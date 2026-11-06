@@ -155,15 +155,13 @@ class Packaging(unittest.TestCase):
             self.install()
         self.assertFalse(self.prefix.exists())
 
-    def test_deterministic_tarball_and_unpublished_adapters(self):
+    def test_deterministic_tarball_and_unpublished_formula(self):
         initial = self.artifact.read_bytes()
         release.package(self.root / "first", "0.1.0", "aarch64-apple-darwin", {"commit": "first"}, True)
         self.assertEqual(self.artifact.read_bytes(), initial)
-        package = json.loads((self.root / "first/npm/darwin-arm64/package.json").read_bytes())
-        self.assertTrue(package["private"])
         self.assertIn(self.artifact.as_uri(), (self.root / "first/tiechui.rb").read_text())
 
-    def test_windows_zip_and_npm_adapter(self):
+    def test_windows_zip(self):
         output = self.root / "windows"
         output.mkdir()
         for name in ("tc.exe", "tiechui.exe"):
@@ -175,9 +173,54 @@ class Packaging(unittest.TestCase):
         self.assertEqual(artifact.name, "tiechui-0.1.0-x86_64-pc-windows-msvc.zip")
         with zipfile.ZipFile(artifact) as archive:
             self.assertEqual(archive.namelist(), ["tc.exe", "tiechui.exe", "manifest.json"])
-        package = json.loads((output / "npm/win32-x64/package.json").read_bytes())
-        self.assertEqual(package["bin"], {"tc": "bin/tc.exe", "tiechui": "bin/tiechui.exe"})
         self.assertFalse((output / "tiechui.rb").exists())
+
+    def test_npm_packages_launch_the_platform_build(self):
+        node = shutil.which("node")
+        here = subprocess.run([node, "-p", "process.platform + '-' + process.arch"], capture_output=True,
+                              text=True, check=True).stdout.strip() if node else None
+        assets = self.root / "assets"
+        assets.mkdir()
+        sums = []
+        for host, platform in release.NPM.items():
+            output = self.root / host
+            output.mkdir()
+            for name in release.binaries(host):
+                script = name == "tc" and platform == here
+                (output / name).write_bytes(b'#!/bin/sh\necho "$TIECHUI_INSTALL $*"\nexit 3\n'
+                                            if script else (name + host).encode())
+                (output / name).chmod(0o755)
+            artifact = release.package(output, "0.1.0", host, {"commit": host}, True)
+            shutil.copy2(artifact, assets / artifact.name)
+            sums.append(f"{release.digest(artifact.read_bytes())}  {artifact.name}\n")
+        (assets / "SHA256SUMS").write_text("".join(sums))
+        npm = self.root / "npm"
+        main = release.npm(assets, "0.1.0", npm)
+        package = json.loads((main / "package.json").read_bytes())
+        self.assertEqual(package["bin"], {"tc": "bin/tc.js", "tiechui": "bin/tc.js"})
+        self.assertEqual(package["optionalDependencies"]["@tiechui/cli-win32-x64"],
+                         "npm:@tiechui/cli@0.1.0-win32-x64")
+        windows = json.loads((npm / "win32-x64/package.json").read_bytes())
+        self.assertEqual((windows["name"], windows["version"], windows["os"], windows["cpu"], windows["files"]),
+                         ("@tiechui/cli", "0.1.0-win32-x64", ["win32"], ["x64"], ["tc.exe"]))
+        self.assertEqual((npm / "win32-x64/tc.exe").read_bytes(), b"tc.exex86_64-pc-windows-msvc")
+        self.assertEqual(json.loads((npm / "linux-x64/package.json").read_bytes())["libc"], ["glibc"])
+        launcher = (main / "bin/tc.js").read_text()
+        self.assertIn(json.dumps(list(release.NPM.values())).replace('","', '", "'), launcher)
+        with self.assertRaisesRegex(RuntimeError, "mismatched release archive"):
+            (assets / "SHA256SUMS").write_text("".join(sums[1:]))
+            release.npm(assets, "0.1.0", self.root / "again")
+        if here not in release.NPM.values() or os.name == "nt":
+            self.skipTest("node is missing or cannot run the shell fixture")
+        modules = self.root / "global/node_modules/@tiechui"
+        shutil.copytree(main, modules / "cli")
+        shutil.copytree(npm / here, modules / "cli/node_modules/@tiechui" / f"cli-{here}")
+        launched = subprocess.run([node, modules / "cli/bin/tc.js", "exec", "hi"], capture_output=True, text=True)
+        self.assertEqual((launched.returncode, launched.stdout), (3, "npm exec hi\n"))
+        shutil.rmtree(modules / "cli/node_modules")
+        missing = subprocess.run([node, modules / "cli/bin/tc.js"], capture_output=True, text=True)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("npm i -g @tiechui/cli", missing.stderr)
 
     def test_space_gate_precedes_build(self):
         with patch.object(release.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(100, 99, 1)):

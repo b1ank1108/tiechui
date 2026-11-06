@@ -45,8 +45,7 @@
 ## 快速开始
 
 ```sh
-git clone https://github.com/b1ank1108/tiechui.git && cd tiechui
-cargo install --locked --path crates/tiechui-cli --root "$HOME/.local"
+npm i -g @tiechui/cli
 tc
 ```
 
@@ -58,6 +57,14 @@ tc
 支持 macOS、Linux 和 Windows (x64)。内容搜索使用 `rg`；文件发现和 `@` 补全是内置的。
 Windows 上 bash 工具通过 [Git for Windows](https://git-scm.com/download/win) 的
 Git Bash 运行；自动找不到时设置 `TIECHUI_GIT_BASH_PATH`。
+
+**npm。**
+
+```sh
+npm i -g @tiechui/cli
+```
+
+Node 16 及以上运行对应平台的原生构建，由 npm 作为可选依赖安装。pnpm、yarn 和 bun 同样可用。
 
 **macOS 和 Linux。**
 
@@ -491,7 +498,7 @@ Tiechui 还很年轻，变化很快；1.0 之前配置和会话格式仍可能�
 - OpenAI Responses 协议；
 - 订阅登录；
 - `tc mcp serve`；
-- npm 和 Homebrew 发布。
+- Homebrew。
 
 每个 release 都包含 Windows 构建，但 Windows 的 CI 任务目前还不阻塞合并。
 

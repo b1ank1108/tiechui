@@ -24,6 +24,11 @@ NAMES = ("tc", "tiechui")
 WINDOWS = os.name == "nt"
 STATE = ".tiechui-install"
 MIN_FREE = 6 * 1024 ** 3
+# Release targets and their npm platforms, which scripts/npm/tc.js lists too.
+NPM = {"aarch64-apple-darwin": "darwin-arm64", "x86_64-apple-darwin": "darwin-x64",
+       "aarch64-unknown-linux-gnu": "linux-arm64", "x86_64-unknown-linux-gnu": "linux-x64",
+       "x86_64-pc-windows-msvc": "win32-x64"}
+REPOSITORY = "https://github.com/b1ank1108/tiechui"
 
 
 def run(args, cwd=None, env=None, data=None):
@@ -339,17 +344,14 @@ def build(archive, destination, jobs=2):
 
 
 def package(output, version, host, metadata, identical):
-    os_name = next((value for key, value in (("apple-darwin", "darwin"), ("linux", "linux"),
-                                              ("windows", "win32")) if key in host), None)
-    cpu = {"aarch64": "arm64", "x86_64": "x64"}.get(host.split("-")[0])
-    if os_name is None or cpu is None:
+    if host not in NPM:
         raise RuntimeError(f"unsupported packaging host: {host}")
     names = binaries(host)
     files = {name: {"sha256": digest((output / name).read_bytes()), "mode": 0o755} for name in names}
     manifest = dict(metadata, schema_version=1, version=version, target=host, files=files,
                     reproducible=identical)
     write_json(output / "manifest.json", manifest)
-    if os_name == "win32":
+    if "windows" in host:
         artifact = output / f"tiechui-{version}-{host}.zip"
         with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as archive:
             for name in (*names, "manifest.json"):
@@ -368,14 +370,7 @@ def package(output, version, host, metadata, identical):
     (output / "SHA256SUMS").write_text("".join(
         f"{digest(path.read_bytes())}  {path.name}\n" for path in
         (artifact, output / "manifest.json", *(output / name for name in names))))
-    npm = output / "npm" / f"{os_name}-{cpu}"
-    (npm / "bin").mkdir(parents=True, exist_ok=True)
-    for name in names:
-        shutil.copy2(output / name, npm / "bin" / name)
-    write_json(npm / "package.json", {"name": f"@tiechui/{os_name}-{cpu}", "version": version,
-               "private": True, "os": [os_name], "cpu": [cpu], "files": ["bin"],
-               "bin": {name: f"bin/{binary}" for name, binary in zip(NAMES, names)}})
-    if os_name == "win32":
+    if "windows" in host:
         return artifact
     (output / "tiechui.rb").write_text(
         'class Tiechui < Formula\n  desc "Rust terminal coding agent"\n'
@@ -400,6 +395,49 @@ def dist(archive, metadata, output, ci=False):
         print(f"Two isolated builds byte-identical: {identical}", flush=True)
     print(f"Artifact: {artifact}", flush=True)
     return artifact, identical
+
+
+def npm(assets, version, output):
+    """@tiechui/cli and one version of it per platform, from verified release archives."""
+    sums = {name: checksum for checksum, name in
+            (line.split("  ", 1) for line in (assets / "SHA256SUMS").read_text().splitlines())}
+    common = {"license": "AGPL-3.0-only", "homepage": REPOSITORY,
+              "repository": {"type": "git", "url": f"git+{REPOSITORY}.git"}}
+    optional = {}
+    for host, platform in NPM.items():
+        name = f"tiechui-{version}-{host}." + ("zip" if "windows" in host else "tar.gz")
+        archive = assets / name
+        if not archive.is_file() or sums.get(name) != digest(archive.read_bytes()):
+            raise RuntimeError(f"missing or mismatched release archive: {name}")
+        binary = binaries(host)[0]
+        if "windows" in host:
+            with zipfile.ZipFile(archive) as files:
+                data = files.read(binary)
+        else:
+            data = unpack(archive)[1][binary]
+        os_name, cpu = platform.split("-")
+        package = output / platform
+        package.mkdir(parents=True)
+        (package / binary).write_bytes(data)
+        (package / binary).chmod(0o755)
+        manifest = dict(common, name="@tiechui/cli", version=f"{version}-{platform}",
+                        os=[os_name], cpu=[cpu], files=[binary])
+        if os_name == "linux":
+            manifest["libc"] = ["glibc"]
+        (package / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        optional[f"@tiechui/cli-{platform}"] = f"npm:@tiechui/cli@{version}-{platform}"
+    main = output / "cli"
+    (main / "bin").mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/npm/tc.js", main / "bin/tc.js")
+    (main / "bin/tc.js").chmod(0o755)
+    for name in ("README.md", "LICENSE"):
+        shutil.copy2(ROOT / name, main / name)
+    manifest = dict(common, name="@tiechui/cli", version=version,
+                    description="A terminal coding agent written in Rust",
+                    bin={name: "bin/tc.js" for name in NAMES}, files=["bin"],
+                    engines={"node": ">=16"}, optionalDependencies=optional)
+    (main / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return main
 
 
 def deny_check():
@@ -487,6 +525,10 @@ def main():
     command.add_argument("--commit", default="HEAD")
     command.add_argument("--ci", action="store_true")
     commands.add_parser("verify-release")
+    command = commands.add_parser("npm")
+    command.add_argument("assets", type=Path)
+    command.add_argument("--version", required=True)
+    command.add_argument("--output", type=Path, required=True)
     for name in ("install", "uninstall"):
         command = commands.add_parser(name)
         command.add_argument("--prefix", type=Path, required=True)
@@ -502,6 +544,8 @@ def main():
             dist(archive, metadata, output, args.ci)
     elif args.command == "verify-release":
         verify()
+    elif args.command == "npm":
+        npm(args.assets, args.version, args.output)
     elif args.command == "install":
         install(args.artifact, args.prefix)
     else:

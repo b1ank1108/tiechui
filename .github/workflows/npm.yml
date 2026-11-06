@@ -1,0 +1,52 @@
+name: npm
+
+# Publishes @tiechui/cli once a drafted release is published. npm trusts this file by name.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - name: Download and assemble
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --dir assets --pattern 'tiechui-*' --pattern SHA256SUMS
+          python3 scripts/release.py npm assets --version "${TAG#v}" --output npm
+      # Platform versions first, each under its own dist-tag, so latest never names a missing build.
+      - name: Publish
+        run: |
+          publish() {
+            version=$(node -p "require('./$1/package.json').version")
+            if [ -n "$(npm view "@tiechui/cli@$version" version 2>/dev/null)" ]; then
+              echo "@tiechui/cli@$version is already published"
+            else
+              npm publish "./$1" --access public --tag "$2"
+            fi
+          }
+          for platform in $(cd npm && ls -d *-*); do
+            publish "npm/$platform" "$platform"
+          done
+          publish npm/cli latest

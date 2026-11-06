@@ -46,8 +46,7 @@ permissions and modules.
 ## Quick start
 
 ```sh
-git clone https://github.com/b1ank1108/tiechui.git && cd tiechui
-cargo install --locked --path crates/tiechui-cli --root "$HOME/.local"
+npm i -g @tiechui/cli
 tc
 ```
 
@@ -61,6 +60,15 @@ macOS, Linux and Windows (x64) are supported. `rg` is used for content search;
 file discovery and `@` completion are built in. On Windows the bash tool runs
 through Git Bash from [Git for Windows](https://git-scm.com/download/win); set
 `TIECHUI_GIT_BASH_PATH` if it is not found automatically.
+
+**npm.**
+
+```sh
+npm i -g @tiechui/cli
+```
+
+Node 16 or later runs the native build for your platform, which npm installs as
+an optional dependency. pnpm, yarn and bun work too.
 
 **macOS and Linux.**
 
@@ -530,7 +538,7 @@ change before 1.0. Not yet supported:
 - the OpenAI Responses wire;
 - subscription logins;
 - `tc mcp serve`;
-- npm and Homebrew publishing.
+- Homebrew.
 
 Windows builds ship with each release, but the Windows CI job is not yet
 blocking.
