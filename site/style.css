@@ -46,7 +46,6 @@
   --silver: linear-gradient(178deg, #fbfcfd 6%, #d3d8de 34%, #7f8791 50%, #e2e6eb 63%, #a2a9b2 100%);
   --mono: "JetBrains Mono", "Symbols Nerd Font Mono", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", monospace;
   --serif: "Noto Serif SC", "Songti SC", "STSong", serif;
-  --display: "Big Shoulders Display", "Noto Serif SC", sans-serif;
   --rail: 248px;
 }
 
@@ -122,7 +121,7 @@ code {
 #nav a:hover { color: var(--fg); background: rgba(255, 255, 255, 0.03); }
 #nav a.on { color: var(--fg); background: rgba(143, 168, 201, 0.08); }
 #nav a.on .nav-no { color: var(--accent); }
-.nav-no { font: 800 15px/1 var(--display); letter-spacing: 0.04em; color: var(--fg-3); }
+.nav-no { font: 500 11px/1 var(--mono); color: var(--fg-3); }
 .prefs { margin-top: auto; display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--line); }
 .pref { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .pref > span { font-size: 11px; letter-spacing: 0.14em; color: var(--fg-3); }
@@ -151,44 +150,34 @@ code {
 main { margin-left: var(--rail); padding: 0 clamp(20px, 4.5vw, 64px) 80px; max-width: calc(var(--rail) + 1320px); }
 
 .hero {
-  min-height: 92vh;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-content: center;
   align-items: start;
   column-gap: 56px;
-  padding: 56px 0 48px;
+  padding: 72px 0 56px;
   border-bottom: 1px solid var(--line);
   position: relative;
 }
-.overline { grid-column: 1 / -1; margin: 0 0 36px; font-size: 11px; letter-spacing: 0.26em; color: var(--fg-3); text-transform: uppercase; }
-.overline em { font-style: normal; color: var(--accent); }
-.mark { grid-column: 1 / -1; display: flex; align-items: flex-end; gap: 26px; }
+.mark { grid-column: 1 / -1; display: flex; align-items: center; gap: 24px; animation: rise 0.8s both; }
+.logo { width: 78px; height: 48px; flex: none; }
 .word {
   margin: 0;
-  font: 900 clamp(108px, 15vw, 232px)/0.92 var(--serif);
-  letter-spacing: -0.02em;
+  font: 900 44px/1.1 var(--serif);
+  letter-spacing: 0.04em;
   white-space: nowrap;
   background: var(--silver);
   background-size: 100% 220%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  filter: drop-shadow(0 18px 40px rgba(0, 0, 0, 0.55));
-  animation: strike 0.9s cubic-bezier(0.2, 0.9, 0.1, 1) both, anneal 2.4s 0.2s ease-out both;
 }
-.vertical {
-  writing-mode: vertical-rl;
-  font: 900 26px/1 var(--serif);
-  letter-spacing: 0.32em;
-  color: var(--fg-2);
-  padding-bottom: 0.6em;
-  animation: rise 0.9s 0.35s both;
-}
+.word span { font: 600 20px/1 var(--mono); letter-spacing: 0.02em; margin-left: 6px; }
+.tagline { margin: 6px 0 0; font-size: 12px; letter-spacing: 0.16em; color: var(--fg-3); }
+.tagline em { font-style: normal; color: var(--accent); }
 .anvil {
   grid-column: 1 / -1;
   height: 1px;
-  margin: 30px 0 34px;
+  margin: 28px 0 32px;
   background: linear-gradient(90deg, transparent, #c9ced6 18%, #c9ced6 82%, transparent);
   transform-origin: 50% 50%;
   animation: forge 1s 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -209,12 +198,6 @@ main { margin-left: var(--rail); padding: 0 clamp(20px, 4.5vw, 64px) 80px; max-w
 #hero-frame .term { font-size: 12px; border-radius: 8px; border: 1px solid var(--line-2); box-shadow: 0 40px 80px -40px rgba(0, 0, 0, 0.9); }
 #stamp { margin: 26px 0 0; font-size: 11px; letter-spacing: 0.06em; color: var(--fg-3); }
 
-@keyframes strike {
-  0% { transform: translateY(-0.08em) scale(1.03); filter: brightness(1.8) drop-shadow(0 0 0 transparent); opacity: 0; }
-  60% { opacity: 1; }
-  100% { transform: none; }
-}
-@keyframes anneal { from { background-position: 0 100%; } to { background-position: 0 0; } }
 @keyframes forge { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 @keyframes rise { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
 
@@ -223,7 +206,7 @@ main { margin-left: var(--rail); padding: 0 clamp(20px, 4.5vw, 64px) 80px; max-w
 .plate { padding-top: 112px; }
 .plate-head {
   display: grid;
-  grid-template-columns: 168px minmax(0, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   align-items: end;
   gap: 28px;
   padding-bottom: 22px;
@@ -241,16 +224,9 @@ main { margin-left: var(--rail); padding: 0 clamp(20px, 4.5vw, 64px) 80px; max-w
     linear-gradient(var(--line-2), var(--line-2)) bottom / 100% 1px no-repeat,
     repeating-linear-gradient(90deg, var(--line-2) 0 1px, transparent 1px 24px) bottom / 100% 5px no-repeat;
 }
-.plate-no {
-  font: 800 152px/0.78 var(--display);
-  letter-spacing: -0.02em;
-  background: var(--silver);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.plate-titles .en { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--accent); }
-.plate-titles h2 { margin: 0; font: 900 40px/1.1 var(--serif); letter-spacing: 0.02em; }
+.plate-titles .en { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--fg-3); }
+.plate-titles .en b { font-weight: 500; color: var(--accent); margin-right: 0.6em; }
+.plate-titles h2 { margin: 0; font: 900 32px/1.15 var(--serif); letter-spacing: 0.02em; }
 .lede { margin: 0; max-width: 52ch; color: var(--fg-2); font-size: 13.5px; }
 
 .ex { margin: 52px 0 0; }
@@ -419,9 +395,7 @@ footer { margin-top: 120px; padding-top: 24px; border-top: 1px solid var(--line)
 @media (max-width: 1180px) {
   .hero { grid-template-columns: minmax(0, 1fr); }
   .hero-side { margin-top: 36px; }
-  .plate-head { grid-template-columns: 120px minmax(0, 1fr); }
-  .plate-head .lede { grid-column: 1 / -1; }
-  .plate-no { font-size: 112px; }
+  .plate-head { grid-template-columns: minmax(0, 1fr); gap: 14px; }
 }
 @media (max-width: 860px) {
   :root { --rail: 0px; }
@@ -431,9 +405,9 @@ footer { margin-top: 120px; padding-top: 24px; border-top: 1px solid var(--line)
   .prefs { margin: 0 0 0 auto; padding: 0; border: 0; grid-auto-flow: column; }
   .pref > span, .rail-foot { display: none; }
   .hero { min-height: auto; }
-  .plate-no { font-size: 84px; }
-  .plate-head { grid-template-columns: 80px minmax(0, 1fr); gap: 16px; }
-  .plate-titles h2 { font-size: 30px; }
+  .plate-titles h2 { font-size: 26px; }
+  .word { font-size: 34px; }
+  .logo { width: 58px; height: 36px; }
   .step { grid-template-columns: 90px 1fr auto; }
   .step .hex, .step .use, .bar-row .use { display: none; }
   .bar-row { grid-template-columns: 110px 1fr 60px; }

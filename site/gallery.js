@@ -756,12 +756,13 @@
       const section = el("section", "plate");
       section.id = plate.id;
       const head = el("header", "plate-head");
-      const no = el("div", "plate-no", plate.no);
       const titles = el("div", "plate-titles");
-      titles.append(el("p", "en", plate.en), el("h2", "", plate.title));
+      const en = el("p", "en");
+      en.append(el("b", "", plate.no), plate.en);
+      titles.append(en, el("h2", "", plate.title));
       const lede = el("p", "lede");
       lede.append(rich(plate.lede));
-      head.append(no, titles, lede);
+      head.append(titles, lede);
       section.append(head);
       const body = el("div", "plate-body");
       if (plate.custom) plate.custom(body);
