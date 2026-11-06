@@ -20,8 +20,8 @@ expression: "folds(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 
 == explored
 [fg#666c77]• [b]Explored
-[fg#666c77]  └ [fgCyan]Read[-] src/lib.rs
-[-]    [fgCyan]Search[-] fn main
+[fg#666c77]  └ [fgCyan]Read[-] [-]lib.rs
+[fg#666c77]    [fgCyan]Search[-] [-]fn main
 [-]    [fg#666c77]+ Show details
 
 == explored unfolded

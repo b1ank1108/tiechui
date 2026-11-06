@@ -11,9 +11,9 @@ expression: "render(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 [fg#666c77]• [i,fg#666c77]The tokenizer drops [i,fg#8fa8c9]\r[i,fg#666c77].
 
 [fg#666c77]• [b]Explored
-[fg#666c77]  └ [fgCyan]Read[-] src/lib.rs, src/app.rs
-[-]    [fgCyan]Search[-] fn main · src
-[-]    [fgCyan]List[-] .
+[fg#666c77]  └ [fgCyan]Read[-] [-]lib.rs[fg#666c77], [-]app.rs
+[fg#666c77]    [fgCyan]Search[-] [-]fn main[fg#666c77] in [-]src
+[fg#666c77]    [fgCyan]List[-] [-].
 
 [b,fg#8fb996]• [b]Ran[-] cargo test …[fg#666c77] · 1s
 [fg#666c77]  └ line 3

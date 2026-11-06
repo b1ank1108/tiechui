@@ -6,7 +6,7 @@ expression: "states(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 == running
 
 [b,fg#d0d0d0]•[-] [b]Exploring
-[fg#666c77]  └ [fgCyan]Read[-] a.rs, b.rs
+[fg#666c77]  └ [fgCyan]Read[-] [-]a.rs[fg#666c77], [-]b.rs
 
 [b,fg#d0d0d0]• [b]Running[-] sleep 5
 

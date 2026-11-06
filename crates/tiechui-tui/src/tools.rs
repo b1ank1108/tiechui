@@ -245,33 +245,111 @@ fn explored(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Line
         }
         return lines;
     }
-    let mut steps: Vec<(Action, Vec<String>)> = Vec::new();
+    let mut steps: Vec<(Action, Vec<&Tool>)> = Vec::new();
     for tool in tools {
         let action = Action::of(&tool.name);
-        let subject = subject(tool);
         match steps.last_mut() {
-            Some((previous, subjects)) if *previous == action => {
-                if !subjects.contains(&subject) {
-                    subjects.push(subject);
+            Some((previous, step)) if *previous == action => {
+                if !step.iter().any(|seen| subject(seen) == subject(tool)) {
+                    step.push(tool);
                 }
             }
-            _ => steps.push((action, vec![subject])),
+            _ => steps.push((action, vec![tool])),
         }
     }
-    for (index, (action, subjects)) in steps.into_iter().enumerate() {
-        let prefix = if index == 0 {
-            Span::styled("  └ ", theme.dim)
-        } else {
-            Span::raw("    ")
-        };
-        let content = [
-            Span::styled(action.label(), Style::default().fg(Color::Cyan)),
-            Span::raw(" "),
-            Span::raw(subjects.join(", ")),
-        ];
-        lines.extend(wrap(&content, width, &[prefix], &[Span::raw("    ")]));
+    let mut rows = Vec::new();
+    for (index, (action, step)) in steps.into_iter().enumerate() {
+        let lead = if index == 0 { "  └ " } else { "    " };
+        let label = action.label();
+        let mut content = Vec::new();
+        let paths: Vec<String> = step
+            .iter()
+            .map(|tool| {
+                let key: &[&str] = match action {
+                    Action::Search => &["path"],
+                    _ => &["path", "file_path"],
+                };
+                argument(tool, key).map(single_line).unwrap_or_default()
+            })
+            .collect();
+        for (position, (tool, path)) in step.iter().zip(short_names(&paths)).enumerate() {
+            if position > 0 {
+                content.push(Span::styled(", ", theme.dim));
+            }
+            match action {
+                Action::Search => {
+                    let pattern = argument(tool, &["pattern"]).map(single_line);
+                    content.push(Span::raw(
+                        pattern.unwrap_or_else(|| single_line(&tool.name)),
+                    ));
+                    if !path.is_empty() {
+                        content.push(Span::styled(" in ", theme.dim));
+                        content.push(Span::raw(path));
+                    }
+                }
+                _ if path.is_empty() => content.push(Span::raw(single_line(&tool.name))),
+                _ => content.push(Span::raw(path)),
+            }
+        }
+        // Continuation rows hang under the first subject, past the step's label.
+        rows.extend(wrap(
+            &content,
+            width,
+            &[
+                Span::styled(lead, theme.dim),
+                Span::styled(label, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+            ],
+            &[Span::raw(" ".repeat(wrap::width(lead) + label.len() + 1))],
+        ));
     }
+    if rows.len() > PREVIEW_ROWS {
+        // The rest is under Show details.
+        rows.truncate(PREVIEW_ROWS);
+        if let Some(last) = rows.pop() {
+            let mut spans = last.spans;
+            spans.push(Span::styled(" …", theme.dim));
+            rows.push(wrap::fit(spans, width, true));
+        }
+    }
+    lines.extend(rows);
     lines
+}
+
+/// The last component of each path, with as many parents as it takes to tell equal names apart.
+fn short_names(paths: &[String]) -> Vec<String> {
+    let parts: Vec<Vec<&str>> = paths
+        .iter()
+        .map(|path| {
+            path.split(['/', '\\'])
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .collect();
+    let mut depth = vec![1; paths.len()];
+    loop {
+        let names: Vec<String> = parts
+            .iter()
+            .zip(paths)
+            .zip(&depth)
+            .map(|((parts, path), depth)| match parts.len() {
+                0 => path.clone(),
+                count => parts[count - (*depth).min(count)..].join("/"),
+            })
+            .collect();
+        let mut longer = false;
+        for index in 0..paths.len() {
+            let clash = (0..paths.len())
+                .any(|other| names[other] == names[index] && paths[other] != paths[index]);
+            if clash && depth[index] < parts[index].len() {
+                depth[index] += 1;
+                longer = true;
+            }
+        }
+        if !longer {
+            return names;
+        }
+    }
 }
 
 /// A history tool's result: its JSON, or the raw text when it is not JSON.
@@ -909,6 +987,74 @@ mod tests {
         };
         assert_eq!(fold(&[direct], 80, &theme), Some(Fold::Lines));
         assert_eq!(fold(&[wrapped], 80, &theme), Some(Fold::Lines));
+    }
+
+    #[test]
+    fn explored_names_shorten_until_they_differ() {
+        let paths = [
+            "docs/README.md",
+            "README.md",
+            "src/app/mod.rs",
+            "src/ui/mod.rs",
+            ".",
+        ];
+        assert_eq!(
+            short_names(&paths.map(String::from)),
+            [
+                "docs/README.md",
+                "README.md",
+                "app/mod.rs",
+                "ui/mod.rs",
+                "."
+            ]
+        );
+    }
+
+    #[test]
+    fn explored_steps_hang_under_their_subjects_up_to_three_rows() {
+        let theme = Theme::fixture(crate::palette::ColorLevel::TrueColor, false);
+        let tools: Vec<Tool> = (0..12)
+            .map(|n| {
+                tool(
+                    "read",
+                    json!({"path": format!("deep/dir/file{n:02}.rs")}),
+                    Some(("", false)),
+                )
+            })
+            .chain([tool(
+                "grep",
+                json!({"pattern": "todo", "path": "src"}),
+                Some(("", false)),
+            )])
+            .collect();
+        let text = |width| -> Vec<String> {
+            explored(&tools, width, &theme, View::History)
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        assert_eq!(
+            text(40),
+            [
+                "• Explored",
+                "  └ Read file00.rs, file01.rs,",
+                "         file02.rs, file03.rs,",
+                "         file04.rs, file05.rs, …",
+            ]
+        );
+        assert_eq!(
+            text(200)[1..],
+            [
+                format!(
+                    "  └ Read {}",
+                    (0..12)
+                        .map(|n| format!("file{n:02}.rs"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "    Search todo in src".to_owned(),
+            ]
+        );
     }
 
     fn tool(name: &str, arguments: Value, output: Option<(&str, bool)>) -> Tool {
