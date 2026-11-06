@@ -904,6 +904,7 @@ def model(f):
     s.command("use alpha", "ALPHA_DONE")
     s.check(f.mock.requests[-1]["model"] == "alpha", "Model did not switch back")
     s.exit()
+    s.check('model = "fixture/alpha"' in f.config.read_text(), "Picked model was not saved")
 
 
 def approval(f):

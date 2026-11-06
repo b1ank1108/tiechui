@@ -299,6 +299,11 @@ impl tiechui_tui::Services for Services {
             .map_err(|error| error.to_string())
     }
 
+    fn save_model(&self, model: &str) -> Result<(), String> {
+        tiechui_config::save_preference(&self.config, "model", model.into())
+            .map_err(|error| error.to_string())
+    }
+
     fn trust(&self, cwd: &Path, arguments: &str) -> String {
         trust(&self.home, cwd, arguments)
     }

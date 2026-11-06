@@ -114,6 +114,7 @@ pub trait Services: Send + Sync {
     ) -> resume::Loaded;
     fn save_status_line(&self, line: &status::StatusLineConfig) -> Result<(), String>;
     fn save_theme(&self, name: &str) -> Result<(), String>;
+    fn save_model(&self, model: &str) -> Result<(), String>;
     fn trust(&self, cwd: &Path, arguments: &str) -> String;
 }
 
@@ -347,6 +348,15 @@ async fn session(
             tokio::task::spawn_blocking(move || {
                 if let Err(error) = services.save_theme(&name) {
                     let _ = failed.blocking_send(format!("Theme not saved: {error}"));
+                }
+            });
+        }
+        if let Some(model) = app.take_model_save() {
+            let services = host.services.clone();
+            let failed = failed.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = services.save_model(&model) {
+                    let _ = failed.blocking_send(format!("Model not saved: {error}"));
                 }
             });
         }

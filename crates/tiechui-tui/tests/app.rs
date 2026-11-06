@@ -1162,6 +1162,7 @@ fn model_and_thinking_pickers_switch_through_the_session() {
             model: "ds-anthropic/flash".into(),
         }]
     );
+    assert_eq!(app.take_model_save().as_deref(), Some("ds-anthropic/flash"));
     typed(&mut app, "/thinking high");
     app.key(key(KeyCode::Enter));
     assert_eq!(
@@ -1187,6 +1188,7 @@ fn model_and_thinking_pickers_switch_through_the_session() {
             .iter()
             .any(|r| r.contains("Thinking Level"))
     );
+    assert!(app.take_model_save().is_none());
 }
 
 fn asked(id: &str, request: ApprovalRequest) -> Event {

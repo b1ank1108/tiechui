@@ -88,6 +88,7 @@ pub struct App {
     themes_dir: Option<PathBuf>,
     theme_picker: Option<crate::theme_picker::ThemePicker>,
     save_theme: Option<String>,
+    save_model: Option<String>,
     width: usize,
     height: usize,
     thread: Option<(ThreadId, SessionEpoch)>,
@@ -280,6 +281,7 @@ impl App {
             themes_dir: options.themes_dir,
             theme_picker: None,
             save_theme: None,
+            save_model: None,
             width: width.max(1),
             height: 24,
             thread: None,
@@ -435,6 +437,11 @@ impl App {
 
     pub fn take_theme_save(&mut self) -> Option<String> {
         self.save_theme.take()
+    }
+
+    /// A model picked with `/model`, as `<provider>/<model>`.
+    pub fn take_model_save(&mut self) -> Option<String> {
+        self.save_model.take()
     }
 
     pub fn reload_theme(&mut self, name: Option<String>) {
@@ -1294,11 +1301,17 @@ impl App {
 
     fn choose(&mut self, title: &'static str, choices: Vec<select::Choice>, query: &str) {
         match Select::open(title, choices, query) {
-            Ok(op) => {
-                self.send(op);
-            }
+            Ok(op) => self.pick(op),
             Err(select) => self.select = Some(select),
         }
+    }
+
+    /// A picked model also becomes the default for new sessions.
+    fn pick(&mut self, op: Op) {
+        if let Op::SetModel { model, .. } = &op {
+            self.save_model = Some(model.clone());
+        }
+        self.send(op);
     }
 
     /// The `/` menu, while the draft is a single `/word`.
@@ -2061,7 +2074,7 @@ impl App {
                 select::Outcome::Cancel => self.select = None,
                 select::Outcome::Pick(op) => {
                     self.select = None;
-                    self.send(op);
+                    self.pick(op);
                 }
             }
             return Exit::Running;
