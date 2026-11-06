@@ -69,10 +69,7 @@ pub fn from_config(
     name: &str,
     config: &ProviderConfig,
 ) -> Result<Box<dyn ModelProvider>, ProviderError> {
-    let key = config
-        .api_key()
-        .map_err(|error| ProviderError::new(ErrorKind::Auth, error.to_string()))?
-        .ok_or_else(|| ProviderError::new(ErrorKind::Auth, "api_key or api_key_env is required"))?;
+    let key = api_key(config)?;
     let client = client_builder().build().map_err(ProviderError::transport)?;
     match config.wire {
         Wire::AnthropicMessages => Ok(Box::new(anthropic::Anthropic::new(
@@ -80,6 +77,60 @@ pub fn from_config(
         )?)),
         Wire::OpenaiCompletions => Ok(Box::new(openai::Openai::new(name, config, &key, client)?)),
     }
+}
+
+/// The model ids the provider's `/models` endpoint lists, sorted.
+pub async fn list_models(
+    config: &ProviderConfig,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>, ProviderError> {
+    let key = api_key(config)?;
+    let client = client_builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(ProviderError::transport)?;
+    let request = match config.wire {
+        Wire::AnthropicMessages => {
+            let transport = transport::Transport::new(
+                "models",
+                config,
+                &key,
+                client,
+                anthropic::ROOT,
+                "/models",
+                "",
+            )?;
+            transport
+                .client
+                .get(transport.endpoint)
+                .header("x-api-key", transport.key)
+                .header("anthropic-version", anthropic::VERSION)
+                .query(&[("limit", "1000")])
+        }
+        Wire::OpenaiCompletions => {
+            let transport = transport::Transport::new(
+                "models",
+                config,
+                &key,
+                client,
+                openai::ROOT,
+                "/models",
+                "Bearer ",
+            )?;
+            transport
+                .client
+                .get(transport.endpoint)
+                .header("authorization", transport.key)
+        }
+    };
+    transport::list(request, cancel).await
+}
+
+fn api_key(config: &ProviderConfig) -> Result<String, ProviderError> {
+    config
+        .api_key()
+        .map_err(|error| ProviderError::new(ErrorKind::Auth, error.to_string()))?
+        .ok_or_else(|| ProviderError::new(ErrorKind::Auth, "api_key or api_key_env is required"))
 }
 
 #[cfg(test)]

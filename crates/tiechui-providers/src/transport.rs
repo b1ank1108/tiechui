@@ -200,6 +200,40 @@ pub(crate) async fn send(
     Ok((response, delay))
 }
 
+/// Reads a `/models` listing: `data[].id`, or a bare array of the same objects.
+pub(crate) async fn list(
+    outgoing: RequestBuilder,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>, ProviderError> {
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ProviderError::cancelled()),
+        response = outgoing.send() => response.map_err(ProviderError::transport)?,
+    };
+    let status = response.status();
+    let delay = retry_after(response.headers(), SystemTime::now());
+    let body = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ProviderError::cancelled()),
+        body = response.bytes() => body.map_err(ProviderError::transport)?,
+    };
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(classify(Some(status.as_u16()), &body, delay));
+    }
+    let mut ids: Vec<String> = body
+        .get("data")
+        .unwrap_or(&body)
+        .as_array()
+        .ok_or_else(|| ProviderError::stream("the models response is not a list"))?
+        .iter()
+        .filter_map(|model| model.get("id")?.as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub(crate) trait Decoder: Send + 'static {
     fn take_usage(&mut self) -> Option<tiechui_model::Usage>;
     fn accept(

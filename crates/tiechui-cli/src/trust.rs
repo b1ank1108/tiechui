@@ -101,6 +101,8 @@ fn question(cwd: &Path, target: &Path) -> Question {
             "Quit".to_owned(),
         ],
         dismiss: "quit",
+        input: None,
+        multiple: false,
     }
 }
 

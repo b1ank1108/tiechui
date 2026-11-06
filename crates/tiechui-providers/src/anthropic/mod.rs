@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 use crate::transport::{self, Transport};
 use crate::{ModelProvider, ProviderError};
 
+pub(crate) const ROOT: &str = "https://api.anthropic.com";
+pub(crate) const VERSION: &str = "2023-06-01";
+
 pub(crate) struct Anthropic(Transport);
 
 impl Anthropic {
@@ -20,16 +23,7 @@ impl Anthropic {
         key: &str,
         client: Client,
     ) -> Result<Self, ProviderError> {
-        Transport::new(
-            name,
-            config,
-            key,
-            client,
-            "https://api.anthropic.com",
-            "/messages",
-            "",
-        )
-        .map(Self)
+        Transport::new(name, config, key, client, ROOT, "/messages", "").map(Self)
     }
 }
 
@@ -92,7 +86,7 @@ impl ModelProvider for Anthropic {
             .client
             .post(self.0.endpoint.clone())
             .header("x-api-key", self.0.key.clone())
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", VERSION)
             .header("accept", "text/event-stream")
             .json(&body);
         let mut betas = Vec::new();

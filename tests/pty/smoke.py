@@ -195,6 +195,17 @@ class Mock:
             def log_message(self, *args):
                 pass
 
+            def do_GET(self):
+                if not self.path.endswith("/models"):
+                    self.send_error(404)
+                    return
+                body = json.dumps({"data": [{"id": model} for model in mock.models]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 index = len(mock.requests)
@@ -960,6 +971,46 @@ def consent(f):
     s.check(json.loads(decisions.read_text()) == {str(f.cwd.resolve()): False}, "Denial was not saved")
 
 
+def setup(f):
+    f.providers.unlink()
+    f.config.write_text("# preserve this comment\n", encoding="utf-8")
+    s = Session(f)
+    s.wait("Choose the API format")
+    s.send("\x1b[B\r")  # OpenAI Chat Completions.
+    s.wait("API address")
+    s.send("http://127.0.0.1:%d\r" % f.mock.server.server_port)
+    s.wait("Paste a key")
+    s.send("\x1b[B\r")  # From an environment variable.
+    s.wait("Environment variable")
+    s.send("TC_PTY_MISSING_KEY\r")
+    s.wait("TC_PTY_MISSING_KEY is not set")
+    s.send("\x7f" * len("MISSING_KEY") + "FAKE_KEY\r")
+    s.wait("2 models at")
+    s.send("bt")
+    s.wait("1. [ ] beta", absent="alpha")
+    s.send(" \x7f\x7f ")  # Check beta, clear the search, check alpha.
+    s.wait("2 checked")
+    s.wait("2. [x] beta")
+    s.send("\r")
+    s.wait("Context window")
+    s.send("\r")
+    s.wait("Max output")
+    s.send("\x7f" * 5 + "512\r")
+    s.wait("Reasoning")
+    s.send("\x1b[B\r")  # No.
+    s.wait("/resume past sessions")
+    s.exit()
+    s.check(f.mock.requests[0]["model"] == "alpha", "The check did not use the first chosen model")
+    config = f.config.read_text().splitlines()
+    s.check('model = "local/alpha"' in config and "# preserve this comment" in config, "Model not selected")
+    providers = f.providers.read_text()
+    expected = ('[local]\nwire = "openai-completions"\nbase_url = "http://127.0.0.1:%d"\n'
+                'api_key_env = "TC_PTY_FAKE_KEY"\n' % f.mock.server.server_port) + "".join(
+        '\n[[local.models]]\nid = "%s"\ncontext_window = 200000\nmax_output = 512\n'
+        'reasoning = false\nimages = false\n' % model for model in ["alpha", "beta"])
+    s.check(providers == expected, "Unexpected providers.toml:\n" + providers)
+
+
 def statusline(f):
     s = f.start()
     original = f.config.read_bytes()
@@ -1606,6 +1657,7 @@ CASES = {
     "retry-manual": (retry_manual, lambda: [Reply(status=500), Reply("MANUAL_RECOVERED")]),
     "startup": (startup, lambda: []),
     "consent": (consent, lambda: []),
+    "setup": (setup, lambda: [Reply("OK")]),
     "streaming": (streaming, lambda: [Reply("STREAM_PART\n", hold=True, tail="STREAM_DONE")]),
     "tools": (tools, lambda: [Reply(tools=[("read", {"path": "one.txt"}), ("read", {"path": "two.txt"})]),
                                Reply(tools=[("bash", {"command": "printf tool-output"})]), Reply("TOOLS_DONE")]),

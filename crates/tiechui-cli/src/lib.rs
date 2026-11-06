@@ -8,6 +8,7 @@ mod hooks;
 mod interactive;
 mod mcp;
 mod plugins;
+mod setup;
 mod skills;
 mod subagents;
 mod trust;
@@ -117,6 +118,10 @@ pub fn run(name: &'static str) {
                 ),
         )
         .subcommand(
+            Command::new("setup")
+                .about("Choose a model service and model, saved to the user profile"),
+        )
+        .subcommand(
             Command::new("trust")
                 .about("Manage project trust without prompting")
                 .arg(Arg::new("cwd").long("cwd").value_name("DIRECTORY"))
@@ -219,6 +224,7 @@ pub fn run(name: &'static str) {
     }
     let code = match matches.subcommand() {
         Some(("exec", args)) => runtime.block_on(exec::run(args)),
+        Some(("setup", _)) => runtime.block_on(setup::command()),
         None => runtime.block_on(interactive::run(&matches)),
         Some(_) => return,
     };

@@ -32,7 +32,35 @@ pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), C
             .map_err(|message| ConfigError::new(path, key, message))?;
         preserve_unchanged_text(text, &document.to_string())
     };
-    if original.as_deref() == Some(rendered.as_str()) {
+    replace(path, key, original, &rendered)
+}
+
+/// Appends a `[name]` provider table, rendered as TOML, unless `name` is already declared.
+pub fn add_provider(path: &Path, name: &str, table: &str) -> Result<(), ConfigError> {
+    let original = read_optional(path)?;
+    let text = original.as_deref().unwrap_or("");
+    let document =
+        Document::parse(text).map_err(|error| ConfigError::new(path, name, error.message()))?;
+    if document.contains_key(name) {
+        return Err(ConfigError::new(path, name, "provider already exists"));
+    }
+    let separator = match text {
+        "" => "",
+        text if text.ends_with('\n') => "\n",
+        _ => "\n\n",
+    };
+    let rendered = format!("{text}{separator}{table}");
+    replace(path, name, original, &rendered)
+}
+
+/// Replaces `path` atomically unless it changed since `original` was read. New files are 0600.
+fn replace(
+    path: &Path,
+    key: &str,
+    original: Option<String>,
+    rendered: &str,
+) -> Result<(), ConfigError> {
+    if original.as_deref() == Some(rendered) {
         return Ok(());
     }
     let target = if original.is_some() {

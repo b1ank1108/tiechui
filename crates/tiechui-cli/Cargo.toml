@@ -31,6 +31,7 @@ tiechui-module-hooks.workspace = true
 tiechui-module-plugins.workspace = true
 tiechui-plugin-api.workspace = true
 clap.workspace = true
+futures.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tiechui-config.workspace = true

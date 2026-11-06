@@ -105,8 +105,19 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
     let pick = args
         .get_one::<String>("resume")
         .is_some_and(String::is_empty);
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if terminal && crate::setup::needed(&paths) {
+        match crate::setup::run(&paths).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return 0,
+            Err(message) => {
+                eprintln!("tc: {message}");
+                return 2;
+            }
+        }
+    }
     // The picker's session can belong to another directory, not known yet.
-    if !pick && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if !pick && terminal {
         match crate::trust::consent(&canonical, &paths, &home) {
             Ok(true) => {}
             Ok(false) => return 0,

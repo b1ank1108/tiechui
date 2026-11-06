@@ -354,7 +354,9 @@ pub(crate) async fn prepare(
     } else {
         saved.or(configured)
     }
-    .ok_or_else(|| config_error("set model in config.toml or use --model <provider>/<id>"))?;
+    .ok_or_else(|| {
+        config_error("set model in config.toml, use --model <provider>/<id>, or run tc setup")
+    })?;
     let provider_config = loaded
         .config
         .providers

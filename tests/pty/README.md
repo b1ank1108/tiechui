@@ -36,6 +36,7 @@ fonts remain reviewer checks. Windows ConPTY is not covered.
 | Case | Screen assertions and additional evidence |
 | --- | --- |
 | `startup` | Composer/status, all terminal query replies, Ctrl+D clean exit and alternate-screen restoration. Guards the interactive startup argument panic found by this gate. |
+| `setup` | First run without providers: OpenAI format, address, a missing then a set key variable, the mock's `/models` list searched and two models checked with Space, edited token limits, one check request for the first, the exact `providers.toml` written and the first model selected beside a preserved comment, then the session opens. |
 | `consent` | First open of an untrusted project with a hook: quitting saves nothing, trust and denial are saved, skipped hooks stay unapproved and are asked about again, approval enables them, and a settled project asks nothing. |
 | `sdk-rust` / `sdk-typescript` | Tagged marketplace installation from a temporary copy of the sibling `tiechui-plugins` repository, capability approval, tool result, interceptor denial, and opening/dismissing the panel. Both skip when that checkout is absent; TypeScript also skips when Node is missing. |
 | `streaming` | Partial reply visible while SSE is held; final chunk appears after release. |

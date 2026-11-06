@@ -48,10 +48,12 @@ permissions and modules.
 ```sh
 git clone https://github.com/b1ank1108/tiechui.git && cd tiechui
 cargo install --locked --path crates/tiechui-cli --root "$HOME/.local"
-mkdir -m 700 -p ~/.tiechui && $EDITOR ~/.tiechui/{providers,config}.toml   # see Configure
-export MY_API_KEY=...                                                       # the variable named by api_key_env
 tc
 ```
+
+With no provider configured, `tc` asks for the service, address, key and model,
+lists the models the service offers, checks them with one request and saves the
+answers to `~/.tiechui`. `tc setup` adds another provider later.
 
 ## Install
 
@@ -142,8 +144,8 @@ The user profile remains `$TIECHUI_HOME` (default `~/.tiechui`).
 [examples/config.toml](examples/config.toml) lists every supported configuration
 field with explanations, and [examples/providers.toml](examples/providers.toml)
 does the same for providers. Active entries preserve default behavior; optional
-settings and non-default examples are commented out. The minimal setup below
-declares your own endpoint and model, then selects it.
+settings and non-default examples are commented out. `tc setup` writes the
+minimal setup below for you: your own endpoint and model, then selects it.
 
 `~/.tiechui/providers.toml`, where each top-level table is one provider:
 
@@ -218,9 +220,9 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
 - `--json`, which prints protocol events;
 - `--approval`, described in [Permissions and trust](#permissions-and-trust).
 
-Other subcommands are `doctor`, `trust`, `plugin`, `skills`, `hooks` and `mcp`,
-and each has `--help`. The built-in tools are `read`, `write`, `edit`, `grep`,
-`find` and `bash`, plus `shell_list`, `shell_output` and `shell_stop` for
+Other subcommands are `setup`, `doctor`, `trust`, `plugin`, `skills`, `hooks`
+and `mcp`, and each has `--help`. The built-in tools are `read`, `write`, `edit`,
+`grep`, `find` and `bash`, plus `shell_list`, `shell_output` and `shell_stop` for
 background commands. Modules, plugins and MCP servers add more.
 
 ### Keys

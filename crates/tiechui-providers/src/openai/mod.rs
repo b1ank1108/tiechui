@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::transport::{self, Transport};
 use crate::{ModelProvider, ProviderError};
 
+pub(crate) const ROOT: &str = "https://api.openai.com";
+
 pub(crate) struct Openai {
     transport: Transport,
     compat: CompletionsCompat,
@@ -29,7 +31,7 @@ impl Openai {
                 config,
                 key,
                 client,
-                "https://api.openai.com",
+                ROOT,
                 "/chat/completions",
                 "Bearer ",
             )?,

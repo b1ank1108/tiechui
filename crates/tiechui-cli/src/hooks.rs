@@ -118,7 +118,7 @@ pub(crate) fn review(
             tiechui_module_hooks::approve(home, &pending, cancel).map_err(|e| e.to_string())?
         }
         Answer::Interrupted => return Ok(false),
-        Answer::Choice(_) | Answer::Dismissed => {}
+        Answer::Choice(_) | Answer::Choices(_) | Answer::Text(_) | Answer::Dismissed => {}
     }
     Ok(true)
 }
@@ -154,5 +154,7 @@ fn question(pending: &[Hook]) -> Question {
             "Continue without approving (they won't run)".to_owned(),
         ],
         dismiss: "skip",
+        input: None,
+        multiple: false,
     }
 }

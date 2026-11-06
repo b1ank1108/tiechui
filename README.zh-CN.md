@@ -47,10 +47,11 @@
 ```sh
 git clone https://github.com/b1ank1108/tiechui.git && cd tiechui
 cargo install --locked --path crates/tiechui-cli --root "$HOME/.local"
-mkdir -m 700 -p ~/.tiechui && $EDITOR ~/.tiechui/{providers,config}.toml   # 见「配置」
-export MY_API_KEY=...                                                       # api_key_env 指定的变量
 tc
 ```
+
+还没有配置 provider 时，`tc` 会依次询问服务、地址、密钥和模型，列出服务提供的模型，
+用一次请求验证后把结果存进 `~/.tiechui`。之后用 `tc setup` 添加更多 provider。
 
 ## 安装
 
@@ -133,8 +134,8 @@ profile 目录是 `$TIECHUI_HOME`，默认 `~/.tiechui`：
 
 [examples/config.toml](examples/config.toml) 列出了所有支持的配置字段及说明，
 [examples/providers.toml](examples/providers.toml) 对 provider 做了同样的事。
-未注释的条目保持默认行为；可选设置和非默认示例都被注释掉了。下面的最小配置
-声明你自己的端点和模型，然后选中它。
+未注释的条目保持默认行为；可选设置和非默认示例都被注释掉了。`tc setup` 会替你写出
+下面的最小配置：声明你自己的端点和模型，然后选中它。
 
 `~/.tiechui/providers.toml`，每个顶层表是一个 provider：
 
@@ -205,7 +206,7 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
 - `--json`，打印协议事件；
 - `--approval`，见[权限与信任](#权限与信任)。
 
-其他子命令有 `doctor`、`trust`、`plugin`、`skills`、`hooks` 和 `mcp`，都支持 `--help`。
+其他子命令有 `setup`、`doctor`、`trust`、`plugin`、`skills`、`hooks` 和 `mcp`，都支持 `--help`。
 内置工具是 `read`、`write`、`edit`、`grep`、`find` 和 `bash`，以及管理后台命令的
 `shell_list`、`shell_output` 和 `shell_stop`。模块、插件和 MCP 服务器会添加更多工具。
 

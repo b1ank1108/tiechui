@@ -439,6 +439,47 @@ async fn base_urls_gain_the_api_version_only_without_one() {
     );
 }
 
+#[tokio::test]
+async fn models_are_listed_from_the_versioned_root() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer fixture-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": [{"id": "b"}, {"id": "a"}, {"object": "model"}]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("x-api-key", "fixture-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "c"}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/denied/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(json!({"error": {"message": "bad key"}})),
+        )
+        .mount(&server)
+        .await;
+    let list = |wire, root: &str| {
+        let config = ProviderConfig {
+            wire,
+            api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
+            models: vec![],
+            ..super::config(&format!("{}{root}", server.uri()))
+        };
+        async move { crate::list_models(&config, &CancellationToken::new()).await }
+    };
+    assert_eq!(list(Wire::OpenaiCompletions, "").await.unwrap(), ["a", "b"]);
+    assert_eq!(list(Wire::AnthropicMessages, "/v1").await.unwrap(), ["c"]);
+    let error = list(Wire::OpenaiCompletions, "/denied").await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Auth);
+}
+
 #[test]
 fn tool_results_and_images_request() {
     let mut request = request();

@@ -982,6 +982,29 @@ fn saves_handle_inline_and_quoted_dotted_keys_and_new_files() {
 }
 
 #[test]
+fn added_providers_append_to_the_file_without_replacing_one() {
+    let temp = temp_dir();
+    let path = temp.path().join("providers.toml");
+    let table = "[other]\nwire = \"anthropic-messages\"\n";
+    add_provider(&path, "local", PROVIDERS.trim_start()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    add_provider(&path, "other", table).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("{}\n{table}", PROVIDERS.trim_start())
+    );
+    assert!(add_provider(&path, "local", PROVIDERS).is_err());
+    assert_eq!(load_providers(&path).unwrap().len(), 2);
+}
+
+#[test]
 fn malformed_saves_and_scalar_path_conflicts_do_not_change_files() {
     let temp = temp_dir();
     for text in ["broken = [", "modules = false\n"] {

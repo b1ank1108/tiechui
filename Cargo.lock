@@ -2731,6 +2731,7 @@ name = "tiechui-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "libc",
  "reqwest",
  "serde_json",
