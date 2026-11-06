@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <b>简体中文</b> · <a href="#界面一览">界面一览</a>
+  <a href="README.md">English</a> · <b>简体中文</b> · <a href="https://b1ank1108.github.io/tiechui/">界面一览</a>
 </p>
 
 <p align="center">
@@ -304,9 +304,9 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
 ## 界面一览
 
-[`site/`](site/) 逐屏展示终端界面，覆盖深色和浅色主题、80 和 40 列以及三种色彩级别，
-由 TUI 快照测试逐格渲染。它将发布到 GitHub Pages；在此之前，用浏览器打开
-`site/index.html`。快照变化后，运行 `python3 scripts/ui_gallery.py` 刷新数据。
+[界面一览](https://b1ank1108.github.io/tiechui/)逐屏展示终端界面，覆盖深色和浅色主题、
+80 和 40 列以及三种色彩级别，由 TUI 快照测试逐格渲染。源码在 [`site/`](site/)；快照变化后
+运行 `python3 scripts/ui_gallery.py` 刷新数据，`.github/workflows/pages.yml` 从 `main` 发布。
 
 ## 权限与信任
 

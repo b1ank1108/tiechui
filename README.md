@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="#ui-gallery">UI gallery</a>
+  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="https://b1ank1108.github.io/tiechui/">UI gallery</a>
 </p>
 
 <p align="center">
@@ -322,11 +322,11 @@ Disabling a module removes its commands. Plugins can add commands.
 
 ## UI gallery
 
-[`site/`](site/) shows the terminal UI screen by screen, in dark and light
-themes, at 80 and 40 columns and at three color levels, rendered cell by cell
-from the TUI snapshot tests. It will be published on GitHub Pages; until then,
-open `site/index.html` in a browser. After snapshot changes,
-`python3 scripts/ui_gallery.py` refreshes its data.
+The [UI gallery](https://b1ank1108.github.io/tiechui/) shows the terminal UI
+screen by screen, in dark and light themes, at 80 and 40 columns and at three
+color levels, rendered cell by cell from the TUI snapshot tests. Its source is
+[`site/`](site/); `python3 scripts/ui_gallery.py` refreshes its data after
+snapshot changes, and `.github/workflows/pages.yml` publishes it from `main`.
 
 ## Permissions and trust
 

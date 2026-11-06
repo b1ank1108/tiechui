@@ -605,7 +605,7 @@
       const bar = el("div", "bar");
       const meta = [pick.cols || Math.max(...frame.rows.map((r) => r.reduce((s, c) => s + c.w, 0))) + " cols", pick.mode === "light" ? "浅色" : "深色", pick.axes.色彩].filter(Boolean).join(" · ");
       bar.append(el("span", "src", pick.source));
-      bar.append(el("span", "meta", meta), copyButton(frame));
+      bar.append(el("span", "meta", meta), copyButton(() => Term.text(frame)));
       shell.append(bar, term);
       stage.replaceChildren(shell);
     }
@@ -614,12 +614,12 @@
     return fig;
   }
 
-  function copyButton(frame) {
+  function copyButton(read) {
     const button = el("button", "copy", "复制");
     button.type = "button";
     button.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(Term.text(frame));
+        await navigator.clipboard.writeText(read());
         button.textContent = "✓ 已复制";
         button.classList.add("done");
       } catch {
@@ -815,6 +815,11 @@
     const hero = document.getElementById("hero-frame");
     const box = boxes(DATA.snapshots.app__session_header.parts[0].lines)[0];
     hero.append(frameView({ lines: header(box, MIST.dark), mode: "dark", cols: [...box[0]].length }).term);
+
+    for (const cmd of document.querySelectorAll(".install .cmd")) {
+      const code = cmd.querySelector("code");
+      cmd.append(copyButton(() => code.textContent));
+    }
 
     const count = Object.keys(DATA.snapshots).length;
     const frames = Object.values(DATA.snapshots).reduce((sum, s) => sum + s.parts.length, 0);
