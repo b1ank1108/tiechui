@@ -42,7 +42,7 @@ async fn execute(
             .map_err(|e| ToolError(e.to_string()))??;
         if hook.hash.split_once('/').map(|(_, hash)| hash) != Some(hash.as_str()) {
             return Err(ToolError(
-                "Plugin contents changed; run tc hooks trust".into(),
+                "Plugin contents changed; run chui hooks trust".into(),
             ));
         }
     }
@@ -51,7 +51,9 @@ async fn execute(
             .await
             .map_err(|e| ToolError(e.to_string()))?;
         if !config::verify(hook, &bytes) {
-            return Err(ToolError("Project hook changed; run tc hooks trust".into()));
+            return Err(ToolError(
+                "Project hook changed; run chui hooks trust".into(),
+            ));
         }
     }
     #[cfg(unix)]

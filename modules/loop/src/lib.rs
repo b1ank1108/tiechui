@@ -456,7 +456,7 @@ impl Loop {
             return Ok(listed);
         }
         let store = self.store.clone().ok_or(
-            "Durable tasks need a trusted project. Trust it with `tc trust`, or keep the task session-only.",
+            "Durable tasks need a trusted project. Trust it with `chui trust`, or keep the task session-only.",
         )?;
         let session: Vec<String> = self
             .lock()?

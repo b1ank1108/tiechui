@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs tc and tiechui from a GitHub release.
+# Installs chui and tiechui from a GitHub release.
 # Usage: curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 # Environment: TIECHUI_VERSION (default: latest), TIECHUI_INSTALL_DIR (default: ~/.local/bin).
 set -eu
@@ -68,13 +68,13 @@ else
 fi
 [ -n "$expected" ] && [ "$expected" = "$actual" ] || fail "checksum mismatch for $asset"
 
-tar -xzf "$temp/$asset" -C "$temp" tc tiechui
+tar -xzf "$temp/$asset" -C "$temp" chui tiechui
 mkdir -p "$dir"
-for name in tc tiechui; do
+for name in chui tiechui; do
     mv -f "$temp/$name" "$dir/$name"
     chmod 755 "$dir/$name"
 done
-echo "Installed tc $version to $dir"
+echo "Installed chui $version to $dir"
 
 case ":$PATH:" in
     *":$dir:"*) ;;

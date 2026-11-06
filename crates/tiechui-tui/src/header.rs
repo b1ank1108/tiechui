@@ -64,7 +64,7 @@ fn logo(theme: &Theme) -> Vec<Vec<Span<'static>>> {
 pub fn render(header: &Header, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     if width < 5 {
-        return vec![wrap::fit(vec![Span::styled("tc", bold)], width, false)];
+        return vec![wrap::fit(vec![Span::styled("chui", bold)], width, false)];
     }
     let model = header.model.as_deref().unwrap_or("no model");
     let info = [

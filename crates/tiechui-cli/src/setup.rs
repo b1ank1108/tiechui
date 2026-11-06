@@ -1,4 +1,4 @@
-//! `tc setup`, which `tc` also runs while no provider is configured: one provider and model,
+//! `chui setup`, which `chui` also runs while no provider is configured: one provider and model,
 //! saved to the user profile and selected.
 
 use std::collections::BTreeMap;
@@ -15,11 +15,11 @@ const FORMATS: [(&str, Wire); 2] = [
     ("OpenAI Chat Completions", Wire::OpenaiCompletions),
 ];
 
-/// `tc setup`.
+/// `chui setup`.
 pub(crate) async fn command() -> i32 {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        eprintln!("tc: setup asks questions and needs a terminal");
+        eprintln!("chui: setup asks questions and needs a terminal");
         return 2;
     }
     let paths = match std::env::current_dir()
@@ -28,7 +28,7 @@ pub(crate) async fn command() -> i32 {
     {
         Ok(paths) => paths,
         Err(message) => {
-            eprintln!("tc: {message}");
+            eprintln!("chui: {message}");
             return 2;
         }
     };
@@ -36,13 +36,13 @@ pub(crate) async fn command() -> i32 {
         Ok(Some(_)) => 0,
         Ok(None) => 1,
         Err(message) => {
-            eprintln!("tc: {message}");
+            eprintln!("chui: {message}");
             2
         }
     }
 }
 
-/// Whether `tc` needs setup first: no provider is declared, so no session could open.
+/// Whether `chui` needs setup first: no provider is declared, so no session could open.
 pub(crate) fn needed(paths: &ConfigPaths) -> bool {
     tiechui_config::load_providers(&paths.providers()).is_ok_and(|providers| providers.is_empty())
 }
@@ -53,7 +53,7 @@ pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
     loop {
         let Some(format) = choose(
             "Welcome to Tiechui",
-            vec!["Choose the API format. Run tc setup to add another provider later.".into()],
+            vec!["Choose the API format. Run chui setup to add another provider later.".into()],
             FORMATS
                 .iter()
                 .map(|(label, _)| (*label).to_owned())
@@ -217,7 +217,7 @@ fn key() -> Result<Option<Key>, String> {
         .map(|key| (Some(ApiKey(key)), None)),
         _ => text(
             "Environment variable",
-            vec!["Export it in the shell that starts tc.".into()],
+            vec!["Export it in the shell that starts chui.".into()],
             "",
             false,
             |name| {

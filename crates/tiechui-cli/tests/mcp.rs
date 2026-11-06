@@ -43,7 +43,7 @@ async fn oauth_login_and_logout_use_the_selected_profile() {
         format!("[mcp_servers.fixture]\nurl = '{base}/mcp'\nenabled = false\n"),
     )
     .unwrap();
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())
@@ -96,7 +96,7 @@ fn fixture_provider(home: &Path, base_url: &str) {
 }
 
 fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", home)
         .env("TIECHUI_HOME", home)
@@ -177,7 +177,7 @@ async fn exec_first_turn_finishes_while_server_is_still_starting() {
     std::fs::write(home.join("config.toml"), "model = 'fixture/model'\n[mcp_servers.slow]\ncommand = '/bin/sleep'\nargs = ['30']\nstartup_timeout_sec = 30\n").unwrap();
     let output = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"))
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
             .env_clear()
             .env("HOME", &home)
             .env("TIECHUI_HOME", &home)
@@ -245,7 +245,7 @@ async fn exec_first_request_includes_a_server_that_starts_promptly() {
         ),
     )
     .unwrap();
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())
@@ -294,7 +294,7 @@ async fn list_http_tools_sends_static_headers_and_environment_bearer_token() {
             ResponseTemplate::new(200).insert_header("mcp-session-id", "fixture").set_body_json(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
         }).mount(&server).await;
     std::fs::write(temp.path().join("config.toml"), format!("[mcp_servers.http]\nurl = '{}'\nbearer_token_env_var = 'TC_MCP_FIXTURE_TOKEN'\nhttp_headers = {{ x-fixture = 'static-value' }}\n", server.uri())).unwrap();
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())

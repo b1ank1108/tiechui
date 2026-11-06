@@ -73,7 +73,7 @@ Delays must be positive and the maximum must be at least the base delay.
 Each scheduled wait and subsequent attempt emits `request_retry`; turn completion
 ends retry activity. The TUI enters waiting status titled `Retrying request` with
 Esc and pauses the activity timer until the retry starts, just as for prompts.
-`tc exec` reports one-line retry messages on stderr and events in `--json`.
+`chui exec` reports one-line retry messages on stderr and events in `--json`.
 
 `Op::Retry` (the TUI's argument-free `/retry`) runs one manual recovery attempt,
 or starts the scheduled attempt immediately during backoff. It adds no input and

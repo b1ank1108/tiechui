@@ -9,7 +9,7 @@
 
 <p align="center">
   A terminal coding agent written in Rust.<br>
-  One binary, installed as <code>tc</code> and <code>tiechui</code>, with an interactive terminal UI and a headless <code>exec</code>.
+  One binary, installed as <code>chui</code> and <code>tiechui</code>, with an interactive terminal UI and a headless <code>exec</code>.
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/tui.png" width="720" alt="tc in a terminal: the session header, a turn with tool calls, a diff and a background shell, the composer, the status line in auto mode and the background activity row">
+  <img src=".github/assets/tui.png" width="720" alt="chui in a terminal: the session header, a turn with tool calls, a diff and a background shell, the composer, the status line in auto mode and the background activity row">
 </p>
 
 ## Highlights
@@ -47,12 +47,12 @@ permissions and modules.
 
 ```sh
 npm i -g @tiechui/cli
-tc
+chui
 ```
 
-With no provider configured, `tc` asks for the service, address, key and model,
+With no provider configured, `chui` asks for the service, address, key and model,
 lists the models the service offers, checks them with one request and saves the
-answers to `~/.tiechui`. `tc setup` adds another provider later.
+answers to `~/.tiechui`. `chui setup` adds another provider later.
 
 ## Install
 
@@ -76,7 +76,7 @@ an optional dependency. pnpm, yarn and bun work too.
 curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 ```
 
-It verifies the archive against `SHA256SUMS` and installs `tc` and `tiechui`
+It verifies the archive against `SHA256SUMS` and installs `chui` and `tiechui`
 into `~/.local/bin`. Set `TIECHUI_VERSION` to pin a release or
 `TIECHUI_INSTALL_DIR` to choose another directory.
 
@@ -93,15 +93,15 @@ Building from source needs Rust through rustup (the checkout pins **1.95.0**
 with rustfmt and clippy) and Git.
 
 **From source.** `cargo install --locked --path crates/tiechui-cli --root
-<prefix>` installs `tc` and `tiechui` into `<prefix>/bin`. For development,
-`cargo run --locked --bin tc -- --help` runs without installing.
+<prefix>` installs `chui` and `tiechui` into `<prefix>/bin`. For development,
+`cargo run --locked --bin chui -- --help` runs without installing.
 
 **Managed install from a source checkout (macOS and Linux).** Build a tarball
 with `cargo xtask dist`, or download one from a GitHub Release, then:
 
 ```sh
 cargo xtask install tiechui-VERSION-TARGET.tar.gz --prefix ~/.local
-~/.local/bin/tc doctor --prefix ~/.local
+~/.local/bin/chui doctor --prefix ~/.local
 cargo xtask uninstall --prefix ~/.local
 ```
 
@@ -152,7 +152,7 @@ The user profile remains `$TIECHUI_HOME` (default `~/.tiechui`).
 [examples/config.toml](examples/config.toml) lists every supported configuration
 field with explanations, and [examples/providers.toml](examples/providers.toml)
 does the same for providers. Active entries preserve default behavior; optional
-settings and non-default examples are commented out. `tc setup` writes the
+settings and non-default examples are commented out. `chui setup` writes the
 minimal setup below for you: your own endpoint and model, then selects it.
 
 `~/.tiechui/providers.toml`, where each top-level table is one provider:
@@ -202,8 +202,8 @@ theme = "automatic"                    # follows the terminal background
 Each provider takes its key from `api_key` in `providers.toml` or from the
 environment variable named by `api_key_env`, never both. An inline key stays out
 of the environment that tools inherit; keep the file private with `chmod 600`,
-which `tc doctor` checks. Tiechui does not load any secrets file itself, so with
-`api_key_env` export the variable in the shell that starts `tc`.
+which `chui doctor` checks. Tiechui does not load any secrets file itself, so with
+`api_key_env` export the variable in the shell that starts `chui`.
 [schema/config.json](schema/config.json) and
 [schema/providers.json](schema/providers.json) are the complete key references, and
 [crates/tiechui-providers](crates/tiechui-providers/README.md) covers wire
@@ -212,16 +212,16 @@ compatibility.
 ## Use
 
 ```sh
-tc                                         # interactive, current directory
-tc --cwd ~/src/app --model gateway/example-model --thinking high
-tc --mode auto                             # permission mode for this run
-tc --resume                                # pick a saved session
-tc --resume SESSION_ID
-tc exec "Explain the failing tests"        # headless, prints the answer
-tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
+chui                                         # interactive, current directory
+chui --cwd ~/src/app --model gateway/example-model --thinking high
+chui --mode auto                             # permission mode for this run
+chui --resume                                # pick a saved session
+chui --resume SESSION_ID
+chui exec "Explain the failing tests"        # headless, prints the answer
+chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 ```
 
-`tc exec` accepts:
+`chui exec` accepts:
 
 - `--model`, `--thinking`, `--mode` and `--cwd`;
 - `--resume ID` (headless resume always needs an ID);
@@ -280,7 +280,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 | `/permissions [rules\|auto\|yolo]` | Rules, grants and recent decisions; switch the mode for this session |
 | `/status` | Module state, config paths, diagnostics |
 | `/trust [allow\|deny]` | Project trust |
-| `/skills` | Insert a skill into the draft; use `tc skills list` outside the TUI |
+| `/skills` | Insert a skill into the draft; use `chui skills list` outside the TUI |
 | `/mcp`, `/hooks` | Integration views |
 | `/theme`, `/statusline` | Syntax theme picker, status line items |
 | `/help`, `/quit` | Shortcuts, exit |
@@ -379,15 +379,15 @@ Headless runs choose `--approval`:
 | `deny` | Every intercepted call is denied |
 | `yolo` | Same as `--mode yolo` when `--mode` is absent |
 
-`tc trust allow|deny|status --cwd DIR` (or `/trust`) decides whether a project's
+`chui trust allow|deny|status --cwd DIR` (or `/trust`) decides whether a project's
 `.agents/` configuration, rules, skills and hooks load, with `.claude/`
 compatibility. Command hooks and T2 plugin capabilities have their own approvals. See
 [modules/permissions](modules/permissions/README.md).
 
-The first time `tc` opens a project with such files, it asks and saves the answer
+The first time `chui` opens a project with such files, it asks and saves the answer
 for the Git root. It then asks about any new or changed command hooks. Your home
 directory and its parents are never saved this way, because every project below
-would inherit them; use `tc trust allow` there. `tc exec` never asks: it skips
+would inherit them; use `chui trust allow` there. `chui exec` never asks: it skips
 undecided project content and warns.
 
 ## Extend
@@ -401,12 +401,12 @@ undecided project content and warns.
   - Headless runs need the grant to already exist.
 
 ```sh
-tc plugin marketplace add ~/src/tiechui-plugins --ref main   # a local clone or a public Git URL
-tc plugin add sdk-typescript@tiechui-plugins
-tc plugin list --json
-tc plugin upgrade [NAME]        # explicit only; shows what changed
-tc plugin remove NAME
-tc plugin add ./path/to/package # local package
+chui plugin marketplace add ~/src/tiechui-plugins --ref main   # a local clone or a public Git URL
+chui plugin add sdk-typescript@tiechui-plugins
+chui plugin list --json
+chui plugin upgrade [NAME]        # explicit only; shows what changed
+chui plugin remove NAME
+chui plugin add ./path/to/package # local package
 ```
 
 Marketplaces use Codex's `marketplace.json` layout. Installs are pinned to the
@@ -428,10 +428,10 @@ Further reading:
 - the profile's `skills/`.
 
 These roots are discovered by default, without a skills configuration section.
-List skills with `tc skills list`, or select one with `/skills` in the TUI. `AGENTS.md` and the other context files are
+List skills with `chui skills list`, or select one with `/skills` in the TUI. `AGENTS.md` and the other context files are
 described in [modules/context-files](modules/context-files/README.md).
 
-**Hooks:** `tc hooks list` lists them and `tc hooks trust` approves command
+**Hooks:** `chui hooks list` lists them and `chui hooks trust` approves command
 hooks.
 
 ### MCP
@@ -451,9 +451,9 @@ tool_timeout_sec = 60
 ```
 
 ```sh
-tc mcp list
-tc mcp login remote [--scopes a,b]   # browser OAuth with PKCE and a loopback callback
-tc mcp logout remote
+chui mcp list
+chui mcp login remote [--scopes a,b]   # browser OAuth with PKCE and a loopback callback
+chui mcp logout remote
 ```
 
 OAuth tokens are refreshed automatically and stored with mode 0600. Logout
@@ -467,7 +467,7 @@ or `bearer_token_env_var` takes precedence over OAuth. See
   - Resuming restores messages and module state.
   - It does not restore session grants or the side chat.
   - The resume picker searches and previews. See [crates/tiechui-session](crates/tiechui-session/README.md).
-- **`tc doctor`.** It is read-only and exits nonzero when it finds a problem. It checks:
+- **`chui doctor`.** It is read-only and exits nonzero when it finds a problem. It checks:
   - installed binaries against the ownership record;
   - interrupted installs;
   - 0700 profile directories, and 0600 secret and token files and a
@@ -537,7 +537,7 @@ change before 1.0. Not yet supported:
 - an OS sandbox;
 - the OpenAI Responses wire;
 - subscription logins;
-- `tc mcp serve`;
+- `chui mcp serve`;
 - Homebrew.
 
 Windows builds ship with each release, but the Windows CI job is not yet

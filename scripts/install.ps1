@@ -1,4 +1,4 @@
-# Installs tc.exe and tiechui.exe from a GitHub release.
+# Installs chui.exe and tiechui.exe from a GitHub release.
 # Usage: irm https://github.com/b1ank1108/tiechui/releases/latest/download/install.ps1 | iex
 # Environment: TIECHUI_VERSION (default: latest), TIECHUI_INSTALL_DIR (default: %LOCALAPPDATA%\Programs\tiechui).
 $ErrorActionPreference = 'Stop'
@@ -37,18 +37,18 @@ try {
 
     Expand-Archive -Path (Join-Path $temp $asset) -DestinationPath (Join-Path $temp 'out')
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    foreach ($name in 'tc.exe', 'tiechui.exe') {
+    foreach ($name in 'chui.exe', 'tiechui.exe') {
         Copy-Item -Path (Join-Path $temp "out\$name") -Destination (Join-Path $dir $name) -Force
     }
 } finally {
     Remove-Item -Recurse -Force $temp
 }
-Write-Host "Installed tc $version to $dir"
+Write-Host "Installed chui $version to $dir"
 
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not (($path -split ';') -contains $dir)) {
     [Environment]::SetEnvironmentVariable('Path', (@($path, $dir) | Where-Object { $_ }) -join ';', 'User')
-    Write-Host "Added $dir to the user Path; open a new terminal to use tc."
+    Write-Host "Added $dir to the user Path; open a new terminal to use chui."
 }
 if (-not (Get-Command bash.exe -ErrorAction SilentlyContinue) -and -not $env:TIECHUI_GIT_BASH_PATH) {
     Write-Host 'The bash tool needs Git for Windows: https://git-scm.com/download/win'

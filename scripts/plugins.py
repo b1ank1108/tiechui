@@ -88,7 +88,7 @@ def check():
         env = {"PATH": os.environ["PATH"], "HOME": str(home), "TIECHUI_HOME": str(home)}
 
         def cli(*args):
-            result = subprocess.run([str(ROOT / "target/debug/tc"), *args], cwd=temp,
+            result = subprocess.run([str(ROOT / "target/debug/chui"), *args], cwd=temp,
                                     env=env, check=True, capture_output=True, text=True)
             return result.stdout
 

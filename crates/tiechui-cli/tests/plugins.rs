@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use serde_json::{Value, json};
 
 fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", home)
         .env("TIECHUI_HOME", home)
@@ -122,7 +122,7 @@ async fn exec_uses_plugin_skill_catalog_and_approved_hook_context() {
         .await;
     fs::write(home.join("config.toml"), "model = 'fixture/model'\n").unwrap();
     fs::write(home.join("providers.toml"), format!("[fixture]\nwire = 'anthropic-messages'\nbase_url = '{}'\napi_key_env = 'TC_PLUGIN_FIXTURE_KEY'\nmodels = [{{id = 'model', context_window = 200000, max_output = 4096}}]\n", provider.uri())).unwrap();
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("HOME", &home)
         .env("TIECHUI_HOME", &home)

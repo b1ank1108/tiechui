@@ -124,7 +124,7 @@ pub struct Options {
     pub no_alt_screen: bool,
     pub syntax_theme: Option<String>,
     pub themes_dir: Option<PathBuf>,
-    /// Sent once the first thread starts, as `tc exec` does: the command line's model and
+    /// Sent once the first thread starts, as `chui exec` does: the command line's model and
     /// thinking level, persisted by the session.
     pub startup: Vec<Op>,
     /// Root for `@` mentions and relative pasted image paths.
@@ -236,7 +236,7 @@ fn enhance(out: &mut impl Write) -> io::Result<()> {
 pub async fn run(client: Option<Client>, host: Host, options: Options) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
-            "the interactive UI needs a terminal; use tc exec",
+            "the interactive UI needs a terminal; use chui exec",
         ));
     }
     let previous = std::panic::take_hook();

@@ -1,12 +1,12 @@
 # MCP client module
 
-`tc exec` starts configured servers concurrently without waiting for initialization.
+`chui exec` starts configured servers concurrently without waiting for initialization.
 Ready tools enter the live `ToolSource` catalog and use the ordinary tool scheduler,
 validation and interceptors. Failed or disconnected servers retain an error in
 `ServerStatus`; their tools leave the catalog. Dropping the session cancels clients
 and kills each stdio server's Unix process group, including descendants.
 
-`tc mcp list [--json] [--cwd DIRECTORY]` waits for startup to settle and reports
+`chui mcp list [--json] [--cwd DIRECTORY]` waits for startup to settle and reports
 server states, tool names, origins, diagnostics and failures. Ctrl-C ends the wait.
 
 ## Configuration and contributions
@@ -29,7 +29,7 @@ a bearer token resolved from the named environment variable. Redirects are disab
 project or extension origin. `FileMcpSource::load` provides a TOML-backed source.
 Project contributions are also gated by session trust. The first definition of a
 duplicate server wins and records a diagnostic. `ElicitationHandler` is the
-interactive boundary: `tc` asks through the session's interaction queue and
+interactive boundary: `chui` asks through the session's interaction queue and
 declines URL requests; the headless host uses `DeclineElicitation`.
 
 ## Tools
@@ -51,7 +51,7 @@ use the same scheduler, permissions and cancellation path as other tools.
 
 ## OAuth
 
-`tc mcp login <server> [--scopes SCOPE,...]` prints an authorization URL and waits
+`chui mcp login <server> [--scopes SCOPE,...]` prints an authorization URL and waits
 for a loopback callback. The native public-client flow uses protected-resource
 and authorization-server discovery, dynamic registration and PKCE S256, with
 state, callback path and issuer validation. Open the printed URL in a browser;
@@ -61,12 +61,12 @@ Redirects are disabled and OAuth responses are size-bounded.
 Tokens are written atomically with mode 0600 under `$TIECHUI_HOME/mcp-oauth/`,
 keyed by server name and URL. HTTP requests refresh expiring tokens under a file
 lock, preserve/rotate refresh tokens and require the original issuer. Expired
-tokens without a refresh token require another login. `tc mcp logout <server>`
+tokens without a refresh token require another login. `chui mcp logout <server>`
 removes local credentials; it does not revoke the remote authorization grant.
-`/mcp` and `tc mcp list` show OAuth status without token values. Explicit static
+`/mcp` and `chui mcp list` show OAuth status without token values. Explicit static
 Authorization headers and environment bearer tokens take precedence over OAuth.
 
-`tc` is an MCP client only; it does not serve MCP.
+`chui` is an MCP client only; it does not serve MCP.
 
 ## Dependencies and validation
 

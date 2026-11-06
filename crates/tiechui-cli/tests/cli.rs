@@ -1,7 +1,7 @@
 use std::process::Command;
 
 const BINARIES: [(&str, &str); 2] = [
-    ("tc", env!("CARGO_BIN_EXE_tc")),
+    ("chui", env!("CARGO_BIN_EXE_chui")),
     ("tiechui", env!("CARGO_BIN_EXE_tiechui")),
 ];
 

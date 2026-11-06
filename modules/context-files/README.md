@@ -43,7 +43,7 @@ process's request without creating a duplicate audit entry.
 The TUI's `/reload` ends the session and prepares it again, so files are
 rediscovered and changed metadata audited as at process start. Protocol
 `Op::Reload` reloads session storage only; it has no module reload hook.
-`tc exec` has no interactive reload command. Disable discovery and the cwd
+`chui exec` has no interactive reload command. Disable discovery and the cwd
 contribution with `[modules] context-files = false`.
 
 Golden tests recreate the fixture trees in `tests/fixtures/golden.json` and

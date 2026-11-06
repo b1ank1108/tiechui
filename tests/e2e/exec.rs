@@ -145,7 +145,7 @@ models = [{{ id = "model", context_window = 200000, max_output = 4096 }}]
     }
 
     fn command(&self, prompt: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tc"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chui"));
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -342,7 +342,7 @@ async fn resume_rediscovers_context_and_audits_only_changes_to_paths_and_byte_co
         "TRUSTED_PROJECT_CONTEXT_MARKER",
     )
     .unwrap();
-    let trust = Command::new(env!("CARGO_BIN_EXE_tc"))
+    let trust = Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("TIECHUI_HOME", &fixture.home)
         .env("HOME", fixture.root.path())

@@ -316,11 +316,11 @@ impl OAuthStore {
                     .tokens
                     .refresh_token
                     .as_deref()
-                    .ok_or_else(|| error("MCP OAuth token expired; run tc mcp login"))?;
+                    .ok_or_else(|| error("MCP OAuth token expired; run chui mcp login"))?;
                 let http = client()?;
                 let metadata = discover(&http, &self.url).await?;
                 if metadata.issuer != stored.issuer {
-                    return Err(error("OAuth issuer changed; run tc mcp login"));
+                    return Err(error("OAuth issuer changed; run chui mcp login"));
                 }
                 let refresh = refresh.to_owned();
                 let store = self.clone();

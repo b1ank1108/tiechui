@@ -15,7 +15,7 @@ Roots, in precedence order:
 Discovery needs no configuration. Use `modules.skills` to disable catalog
 injection.
 
-`tc skills list --cwd <directory> [--json]` shows resolved metadata, root paths,
+`chui skills list --cwd <directory> [--json]` shows resolved metadata, root paths,
 source scopes, disabled model invocation, and diagnostics. `modules.skills = false`
 disables catalog injection in `exec`; listing remains available for inspection.
 
@@ -44,7 +44,7 @@ still holds the same content.
 `/skills` requests the shared resource picker through a generic UI event when an
 interactive session is available. Selecting a skill inserts a bound reference and
 preserves the draft; it does not submit a turn. Headless `RunCommand` lists
-metadata; the CLI equivalent is `tc skills list`. `tc exec` treats its prompt
+metadata; the CLI equivalent is `chui skills list`. `chui exec` treats its prompt
 as ordinary model input, including text that starts with `/skills`.
 
 The catalog lists skills in root order, user roots first, so a project skill

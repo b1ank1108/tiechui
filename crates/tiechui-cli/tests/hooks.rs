@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn command(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("TIECHUI_HOME", home)
         .env("HOME", home)

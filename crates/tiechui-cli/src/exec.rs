@@ -55,7 +55,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
     match result {
         Ok(code) => code,
         Err((code, message)) => {
-            eprintln!("tc: {message}");
+            eprintln!("chui: {message}");
             code
         }
     }
@@ -150,7 +150,7 @@ pub(crate) async fn prepare(
     .map_err(runtime_error)??;
     if !trusted {
         warnings.push(format!(
-            "trust: skipping untrusted project content in {}; use tc trust --cwd {} allow",
+            "trust: skipping untrusted project content in {}; use chui trust --cwd {} allow",
             cwd.display(),
             cwd.display()
         ));
@@ -355,7 +355,7 @@ pub(crate) async fn prepare(
         saved.or(configured)
     }
     .ok_or_else(|| {
-        config_error("set model in config.toml, use --model <provider>/<id>, or run tc setup")
+        config_error("set model in config.toml, use --model <provider>/<id>, or run chui setup")
     })?;
     let provider_config = loaded
         .config

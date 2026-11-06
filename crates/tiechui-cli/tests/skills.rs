@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn command(user: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .env("TIECHUI_HOME", user.join(".tiechui"))
         .env("HOME", user)
@@ -140,7 +140,7 @@ async fn exec_injects_catalog_rediscovers_on_resume_and_respects_trust_and_activ
         "---\nname: disabled-skill\ndescription: DISABLED_SKILL_DESCRIPTION\ndisable-model-invocation: true\n---\n",
     );
     let run = |resume: Option<String>| {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_tc"));
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"));
         command
             .env_clear()
             .env("HOME", &user)

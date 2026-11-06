@@ -10,7 +10,7 @@ Selection freezes the painted transcript while the composer remains live.
 Closing a viewer retains the fullscreen chat; exit and suspension restore the
 shell screen. Finished cells are cached and resize rewraps their source.
 
-`tc --no-alt-screen` keeps the inline mode, with native terminal scrolling and
+`chui --no-alt-screen` keeps the inline mode, with native terminal scrolling and
 selection. Inline resize replay waits 75 ms and retains at most 1,000 rows by
 default (VS Code: 1,000; Windows Terminal: 9,001; WezTerm: 3,500; Alacritty:
 10,000), with a final repair when a resized stream finishes. Late OSC

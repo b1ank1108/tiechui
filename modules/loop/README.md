@@ -41,5 +41,5 @@ never overwritten. One interactive session per project holds
 5 seconds of it ending. Runs are recorded within a second, so a crash right
 after a run can repeat a recurring task once. One-shots that came due while no
 session ran them are not run: the next owner asks the model to check with the
-user first, and removes them once that turn starts. `tc exec` manages durable
+user first, and removes them once that turn starts. `chui exec` manages durable
 tasks but runs none; session-only creation there is an error.

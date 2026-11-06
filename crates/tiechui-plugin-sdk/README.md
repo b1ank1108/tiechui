@@ -30,4 +30,4 @@ capabilities in `.tiechui-plugin/plugin.json`.
 Stdout is reserved for protocol frames. Log to stderr. Frames over 1 MiB or
 invalid envelopes close the transport, and disconnection cancels handlers and
 pending UI without replay. Local installation copies a package, so build and
-copy its executable into that package before `tc plugin add`.
+copy its executable into that package before `chui plugin add`.

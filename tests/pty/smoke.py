@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline, screen-asserted tc integration tests. Python 3.9+, POSIX, stdlib only."""
+"""Offline, screen-asserted chui integration tests. Python 3.9+, POSIX, stdlib only."""
 import argparse
 import base64
 import codecs
@@ -28,12 +28,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from plugins import PLUGINS, commit_fixture, copy_repository
 
-BIN = Path(os.environ.get("TIECHUI_BIN", ROOT / "target/debug/tc")).resolve()
+BIN = Path(os.environ.get("TIECHUI_BIN", ROOT / "target/debug/chui")).resolve()
 ESC = "\x1b"
 
 
 class Screen:
-    """Incremental VT subset used by tc; cells include wide-character continuations.
+    """Incremental VT subset used by chui; cells include wide-character continuations.
 
     This deliberately does not model terminal width-reflow or font/color rendering.
     Alternate screen saves the main buffer and cursor; 3J erases scrollback only.

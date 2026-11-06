@@ -258,7 +258,7 @@ fn inspect(
         {
             return Err("unsupported ownership schema".into());
         }
-        for name in ["tc", "tiechui"] {
+        for name in ["chui", "tiechui"] {
             check(cancel)?;
             let path = prefix.join("bin").join(name);
             match fingerprint(&path, cancel) {

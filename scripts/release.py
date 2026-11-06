@@ -20,11 +20,11 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ("tc", "tiechui")
+NAMES = ("chui", "tiechui")
 WINDOWS = os.name == "nt"
 STATE = ".tiechui-install"
 MIN_FREE = 6 * 1024 ** 3
-# Release targets and their npm platforms, which scripts/npm/tc.js lists too.
+# Release targets and their npm platforms, which scripts/npm/chui.js lists too.
 NPM = {"aarch64-apple-darwin": "darwin-arm64", "x86_64-apple-darwin": "darwin-x64",
        "aarch64-unknown-linux-gnu": "linux-arm64", "x86_64-unknown-linux-gnu": "linux-x64",
        "x86_64-pc-windows-msvc": "win32-x64"}
@@ -193,7 +193,7 @@ def unpack(artifact):
         entries = archive.getmembers()
         if (len(entries) != 3 or {e.name for e in entries} != {*NAMES, "manifest.json"}
                 or any(not e.isfile() or e.size > 512 * 1024 ** 2 for e in entries)):
-            raise RuntimeError("artifact must contain only regular tc, tiechui and manifest.json files")
+            raise RuntimeError("artifact must contain only regular chui, tiechui and manifest.json files")
         contents = {e.name: archive.extractfile(e).read() for e in entries}
         manifest = json.loads(contents.pop("manifest.json"))
         if manifest.get("schema_version") != 1 or set(manifest.get("files", {})) != set(NAMES):
@@ -375,7 +375,7 @@ def package(output, version, host, metadata, identical):
     (output / "tiechui.rb").write_text(
         'class Tiechui < Formula\n  desc "Rust terminal coding agent"\n'
         f'  url "{artifact.as_uri()}"\n  version "{version}"\n  sha256 "{checksum}"\n'
-        '  def install\n    bin.install "tc", "tiechui"\n  end\nend\n')
+        '  def install\n    bin.install "chui", "tiechui"\n  end\nend\n')
     return artifact
 
 
@@ -428,13 +428,13 @@ def npm(assets, version, output):
         optional[f"@tiechui/cli-{platform}"] = f"npm:@tiechui/cli@{version}-{platform}"
     main = output / "cli"
     (main / "bin").mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts/npm/tc.js", main / "bin/tc.js")
-    (main / "bin/tc.js").chmod(0o755)
+    shutil.copy2(ROOT / "scripts/npm/chui.js", main / "bin/chui.js")
+    (main / "bin/chui.js").chmod(0o755)
     for name in ("README.md", "LICENSE"):
         shutil.copy2(ROOT / name, main / name)
     manifest = dict(common, name="@tiechui/cli", version=version,
                     description="A terminal coding agent written in Rust",
-                    bin={name: "bin/tc.js" for name in NAMES}, files=["bin"],
+                    bin={name: "bin/chui.js" for name in NAMES}, files=["bin"],
                     engines={"node": ">=16"}, optionalDependencies=optional)
     (main / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return main
@@ -497,11 +497,11 @@ def verify():
                 step("install", lambda: install(artifact, prefix))
                 home = Path(temporary) / "profile"
                 home.mkdir(mode=0o700)
-                step("doctor", lambda: run([prefix / "bin/tc", "doctor", "--prefix", prefix, "--profile", home]))
+                step("doctor", lambda: run([prefix / "bin/chui", "doctor", "--prefix", prefix, "--profile", home]))
                 for theme in ("dark", "light"):
                     step("installed-" + theme, lambda theme=theme: run(
                         ["python3", "-B", "tests/pty/smoke.py", "streaming", "--background", theme],
-                        env={"TIECHUI_BIN": str(prefix / "bin/tc")}))
+                        env={"TIECHUI_BIN": str(prefix / "bin/chui")}))
                 step("uninstall", lambda: uninstall(prefix))
             with source() as (_, final_source):
                 if final_source["tree"] != metadata["tree"]:

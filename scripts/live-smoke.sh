@@ -2,10 +2,10 @@
 # Manual only. This script intentionally uses the configured provider's credentials.
 set -eu
 if [ "${1:-}" = "--help" ] || [ -z "${TIECHUI_SMOKE_MODEL:-}" ]; then
-    echo 'Usage: TIECHUI_SMOKE_MODEL=<provider>/<id> [TIECHUI_BIN=<tc-path>] scripts/live-smoke.sh [--mcp <server>]'
+    echo 'Usage: TIECHUI_SMOKE_MODEL=<provider>/<id> [TIECHUI_BIN=<chui-path>] scripts/live-smoke.sh [--mcp <server>]'
     echo 'Runs two bash turns, checks the model-visible skills catalog, resumes, and prints usage including cache reads.'
     echo 'Optional --mcp also requires a successful tool call from that configured server.'
-    echo 'Requires Python 3.9+, a configured model and visible skill, and provider credential environment variables; tc resolves config.'
+    echo 'Requires Python 3.9+, a configured model and visible skill, and provider credential environment variables; chui resolves config.'
     [ "${1:-}" = "--help" ] && exit 0
     exit 2
 fi
@@ -28,7 +28,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mcp", metavar="SERVER")
 args = parser.parse_args(sys.argv[2:])
 model = os.environ["TIECHUI_SMOKE_MODEL"]
-binary = str(Path(os.environ.get("TIECHUI_BIN", str(repo / "target/release/tc"))).resolve())
+binary = str(Path(os.environ.get("TIECHUI_BIN", str(repo / "target/release/chui"))).resolve())
 
 def inspect(cwd, command):
     result = subprocess.run([binary, *command, "--cwd", cwd, "--json"],

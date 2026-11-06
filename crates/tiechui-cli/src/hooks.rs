@@ -29,7 +29,7 @@ pub(crate) fn run(command: &str, args: &ArgMatches) -> Result<(), String> {
     let registry = super::plugins::load(&cwd, home, trusted, &loaded.config, &cancel)?;
     if command == "trust" {
         if !trusted && registry.hook_sources().is_empty() {
-            return Err("Trust the project first with tc trust allow".into());
+            return Err("Trust the project first with chui trust allow".into());
         }
         let count = tiechui_module_hooks::trust_with_sources(
             &cwd,
@@ -142,7 +142,7 @@ fn question(pending: &[Hook]) -> Question {
     }));
     if pending.len() > REVIEWED {
         body.push(format!(
-            "and {} more; tc hooks list shows them all",
+            "and {} more; chui hooks list shows them all",
             pending.len() - REVIEWED
         ));
     }

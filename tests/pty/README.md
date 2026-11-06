@@ -3,7 +3,7 @@
 Run `just pty`, or select independent cases with `just pty resume approval`.
 `python3 -B tests/pty/smoke.py --list` lists the names. The harness uses Python
 3.9+ standard library facilities only. `TIECHUI_BIN` selects an already built
-executable (default `target/debug/tc`); the just recipe builds `tc` first, then
+executable (default `target/debug/chui`); the just recipe builds `chui` first, then
 runs emulator unit tests and the selected PTY cases. No Python/Node packages,
 production test switches, real credentials or external provider are needed.
 
@@ -50,7 +50,7 @@ fonts remain reviewer checks. Windows ConPTY is not covered.
 | `paste` | Folded multiline paste expands to the exact original provider payload. |
 | `cjk` | Individually typed Chinese input, Chinese reply, exact submitted Unicode text. |
 | `resize` | TIOCSWINSZ and SIGWINCH at 50/120/80 columns; draft, rules and status survive. |
-| `resume` | Real sessions seeded through `tc exec`; startup picker, search, Ctrl+E metadata/preview, Ctrl+T conversation, layered Esc starting a new session, in-session `/resume`, retained history in the next request, and startup Enter resume. Browsing leaves old bytes unchanged; the storage unit test also checks mtime. |
+| `resume` | Real sessions seeded through `chui exec`; startup picker, search, Ctrl+E metadata/preview, Ctrl+T conversation, layered Esc starting a new session, in-session `/resume`, retained history in the next request, and startup Enter resume. Browsing leaves old bytes unchanged; the storage unit test also checks mtime. |
 | `model` | `/model` shows both mock models, switches to beta and back to alpha; request model IDs agree. |
 | `approval` | Trusted project rule asks for bash. Allow once executes, a second call asks again, deny-with-reason blocks its write and reaches the mock as a tool result. |
 | `statusline` | Icon preview, cancel, saved battery and actual 90% remaining usage, reload persistence, preserved TOML comment, and host-backed `/trust` status/allow. |
@@ -62,4 +62,4 @@ and resize. In particular, erased text must not satisfy later assertions.
 The `t2-plugins` case installs the local Rust test plugin, approves its declared
 capabilities, invokes its tool, verifies interceptor denial, opens a declarative
 panel and checks that the process group is gone after exit. `just pty` builds the
-fixture binary as well as `tc`.
+fixture binary as well as `chui`.

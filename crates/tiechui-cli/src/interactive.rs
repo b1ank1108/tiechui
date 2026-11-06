@@ -83,21 +83,21 @@ async fn open(
     Ok((live, opened))
 }
 
-/// `tc` without a subcommand: the same session setup as `tc exec`, driven by the TUI.
+/// `chui` without a subcommand: the same session setup as `chui exec`, driven by the TUI.
 /// `/new`, `/resume` and `/reload` end the session and prepare the next one from scratch,
 /// so a session from another directory gets that directory's trust, configuration and tools.
 pub(crate) async fn run(args: &ArgMatches) -> i32 {
     let startup = match startup(args) {
         Ok(ops) => ops,
         Err((code, message)) => {
-            eprintln!("tc: {message}");
+            eprintln!("chui: {message}");
             return code;
         }
     };
     let (cwd, canonical, paths, home) = match locations(args) {
         Ok(locations) => locations,
         Err((code, message)) => {
-            eprintln!("tc: {message}");
+            eprintln!("chui: {message}");
             return code;
         }
     };
@@ -111,7 +111,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
             Ok(Some(_)) => {}
             Ok(None) => return 0,
             Err(message) => {
-                eprintln!("tc: {message}");
+                eprintln!("chui: {message}");
                 return 2;
             }
         }
@@ -122,7 +122,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
             Ok(true) => {}
             Ok(false) => return 0,
             Err(message) => {
-                eprintln!("tc: {message}");
+                eprintln!("chui: {message}");
                 return 2;
             }
         }
@@ -148,7 +148,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
                 )
             }
             Err((code, message)) => {
-                eprintln!("tc: {message}");
+                eprintln!("chui: {message}");
                 return code;
             }
         }
@@ -223,12 +223,12 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
         None => None,
     };
     if let Err(error) = result {
-        eprintln!("tc: {error}");
+        eprintln!("chui: {error}");
         return 1;
     }
     match failure {
         Some(error) => {
-            eprintln!("tc: {error}");
+            eprintln!("chui: {error}");
             1
         }
         None => 0,
@@ -309,7 +309,7 @@ impl tiechui_tui::Services for Services {
     }
 }
 
-/// `/trust [allow | deny]`, reported as `tc trust` does.
+/// `/trust [allow | deny]`, reported as `chui trust` does.
 fn trust(home: &Path, cwd: &Path, arguments: &str) -> String {
     let decision = match arguments {
         "" => None,

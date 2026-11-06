@@ -22,7 +22,7 @@ Other result fields pass through unchanged.
 Searching and invoking never add definitions to the request's tools array.
 Presentation depends only on the current callable catalog and model window.
 Each registry owns its snapshot; no discovery history or session entries are
-written. The same module registration serves interactive sessions, `tc exec`,
+written. The same module registration serves interactive sessions, `chui exec`,
 subagents and side chats.
 
 MCP calls use exclusive scheduling until read-only classification is available;

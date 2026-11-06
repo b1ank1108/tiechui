@@ -1,4 +1,4 @@
-//! Shared command-line entry point for the `tiechui` and `tc` binaries.
+//! Shared command-line entry point for the `tiechui` and `chui` binaries.
 
 mod approvals;
 mod diagnostics;

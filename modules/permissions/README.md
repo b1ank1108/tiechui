@@ -75,7 +75,7 @@ invalid project config are never settled by a mode either.
 The main session reports its mode to the TUI as the `tiechui.permissions.mode`
 extension event on restore and whenever it changes; child agents stay quiet.
 
-| `tc exec --approval` | Behavior |
+| `chui exec --approval` | Behavior |
 | --- | --- |
 | `allow-listed` (default) | Asks the mode leaves open return an unavailable-approval tool error; explicit denies remain. |
 | `deny` | Deny every intercepted call. |
@@ -87,7 +87,7 @@ do not end the turn.
 
 `ApprovalRequester::request` receives the original call (including proposed
 write/edit contents), matched rule and values, source, cwd, proposed session
-scope, and a cancellation token. `tc` implements it through the session's
+scope, and a cancellation token. `chui` implements it through the session's
 interaction queue, which shows one prompt at a time alongside MCP elicitations.
 Decisions allow once, allow the displayed session scope, optionally widen a
 directional scope to both directions, or deny with a reason. Memory-only grants

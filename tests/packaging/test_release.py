@@ -45,9 +45,9 @@ class Packaging(unittest.TestCase):
         moved = self.root / "moved"
         self.prefix.rename(moved)
         self.prefix = moved
-        (moved / "bin/tc").unlink()
+        (moved / "bin/chui").unlink()
         self.install()
-        self.assertEqual((moved / "bin/tc").read_bytes(), b"tcfirst")
+        self.assertEqual((moved / "bin/chui").read_bytes(), b"chuifirst")
         self.install(self.artifact_for("second"))
         release.uninstall(moved)
         self.assertFalse((moved / "bin").exists())
@@ -60,7 +60,7 @@ class Packaging(unittest.TestCase):
         foreign.write_bytes(b"foreign")
         with self.assertRaisesRegex(RuntimeError, "unowned"):
             self.install()
-        self.assertFalse((self.prefix / "bin/tc").exists())
+        self.assertFalse((self.prefix / "bin/chui").exists())
         self.assertEqual(foreign.read_bytes(), b"foreign")
         foreign.unlink()
         self.install()
@@ -81,7 +81,7 @@ class Packaging(unittest.TestCase):
     def test_interrupt_at_each_boundary_rolls_back_then_retries(self):
         second = self.artifact_for("second")
         self.install()
-        for boundary in ("journal", "tc", "tiechui", "record"):
+        for boundary in ("journal", "chui", "tiechui", "record"):
             def interrupt(stage):
                 if stage == boundary:
                     raise InterruptedError("simulated power loss")
@@ -92,14 +92,14 @@ class Packaging(unittest.TestCase):
             with release.locked(self.prefix) as (prefix, state):
                 release.recover(prefix, state)
             self.assertFalse(journal.exists())
-            self.assertEqual((self.prefix / "bin/tc").read_bytes(), b"tcfirst")
+            self.assertEqual((self.prefix / "bin/chui").read_bytes(), b"chuifirst")
             self.assertEqual((self.prefix / "bin/tiechui").read_bytes(), b"tiechuifirst")
         self.install(second)
-        self.assertEqual((self.prefix / "bin/tc").read_bytes(), b"tcsecond")
+        self.assertEqual((self.prefix / "bin/chui").read_bytes(), b"chuisecond")
 
     def test_interrupted_initial_install_and_uninstall(self):
         def interrupt(stage):
-            if stage == "tc":
+            if stage == "chui":
                 raise InterruptedError()
         with self.assertRaises(InterruptedError):
             self.install(checkpoint=interrupt)
@@ -112,14 +112,14 @@ class Packaging(unittest.TestCase):
     def test_recovery_refuses_external_changes(self):
         self.install()
         def interrupt(stage):
-            if stage == "tc":
+            if stage == "chui":
                 raise InterruptedError()
         with self.assertRaises(InterruptedError):
             self.install(self.artifact_for("second"), interrupt)
-        (self.prefix / "bin/tc").write_bytes(b"external")
+        (self.prefix / "bin/chui").write_bytes(b"external")
         with self.assertRaisesRegex(RuntimeError, "external modification"):
             self.install()
-        self.assertEqual((self.prefix / "bin/tc").read_bytes(), b"external")
+        self.assertEqual((self.prefix / "bin/chui").read_bytes(), b"external")
 
     def test_prefix_lock_excludes_other_installers(self):
         with release.locked(self.prefix):
@@ -147,7 +147,7 @@ class Packaging(unittest.TestCase):
         output = self.root / "first"
         with tarfile.open(self.artifact, "w:gz") as archive:
             for name in (*release.NAMES, "manifest.json"):
-                data = b"corrupted" if name == "tc" else (output / name).read_bytes()
+                data = b"corrupted" if name == "chui" else (output / name).read_bytes()
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
@@ -164,7 +164,7 @@ class Packaging(unittest.TestCase):
     def test_windows_zip(self):
         output = self.root / "windows"
         output.mkdir()
-        for name in ("tc.exe", "tiechui.exe"):
+        for name in ("chui.exe", "tiechui.exe"):
             (output / name).write_bytes(b"MZ" + name.encode())
         artifact = release.package(output, "0.1.0", "x86_64-pc-windows-msvc", {"commit": "windows"}, True)
         first = artifact.read_bytes()
@@ -172,7 +172,7 @@ class Packaging(unittest.TestCase):
         self.assertEqual(artifact.read_bytes(), first)
         self.assertEqual(artifact.name, "tiechui-0.1.0-x86_64-pc-windows-msvc.zip")
         with zipfile.ZipFile(artifact) as archive:
-            self.assertEqual(archive.namelist(), ["tc.exe", "tiechui.exe", "manifest.json"])
+            self.assertEqual(archive.namelist(), ["chui.exe", "tiechui.exe", "manifest.json"])
         self.assertFalse((output / "tiechui.rb").exists())
 
     def test_npm_packages_launch_the_platform_build(self):
@@ -186,7 +186,7 @@ class Packaging(unittest.TestCase):
             output = self.root / host
             output.mkdir()
             for name in release.binaries(host):
-                script = name == "tc" and platform == here
+                script = name == "chui" and platform == here
                 (output / name).write_bytes(b'#!/bin/sh\necho "$TIECHUI_INSTALL $*"\nexit 3\n'
                                             if script else (name + host).encode())
                 (output / name).chmod(0o755)
@@ -197,15 +197,15 @@ class Packaging(unittest.TestCase):
         npm = self.root / "npm"
         main = release.npm(assets, "0.1.0", npm)
         package = json.loads((main / "package.json").read_bytes())
-        self.assertEqual(package["bin"], {"tc": "bin/tc.js", "tiechui": "bin/tc.js"})
+        self.assertEqual(package["bin"], {"chui": "bin/chui.js", "tiechui": "bin/chui.js"})
         self.assertEqual(package["optionalDependencies"]["@tiechui/cli-win32-x64"],
                          "npm:@tiechui/cli@0.1.0-win32-x64")
         windows = json.loads((npm / "win32-x64/package.json").read_bytes())
         self.assertEqual((windows["name"], windows["version"], windows["os"], windows["cpu"], windows["files"]),
-                         ("@tiechui/cli", "0.1.0-win32-x64", ["win32"], ["x64"], ["tc.exe"]))
-        self.assertEqual((npm / "win32-x64/tc.exe").read_bytes(), b"tc.exex86_64-pc-windows-msvc")
+                         ("@tiechui/cli", "0.1.0-win32-x64", ["win32"], ["x64"], ["chui.exe"]))
+        self.assertEqual((npm / "win32-x64/chui.exe").read_bytes(), b"chui.exex86_64-pc-windows-msvc")
         self.assertEqual(json.loads((npm / "linux-x64/package.json").read_bytes())["libc"], ["glibc"])
-        launcher = (main / "bin/tc.js").read_text()
+        launcher = (main / "bin/chui.js").read_text()
         self.assertIn(json.dumps(list(release.NPM.values())).replace('","', '", "'), launcher)
         with self.assertRaisesRegex(RuntimeError, "mismatched release archive"):
             (assets / "SHA256SUMS").write_text("".join(sums[1:]))
@@ -215,10 +215,10 @@ class Packaging(unittest.TestCase):
         modules = self.root / "global/node_modules/@tiechui"
         shutil.copytree(main, modules / "cli")
         shutil.copytree(npm / here, modules / "cli/node_modules/@tiechui" / f"cli-{here}")
-        launched = subprocess.run([node, modules / "cli/bin/tc.js", "exec", "hi"], capture_output=True, text=True)
+        launched = subprocess.run([node, modules / "cli/bin/chui.js", "exec", "hi"], capture_output=True, text=True)
         self.assertEqual((launched.returncode, launched.stdout), (3, "npm exec hi\n"))
         shutil.rmtree(modules / "cli/node_modules")
-        missing = subprocess.run([node, modules / "cli/bin/tc.js"], capture_output=True, text=True)
+        missing = subprocess.run([node, modules / "cli/bin/chui.js"], capture_output=True, text=True)
         self.assertEqual(missing.returncode, 1)
         self.assertIn("npm i -g @tiechui/cli", missing.stderr)
 

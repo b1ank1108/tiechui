@@ -187,7 +187,7 @@ pub fn discover(
             if project && !trusted {
                 plugin
                     .diagnostics
-                    .push("Untrusted project plugin ignored; use tc trust allow".into());
+                    .push("Untrusted project plugin ignored; use chui trust allow".into());
             }
             if !project {
                 match store::read_installation(home, &plugin.name) {

@@ -41,7 +41,7 @@ pub(crate) fn run(args: &ArgMatches) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// What `tc` settles before its first session: trust for a project with no decision yet, then
+/// What `chui` settles before its first session: trust for a project with no decision yet, then
 /// any new or changed hooks. `false` means the user left.
 pub(crate) fn consent(cwd: &Path, paths: &ConfigPaths, home: &Path) -> Result<bool, String> {
     let store = TrustStore::new(home);

@@ -10,7 +10,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 fn doctor(prefix: &Path, profile: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .args(["doctor", "--prefix"])
         .arg(prefix)
@@ -25,8 +25,8 @@ fn doctor_without_prefix_skips_uninstalled_binary_checks() {
     let root = tempfile::tempdir().unwrap();
     let debug = root.path().join("target/debug");
     fs::create_dir_all(&debug).unwrap();
-    let binary = debug.join("tc");
-    fs::hard_link(env!("CARGO_BIN_EXE_tc"), &binary).unwrap();
+    let binary = debug.join("chui");
+    fs::hard_link(env!("CARGO_BIN_EXE_chui"), &binary).unwrap();
     let profile = root.path().join("profile");
     fs::create_dir(&profile).unwrap();
     fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
@@ -116,12 +116,12 @@ fn doctor_reports_broken_install_profile_and_schemas_without_changes() {
     fs::write(
         prefix.join(".tiechui-install/ownership.json"),
         serde_json::to_vec(&json!({
-            "schema_version": 1, "files": {"tc": entry, "tiechui": entry}
+            "schema_version": 1, "files": {"chui": entry, "tiechui": entry}
         }))
         .unwrap(),
     )
     .unwrap();
-    for name in ["tc", "tiechui"] {
+    for name in ["chui", "tiechui"] {
         let path = prefix.join("bin").join(name);
         fs::write(&path, b"binary").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -129,7 +129,7 @@ fn doctor_reports_broken_install_profile_and_schemas_without_changes() {
     fs::create_dir(&profile).unwrap();
     fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(doctor(&prefix, &profile).status.success());
-    fs::write(prefix.join("bin/tc"), b"tampered").unwrap();
+    fs::write(prefix.join("bin/chui"), b"tampered").unwrap();
     fs::remove_file(prefix.join("bin/tiechui")).unwrap();
     fs::write(prefix.join(".tiechui-install/journal.json"), b"{}").unwrap();
     fs::set_permissions(&profile, fs::Permissions::from_mode(0o755)).unwrap();
@@ -186,7 +186,7 @@ fn doctor_reports_broken_install_profile_and_schemas_without_changes() {
     }
     assert!(!output.contains("SENTINEL"));
     assert_eq!(before, walk(&profile));
-    assert_eq!(fs::read(prefix.join("bin/tc")).unwrap(), b"tampered");
+    assert_eq!(fs::read(prefix.join("bin/chui")).unwrap(), b"tampered");
 }
 
 fn walk(path: &Path) -> Vec<(std::path::PathBuf, Vec<u8>, u32)> {

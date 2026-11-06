@@ -254,7 +254,7 @@ async fn exercise(root: &Path) {
 }
 
 fn doctor(home: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
         .args(["doctor", "--profile"])
         .arg(home)

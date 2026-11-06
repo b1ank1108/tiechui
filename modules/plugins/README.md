@@ -1,15 +1,15 @@
 # Plugin packages
 
-`tc plugin add <path>` copies a local package to `$TIECHUI_HOME/plugins/<name>`
+`chui plugin add <path>` copies a local package to `$TIECHUI_HOME/plugins/<name>`
 (default `~/.tiechui/plugins/<name>`). It records the canonical source and SHA-256
 content hash in `plugins/.records/<name>.json`. The add command refuses to
-overwrite existing installations. Use `tc plugin list [--json]` and `tc plugin remove <name>` to inspect
+overwrite existing installations. Use `chui plugin list [--json]` and `chui plugin remove <name>` to inspect
 and remove installations.
 
-`tc plugin marketplace add <git-url-or-path> [--ref REF]` registers a committed
+`chui plugin marketplace add <git-url-or-path> [--ref REF]` registers a committed
 Git snapshot; `marketplace list` lists registrations and `marketplace remove
 <name-or-source>` removes one without deleting installed packages or the source.
-`tc plugin add <name>@<marketplace>` installs from that snapshot. The catalog is
+`chui plugin add <name>@<marketplace>` installs from that snapshot. The catalog is
 the first file found among the Codex layout (`.agents/plugins/marketplace.json`,
 then `api_marketplace.json`), the Claude and Cursor layouts
 (`.claude-plugin/marketplace.json`, `.cursor-plugin/marketplace.json`), and root
@@ -21,7 +21,7 @@ its own transport; Tiechui supplies no credentials, disables hooks, and isolates
 Git's home and global/system configuration from the user's profile.
 
 Installation records pin both marketplace/package commits and the installed
-content hash. `tc plugin upgrade [name]` explicitly resolves the current source
+content hash. `chui plugin upgrade [name]` explicitly resolves the current source
 again, including moved tags, and reports old/new commits, hashes and added,
 modified or deleted files. Changed contents revoke capability grants; the next
 interactive start asks again, and headless starts require a new grant. Existing
@@ -37,7 +37,7 @@ my-plugin = false
 ```
 
 Project packages in `.agents/plugins/<directory>` and `.claude/plugins/<directory>` are discovered from the project
-root to the current directory. They require `tc trust allow`; a module override
+root to the current directory. They require `chui trust allow`; a module override
 cannot bypass project trust. User packages take precedence over project packages
 with the same name. Built-in module names are reserved.
 
@@ -79,7 +79,7 @@ contributions. See
 interactive start, all declared capabilities require approval through the shared
 foreground queue. Grants pin the package path and content hash in `$TIECHUI_HOME/plugin-grants/`;
 content changes revoke them. Headless starts require an existing grant, and
-untrusted projects start no T2 processes (`tc trust allow` is required). Delete
+untrusted projects start no T2 processes (`chui trust allow` is required). Delete
 the package's grant file to require approval on its next start.
 
 T2 freshness checks walk package metadata before each tool, command, interceptor,
@@ -102,7 +102,7 @@ Skills, MCP definitions, and hook sources go through the existing contribution
 APIs. MCP server names retain their declared names and the existing duplicate
 diagnostics. `modules.mcp = false` also disables contributed servers.
 
-Plugin hooks require `tc hooks trust`, including installed user packages.
+Plugin hooks require `chui hooks trust`, including installed user packages.
 Approval pins both the normalized handler and the bundle contents, and
 execution checks fresh contents before starting the command. Changing a script
 invalidates approval even when the hooks JSON is unchanged. Fingerprints ignore

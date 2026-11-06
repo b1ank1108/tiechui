@@ -9,7 +9,7 @@
 
 <p align="center">
   用 Rust 写的终端编程代理。<br>
-  一个二进制，以 <code>tc</code> 和 <code>tiechui</code> 两个名字安装，提供交互式终端界面和无界面的 <code>exec</code>。
+  一个二进制，以 <code>chui</code> 和 <code>tiechui</code> 两个名字安装，提供交互式终端界面和无界面的 <code>exec</code>。
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/tui.png" width="720" alt="终端里的 tc：会话头、一轮带工具调用、diff 和后台 shell 的对话、输入框、auto 模式下的状态行与后台活动行">
+  <img src=".github/assets/tui.png" width="720" alt="终端里的 chui：会话头、一轮带工具调用、diff 和后台 shell 的对话、输入框、auto 模式下的状态行与后台活动行">
 </p>
 
 ## 亮点
@@ -46,11 +46,11 @@
 
 ```sh
 npm i -g @tiechui/cli
-tc
+chui
 ```
 
-还没有配置 provider 时，`tc` 会依次询问服务、地址、密钥和模型，列出服务提供的模型，
-用一次请求验证后把结果存进 `~/.tiechui`。之后用 `tc setup` 添加更多 provider。
+还没有配置 provider 时，`chui` 会依次询问服务、地址、密钥和模型，列出服务提供的模型，
+用一次请求验证后把结果存进 `~/.tiechui`。之后用 `chui setup` 添加更多 provider。
 
 ## 安装
 
@@ -72,7 +72,7 @@ Node 16 及以上运行对应平台的原生构建，由 npm 作为可选依赖�
 curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 ```
 
-它用 `SHA256SUMS` 校验压缩包，把 `tc` 和 `tiechui` 装进 `~/.local/bin`。
+它用 `SHA256SUMS` 校验压缩包，把 `chui` 和 `tiechui` 装进 `~/.local/bin`。
 设置 `TIECHUI_VERSION` 可固定版本，`TIECHUI_INSTALL_DIR` 可换安装目录。
 
 **Windows (PowerShell)。**
@@ -86,15 +86,15 @@ irm https://github.com/b1ank1108/tiechui/releases/latest/download/install.ps1 | 
 从源码构建需要通过 rustup 安装的 Rust（仓库固定 **1.95.0**，含 rustfmt 和 clippy）和 Git。
 
 **从源码安装。** `cargo install --locked --path crates/tiechui-cli --root <prefix>`
-会把 `tc` 和 `tiechui` 装进 `<prefix>/bin`。开发时用
-`cargo run --locked --bin tc -- --help` 免安装运行。
+会把 `chui` 和 `tiechui` 装进 `<prefix>/bin`。开发时用
+`cargo run --locked --bin chui -- --help` 免安装运行。
 
 **从源码仓库托管安装（macOS 和 Linux）。** 用 `cargo xtask dist` 构建 tarball，
 或从 GitHub Release 下载，然后：
 
 ```sh
 cargo xtask install tiechui-VERSION-TARGET.tar.gz --prefix ~/.local
-~/.local/bin/tc doctor --prefix ~/.local
+~/.local/bin/chui doctor --prefix ~/.local
 cargo xtask uninstall --prefix ~/.local
 ```
 
@@ -141,7 +141,7 @@ profile 目录是 `$TIECHUI_HOME`，默认 `~/.tiechui`：
 
 [examples/config.toml](examples/config.toml) 列出了所有支持的配置字段及说明，
 [examples/providers.toml](examples/providers.toml) 对 provider 做了同样的事。
-未注释的条目保持默认行为；可选设置和非默认示例都被注释掉了。`tc setup` 会替你写出
+未注释的条目保持默认行为；可选设置和非默认示例都被注释掉了。`chui setup` 会替你写出
 下面的最小配置：声明你自己的端点和模型，然后选中它。
 
 `~/.tiechui/providers.toml`，每个顶层表是一个 provider：
@@ -188,8 +188,8 @@ theme = "automatic"                    # 跟随终端背景
 
 每个 provider 的密钥来自 `providers.toml` 里的 `api_key`，或 `api_key_env` 指定的
 环境变量，二者不能同时使用。直接写入的密钥不会进入工具继承的环境；用 `chmod 600`
-保护该文件，`tc doctor` 会检查。Tiechui 自己不加载任何密钥文件，所以使用
-`api_key_env` 时要在启动 `tc` 的 shell 里导出变量。
+保护该文件，`chui doctor` 会检查。Tiechui 自己不加载任何密钥文件，所以使用
+`api_key_env` 时要在启动 `chui` 的 shell 里导出变量。
 [schema/config.json](schema/config.json) 和 [schema/providers.json](schema/providers.json)
 是完整的键参考，[crates/tiechui-providers](crates/tiechui-providers/README.md)
 介绍协议兼容性。
@@ -197,16 +197,16 @@ theme = "automatic"                    # 跟随终端背景
 ## 使用
 
 ```sh
-tc                                         # 交互模式，当前目录
-tc --cwd ~/src/app --model gateway/example-model --thinking high
-tc --mode auto                             # 本次运行的权限模式
-tc --resume                                # 选择已保存的会话
-tc --resume SESSION_ID
-tc exec "Explain the failing tests"        # 无界面运行，打印回答
-tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
+chui                                         # 交互模式，当前目录
+chui --cwd ~/src/app --model gateway/example-model --thinking high
+chui --mode auto                             # 本次运行的权限模式
+chui --resume                                # 选择已保存的会话
+chui --resume SESSION_ID
+chui exec "Explain the failing tests"        # 无界面运行，打印回答
+chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 ```
 
-`tc exec` 接受：
+`chui exec` 接受：
 
 - `--model`、`--thinking`、`--mode` 和 `--cwd`；
 - `--resume ID`（无界面恢复必须给 ID）；
@@ -262,7 +262,7 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `/permissions [rules\|auto\|yolo]` | 规则、授权和最近的决定；切换本会话的模式 |
 | `/status` | 模块状态、配置路径、诊断 |
 | `/trust [allow\|deny]` | 项目信任 |
-| `/skills` | 把技能插入草稿；界面外用 `tc skills list` |
+| `/skills` | 把技能插入草稿；界面外用 `chui skills list` |
 | `/mcp`、`/hooks` | 集成视图 |
 | `/theme`、`/statusline` | 语法主题选择器、状态行显示项 |
 | `/help`、`/quit` | 快捷键、退出 |
@@ -352,13 +352,13 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `deny` | 拒绝所有被拦截的调用 |
 | `yolo` | 未指定 `--mode` 时等同于 `--mode yolo` |
 
-`tc trust allow|deny|status --cwd DIR`（或 `/trust`）决定是否加载项目的 `.agents/`
+`chui trust allow|deny|status --cwd DIR`（或 `/trust`）决定是否加载项目的 `.agents/`
 配置、规则、技能和 hooks，并兼容 `.claude/`。命令 hooks 和 T2 插件能力有各自的审批。
 见 [modules/permissions](modules/permissions/README.md)。
 
-`tc` 第一次打开含有这些文件的项目时会询问，并按 Git 根目录保存答案。之后对新增或
+`chui` 第一次打开含有这些文件的项目时会询问，并按 Git 根目录保存答案。之后对新增或
 变更的命令 hooks 还会询问。主目录及其上级目录不会这样保存，因为下面所有项目都会继承；
-在那里请使用 `tc trust allow`。`tc exec` 从不询问：它跳过未决定的项目内容并给出警告。
+在那里请使用 `chui trust allow`。`chui exec` 从不询问：它跳过未决定的项目内容并给出警告。
 
 ## 扩展
 
@@ -371,12 +371,12 @@ tc exec "Continue" --resume SESSION_ID --json --approval allow-listed
   - 无界面运行要求授权已经存在。
 
 ```sh
-tc plugin marketplace add ~/src/tiechui-plugins --ref main   # 本地克隆或公开的 Git URL
-tc plugin add sdk-typescript@tiechui-plugins
-tc plugin list --json
-tc plugin upgrade [NAME]        # 只在显式执行时升级，并显示变化
-tc plugin remove NAME
-tc plugin add ./path/to/package # 本地包
+chui plugin marketplace add ~/src/tiechui-plugins --ref main   # 本地克隆或公开的 Git URL
+chui plugin add sdk-typescript@tiechui-plugins
+chui plugin list --json
+chui plugin upgrade [NAME]        # 只在显式执行时升级，并显示变化
+chui plugin remove NAME
+chui plugin add ./path/to/package # 本地包
 ```
 
 市场使用 Codex 的 `marketplace.json` 布局。安装固定到解析出的提交和内容哈希。Git 运行时
@@ -395,11 +395,11 @@ tc plugin add ./path/to/package # 本地包
 - 主目录和已信任项目中的 `.agents/skills` 与 `.claude/skills`；
 - profile 的 `skills/`。
 
-这些根目录默认被发现，无需配置技能段。用 `tc skills list` 列出技能，或在界面中用
+这些根目录默认被发现，无需配置技能段。用 `chui skills list` 列出技能，或在界面中用
 `/skills` 选择。`AGENTS.md` 和其他上下文文件见
 [modules/context-files](modules/context-files/README.md)。
 
-**Hooks：** `tc hooks list` 列出，`tc hooks trust` 批准命令 hooks。
+**Hooks：** `chui hooks list` 列出，`chui hooks trust` 批准命令 hooks。
 
 ### MCP
 
@@ -417,9 +417,9 @@ tool_timeout_sec = 60
 ```
 
 ```sh
-tc mcp list
-tc mcp login remote [--scopes a,b]   # 浏览器 OAuth，PKCE 加本地回调
-tc mcp logout remote
+chui mcp list
+chui mcp login remote [--scopes a,b]   # 浏览器 OAuth，PKCE 加本地回调
+chui mcp logout remote
 ```
 
 OAuth 令牌自动刷新，以 0600 权限保存。登出会删除本地令牌，但不会在服务器上吊销。
@@ -431,7 +431,7 @@ OAuth 令牌自动刷新，以 0600 权限保存。登出会删除本地令牌�
   - 恢复会话会还原消息和模块状态。
   - 不会还原会话授权或旁聊。
   - 恢复选择器支持搜索和预览。见 [crates/tiechui-session](crates/tiechui-session/README.md)。
-- **`tc doctor`。** 只读，发现问题时以非零状态退出。它检查：
+- **`chui doctor`。** 只读，发现问题时以非零状态退出。它检查：
   - 已安装的二进制是否与所有权记录一致；
   - 中断的安装；
   - 0700 的 profile 目录，0600 的密钥和令牌文件，以及含内联密钥的 `providers.toml`；
@@ -497,7 +497,7 @@ Tiechui 还很年轻，变化很快；1.0 之前配置和会话格式仍可能�
 - 操作系统沙箱；
 - OpenAI Responses 协议；
 - 订阅登录；
-- `tc mcp serve`；
+- `chui mcp serve`；
 - Homebrew。
 
 每个 release 都包含 Windows 构建，但 Windows 的 CI 任务目前还不阻塞合并。

@@ -11,8 +11,8 @@ name = "tiechui"
 path = "src/bin/tiechui.rs"
 
 [[bin]]
-name = "tc"
-path = "src/bin/tc.rs"
+name = "chui"
+path = "src/bin/chui.rs"
 
 [dependencies]
 tiechui-module-subagents.workspace = true
