@@ -1,0 +1,78 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+assertion_line: 146
+expression: "render(&Theme::fixture(ColorLevel::Ansi16, false), 80)"
+---
+[-]                                                                                
+[b,d]› [-]fix the bug[-]                                                                   
+[-]  [-]second line 中文[-]                                                              
+[-]                                                                                
+
+[d]• [d,i]The tokenizer drops [d,i,fg@6]\r[d,i].
+
+[d]• [b]Explored
+[d]  └ [fgCyan]Read[-] src/lib.rs, src/app.rs
+[-]    [fgCyan]Search[-] fn main · src
+[-]    [fgCyan]List[-] .
+
+[b,fg@2]• [b]Ran[-] cargo test …[d] · 1s
+[d]  └ line 3
+[-]    [d]line 4
+[-]    [d]line 5
+[-]    [d]+ 3 lines
+
+[b,fg@1]• [b]Ran[-] false[d] · 1s
+[d]  └ Command exited with code 1
+
+[b,fg@1]• [b,fg@1]Failed[-] missing.rs[d] · 1s
+[d]  └ ENOENT: no such file
+
+[b,fg@2]• [b]Updated[-] src/main.rs[d] · 1s
+[d]  └ [d]1 [-]  [-]fn main() {
+[-]    [d]2 [fgRed]- [fgRed]    println!("old");
+[-]    [d]2 [fgGreen]+ [fgGreen]    println!("new");
+[-]    [d]3 [-]  [-]}
+
+[b,fg@2]• [b]Called[-] [fgCyan]exa__web_search[d] · 1s
+[-]    [d]{"query":"rust"}
+[d]  └ [d](no output)
+
+[d]────────────────────────────────────────────────────────────────────────────────
+
+[d]• [b,u]Title
+
+[-]  [-]Some [b]bold[-], [i]italic[-], [fg@6]code[-] and [fg@6]a link[d] (https://example.com)[-].
+[-]  [-]A second source line.
+
+[-]  [b]Section
+
+[-]  [b]### Detail
+
+[-]  [d]- [-]one
+[-]  [d]- [-]two with a longer item that wraps past the narrow width
+[-]  [-]  [d]- [-]nested
+
+[-]  [d]1. [-]first
+[-]  [d]2. [-]second
+
+[-]  [d]│ [d]quoted text
+
+[-]  [d]```rust
+[-]  [-]  fn main() {}
+[-]  [d]```
+
+[-]  [d]┌──────┬───────┐
+[-]  [d]│ [b]Name[-][d] │ [b]Value[-][d] │
+[-]  [d]├──────┼───────┤
+[-]  [d]│ [-]中文[-][d] │ [-]42[-]   [d] │
+[-]  [d]└──────┴───────┘
+
+[-]  [d]──────────────────────────────────────────────────────────────────────────────
+
+[-]  [-]Done.
+
+[d]────────────────────────────── Worked for 2m 05s ───────────────────────────────
+
+[fg@1]■ [fg@1]provider returned 500
+
+[fg@1]■ [fg@1]Conversation interrupted - tell the model what to do differently.

@@ -1,0 +1,64 @@
+---
+source: crates/tiechui-tui/tests/status.rs
+expression: "out.join(\"\\n\\n\")"
+---
+== default
+[-]  [fg#9aa0aa]a model high[fg#666c77] (high) · [fg#9aa0aa]~/project[fg#666c77] · [fg#8fa8c9]main[-]                                           [fg#9aa0aa]75% left[fg#666c77] / 200k
+
+== default icons
+[-]  [fg#9aa0aa] a model high[fg#666c77] (high) · [fg#9aa0aa] ~/project[fg#666c77] · [fg#8fa8c9] main[-]                                        [fg#9aa0aa] 75%[fg#666c77] / 200k
+
+== all items
+[-]model               [fg#9aa0aa]a model high
+[-]model               [fg#9aa0aa] a model high
+[-]model-with-reasoning[fg#9aa0aa]a model high[fg#666c77] (high)
+[-]model-with-reasoning[fg#9aa0aa] a model high[fg#666c77] (high)
+[-]reasoning           [fg#666c77]high
+[-]reasoning           [fg#666c77] high
+[-]current-dir         [fg#9aa0aa]~/project
+[-]current-dir         [fg#9aa0aa] ~/project
+[-]project-name        [fg#9aa0aa]tiechui
+[-]project-name        [fg#9aa0aa] tiechui
+[-]hostname            [fg#666c77]host
+[-]hostname            [fg#666c77] host
+[-]git-branch          [fg#8fa8c9]main
+[-]git-branch          [fg#8fa8c9] main
+[-]branch-changes      [fg#666c77]+2 -1
+[-]branch-changes      [fg#666c77] +2 -1
+[-]run-state           [fg#666c77]Ready
+[-]run-state           [fg#666c77] Ready
+[-]permission-mode     [-](none)
+[-]permission-mode     [-](none)
+[-]context-remaining   [fg#9aa0aa]75% left
+[-]context-remaining   [fg#9aa0aa] 75%
+[-]context-used        [fg#9aa0aa]25% used
+[-]context-used        [fg#9aa0aa] 25%
+[-]version             [fg#666c77]0.1.0
+[-]version             [fg#666c77] 0.1.0
+[-]context-window-size [fg#666c77]200k
+[-]context-window-size [fg#666c77] 200k
+[-]used-tokens         [fg#666c77]120 used
+[-]used-tokens         [fg#666c77] 120
+[-]total-input-tokens  [fg#666c77]100 in
+[-]total-input-tokens  [fg#666c77] 100
+[-]total-output-tokens [fg#666c77]20 out
+[-]total-output-tokens [fg#666c77] 20
+[-]cache-hit-rate      [fg#666c77]80% cache
+[-]cache-hit-rate      [fg#666c77] 80%
+[-]estimated-thread-cost[-](none)
+[-]estimated-thread-cost[-](none)
+[-]thread-id           [fg#666c77]0190-thread
+[-]thread-id           [fg#666c77]# 0190-thread
+[-]thread-title        [fg#8fa8c9]0190-thread
+[-]thread-title        [fg#8fa8c9] 0190-thread
+
+== all items narrow
+[-]  [fg#666c77]Ready · [fg#9aa0aa]75% left[fg#666c77] · [fg#9aa0aa]25% used[fg#666c77] · 200k …
+
+== low context warning
+[-]                                                     [fg#d6b07a] 15%[fg#666c77] · [fg#a99ccf] Working[fg#666c77] · [fg#d6b07a] 85%
+[-]                                                 [fg#d6b07a]15% left[fg#666c77] · [fg#a99ccf]Working[fg#666c77] · [fg#d6b07a]85% used
+
+== low context error
+[-]                                                        [fg#d48a8a] 5%[fg#666c77] · [fg#d48a8a] Error[fg#666c77] · [fg#d48a8a] 95%
+[-]                                                    [fg#d48a8a]5% left[fg#666c77] · [fg#d48a8a]Error[fg#666c77] · [fg#d48a8a]95% used

@@ -1,0 +1,183 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: values
+---
+[
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "thread_started",
+      "thread": {
+        "epoch": 7,
+        "id": "thread-1",
+        "turns": []
+      }
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "turn_started",
+      "turn": {
+        "id": "turn-1",
+        "items": [
+          {
+            "id": "item-1",
+            "kind": "assistant_message",
+            "text": "hello"
+          }
+        ],
+        "status": "in_progress"
+      }
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "item": {
+        "id": "item-1",
+        "kind": "assistant_message",
+        "text": "hello"
+      },
+      "kind": "item_started",
+      "turn_id": "turn-1"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "delta": " world",
+      "item_id": "item-1",
+      "kind": "item_delta",
+      "turn_id": "turn-1"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "item": {
+        "id": "item-1",
+        "kind": "assistant_message",
+        "text": "hello"
+      },
+      "kind": "item_completed",
+      "turn_id": "turn-1"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "token_usage_updated",
+      "last": {
+        "cache_read": 11,
+        "cache_write": 3,
+        "input": 17,
+        "output": 5
+      },
+      "total": {
+        "cache_read": 110,
+        "cache_write": 30,
+        "input": 170,
+        "output": 50
+      },
+      "turn_id": "turn-1"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "turn_completed",
+      "turn": {
+        "id": "turn-1",
+        "items": [
+          {
+            "id": "item-1",
+            "kind": "assistant_message",
+            "text": "hello"
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "approval_id": "approval-1",
+      "kind": "approval_requested",
+      "request": {
+        "arguments": {
+          "command": "rm -rf build"
+        },
+        "call_id": "call-1",
+        "kind": "permission",
+        "matched_pattern": "rm *",
+        "origin": "user",
+        "session_patterns": [
+          "rm *"
+        ],
+        "surface": "bash",
+        "tool": "bash",
+        "values": [
+          "rm -rf build"
+        ]
+      },
+      "turn_id": "turn-1"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "approval_id": "approval-2",
+      "kind": "approval_requested",
+      "request": {
+        "kind": "elicitation",
+        "request": {
+          "message": "Pick one",
+          "requestedSchema": {
+            "properties": {},
+            "type": "object"
+          }
+        },
+        "server": "docs"
+      },
+      "turn_id": null
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "approval_id": "approval-2",
+      "kind": "approval_resolved"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "error",
+      "message": "fixture failure"
+    },
+    "submission_id": "submission-1",
+    "thread_id": "thread-1"
+  }
+]

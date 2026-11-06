@@ -1,0 +1,64 @@
+---
+source: crates/tiechui-tui/tests/app.rs
+expression: states(40)
+---
+== empty
+
+────────────────────────────────────────
+›
+────────────────────────────────────────
+  ? for shortcuts
+[cursor Some((2, 2))]
+== multi-line
+
+────────────────────────────────────────
+› first line
+  second line that is long enough to
+  wrap at forty columns
+  third
+────────────────────────────────────────
+  ? for shortcuts
+[cursor Some((5, 7))]
+== scroll hints
+
+── ↑ 1 more ────────────────────────────
+  line 2
+  line 3
+  line 4
+  line 5
+── ↓ 4 more ────────────────────────────
+  ? for shortcuts
+[cursor Some((5, 8))]
+== queued previews
+
+• Working (0s • esc to interrupt)
+
+  • Messages to be submitted after next
+    tool call
+    ↳ use the second approach
+
+  • Queued follow-up inputs
+    ↳ then run the tests
+    ↳ a
+      b
+      c
+      …
+      alt+up edit last queued message
+
+────────────────────────────────────────
+›
+────────────────────────────────────────
+  ? for shortcuts
+[cursor Some((16, 2))]
+== menu open
+
+  Files · [Files] All
+> app.rs    src/
+  apply.rs  src/
+  File · 2 matches
+  ↑↓ · Tab/Enter · Esc · Shift+Tab filt…
+────────────────────────────────────────
+› @ap
+────────────────────────────────────────
+  ? for shortcuts
+[cursor Some((7, 5))]

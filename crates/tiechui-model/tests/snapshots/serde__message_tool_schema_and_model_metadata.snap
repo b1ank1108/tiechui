@@ -1,0 +1,38 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: "json!({\n    \"message\": round_trip(&message), \"tool_spec\": round_trip(&spec),\n    \"model_id\": round_trip(&ModelId(\"local/default\".into())), \"capabilities\":\n    round_trip(&capabilities),\n})"
+---
+{
+  "capabilities": {
+    "context_window": 128000,
+    "images": true,
+    "max_output": 8192,
+    "reasoning": true
+  },
+  "message": {
+    "content": [
+      {
+        "kind": "text",
+        "text": "hello 世界"
+      }
+    ],
+    "role": "user"
+  },
+  "model_id": "local/default",
+  "tool_spec": {
+    "description": "Read a local file",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "read"
+  }
+}

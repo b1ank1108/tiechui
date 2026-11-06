@@ -1,0 +1,22 @@
+---
+source: crates/tiechui-tui/tests/viewport.rs
+assertion_line: 275
+expression: "support::dump(&picker.render(width, 24, &theme))"
+---
+[fg#4f6f9a]Select Syntax Theme
+[fg#9aa1ac]Move up/down to live preview themes
+[-]Filter: 
+[fg#4f6f9a]› automatic
+[fg#9aa1ac]  Catppuccin Latte
+[fg#9aa1ac]  Catppuccin Mocha
+[fg#9aa1ac]  1337
+[fg#9aa1ac]  Catppuccin Frappe
+[fg#9aa1ac]  Catppuccin Macchiato
+[fg#9aa1ac]  Coldark-Cold
+[fg#9aa1ac]  Coldark-Dark
+
+[d]12 [-]  [fg#8839ef]fn[fg#4c4f69] [i,fg#1e66f5]greet[fg#7c7f93]([i,fg#e64553]name[fg#7c7f93]:[i,fg#e64553] [fg#179299]&[fg#8839ef]str[fg#7c7f93])[fg#4c4f69] [fg#7c7f93]->[fg#4c4f69] String [fg#7c7f93]{
+[fg#1f2328,bg#ffcecb]13 [fgRed,bg#ffebe9]- [fg#4c4f69,bg#ffebe9]    [i,fg#1e66f5,bg#ffebe9]format![fg#7c7f93,bg#ffebe9]([fg#40a02b,bg#ffebe9]"Hello, [fg#ea76cb,bg#ffebe9]{}[fg#40a02b,bg#ffebe9]!"[fg#7c7f93,bg#ffebe9],[fg#4c4f69,bg#ffebe9] name[fg#7c7f93,bg#ffebe9])[bg#ffebe9]    
+[fg#1f2328,bg#aceebb]13 [fgGreen,bg#dafbe1]+ [fg#4c4f69,bg#dafbe1]    [i,fg#1e66f5,bg#dafbe1]format![fg#7c7f93,bg#dafbe1]([fg#40a02b,bg#dafbe1]"Hello, [fg#ea76cb,bg#dafbe1]{name}[fg#40a02b,bg#dafbe1]!"[fg#7c7f93,bg#dafbe1])[bg#dafbe1]      
+[d]14 [-]  [fg#7c7f93]}
+[fg#9aa1ac]↑/↓ preview · enter save · esc cancel

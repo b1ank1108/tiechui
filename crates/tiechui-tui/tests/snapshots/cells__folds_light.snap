@@ -1,0 +1,55 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+expression: "folds(&Theme::fixture(ColorLevel::TrueColor, true), 80)"
+---
+== output
+[b,fg#4f8a5b]• [b]Ran[-] cargo test[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ line 3
+[-]    [fg#9aa1ac]line 4
+[-]    [fg#9aa1ac]line 5
+[-]    [b,fg#4f6f9a]+ 2 lines
+
+== output unfolded
+[b,fg#4f8a5b]• [b]Ran[-] cargo test[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ [fg#9aa1ac]line 1
+[-]    [fg#9aa1ac]line 2
+[-]    [fg#9aa1ac]line 3
+[-]    [fg#9aa1ac]line 4
+[-]    [fg#9aa1ac]line 5
+[-]    [fg#9aa1ac]− Show less
+
+== explored
+[fg#9aa1ac]• [b]Explored
+[fg#9aa1ac]  └ [fgCyan]Read[-] src/lib.rs
+[-]    [fgCyan]Search[-] fn main
+[-]    [fg#9aa1ac]+ Show details
+
+== explored unfolded
+[fg#9aa1ac]• [b]Explored
+[-]  [b]Read[-] src/lib.rs[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ [fg#9aa1ac]pub mod app;
+[-]  [b]Search[-] fn main[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ [fg#9aa1ac]src/main.rs:1
+[-]    [fg#9aa1ac]− Hide details
+
+== checkpoint
+[fg#9aa1ac]◇ [b]Compacted context[fg#9aa1ac] · 9.5k tokens summarized
+[-]    [fg#9aa1ac]+ Show summary
+
+== checkpoint unfolded
+[fg#9aa1ac]◇ [b]Compacted context[fg#9aa1ac] · 9.5k tokens summarized
+
+[-]  [b]Goal
+
+[-]  [-]Continue the implementation.
+[-]    [fg#9aa1ac]− Hide summary
+
+== thinking
+[fg#9aa1ac]• [fg#9aa1ac]Thought · Inspecting the parser
+[-]    [fg#9aa1ac]+ Show thinking
+
+== thinking unfolded
+[fg#9aa1ac]• [b,i,fg#9aa1ac]Inspecting the parser
+
+[-]  [i,fg#9aa1ac]The tokenizer drops [i,fg#4f6f9a]\r[i,fg#9aa1ac].
+[-]    [fg#9aa1ac]− Hide thinking

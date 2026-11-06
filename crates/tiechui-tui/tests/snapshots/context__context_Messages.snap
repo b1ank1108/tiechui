@@ -1,0 +1,108 @@
+---
+source: crates/tiechui-tui/tests/context.rs
+assertion_line: 140
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+[fg#33363d]────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Messages
+
+[fg#666c77]  Current branch · chronological … ~6.5k
+[fg#8fa8c9]→ ├─ user #1 ·····················   ~10
+[-]  ├─ assistant #2 ················ ~1.5k
+[-]  └─ toolResult #3 ···············   ~5k
+
+[fg#666c77]  TOTAL ·························· ~6.5k
+
+
+
+
+
+
+
+
+
+[-]  [fg#666c77]Current branch messages in
+[-]  [fg#666c77]chronological order.
+
+[fg#33363d]────────────────────────────────────────
+[fg#666c77]←→ tabs · ↑↓ · Enter · / · Esc
+
+80 columns / dark
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Messages
+[fg#666c77]Overview  System  Tools  Injections  [fg#8fa8c9]Messages  
+
+[fg#666c77]  Current branch · chronological order (3) ··························· ~6.5k
+[fg#8fa8c9]→ ├─ user #1 ·························································   ~10
+[-]  ├─ assistant #2 ···················································· ~1.5k
+[-]  └─ toolResult #3 ···················································   ~5k
+
+[fg#666c77]  TOTAL ······························································ ~6.5k
+
+
+
+
+
+
+
+
+
+[-]  [fg#666c77]Current branch messages in chronological order.
+
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+[fg#666c77]←/→ tabs · ↑↓ select · Enter preview · / search · Esc close
+
+40 columns / light
+[fg#dde0e5]────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Messages
+
+[fg#9aa1ac]  Current branch · chronological … ~6.5k
+[fg#4f6f9a]→ ├─ user #1 ·····················   ~10
+[-]  ├─ assistant #2 ················ ~1.5k
+[-]  └─ toolResult #3 ···············   ~5k
+
+[fg#9aa1ac]  TOTAL ·························· ~6.5k
+
+
+
+
+
+
+
+
+
+[-]  [fg#9aa1ac]Current branch messages in
+[-]  [fg#9aa1ac]chronological order.
+
+[fg#dde0e5]────────────────────────────────────────
+[fg#9aa1ac]←→ tabs · ↑↓ · Enter · / · Esc
+
+80 columns / light
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Messages
+[fg#9aa1ac]Overview  System  Tools  Injections  [fg#4f6f9a]Messages  
+
+[fg#9aa1ac]  Current branch · chronological order (3) ··························· ~6.5k
+[fg#4f6f9a]→ ├─ user #1 ·························································   ~10
+[-]  ├─ assistant #2 ···················································· ~1.5k
+[-]  └─ toolResult #3 ···················································   ~5k
+
+[fg#9aa1ac]  TOTAL ······························································ ~6.5k
+
+
+
+
+
+
+
+
+
+[-]  [fg#9aa1ac]Current branch messages in chronological order.
+
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+[fg#9aa1ac]←/→ tabs · ↑↓ select · Enter preview · / search · Esc close

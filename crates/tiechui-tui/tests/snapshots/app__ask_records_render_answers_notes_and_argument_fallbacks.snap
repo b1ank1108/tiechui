@@ -1,0 +1,112 @@
+---
+source: crates/tiechui-tui/tests/app.rs
+assertion_line: 1500
+expression: "shots.join(\"\\n\\n\")"
+---
+40 light=false submitted
+[fg#666c77]• [b]Questions[fg#666c77] 2/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#666c77]answer: [fgCyan]Small change (Recommended)
+[-]    [fg#666c77]note: [fgCyan]Preserve the existing
+[-]          [fgCyan]interface and its
+[-]          [fgCyan]documentation.
+[-]  • [-]Anything else?
+[-]    [fg#666c77]answer: [fgCyan]A free-text answer
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#666c77](unanswered)
+
+40 light=false cancelled
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered[fgCyan] (interrupted)
+[-]  • [-]Which implementation should we use?
+[-]    [fg#666c77](unanswered)
+[-]  • [-]Anything else?[fg#666c77] (unanswered)
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#666c77](unanswered)
+[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+
+40 light=false error
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#666c77](unanswered)
+[-]  • [-]Anything else?[fg#666c77] (unanswered)
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#666c77](unanswered)
+[fg#d48a8a]  ↳ [fg#d48a8a]request_user_input requires
+[fg#d48a8a]    [fg#d48a8a]interactive TUI mode.
+
+80 light=false submitted
+[fg#666c77]• [b]Questions[fg#666c77] 2/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#666c77]answer: [fgCyan]Small change (Recommended)
+[-]    [fg#666c77]note: [fgCyan]Preserve the existing interface and its documentation.
+[-]  • [-]Anything else?
+[-]    [fg#666c77]answer: [fgCyan]A free-text answer
+[-]  • [-]Should this stay unanswered?[fg#666c77] (unanswered)
+
+80 light=false cancelled
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered[fgCyan] (interrupted)
+[-]  • [-]Which implementation should we use?[fg#666c77] (unanswered)
+[-]  • [-]Anything else?[fg#666c77] (unanswered)
+[-]  • [-]Should this stay unanswered?[fg#666c77] (unanswered)
+[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+
+80 light=false error
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered
+[-]  • [-]Which implementation should we use?[fg#666c77] (unanswered)
+[-]  • [-]Anything else?[fg#666c77] (unanswered)
+[-]  • [-]Should this stay unanswered?[fg#666c77] (unanswered)
+[fg#d48a8a]  ↳ [fg#d48a8a]request_user_input requires interactive TUI mode.
+
+40 light=true submitted
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 2/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#9aa1ac]answer: [fgCyan]Small change (Recommended)
+[-]    [fg#9aa1ac]note: [fgCyan]Preserve the existing
+[-]          [fgCyan]interface and its
+[-]          [fgCyan]documentation.
+[-]  • [-]Anything else?
+[-]    [fg#9aa1ac]answer: [fgCyan]A free-text answer
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#9aa1ac](unanswered)
+
+40 light=true cancelled
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered[fgCyan] (interrupted)
+[-]  • [-]Which implementation should we use?
+[-]    [fg#9aa1ac](unanswered)
+[-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#9aa1ac](unanswered)
+[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+
+40 light=true error
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#9aa1ac](unanswered)
+[-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
+[-]  • [-]Should this stay unanswered?
+[-]    [fg#9aa1ac](unanswered)
+[fg#b05656]  ↳ [fg#b05656]request_user_input requires
+[fg#b05656]    [fg#b05656]interactive TUI mode.
+
+80 light=true submitted
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 2/3 answered
+[-]  • [-]Which implementation should we use?
+[-]    [fg#9aa1ac]answer: [fgCyan]Small change (Recommended)
+[-]    [fg#9aa1ac]note: [fgCyan]Preserve the existing interface and its documentation.
+[-]  • [-]Anything else?
+[-]    [fg#9aa1ac]answer: [fgCyan]A free-text answer
+[-]  • [-]Should this stay unanswered?[fg#9aa1ac] (unanswered)
+
+80 light=true cancelled
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered[fgCyan] (interrupted)
+[-]  • [-]Which implementation should we use?[fg#9aa1ac] (unanswered)
+[-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
+[-]  • [-]Should this stay unanswered?[fg#9aa1ac] (unanswered)
+[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+
+80 light=true error
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered
+[-]  • [-]Which implementation should we use?[fg#9aa1ac] (unanswered)
+[-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
+[-]  • [-]Should this stay unanswered?[fg#9aa1ac] (unanswered)
+[fg#b05656]  ↳ [fg#b05656]request_user_input requires interactive TUI mode.

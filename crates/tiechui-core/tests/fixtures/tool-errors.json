@@ -1,0 +1,203 @@
+{
+  "validation": [
+    {
+      "arguments": {},
+      "text": "Validation failed for tool \"probe\":\n  - value: must have required properties value\n\nReceived arguments:\n{}"
+    },
+    {
+      "arguments": {
+        "value": []
+      },
+      "text": "Validation failed for tool \"probe\":\n  - value: must be string\n\nReceived arguments:\n{\n  \"value\": []\n}"
+    }
+  ],
+  "coercion": [
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "arguments": {
+        "value": null
+      },
+      "converted": {}
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "arguments": {
+        "value": null
+      },
+      "converted": {
+        "value": null
+      }
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "arguments": {
+        "value": "5"
+      },
+      "converted": {
+        "value": 5
+      }
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "arguments": {
+        "value": "abc"
+      },
+      "error": "Validation failed for tool \"probe\":\n  - value: must be integer\n\nReceived arguments:\n{\n  \"value\": \"abc\"\n}"
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "arguments": {
+        "value": "true"
+      },
+      "converted": {
+        "value": true
+      }
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "arguments": {
+        "value": "false"
+      },
+      "converted": {
+        "value": false
+      }
+    },
+    {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "nested": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer"
+              },
+              "optional": {
+                "type": "string"
+              }
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "optional": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "arguments": {
+        "nested": {
+          "count": "5",
+          "optional": null
+        },
+        "items": [
+          {
+            "enabled": "true",
+            "optional": null
+          },
+          {
+            "enabled": "false"
+          }
+        ],
+        "labels": [
+          5,
+          true,
+          false
+        ]
+      },
+      "converted": {
+        "nested": {
+          "count": 5
+        },
+        "items": [
+          {
+            "enabled": true
+          },
+          {
+            "enabled": false
+          }
+        ],
+        "labels": [
+          "5",
+          "true",
+          "false"
+        ]
+      }
+    }
+  ],
+  "aborted": "Operation aborted",
+  "failed": "tool failure",
+  "missing": "Tool missing not found",
+  "truncated": "Tool call \"probe\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments."
+}

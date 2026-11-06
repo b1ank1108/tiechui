@@ -1,0 +1,12 @@
+: sanitized fixture, with an empty-choice usage chunk
+
+data: {"choices":[{"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":23,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":11,"cache_write_tokens":5}}}
+
+data: [DONE]
+

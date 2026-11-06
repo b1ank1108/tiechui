@@ -1,0 +1,79 @@
+# Complete Tiechui provider reference.
+# Copy to ~/.tiechui/providers.toml, or $TIECHUI_HOME/providers.toml, beside config.toml.
+# No providers or built-in model catalog are supplied. Each top-level table is one
+# provider; select a model in config.toml with model = "<provider>/<model id>".
+# Providers are read only from this user file, never from a project or the CLI.
+# A provider sets api_key inline or names a variable with api_key_env, not both.
+# Keep this file private (chmod 600) when it holds a key. No secrets file is loaded.
+# Unknown keys are errors. See schema/providers.json for types and validation bounds.
+
+# Uncomment this entire example provider/model block, then replace the endpoint
+# and model limits.
+# [example]
+# wire = "openai-completions"
+# The other supported wire is "anthropic-messages".
+# Omit base_url for the wire's standard endpoint; .invalid is a placeholder here.
+# base_url = "https://gateway.example.invalid/v1"
+# api_key_env = "EXAMPLE_API_KEY"
+
+# OpenAI-completions compatibility defaults for this provider. Change only for a
+# gateway that requires it; max_tokens_field also accepts "max_tokens", and
+# thinking_format also accepts "deepseek".
+# [example.compat]
+# supports_store = true
+# supports_developer_role = true
+# supports_strict_mode = false
+# supports_reasoning_effort = true
+# supports_usage_in_streaming = true
+# max_tokens_field = "max_completion_tokens"
+# thinking_format = "openai"
+# requires_reasoning_content_on_assistant_messages = false
+
+# [[example.models]]
+# id = "model"
+# context_window = 32768
+# max_output = 4096
+# reasoning = false
+# images = false
+# Anthropic thinking mode: budget (default) or adaptive.
+# thinking = "budget"
+# Anthropic cache retention: none, short (default), long (one hour).
+# cache_retention = "short"
+# Anthropic fallback IDs must refer to other models declared in this provider.
+# fallback_models = []
+
+# Optional USD per million tokens. These are illustrative numbers, not vendor prices.
+# Omit this table when prices are unknown; costs are then not reported.
+# [example.models.prices]
+# input = 1.0
+# output = 5.0
+# cache_read = 0.1
+# cache_write = 1.25
+
+# Optional map from Tiechui levels to wire values; false marks an unsupported level.
+# Without this table, the provider resolves its normal capabilities.
+# [example.models.thinking_levels]
+# off = false
+# minimal = "low"
+# low = "low"
+# medium = "medium"
+# high = "high"
+# xhigh = false
+# max = false
+
+# Optional per-model compatibility overrides for gateways that mix model families.
+# Each member is optional and replaces only that member of [example.compat].
+# [example.models.compat]
+# supports_store = false
+# supports_developer_role = false
+# supports_strict_mode = false
+# supports_reasoning_effort = false
+# supports_usage_in_streaming = false
+# max_tokens_field = "max_tokens"
+# thinking_format = "deepseek"
+# requires_reasoning_content_on_assistant_messages = true
+
+# A provider whose key is written inline instead of read from a variable.
+# [inline]
+# wire = "anthropic-messages"
+# api_key = "replace-with-your-key"

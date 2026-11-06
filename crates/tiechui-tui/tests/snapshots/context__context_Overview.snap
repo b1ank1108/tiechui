@@ -1,0 +1,108 @@
+---
+source: crates/tiechui-tui/tests/context.rs
+assertion_line: 140
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+[b,fg#8fa8c9]Context · Overview
+
+[-]Category estimate: ~10.5k / 200k
+[fg#666c77]Session context estimate: 24k · i detail
+[fg#666c77]Cache: 95.2% · c diagnostics
+
+[b]Categories
+[fg#8fa8c9]› [fg#f6e2b7]■ [fg#8fa8c9]System prompt ·········· ~3k    1.5%
+[fg#666c77]  [fg#abdfa7]■ [fg#666c77]Instructions ·········· ~500    0.2%
+[fg#666c77]  [fg#c8a9ee]■ [fg#666c77]Skills ················ ~300    0.1%
+[fg#666c77]  [fg#8fb3ef]■ [fg#666c77]Tool definitions ······ ~200    0.1%
+[fg#666c77]  [fg#9cded3]■ [fg#666c77]User / injected ········ ~10    0.0%
+[fg#666c77]  [fg#f2b590]■ [fg#666c77]Assistant messages ··· ~1.5k    0.8%
+[fg#666c77]  [fg#9499ae]■ [fg#666c77]Tool output ············ ~5k    2.5%
+[fg#666c77]  □ Free (estimate) ~189.5k
+
+
+
+
+
+
+
+
+[fg#666c77]←→ tabs · ↑↓ · Enter · c · i · Esc
+
+80 columns / dark
+[b,fg#8fa8c9]Context · Overview
+[fg#8fa8c9]Overview  [fg#666c77]System  Tools  Injections  Messages  
+
+[-]Category estimate: ~10.5k / 200k
+[fg#666c77]Session context estimate: 24k · i details
+[fg#666c77]Cache: 95.2% · c diagnostics
+
+[b]                                    Categories
+[-]  [b,fg#f6e2b7]■[-] [b,fg#f6e2b7]■[-] [b,fg#f6e2b7]■[-] [fg#abdfa7]◧[-] [fg#f2b590]◧[-] [fg#f2b590]◧[-] [fg#9499ae]■[-] [fg#9499ae]■[-] [fg#9499ae]■[-] [fg#9499ae]■[-] [fg#9499ae]◧[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#8fa8c9]› [fg#f6e2b7]■ [fg#8fa8c9]System prompt ·············· ~3k    1.5%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#abdfa7]■ [fg#666c77]Instructions ·············· ~500    0.2%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#c8a9ee]■ [fg#666c77]Skills ···················· ~300    0.1%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#8fb3ef]■ [fg#666c77]Tool definitions ·········· ~200    0.1%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#9cded3]■ [fg#666c77]User / injected ············ ~10    0.0%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#f2b590]■ [fg#666c77]Assistant messages ······· ~1.5k    0.8%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  [fg#9499ae]■ [fg#666c77]Tool output ················ ~5k    2.5%
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   [fg#666c77]  □ Free (estimate) ~189.5k
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   
+[-]  [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-] [fg#666c77]□[-]   
+[fg#666c77]  Full window · ~961 tokens/cell
+[fg#666c77]  ■ category · ◧ mixed / partial · □ free (estimate)
+[fg#666c77]←/→ tabs · ↑↓ select · Enter open · z zoom · c cache · i details · Esc close
+
+40 columns / light
+[b,fg#4f6f9a]Context · Overview
+
+[-]Category estimate: ~10.5k / 200k
+[fg#9aa1ac]Session context estimate: 24k · i detail
+[fg#9aa1ac]Cache: 95.2% · c diagnostics
+
+[b]Categories
+[fg#4f6f9a]› [fg#d59030]■ [fg#4f6f9a]System prompt ·········· ~3k    1.5%
+[fg#9aa1ac]  [fg#489a36]■ [fg#9aa1ac]Instructions ·········· ~500    0.2%
+[fg#9aa1ac]  [fg#8340da]■ [fg#9aa1ac]Skills ················ ~300    0.1%
+[fg#9aa1ac]  [fg#2865df]■ [fg#9aa1ac]Tool definitions ······ ~200    0.1%
+[fg#9aa1ac]  [fg#248c92]■ [fg#9aa1ac]User / injected ········ ~10    0.0%
+[fg#9aa1ac]  [fg#ec691e]■ [fg#9aa1ac]Assistant messages ··· ~1.5k    0.8%
+[fg#9aa1ac]  [fg#7d7f90]■ [fg#9aa1ac]Tool output ············ ~5k    2.5%
+[fg#9aa1ac]  □ Free (estimate) ~189.5k
+
+
+
+
+
+
+
+
+[fg#9aa1ac]←→ tabs · ↑↓ · Enter · c · i · Esc
+
+80 columns / light
+[b,fg#4f6f9a]Context · Overview
+[fg#4f6f9a]Overview  [fg#9aa1ac]System  Tools  Injections  Messages  
+
+[-]Category estimate: ~10.5k / 200k
+[fg#9aa1ac]Session context estimate: 24k · i details
+[fg#9aa1ac]Cache: 95.2% · c diagnostics
+
+[b]                                    Categories
+[-]  [b,fg#d59030]■[-] [b,fg#d59030]■[-] [b,fg#d59030]■[-] [fg#489a36]◧[-] [fg#ec691e]◧[-] [fg#ec691e]◧[-] [fg#7d7f90]■[-] [fg#7d7f90]■[-] [fg#7d7f90]■[-] [fg#7d7f90]■[-] [fg#7d7f90]◧[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#4f6f9a]› [fg#d59030]■ [fg#4f6f9a]System prompt ·············· ~3k    1.5%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#489a36]■ [fg#9aa1ac]Instructions ·············· ~500    0.2%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#8340da]■ [fg#9aa1ac]Skills ···················· ~300    0.1%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#2865df]■ [fg#9aa1ac]Tool definitions ·········· ~200    0.1%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#248c92]■ [fg#9aa1ac]User / injected ············ ~10    0.0%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#ec691e]■ [fg#9aa1ac]Assistant messages ······· ~1.5k    0.8%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  [fg#7d7f90]■ [fg#9aa1ac]Tool output ················ ~5k    2.5%
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   [fg#9aa1ac]  □ Free (estimate) ~189.5k
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   
+[-]  [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-] [fg#9aa1ac]□[-]   
+[fg#9aa1ac]  Full window · ~961 tokens/cell
+[fg#9aa1ac]  ■ category · ◧ mixed / partial · □ free (estimate)
+[fg#9aa1ac]←/→ tabs · ↑↓ select · Enter open · z zoom · c cache · i details · Esc close

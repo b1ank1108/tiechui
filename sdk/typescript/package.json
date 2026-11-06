@@ -1,0 +1,11 @@
+{
+  "name": "@tiechui/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Typed stdio plugin SDK for Tiechui",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": { ".": { "types": "./index.d.ts", "default": "./index.js" } },
+  "files": ["index.js", "index.d.ts", "protocol.ts", "README.md"],
+  "engines": { "node": ">=25" },
+  "scripts": { "test": "node --test tests/*.test.ts" }
+}

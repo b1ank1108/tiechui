@@ -1,0 +1,18 @@
+Run JavaScript that calls your tools, so loops, filtering and aggregation happen in one step instead of one
+model round trip per call. Use it when a task needs many tool calls or large intermediate output you only
+need part of; for one or two calls, call the tools directly.
+
+`code` is the body of an async function: use await, and `return` what you want to see. Call tools as
+`await tools.<name>(args)` with the same arguments as a direct call, e.g. `await tools.read({path: "a.rs"})`
+or `await tools["mcp__github__list_issues"]({owner, repo})`. Tools you would reach through call_tool are
+called the same way, by their exact name. A call resolves to the tool's text output, the same text you would
+see, including truncation notes. A failed or denied call throws an Error whose message is the tool's error
+text; catch it to continue. bash throws on a non-zero exit; append `|| true` when that is expected.
+
+Calls run through the usual permission checks and hooks. Up to 4 run at once (use Promise.all); edits,
+writes and other non-read-only calls run one at a time. File, search, shell and MCP tools are callable;
+run_code, tool_search, call_tool, questions to the user, subagents, goals and schedules are not. There is no
+filesystem, network, require or timer access except through tools, and nothing persists between runs.
+
+You receive the return value (strings as-is, other values as JSON), console.log output, and a summary of
+the tool calls that lists every failure, caught or not.

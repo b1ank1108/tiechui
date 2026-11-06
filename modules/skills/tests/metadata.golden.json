@@ -1,0 +1,85 @@
+{
+  "skills": [
+    {
+      "name": "aliases",
+      "description": "Use an anchored description.",
+      "path": "/skills-fixtures/aliases/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "alpha",
+      "description": "Use <tags> & \"quotes\" with an apostrophe: it's useful.",
+      "path": "/skills-fixtures/alpha/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "fallback",
+      "description": "A folded description spanning two lines.\n",
+      "path": "/skills-fixtures/fallback/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "hidden",
+      "description": "Only explicitly invoked.",
+      "path": "/skills-fixtures/hidden/SKILL.md",
+      "disable_model_invocation": true
+    },
+    {
+      "name": "-Bad--Name-",
+      "description": "Valid description with an invalid name.",
+      "path": "/skills-fixtures/invalid/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "literal-block",
+      "description": "Keep this newline\nbetween these lines.",
+      "path": "/skills-fixtures/literal-block/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "quoted",
+      "description": "A quoted true is not a boolean.",
+      "path": "/skills-fixtures/quoted/SKILL.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "root-file",
+      "description": "Direct markdown children are skills too.",
+      "path": "/skills-fixtures/root.md",
+      "disable_model_invocation": false
+    },
+    {
+      "name": "yaml-types",
+      "description": "no",
+      "path": "/skills-fixtures/yaml-types/SKILL.md",
+      "disable_model_invocation": false
+    }
+  ],
+  "diagnostics": [
+    {
+      "type": "warning",
+      "path": "/skills-fixtures/invalid/SKILL.md",
+      "message": "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+    },
+    {
+      "type": "warning",
+      "path": "/skills-fixtures/invalid/SKILL.md",
+      "message": "name must not start or end with a hyphen"
+    },
+    {
+      "type": "warning",
+      "path": "/skills-fixtures/invalid/SKILL.md",
+      "message": "name must not contain consecutive hyphens"
+    },
+    {
+      "type": "warning",
+      "path": "/skills-fixtures/merge-only/SKILL.md",
+      "message": "description is required"
+    },
+    {
+      "type": "warning",
+      "path": "/skills-fixtures/missing/SKILL.md",
+      "message": "description is required"
+    }
+  ]
+}

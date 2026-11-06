@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Supported Intel label: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check tag against workspace version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version']
+          if os.environ['REF_TYPE'] == 'tag' and os.environ['REF_NAME'] != 'v' + version:
+              raise SystemExit('Release tag must equal v' + version)
+          PY
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Check native target and prepare offline builds
+        shell: bash
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
+          cargo fetch --locked
+      - name: Free disk space for Linux release builds
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h .
+      - run: cargo xtask dist --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            .local/dist-*/*.tar.gz
+            .local/dist-*/*.zip
+            .local/dist-*/SHA256SUMS
+            .local/dist-*/manifest.json
+
+  draft:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: artifacts
+      - name: Combine archive checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, shutil
+          from pathlib import Path
+          output = Path('release')
+          output.mkdir()
+          sums = []
+          archives = [*Path('artifacts').rglob('*.tar.gz'), *Path('artifacts').rglob('*.zip')]
+          for archive in sorted(archives, key=lambda path: path.name):
+              checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+              line = f'{checksum}  {archive.name}'
+              if line not in archive.with_name('SHA256SUMS').read_text().splitlines():
+                  raise SystemExit(f'Checksum mismatch: {archive}')
+              if (output / archive.name).exists():
+                  raise SystemExit(f'Duplicate archive: {archive.name}')
+              shutil.copy2(archive, output / archive.name)
+              sums.append(line)
+          if len(sums) < 5:
+              raise SystemExit('Missing required platform archives')
+          for script in ('install.sh', 'install.ps1'):
+              shutil.copy2(Path('scripts') / script, output / script)
+          (output / 'SHA256SUMS').write_text('\n'.join(sums) + '\n')
+          PY
+      - name: Create draft for manual publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" release/* --draft --verify-tag --title "$TAG" \
+            --generate-notes

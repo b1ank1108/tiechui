@@ -1,0 +1,7 @@
+---
+source: crates/tiechui-tui/tests/program.rs
+expression: "support::dump(&rows)"
+---
+[fg#9aa0aa]Running code[-] · await tools.read({path:'a.rs'});
+[fg#666c77]  … Read a.rs
+[fg#666c77]  0 succeeded, 1 running

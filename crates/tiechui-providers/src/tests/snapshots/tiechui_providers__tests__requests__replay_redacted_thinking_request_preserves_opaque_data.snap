@@ -1,0 +1,48 @@
+---
+source: crates/tiechui-providers/src/tests/requests.rs
+expression: captured(request).await
+---
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "data": " opaque-fixture\n\t ",
+          "type": "redacted_thinking"
+        },
+        {
+          "text": "Answer",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "Continue",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "stream": true,
+  "thinking": {
+    "type": "disabled"
+  }
+}

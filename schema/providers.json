@@ -1,0 +1,356 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Map_of_ProviderConfig",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/ProviderConfig"
+  },
+  "definitions": {
+    "CacheRetention": {
+      "type": "string",
+      "enum": [
+        "none",
+        "short",
+        "long"
+      ]
+    },
+    "CompatOverride": {
+      "type": "object",
+      "properties": {
+        "max_tokens_field": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MaxTokensField"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requires_reasoning_content_on_assistant_messages": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_developer_role": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_reasoning_effort": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_store": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_strict_mode": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_usage_in_streaming": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thinking_format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThinkingFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompletionsCompat": {
+      "type": "object",
+      "properties": {
+        "max_tokens_field": {
+          "default": "max_completion_tokens",
+          "allOf": [
+            {
+              "$ref": "#/definitions/MaxTokensField"
+            }
+          ]
+        },
+        "requires_reasoning_content_on_assistant_messages": {
+          "default": false,
+          "type": "boolean"
+        },
+        "supports_developer_role": {
+          "default": true,
+          "type": "boolean"
+        },
+        "supports_reasoning_effort": {
+          "default": true,
+          "type": "boolean"
+        },
+        "supports_store": {
+          "default": true,
+          "type": "boolean"
+        },
+        "supports_strict_mode": {
+          "default": false,
+          "type": "boolean"
+        },
+        "supports_usage_in_streaming": {
+          "default": true,
+          "type": "boolean"
+        },
+        "thinking_format": {
+          "default": "openai",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThinkingFormat"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MaxTokensField": {
+      "type": "string",
+      "enum": [
+        "max_tokens",
+        "max_completion_tokens"
+      ]
+    },
+    "ModelConfig": {
+      "type": "object",
+      "required": [
+        "context_window",
+        "id",
+        "max_output"
+      ],
+      "properties": {
+        "cache_retention": {
+          "description": "Anthropic cache retention: none, short (default), or long (one hour).",
+          "default": "short",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CacheRetention"
+            }
+          ]
+        },
+        "compat": {
+          "description": "Each supplied member replaces the provider's value.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CompatOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context_window": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "fallback_models": {
+          "description": "Server-side alternatives, using model IDs from this Anthropic provider.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "images": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_output": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "prices": {
+          "description": "USD per million tokens. Omit when prices are unknown; no cost is then reported.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelPrices"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning": {
+          "default": false,
+          "type": "boolean"
+        },
+        "thinking": {
+          "default": "budget",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Thinking"
+            }
+          ]
+        },
+        "thinking_levels": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/definitions/ThinkingLevelValue"
+          },
+          "propertyNames": {
+            "$ref": "#/definitions/ThinkingLevel"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelPrices": {
+      "type": "object",
+      "required": [
+        "cache_read",
+        "cache_write",
+        "input",
+        "output"
+      ],
+      "properties": {
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        },
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderConfig": {
+      "type": "object",
+      "required": [
+        "wire"
+      ],
+      "properties": {
+        "api_key": {
+          "description": "Inline key; set this or `api_key_env`, not both.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "description": "When absent, endpoint selection belongs to the provider implementation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compat": {
+          "default": {
+            "max_tokens_field": "max_completion_tokens",
+            "requires_reasoning_content_on_assistant_messages": false,
+            "supports_developer_role": true,
+            "supports_reasoning_effort": true,
+            "supports_store": true,
+            "supports_strict_mode": false,
+            "supports_usage_in_streaming": true,
+            "thinking_format": "openai"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CompletionsCompat"
+            }
+          ]
+        },
+        "models": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelConfig"
+          }
+        },
+        "wire": {
+          "$ref": "#/definitions/Wire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Thinking": {
+      "type": "string",
+      "enum": [
+        "budget",
+        "adaptive"
+      ]
+    },
+    "ThinkingFormat": {
+      "type": "string",
+      "enum": [
+        "deepseek",
+        "openai"
+      ]
+    },
+    "ThinkingLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "ThinkingLevelValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/UnsupportedLevel"
+        }
+      ]
+    },
+    "UnsupportedLevel": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "Wire": {
+      "type": "string",
+      "enum": [
+        "anthropic-messages",
+        "openai-completions"
+      ]
+    }
+  }
+}

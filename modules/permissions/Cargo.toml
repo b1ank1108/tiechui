@@ -1,0 +1,23 @@
+[package]
+name = "tiechui-module-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+saphyr.workspace = true
+tiechui-plugin-api.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+tokio.workspace = true
+url.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

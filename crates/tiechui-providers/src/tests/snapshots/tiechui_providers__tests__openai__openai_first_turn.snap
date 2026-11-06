@@ -1,0 +1,50 @@
+---
+source: crates/tiechui-providers/src/tests/openai.rs
+expression: body
+---
+{
+  "max_completion_tokens": 4096,
+  "messages": [
+    {
+      "content": "Be concise.",
+      "role": "developer"
+    },
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "reasoning_effort": "high",
+  "store": false,
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "read a file",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

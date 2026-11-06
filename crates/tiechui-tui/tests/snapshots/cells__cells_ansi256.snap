@@ -1,0 +1,78 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+assertion_line: 141
+expression: "render(&Theme::fixture(ColorLevel::Ansi256, false), 80)"
+---
+[bg@235]                                                                                
+[b,d,bg@235]› [bg@235]fix the bug[bg@235]                                                                   
+[bg@235]  [bg@235]second line 中文[bg@235]                                                              
+[bg@235]                                                                                
+
+[fg@242]• [i,fg@242]The tokenizer drops [i,fg@110]\r[i,fg@242].
+
+[fg@242]• [b]Explored
+[fg@242]  └ [fgCyan]Read[-] src/lib.rs, src/app.rs
+[-]    [fgCyan]Search[-] fn main · src
+[-]    [fgCyan]List[-] .
+
+[b,fg@108]• [b]Ran[-] cargo test …[fg@242] · 1s
+[fg@242]  └ line 3
+[-]    [fg@242]line 4
+[-]    [fg@242]line 5
+[-]    [fg@242]+ 3 lines
+
+[b,fg@174]• [b]Ran[-] false[fg@242] · 1s
+[fg@242]  └ Command exited with code 1
+
+[b,fg@174]• [b,fg@174]Failed[-] missing.rs[fg@242] · 1s
+[fg@242]  └ ENOENT: no such file
+
+[b,fg@108]• [b]Updated[-] src/main.rs[fg@242] · 1s
+[fg@242]  └ [d]1 [-]  [fg@183]fn[fg@189] [i,fg@111]main[fg@103]()[fg@189] [fg@103]{
+[-]    [d]2 [fgRed,bg@52]- [fg@189,bg@52]    [i,fg@111,bg@52]println![fg@103,bg@52]([fg@150,bg@52]"old"[fg@103,bg@52]);[bg@52]                                                    
+[-]    [d]2 [fgGreen,bg@22]+ [fg@189,bg@22]    [i,fg@111,bg@22]println![fg@103,bg@22]([fg@150,bg@22]"new"[fg@103,bg@22]);[bg@22]                                                    
+[-]    [d]3 [-]  [fg@103]}
+
+[b,fg@108]• [b]Called[-] [fgCyan]exa__web_search[fg@242] · 1s
+[-]    [fg@242]{"query":"rust"}
+[fg@242]  └ [fg@242](no output)
+
+[fg@242]────────────────────────────────────────────────────────────────────────────────
+
+[fg@242]• [b,u]Title
+
+[-]  [-]Some [b]bold[-], [i]italic[-], [fg@110]code[-] and [fg@110]a link[fg@242] (https://example.com)[-].
+[-]  [-]A second source line.
+
+[-]  [b]Section
+
+[-]  [b]### Detail
+
+[-]  [fg@242]- [-]one
+[-]  [fg@242]- [-]two with a longer item that wraps past the narrow width
+[-]  [-]  [fg@242]- [-]nested
+
+[-]  [fg@242]1. [-]first
+[-]  [fg@242]2. [-]second
+
+[-]  [fg@237]│ [fg@247]quoted text
+
+[-]  [fg@242]```rust
+[-]  [-]  fn main() {}
+[-]  [fg@242]```
+
+[-]  [fg@238]┌──────┬───────┐
+[-]  [fg@238]│ [b]Name[-][fg@238] │ [b]Value[-][fg@238] │
+[-]  [fg@238]├──────┼───────┤
+[-]  [fg@238]│ [-]中文[-][fg@238] │ [-]42[-]   [fg@238] │
+[-]  [fg@238]└──────┴───────┘
+
+[-]  [fg@237]──────────────────────────────────────────────────────────────────────────────
+
+[-]  [-]Done.
+
+[fg@242]────────────────────────────── Worked for 2m 05s ───────────────────────────────
+
+[fg@174]■ [fg@174]provider returned 500
+
+[fg@174]■ [fg@174]Conversation interrupted - tell the model what to do differently.

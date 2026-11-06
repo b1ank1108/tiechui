@@ -1,0 +1,60 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  {
+    "delta": "hello",
+    "index": 0,
+    "kind": "text_delta"
+  },
+  {
+    "delta": "check",
+    "index": 1,
+    "kind": "thinking_delta"
+  },
+  {
+    "id": "call-1",
+    "index": 2,
+    "kind": "tool_call_start",
+    "name": "read"
+  },
+  {
+    "delta": "{\"path\":",
+    "index": 2,
+    "kind": "tool_call_arguments_delta"
+  },
+  {
+    "content": {
+      "arguments": {
+        "limit": 20,
+        "path": "fixture.txt"
+      },
+      "id": "call-1",
+      "kind": "tool_call",
+      "name": "read",
+      "opaque": "tool-replay-fixture"
+    },
+    "index": 2,
+    "kind": "content_complete"
+  },
+  {
+    "kind": "usage",
+    "usage": {
+      "cache_read": 2,
+      "cache_write": 0,
+      "input": 5,
+      "output": 1
+    }
+  },
+  {
+    "kind": "finish",
+    "reason": "tool_use",
+    "usage": {
+      "cache_read": 11,
+      "cache_write": 3,
+      "input": 17,
+      "output": 5
+    }
+  }
+]

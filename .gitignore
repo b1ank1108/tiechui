@@ -1,0 +1,5 @@
+/target/
+/.local/
+.DS_Store
+*.snap.new
+/example/

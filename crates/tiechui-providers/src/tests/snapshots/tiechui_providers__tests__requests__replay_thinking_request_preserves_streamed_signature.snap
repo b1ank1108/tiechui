@@ -1,0 +1,84 @@
+---
+source: crates/tiechui-providers/src/tests/requests.rs
+expression: body
+---
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig-fixture \t",
+          "thinking": "Check.",
+          "type": "thinking"
+        },
+        {
+          "id": "call_read",
+          "input": {
+            "path": "sample.txt"
+          },
+          "name": "read",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "content": [
+            {
+              "text": "sample contents",
+              "type": "text"
+            }
+          ],
+          "is_error": false,
+          "tool_use_id": "call_read",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "stream": true,
+  "thinking": {
+    "budget_tokens": 1024,
+    "display": "summarized",
+    "type": "enabled"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "read a file",
+      "eager_input_streaming": true,
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read"
+    }
+  ]
+}

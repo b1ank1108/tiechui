@@ -1,0 +1,44 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-read.sse",
+    "body_contains": [
+      "Change hello.txt",
+      "bash",
+      "read",
+      "write",
+      "edit",
+      "grep",
+      "find"
+    ]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-edit.sse",
+    "body_contains": [
+      "call_read",
+      "before"
+    ]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-answer.sse",
+    "body_contains": [
+      "call_edit"
+    ]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": [
+      "What changed?",
+      "Edited hello.txt.",
+      "call_edit",
+      "call_read"
+    ]
+  }
+]

@@ -1,0 +1,38 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+assertion_line: 201
+expression: "states(&Theme::fixture(ColorLevel::TrueColor, true), 80)"
+---
+== running
+
+[b,fg#1f2328]•[-] [b]Exploring
+[fg#9aa1ac]  └ [fgCyan]Read[-] a.rs, b.rs
+
+[b,fg#1f2328]• [b]Running[-] sleep 5
+
+[b,fg#1f2328]• [b]Running[-] cargo build
+[fg#9aa1ac]  └ Compiling a
+[-]    [fg#9aa1ac]Compiling b
+
+[b,fg#1f2328]• [b]Calling[-] [fgCyan]exa__fetch[fg#9aa1ac] · pending
+
+== expanded
+
+[b,fg#4f8a5b]• [b]Ran[-] cargo test
+[-]  [-]--quiet[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ [fg#9aa1ac]line 1
+[-]    
+[-]    [fg#9aa1ac]line 2
+[-]    [fg#9aa1ac]line 3
+[-]    [fg#9aa1ac]line 4
+[-]    [fg#9aa1ac]line 5
+
+[b,fg#4f8a5b]• [b]Updated[-] src/main.rs[fg#9aa1ac] · 1s
+[fg#9aa1ac]  └ [d]1 [-]  [fg#8839ef]fn[fg#4c4f69] [i,fg#1e66f5]main[fg#7c7f93]()[fg#4c4f69] [fg#7c7f93]{
+[-]    [fg#1f2328,bg#ffcecb]2 [fgRed,bg#ffebe9]- [fg#4c4f69,bg#ffebe9]    [i,fg#1e66f5,bg#ffebe9]println![fg#7c7f93,bg#ffebe9]([fg#40a02b,bg#ffebe9]"old"[fg#7c7f93,bg#ffebe9]);[bg#ffebe9]                                                    
+[-]    [fg#1f2328,bg#aceebb]2 [fgGreen,bg#dafbe1]+ [fg#4c4f69,bg#dafbe1]    [i,fg#1e66f5,bg#dafbe1]println![fg#7c7f93,bg#dafbe1]([fg#40a02b,bg#dafbe1]"new"[fg#7c7f93,bg#dafbe1]);[bg#dafbe1]                                                    
+[-]    [d]3 [-]  [fg#7c7f93]}
+
+[fg#9aa1ac]• [b,i,fg#9aa1ac]Inspecting the parser
+
+[-]  [i,fg#9aa1ac]The tokenizer drops [i,fg#4f6f9a]\r[i,fg#9aa1ac].

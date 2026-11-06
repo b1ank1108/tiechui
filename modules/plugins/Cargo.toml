@@ -1,0 +1,42 @@
+[package]
+name = "tiechui-module-plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+tiechui-plugin-api.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+url.workspace = true
+tokio.workspace = true
+rmcp.workspace = true
+tiechui-plugin-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tiechui-module-skills.workspace = true
+tiechui-module-mcp.workspace = true
+tiechui-module-hooks.workspace = true
+
+[[bin]]
+name = "t2-test-plugin"
+path = "../../tests/plugins/server.rs"
+required-features = ["test-server"]
+
+[[bin]]
+name = "plugin-test-server"
+path = "../mcp/tests/support/server.rs"
+required-features = ["test-server"]
+
+[features]
+test-server = ["dep:tiechui-plugin-sdk", "rmcp/server", "rmcp/transport-io"]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

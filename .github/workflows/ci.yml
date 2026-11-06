@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '25'
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install search tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Install search tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+      - name: Prepare offline checks
+        run: |
+          cargo fetch --locked
+          cargo deny fetch
+      - run: just check
+        env:
+          CARGO_NET_OFFLINE: 'true'
+      # Only the two sibling-marketplace SDK cases skip on a standalone checkout.
+      - run: just pty
+        env:
+          CARGO_NET_OFFLINE: 'true'
+
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-features --locked
+      - if: ${{ !cancelled() }}
+        run: cargo test --workspace --all-features --locked

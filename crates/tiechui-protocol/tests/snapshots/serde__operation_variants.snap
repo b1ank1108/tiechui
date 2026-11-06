@@ -1,0 +1,67 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  {
+    "content": [
+      {
+        "kind": "text",
+        "text": "hello 世界"
+      },
+      {
+        "data": "AA==",
+        "kind": "image",
+        "mime_type": "image/png"
+      }
+    ],
+    "delivery": "steer",
+    "kind": "user_input"
+  },
+  {
+    "content": [
+      {
+        "kind": "text",
+        "text": "hello 世界"
+      },
+      {
+        "data": "AA==",
+        "kind": "image",
+        "mime_type": "image/png"
+      }
+    ],
+    "delivery": "follow_up",
+    "kind": "user_input"
+  },
+  {
+    "kind": "interrupt",
+    "turn_id": "turn-1"
+  },
+  {
+    "kind": "set_model",
+    "model": "test/model",
+    "provider": "test"
+  },
+  {
+    "kind": "set_thinking",
+    "level": "high"
+  },
+  {
+    "kind": "set_thinking",
+    "level": "off"
+  },
+  {
+    "entry_id": "entry-1",
+    "kind": "branch"
+  },
+  {
+    "kind": "reload"
+  },
+  {
+    "approval_id": "approval-1",
+    "decision": {
+      "kind": "allow_once"
+    },
+    "kind": "approval_response"
+  }
+]

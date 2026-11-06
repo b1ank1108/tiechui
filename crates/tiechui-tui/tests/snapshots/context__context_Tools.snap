@@ -1,0 +1,212 @@
+---
+source: crates/tiechui-tui/tests/context.rs
+assertion_line: 140
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+[fg#33363d]────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Tools
+
+[fg#666c77]  Built-in tools (1) ·············· ~200
+[fg#8fa8c9]→ └─ read ························· ~200
+
+[fg#666c77]  TOTAL ··························· ~200
+
+
+
+
+
+
+
+
+
+
+
+[-]  [fg#666c77]Tool definitions declared in this
+[-]  [fg#666c77]snapshot, grouped by known source.
+
+[fg#33363d]────────────────────────────────────────
+[fg#666c77]←→ tabs · ↑↓ · Enter · / · Esc
+
+Definition / 40 columns
+[fg#33363d]────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Tools
+[b]read · ~200 tokens
+[-]  [fg#666c77]/project/AGENTS.md · included in
+[-]  [fg#666c77]System
+
+[fg#8fa8c9]Definition · ~200 tokens (estimate)
+
+[-]  [fg#9399b2]{
+[-]  [fg#cdd6f4]  [fg#9399b2]"[fg#89b4fa]input_schema[fg#9399b2]":[fg#cdd6f4] [fg#9399b2]{
+[-]  [fg#cdd6f4]    [fg#9399b2]"[fg#89b4fa]type[fg#9399b2]":[fg#cdd6f4] [fg#a6e3a1]"object"
+[-]  [fg#cdd6f4]  [fg#9399b2]},
+[-]  [fg#cdd6f4]  [fg#9399b2]"[fg#89b4fa]name[fg#9399b2]":[fg#cdd6f4] [fg#a6e3a1]"read"
+[-]  [fg#9399b2]}
+
+
+
+
+
+
+
+[fg#33363d]────────────────────────────────────────
+[fg#666c77]↑↓ scroll · Esc back
+
+80 columns / dark
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Tools
+[fg#666c77]Overview  System  [fg#8fa8c9]Tools  [fg#666c77]Injections  Messages  
+
+[fg#666c77]  Built-in tools (1) ·················································· ~200
+[fg#8fa8c9]→ └─ read ····························································· ~200
+
+[fg#666c77]  TOTAL ······························································· ~200
+
+
+
+
+
+
+
+
+
+
+
+[-]  [fg#666c77]Tool definitions declared in this snapshot, grouped by known source.
+
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+[fg#666c77]←/→ tabs · ↑↓ select · Enter preview · / search · Esc close
+
+Definition / 80 columns
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#8fa8c9]Context · Tools
+[fg#666c77]Overview  System  [fg#8fa8c9]Tools  [fg#666c77]Injections  Messages  
+[b]read · ~200 tokens
+[-]  [fg#666c77]/project/AGENTS.md · included in System
+
+[fg#8fa8c9]Definition · ~200 tokens (estimate)
+
+[-]  [fg#9399b2]{
+[-]  [fg#cdd6f4]  [fg#9399b2]"[fg#89b4fa]input_schema[fg#9399b2]":[fg#cdd6f4] [fg#9399b2]{
+[-]  [fg#cdd6f4]    [fg#9399b2]"[fg#89b4fa]type[fg#9399b2]":[fg#cdd6f4] [fg#a6e3a1]"object"
+[-]  [fg#cdd6f4]  [fg#9399b2]},
+[-]  [fg#cdd6f4]  [fg#9399b2]"[fg#89b4fa]name[fg#9399b2]":[fg#cdd6f4] [fg#a6e3a1]"read"
+[-]  [fg#9399b2]}
+
+
+
+
+
+
+
+[fg#33363d]────────────────────────────────────────────────────────────────────────────────
+[fg#666c77]↑↓ / PgUp PgDn scroll · ←/→ tabs · Esc back
+
+40 columns / light
+[fg#dde0e5]────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Tools
+
+[fg#9aa1ac]  Built-in tools (1) ·············· ~200
+[fg#4f6f9a]→ └─ read ························· ~200
+
+[fg#9aa1ac]  TOTAL ··························· ~200
+
+
+
+
+
+
+
+
+
+
+
+[-]  [fg#9aa1ac]Tool definitions declared in this
+[-]  [fg#9aa1ac]snapshot, grouped by known source.
+
+[fg#dde0e5]────────────────────────────────────────
+[fg#9aa1ac]←→ tabs · ↑↓ · Enter · / · Esc
+
+Definition / 40 columns
+[fg#dde0e5]────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Tools
+[b]read · ~200 tokens
+[-]  [fg#9aa1ac]/project/AGENTS.md · included in
+[-]  [fg#9aa1ac]System
+
+[fg#4f6f9a]Definition · ~200 tokens (estimate)
+
+[-]  [fg#7c7f93]{
+[-]  [fg#4c4f69]  [fg#7c7f93]"[fg#1e66f5]input_schema[fg#7c7f93]":[fg#4c4f69] [fg#7c7f93]{
+[-]  [fg#4c4f69]    [fg#7c7f93]"[fg#1e66f5]type[fg#7c7f93]":[fg#4c4f69] [fg#40a02b]"object"
+[-]  [fg#4c4f69]  [fg#7c7f93]},
+[-]  [fg#4c4f69]  [fg#7c7f93]"[fg#1e66f5]name[fg#7c7f93]":[fg#4c4f69] [fg#40a02b]"read"
+[-]  [fg#7c7f93]}
+
+
+
+
+
+
+
+[fg#dde0e5]────────────────────────────────────────
+[fg#9aa1ac]↑↓ scroll · Esc back
+
+80 columns / light
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Tools
+[fg#9aa1ac]Overview  System  [fg#4f6f9a]Tools  [fg#9aa1ac]Injections  Messages  
+
+[fg#9aa1ac]  Built-in tools (1) ·················································· ~200
+[fg#4f6f9a]→ └─ read ····························································· ~200
+
+[fg#9aa1ac]  TOTAL ······························································· ~200
+
+
+
+
+
+
+
+
+
+
+
+[-]  [fg#9aa1ac]Tool definitions declared in this snapshot, grouped by known source.
+
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+[fg#9aa1ac]←/→ tabs · ↑↓ select · Enter preview · / search · Esc close
+
+Definition / 80 columns
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+
+[b,fg#4f6f9a]Context · Tools
+[fg#9aa1ac]Overview  System  [fg#4f6f9a]Tools  [fg#9aa1ac]Injections  Messages  
+[b]read · ~200 tokens
+[-]  [fg#9aa1ac]/project/AGENTS.md · included in System
+
+[fg#4f6f9a]Definition · ~200 tokens (estimate)
+
+[-]  [fg#7c7f93]{
+[-]  [fg#4c4f69]  [fg#7c7f93]"[fg#1e66f5]input_schema[fg#7c7f93]":[fg#4c4f69] [fg#7c7f93]{
+[-]  [fg#4c4f69]    [fg#7c7f93]"[fg#1e66f5]type[fg#7c7f93]":[fg#4c4f69] [fg#40a02b]"object"
+[-]  [fg#4c4f69]  [fg#7c7f93]},
+[-]  [fg#4c4f69]  [fg#7c7f93]"[fg#1e66f5]name[fg#7c7f93]":[fg#4c4f69] [fg#40a02b]"read"
+[-]  [fg#7c7f93]}
+
+
+
+
+
+
+
+[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
+[fg#9aa1ac]↑↓ / PgUp PgDn scroll · ←/→ tabs · Esc back

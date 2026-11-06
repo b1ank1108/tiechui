@@ -1,0 +1,60 @@
+---
+source: crates/tiechui-providers/src/tests/usage_caching.rs
+expression: encoded
+---
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "stream": true,
+  "system": [
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "text": "stable instructions",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "type": "disabled"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "description": "read a file",
+      "eager_input_streaming": true,
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read"
+    }
+  ]
+}

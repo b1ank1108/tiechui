@@ -1,0 +1,22 @@
+[package]
+name = "tiechui-module-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+tiechui-plugin-api.workspace = true
+futures.workspace = true
+regex.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

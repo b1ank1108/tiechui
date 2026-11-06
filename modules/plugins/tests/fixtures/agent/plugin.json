@@ -1,0 +1,23 @@
+{
+  "name": "agent-fixture",
+  "version": "1.0.0",
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "extensions": {
+    "com.openai": {
+      "hooks": {
+        "hooks": {
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "/bin/sh \"$PLUGIN_ROOT/hook.sh\""
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

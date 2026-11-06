@@ -1,0 +1,68 @@
+[
+  {
+    "server": "docs",
+    "tool": "read",
+    "collision": false,
+    "name": "mcp__docs__read"
+  },
+  {
+    "server": "my-server",
+    "tool": "some.tool",
+    "collision": false,
+    "name": "mcp__my_server__some_tool"
+  },
+  {
+    "server": "server",
+    "tool": "a-b",
+    "collision": false,
+    "name": "mcp__server__a_b"
+  },
+  {
+    "server": "server",
+    "tool": "a_b",
+    "collision": false,
+    "name": "mcp__server__a_b"
+  },
+  {
+    "server": "s",
+    "tool": "😀中文/hi",
+    "collision": false,
+    "name": "mcp__s_______hi"
+  },
+  {
+    "server": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tool": "t",
+    "collision": false,
+    "name": "mcp__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_505e2ab3"
+  },
+  {
+    "server": "s",
+    "tool": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "collision": false,
+    "name": "mcp__s__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_7790a31a"
+  },
+  {
+    "server": "s",
+    "tool": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "collision": false,
+    "name": "mcp__s__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "server": "s",
+    "tool": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "collision": false,
+    "name": "mcp__s__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_065b956f"
+  },
+  {
+    "server": "server",
+    "tool": "a-b",
+    "collision": true,
+    "name": "mcp__server__a_b_d436c924"
+  },
+  {
+    "server": "server",
+    "tool": "a_b",
+    "collision": true,
+    "name": "mcp__server__a_b_e0e5c6e9"
+  }
+]

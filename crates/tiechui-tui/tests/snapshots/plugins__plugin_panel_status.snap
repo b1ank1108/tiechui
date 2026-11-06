@@ -1,0 +1,92 @@
+---
+source: crates/tiechui-tui/tests/plugins.rs
+assertion_line: 107
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+
+[fg#8fa8c9]────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────
+[fg#666c77]  fixture: ready
+[-]  [fg#666c77]? for shortcuts
+
+[fg#8fa8c9]fixture: Build report
+[-]Plain text node
+[b]Markdown[-] and [fg#8fa8c9]code
+[-]• [-]First list entry
+[fg#8fa8c9]Build: 2/3
+[bg#292929]                                        
+[bg#292929]  Plugin: [b,bg#292929]fixture[bg#292929]                       
+[bg#292929]                                        
+[bg#292929]  [b,bg#292929]Comment (required)[bg#292929]                    
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› [fg#666c77,bg#292929]Type your answer[bg#292929]                    
+[bg#292929]                                        
+[bg#292929]  [fg#666c77,bg#292929]enter to submit | esc to cancel[bg#292929]       
+[fg#666c77]pgup/pgdn scroll · esc close
+
+80 columns / dark
+
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[fg#666c77]  fixture: ready
+[-]  [fg#666c77]? for shortcuts
+
+[fg#8fa8c9]fixture: Build report
+[-]Plain text node
+[b]Markdown[-] and [fg#8fa8c9]code
+[-]• [-]First list entry
+[fg#8fa8c9]Build: 2/3
+[bg#292929]                                                                                
+[bg#292929]  Plugin: [b,bg#292929]fixture[bg#292929]                                                               
+[bg#292929]                                                                                
+[bg#292929]  [b,bg#292929]Comment (required)[bg#292929]                                                            
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› [fg#666c77,bg#292929]Type your answer[bg#292929]                                                            
+[bg#292929]                                                                                
+[bg#292929]  [fg#666c77,bg#292929]enter to submit | esc to cancel[bg#292929]                                               
+[fg#666c77]pgup/pgdn scroll · esc close
+
+40 columns / light
+
+[fg#4f6f9a]────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────
+[fg#9aa1ac]  fixture: ready
+[-]  [fg#9aa1ac]? for shortcuts
+
+[fg#4f6f9a]fixture: Build report
+[-]Plain text node
+[b]Markdown[-] and [fg#4f6f9a]code
+[-]• [-]First list entry
+[fg#4f6f9a]Build: 2/3
+[bg#f0f0f0]                                        
+[bg#f0f0f0]  Plugin: [b,bg#f0f0f0]fixture[bg#f0f0f0]                       
+[bg#f0f0f0]                                        
+[bg#f0f0f0]  [b,bg#f0f0f0]Comment (required)[bg#f0f0f0]                    
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› [fg#9aa1ac,bg#f0f0f0]Type your answer[bg#f0f0f0]                    
+[bg#f0f0f0]                                        
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit | esc to cancel[bg#f0f0f0]       
+[fg#9aa1ac]pgup/pgdn scroll · esc close
+
+80 columns / light
+
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[fg#9aa1ac]  fixture: ready
+[-]  [fg#9aa1ac]? for shortcuts
+
+[fg#4f6f9a]fixture: Build report
+[-]Plain text node
+[b]Markdown[-] and [fg#4f6f9a]code
+[-]• [-]First list entry
+[fg#4f6f9a]Build: 2/3
+[bg#f0f0f0]                                                                                
+[bg#f0f0f0]  Plugin: [b,bg#f0f0f0]fixture[bg#f0f0f0]                                                               
+[bg#f0f0f0]                                                                                
+[bg#f0f0f0]  [b,bg#f0f0f0]Comment (required)[bg#f0f0f0]                                                            
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› [fg#9aa1ac,bg#f0f0f0]Type your answer[bg#f0f0f0]                                                            
+[bg#f0f0f0]                                                                                
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit | esc to cancel[bg#f0f0f0]                                               
+[fg#9aa1ac]pgup/pgdn scroll · esc close

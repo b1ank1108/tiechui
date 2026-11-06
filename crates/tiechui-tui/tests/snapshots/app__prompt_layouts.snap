@@ -1,0 +1,44 @@
+---
+source: crates/tiechui-tui/tests/app.rs
+expression: "shots.join(\"\\n\\n\")"
+---
+80x30
+
+
+  Would you like to make the following edits?
+
+  Thread: Main
+  Permission rule: path_write · default: ask
+  Session scope: path_write: /repo/src/*
+
+  /repo/src/lib.rs
+  Proposed replacements:
+  - a
+  - b
+  + c
+
+  › 1. Yes, proceed
+    2. Yes, allow this scope for this session
+    3. Yes, allow reads and writes to this scope for this session
+    4. No, continue without running it
+    5. No, and tell the agent what to do differently
+  Press enter to confirm or esc to interrupt · ↑/↓ · ctrl+o details
+[cursor None]
+
+44x16
+
+  Would you like to make the following ed…
+  Thread: Main
+  Rule: path_write · ask
+  Session scope: path_write: /repo/src/*
+  /repo/src/lib.rs
+  Proposed replacements:
+  - a
+
+  › 1. Yes, proceed
+    2. Yes, for this session
+    3. Yes, session read + write
+    4. No, skip
+    5. No, provide reason
+  ↑/↓ · enter · esc · ctrl+o details
+[cursor None]

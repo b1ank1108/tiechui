@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"tool_calls":[{"index":7,"id":"call_a","function":{"name":"read","arguments":"{\"path\":"}},{"index":2,"id":"call_b","function":{"name":"read","arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"b\"}"}},{"index":7,"function":{"arguments":"\"a\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":4}}
+
+data: [DONE]
+

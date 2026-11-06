@@ -1,0 +1,170 @@
+# Complete Tiechui configuration reference.
+# Copy to ~/.tiechui/config.toml, or $TIECHUI_HOME/config.toml.
+# Active settings match built-in behavior. Optional settings and examples that
+# change that behavior are commented out; uncomment only the blocks you need.
+# Providers and models are declared only in providers.toml beside the user config;
+# see examples/providers.toml. This file alone cannot call a model.
+# Layers: defaults < user config < trusted project .agents/config.toml (or .claude/config.toml) < CLI.
+# Unknown config keys are errors; unsupported MCP server fields produce diagnostics.
+# See schema/config.json for types and validation bounds.
+
+# Select a model declared in providers.toml: <provider>/<model id>.
+# model = "example/model"
+# Optional thinking level, clamped to model capabilities. Omission leaves it unset.
+# Values: off, minimal, low, medium, high, xhigh, max.
+# thinking = "high"
+
+# Skills need no configuration. User roots, in order: ~/.agents/skills,
+# ~/.claude/skills, then <TIECHUI_HOME>/skills.
+# Trusted projects: .agents/skills, .claude/skills.
+# Plugin roots follow; the first matching skill name wins.
+
+[modules]
+# All built-in modules are enabled by default. Set an entry to false to disable it.
+# Installed plugins use their package names here and retain their own trust rules.
+ask = true
+btw = true
+compaction = true
+context = true
+context-files = true
+editing = true
+exec = true
+goal = true
+hooks = true
+loop = true
+mcp = true
+# Project config cannot disable the mandatory permission module.
+permissions = true
+rewind = true
+skills = true
+subagents = true
+tool-search = true
+ptc = true
+# example-plugin = false
+
+[retry]
+# Transient failures use bounded exponential backoff; adapters do not retry on their own.
+enabled = true
+# Additional attempts after the initial request, per tool step.
+max_retries = 3
+base_delay_ms = 2000
+# A server-requested delay above this limit fails immediately.
+max_delay_ms = 60000
+
+[compaction]
+# Automatic native compaction near the model limit, plus overflow recovery.
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+# Range-compaction limits below are separate from native compaction's recent tail.
+context_window_cap = 300000
+fallback_context_window = 32768
+preserve_recent_messages = 5
+preserve_recent_tokens = 5000
+# Tool names or trailing-* patterns protected from range compression.
+protected_tools = []
+
+[compaction.model_overrides]
+# Optional token limits for a specific <provider>/<model>; omitted fields inherit.
+# [compaction.model_overrides."example/model"]
+# reserve_tokens = 8192
+# keep_recent_tokens = 10000
+
+[compaction.nudge]
+# Advanced range-compaction pressure and growth thresholds. Ratios are in (0, 1].
+min_context_limit_pct = 0.45
+max_context_limit_pct = 0.85
+emergency_threshold_pct = 0.95
+growth_ratio = 0.3333333333333333
+growth_cap = 100000
+min_growth_floor = 20000
+min_growth_ratio = 0.45
+tier2_growth_multiplier = 1.5
+# "auto" derives the minimum savings threshold; an integer sets a token count.
+min_pressure_benefit_tokens = "auto"
+
+[compaction.tiers]
+enabled = true
+tier2_trigger = 5
+tier3_trigger = 10
+
+[compaction.compress]
+min_compress_range = 5000
+min_summary_length = 50
+max_summary_length = 20000
+min_net_savings_tokens = 1000
+
+[compaction.search]
+default_limit = 10
+max_limit = 30
+
+[compaction.output]
+# Summarize large tool outputs; thresholds are character counts.
+enabled = true
+min_chars = 20000
+
+[compaction.decompress]
+# Ignored since read_history replaced decompress; accepted for older configurations.
+full = false
+
+[permissions]
+# "rules" asks for unmatched actions, "auto" lets a model classifier review them,
+# "yolo" approves them. User config only; CLI --mode overrides it.
+# mode = "rules"
+# Omission keeps the built-in policy. An explicit empty rules array asks for all
+# unmatched actions. Rules are ordered; CLI --approval also governs headless calls.
+# To ask for everything, set permissions.rules to an empty array instead of
+# adding rules with the array-table form below.
+# A reason is allowed only for a deny rule. Project rules require project trust.
+# [[permissions.rules]]
+# surface = "bash"
+# pattern = "rm *"
+# action = "deny"
+# reason = "Protect workspace files"
+
+[tui]
+# Copy non-blank selections on mouse release; false keeps explicit copy shortcuts.
+copy_on_select = true
+# Omission uses automatic syntax colors based on the terminal background.
+# /theme previews and saves a bundled theme or a custom .tmTheme in the profile's themes/.
+# theme = "automatic"
+
+[tui.status_line]
+# Items appear in this order. Empty items retain only the shortcut/context hint.
+items = ["model-with-reasoning", "current-dir", "git-branch", "permission-mode", "context-remaining", "context-window-size"]
+use_theme_colors = true
+# Icons require Nerd Font v3. Entries for hidden items are retained.
+icons = []
+# All item names: model, model-with-reasoning, reasoning, current-dir, project-name,
+# hostname, git-branch, branch-changes, run-state, permission-mode, context-remaining,
+# context-used, version, context-window-size, used-tokens, total-input-tokens, total-output-tokens,
+# cache-hit-rate, estimated-thread-cost, thread-id, thread-title.
+# Fullscreen is the default. Use CLI --no-alt-screen for native terminal scrollback;
+# there is no corresponding config key.
+
+[mcp_servers]
+# No MCP server is configured by default. A server uses either command (stdio)
+# or url (Streamable HTTP). Project servers require trust. Secrets stay in env.
+# [mcp_servers.local]
+# command = "example-mcp-server"
+# args = []
+# env = { EXAMPLE_MODE = "local" }
+# Environment variable names to forward from the parent process.
+# env_vars = ["EXAMPLE_SERVICE_KEY"]
+# cwd = "/absolute/path/to/workspace"
+# startup_timeout_sec = 10.0
+# tool_timeout_sec = 60.0
+# enabled = true
+# Omit enabled_tools to expose all discovered tools; an empty list exposes none.
+# enabled_tools = ["lookup"]
+# disabled_tools = []
+
+# [mcp_servers.remote]
+# url = "https://mcp.example.invalid/mcp"
+# http_headers = { Accept = "application/json, text/event-stream" }
+# bearer_token_env_var = "EXAMPLE_MCP_TOKEN"
+# startup_timeout_sec = 10.0
+# tool_timeout_sec = 60.0
+# enabled = true
+# enabled_tools = ["lookup"]
+# disabled_tools = []

@@ -1,0 +1,32 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "TRUSTED_PROJECT_CONTEXT_MARKER", "project_instructions", "<cwd>"]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "replacement instructions", "Continue"]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "updated instructions with different byte count", "Continue"]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "changed instructions with different byte count", "Continue"]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "changed instructions with different byte count", "Continue"]
+  }
+]

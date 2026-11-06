@@ -1,0 +1,21 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "json!({\n    \"version\": round_trip(&Version::V2), \"ids\":\n    ids.iter().map(round_trip).collect::<Vec<_>>(), \"params\":\n    params.iter().map(round_trip).collect::<Vec<_>>(),\n})"
+---
+{
+  "ids": [
+    "request-1",
+    42,
+    null
+  ],
+  "params": [
+    [
+      "hello",
+      2
+    ],
+    {
+      "thread_id": "thread-1"
+    }
+  ],
+  "version": "2.0"
+}

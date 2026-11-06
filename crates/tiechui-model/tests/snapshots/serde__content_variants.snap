@@ -1,0 +1,41 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  {
+    "kind": "text",
+    "text": "hello 世界"
+  },
+  {
+    "data": "AA==",
+    "kind": "image",
+    "mime_type": "image/png"
+  },
+  {
+    "kind": "thinking",
+    "opaque": "opaque-signature-fixture",
+    "text": "check the input"
+  },
+  {
+    "arguments": {
+      "limit": 20,
+      "path": "fixture.txt"
+    },
+    "id": "call-1",
+    "kind": "tool_call",
+    "name": "read",
+    "opaque": "tool-replay-fixture"
+  },
+  {
+    "call_id": "call-1",
+    "content": [
+      {
+        "kind": "text",
+        "text": "hello 世界"
+      }
+    ],
+    "is_error": false,
+    "kind": "tool_result"
+  }
+]

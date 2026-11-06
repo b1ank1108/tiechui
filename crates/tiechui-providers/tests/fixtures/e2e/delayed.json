@@ -1,0 +1,17 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "delay_ms": 10000
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": [
+      "Continue",
+      "Wait"
+    ]
+  }
+]

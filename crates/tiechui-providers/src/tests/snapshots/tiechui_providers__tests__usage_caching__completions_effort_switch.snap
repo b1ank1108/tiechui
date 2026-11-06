@@ -1,0 +1,38 @@
+---
+source: crates/tiechui-providers/src/tests/usage_caching.rs
+expression: completions
+---
+{
+  "max_completion_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "previous answer",
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "think harder",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "reasoning_effort": "high",
+  "store": false,
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

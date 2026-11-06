@@ -1,0 +1,5 @@
+---
+source: crates/tiechui-tools/tests/framework.rs
+expression: "String::from_utf8(bytes.clone()).unwrap()"
+---
+[{"name":"bash","description":"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.","input_schema":{"properties":{"command":{"description":"Shell command to execute","type":"string"},"timeout":{"description":"Timeout in seconds (optional, no default timeout)","type":"number"}},"required":["command"],"type":"object"}},{"name":"z","description":"Instrumented tool","input_schema":{"type":"object"}}]

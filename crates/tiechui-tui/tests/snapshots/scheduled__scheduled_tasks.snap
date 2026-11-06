@@ -1,0 +1,87 @@
+---
+source: crates/tiechui-tui/tests/scheduled.rs
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+[fg#666c77]• [b]/loop
+[-]  [fg#666c77]Scheduled 5f3a9c21: every 6 minutes
+[-]  [fg#666c77](`*/6 * * * *` local time, 7m rounded
+[-]  [fg#666c77]to the nearest even period).
+[-]  [fg#666c77]Session-only; expires after 7 days.
+[-]  [fg#666c77]Cancel with /cron-delete 5f3a9c21.
+[-]  [fg#666c77]Running it now.
+
+[fg#666c77]• [b]/cron-list
+[-]  [fg#666c77]5f3a9c21 · every 6 minutes · session ·
+[-]  [fg#666c77]next 2026-11-03 15:06 +08:00
+[-]  [fg#666c77]  check the deploy and report only
+[-]  [fg#666c77]changes
+[-]  [fg#666c77]a1b2c3d4 · weekdays at 08:57 · durable
+[-]  [fg#666c77]· next 2026-11-04 08:57 +08:00
+[-]  [fg#666c77]  summarize overnight CI failures
+
+[fg#8fa8c9]────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#666c77]? for shortcuts
+[-]  [fg#666c77]◇ 2 scheduled tasks · next 15:06
+
+80 columns / dark
+[fg#666c77]• [b]/loop
+[-]  [fg#666c77]Scheduled 5f3a9c21: every 6 minutes (`*/6 * * * *` local time, 7m rounded to
+[-]  [fg#666c77]the nearest even period). Session-only; expires after 7 days. Cancel with
+[-]  [fg#666c77]/cron-delete 5f3a9c21. Running it now.
+
+[fg#666c77]• [b]/cron-list
+[-]  [fg#666c77]5f3a9c21 · every 6 minutes · session · next 2026-11-03 15:06 +08:00
+[-]  [fg#666c77]  check the deploy and report only changes
+[-]  [fg#666c77]a1b2c3d4 · weekdays at 08:57 · durable · next 2026-11-04 08:57 +08:00
+[-]  [fg#666c77]  summarize overnight CI failures
+
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#666c77]? for shortcuts
+[-]  [fg#666c77]◇ 2 scheduled tasks · next 15:06
+
+40 columns / light
+[fg#9aa1ac]• [b]/loop
+[-]  [fg#9aa1ac]Scheduled 5f3a9c21: every 6 minutes
+[-]  [fg#9aa1ac](`*/6 * * * *` local time, 7m rounded
+[-]  [fg#9aa1ac]to the nearest even period).
+[-]  [fg#9aa1ac]Session-only; expires after 7 days.
+[-]  [fg#9aa1ac]Cancel with /cron-delete 5f3a9c21.
+[-]  [fg#9aa1ac]Running it now.
+
+[fg#9aa1ac]• [b]/cron-list
+[-]  [fg#9aa1ac]5f3a9c21 · every 6 minutes · session ·
+[-]  [fg#9aa1ac]next 2026-11-03 15:06 +08:00
+[-]  [fg#9aa1ac]  check the deploy and report only
+[-]  [fg#9aa1ac]changes
+[-]  [fg#9aa1ac]a1b2c3d4 · weekdays at 08:57 · durable
+[-]  [fg#9aa1ac]· next 2026-11-04 08:57 +08:00
+[-]  [fg#9aa1ac]  summarize overnight CI failures
+
+[fg#4f6f9a]────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#9aa1ac]? for shortcuts
+[-]  [fg#9aa1ac]◇ 2 scheduled tasks · next 15:06
+
+80 columns / light
+[fg#9aa1ac]• [b]/loop
+[-]  [fg#9aa1ac]Scheduled 5f3a9c21: every 6 minutes (`*/6 * * * *` local time, 7m rounded to
+[-]  [fg#9aa1ac]the nearest even period). Session-only; expires after 7 days. Cancel with
+[-]  [fg#9aa1ac]/cron-delete 5f3a9c21. Running it now.
+
+[fg#9aa1ac]• [b]/cron-list
+[-]  [fg#9aa1ac]5f3a9c21 · every 6 minutes · session · next 2026-11-03 15:06 +08:00
+[-]  [fg#9aa1ac]  check the deploy and report only changes
+[-]  [fg#9aa1ac]a1b2c3d4 · weekdays at 08:57 · durable · next 2026-11-04 08:57 +08:00
+[-]  [fg#9aa1ac]  summarize overnight CI failures
+
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa1ac]? for shortcuts
+[-]  [fg#9aa1ac]◇ 2 scheduled tasks · next 15:06

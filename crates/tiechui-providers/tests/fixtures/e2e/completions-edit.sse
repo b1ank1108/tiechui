@@ -1,0 +1,8 @@
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{\"path\":\"hello.txt\",\"edits\":[{\"oldText\":\"before\",\"newText\":\"after\"}]}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":18,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":11}}}
+
+data: [DONE]
+

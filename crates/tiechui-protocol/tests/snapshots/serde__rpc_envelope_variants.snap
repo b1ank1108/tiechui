@@ -1,0 +1,35 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  {
+    "id": "request-1",
+    "jsonrpc": "2.0",
+    "method": "submit",
+    "params": [
+      "hello"
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+      "epoch": 7
+    }
+  },
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "result": null
+  },
+  {
+    "error": {
+      "code": -32600,
+      "data": null,
+      "message": "Invalid Request"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+  }
+]

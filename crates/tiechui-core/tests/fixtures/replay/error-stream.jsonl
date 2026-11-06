@@ -1,0 +1,4 @@
+{"format_version":1,"id":"fixture","cwd":"/","created_at":0}
+{"id":"e0","parent_id":null,"timestamp":0,"kind":"message","message":{"role":"user","content":[{"kind":"text","text":"Read the files"}]},"model":null}
+{"id":"e1","parent_id":"e0","timestamp":1,"kind":"message","message":{"role":"assistant","content":[{"kind":"tool_call","id":"partial","name":"read","arguments":"{\"path\":"}]},"model":{"provider":"fixture","model":"fixture/model"},"stop_reason":"error"}
+{"id":"e2","parent_id":"e1","timestamp":2,"kind":"message","message":{"role":"tool","content":[{"kind":"tool_result","call_id":"partial","is_error":true,"content":[{"kind":"text","text":"No result provided"}]}]},"model":null}

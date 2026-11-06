@@ -1,0 +1,17 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "bash.sse"
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": [
+      "Continue",
+      "call_bash",
+      "Command aborted"
+    ]
+  }
+]

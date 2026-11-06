@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"reasoning_content":"Check.","reasoning":"Check."}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"sample.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"prompt_cache_hit_tokens":3}}
+
+data: [DONE]
+

@@ -1,0 +1,131 @@
+---
+source: crates/tiechui-tui/tests/program.rs
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 / light=false / History
+[fg#d48a8a]Ran code[-] · Inspect sources and test
+[fg#666c77]  +3 more
+[fg#666c77]  ✓ Read src/file3.rs
+[fg#666c77]  ✓ Read src/file4.rs
+[fg#666c77]  ✓ Read src/file5.rs
+[fg#666c77]  ✓ Read src/file6.rs
+[fg#666c77]  ✓ Read src/file7.rs
+[fg#d48a8a]  ✗ Ran cargo test
+[fg#666c77]  8 succeeded, 1 failed
+
+40 / light=false / Transcript
+[fg#d48a8a]Ran code[-] · Inspect sources and test
+[fg#666c77]  ✓ Read src/file0.rs
+[fg#666c77]  ✓ Read src/file1.rs
+[fg#666c77]  ✓ Read src/file2.rs
+[fg#666c77]  ✓ Read src/file3.rs
+[fg#666c77]  ✓ Read src/file4.rs
+[fg#666c77]  ✓ Read src/file5.rs
+[fg#666c77]  ✓ Read src/file6.rs
+[fg#666c77]  ✓ Read src/file7.rs
+[fg#d48a8a]  ✗ Ran cargo test
+[fg#666c77]  8 succeeded, 1 failed
+
+[fg#cba6f7]const[fg#cdd6f4] files [fg#94e2d5]=[fg#cdd6f4] [fg#cba6f7]await[fg#cdd6f4] [i,fg#cdd6f4]tools[fg#94e2d5].[i,fg#89b4fa]find[fg#9399b2]({[i,fg#89b4fa]pattern[fg#94e2d5]:
+[fg#a6e3a1]'[i,fg#a6e3a1]*.rs[fg#a6e3a1]'[fg#9399b2]});
+[i,fg#cdd6f4]console[fg#94e2d5].[i,fg#89b4fa]log[fg#9399b2]([i,fg#cdd6f4]files[fg#9399b2]);
+[fg#cba6f7]return[fg#cdd6f4] [fg#cba6f7]await[fg#cdd6f4] [i,fg#cdd6f4]tools[fg#94e2d5].[i,fg#89b4fa]bash[fg#9399b2]({[i,fg#89b4fa]command[fg#94e2d5]:[i,fg#89b4fa] [fg#a6e3a1]'[i,fg#a6e3a1]cargo
+[i,fg#a6e3a1]test[fg#a6e3a1]'[fg#9399b2]});
+
+[-]Error: Command exited with code 101
+[-]tool calls: 8 succeeded, 1 failed
+
+80 / light=false / History
+[fg#d48a8a]Ran code[-] · Inspect sources and test
+[fg#666c77]  +3 more
+[fg#666c77]  ✓ Read src/file3.rs
+[fg#666c77]  ✓ Read src/file4.rs
+[fg#666c77]  ✓ Read src/file5.rs
+[fg#666c77]  ✓ Read src/file6.rs
+[fg#666c77]  ✓ Read src/file7.rs
+[fg#d48a8a]  ✗ Ran cargo test
+[fg#666c77]  8 succeeded, 1 failed
+
+80 / light=false / Transcript
+[fg#d48a8a]Ran code[-] · Inspect sources and test
+[fg#666c77]  ✓ Read src/file0.rs
+[fg#666c77]  ✓ Read src/file1.rs
+[fg#666c77]  ✓ Read src/file2.rs
+[fg#666c77]  ✓ Read src/file3.rs
+[fg#666c77]  ✓ Read src/file4.rs
+[fg#666c77]  ✓ Read src/file5.rs
+[fg#666c77]  ✓ Read src/file6.rs
+[fg#666c77]  ✓ Read src/file7.rs
+[fg#d48a8a]  ✗ Ran cargo test
+[fg#666c77]  8 succeeded, 1 failed
+
+[fg#cba6f7]const[fg#cdd6f4] files [fg#94e2d5]=[fg#cdd6f4] [fg#cba6f7]await[fg#cdd6f4] [i,fg#cdd6f4]tools[fg#94e2d5].[i,fg#89b4fa]find[fg#9399b2]({[i,fg#89b4fa]pattern[fg#94e2d5]:[i,fg#89b4fa] [fg#a6e3a1]'[i,fg#a6e3a1]*.rs[fg#a6e3a1]'[fg#9399b2]});
+[i,fg#cdd6f4]console[fg#94e2d5].[i,fg#89b4fa]log[fg#9399b2]([i,fg#cdd6f4]files[fg#9399b2]);
+[fg#cba6f7]return[fg#cdd6f4] [fg#cba6f7]await[fg#cdd6f4] [i,fg#cdd6f4]tools[fg#94e2d5].[i,fg#89b4fa]bash[fg#9399b2]({[i,fg#89b4fa]command[fg#94e2d5]:[i,fg#89b4fa] [fg#a6e3a1]'[i,fg#a6e3a1]cargo test[fg#a6e3a1]'[fg#9399b2]});
+
+[-]Error: Command exited with code 101
+[-]tool calls: 8 succeeded, 1 failed
+
+40 / light=true / History
+[fg#b05656]Ran code[-] · Inspect sources and test
+[fg#9aa1ac]  +3 more
+[fg#9aa1ac]  ✓ Read src/file3.rs
+[fg#9aa1ac]  ✓ Read src/file4.rs
+[fg#9aa1ac]  ✓ Read src/file5.rs
+[fg#9aa1ac]  ✓ Read src/file6.rs
+[fg#9aa1ac]  ✓ Read src/file7.rs
+[fg#b05656]  ✗ Ran cargo test
+[fg#9aa1ac]  8 succeeded, 1 failed
+
+40 / light=true / Transcript
+[fg#b05656]Ran code[-] · Inspect sources and test
+[fg#9aa1ac]  ✓ Read src/file0.rs
+[fg#9aa1ac]  ✓ Read src/file1.rs
+[fg#9aa1ac]  ✓ Read src/file2.rs
+[fg#9aa1ac]  ✓ Read src/file3.rs
+[fg#9aa1ac]  ✓ Read src/file4.rs
+[fg#9aa1ac]  ✓ Read src/file5.rs
+[fg#9aa1ac]  ✓ Read src/file6.rs
+[fg#9aa1ac]  ✓ Read src/file7.rs
+[fg#b05656]  ✗ Ran cargo test
+[fg#9aa1ac]  8 succeeded, 1 failed
+
+[fg#8839ef]const[fg#4c4f69] files [fg#179299]=[fg#4c4f69] [fg#8839ef]await[fg#4c4f69] [i,fg#4c4f69]tools[fg#179299].[i,fg#1e66f5]find[fg#7c7f93]({[i,fg#1e66f5]pattern[fg#179299]:
+[fg#40a02b]'[i,fg#40a02b]*.rs[fg#40a02b]'[fg#7c7f93]});
+[i,fg#4c4f69]console[fg#179299].[i,fg#1e66f5]log[fg#7c7f93]([i,fg#4c4f69]files[fg#7c7f93]);
+[fg#8839ef]return[fg#4c4f69] [fg#8839ef]await[fg#4c4f69] [i,fg#4c4f69]tools[fg#179299].[i,fg#1e66f5]bash[fg#7c7f93]({[i,fg#1e66f5]command[fg#179299]:[i,fg#1e66f5] [fg#40a02b]'[i,fg#40a02b]cargo
+[i,fg#40a02b]test[fg#40a02b]'[fg#7c7f93]});
+
+[-]Error: Command exited with code 101
+[-]tool calls: 8 succeeded, 1 failed
+
+80 / light=true / History
+[fg#b05656]Ran code[-] · Inspect sources and test
+[fg#9aa1ac]  +3 more
+[fg#9aa1ac]  ✓ Read src/file3.rs
+[fg#9aa1ac]  ✓ Read src/file4.rs
+[fg#9aa1ac]  ✓ Read src/file5.rs
+[fg#9aa1ac]  ✓ Read src/file6.rs
+[fg#9aa1ac]  ✓ Read src/file7.rs
+[fg#b05656]  ✗ Ran cargo test
+[fg#9aa1ac]  8 succeeded, 1 failed
+
+80 / light=true / Transcript
+[fg#b05656]Ran code[-] · Inspect sources and test
+[fg#9aa1ac]  ✓ Read src/file0.rs
+[fg#9aa1ac]  ✓ Read src/file1.rs
+[fg#9aa1ac]  ✓ Read src/file2.rs
+[fg#9aa1ac]  ✓ Read src/file3.rs
+[fg#9aa1ac]  ✓ Read src/file4.rs
+[fg#9aa1ac]  ✓ Read src/file5.rs
+[fg#9aa1ac]  ✓ Read src/file6.rs
+[fg#9aa1ac]  ✓ Read src/file7.rs
+[fg#b05656]  ✗ Ran cargo test
+[fg#9aa1ac]  8 succeeded, 1 failed
+
+[fg#8839ef]const[fg#4c4f69] files [fg#179299]=[fg#4c4f69] [fg#8839ef]await[fg#4c4f69] [i,fg#4c4f69]tools[fg#179299].[i,fg#1e66f5]find[fg#7c7f93]({[i,fg#1e66f5]pattern[fg#179299]:[i,fg#1e66f5] [fg#40a02b]'[i,fg#40a02b]*.rs[fg#40a02b]'[fg#7c7f93]});
+[i,fg#4c4f69]console[fg#179299].[i,fg#1e66f5]log[fg#7c7f93]([i,fg#4c4f69]files[fg#7c7f93]);
+[fg#8839ef]return[fg#4c4f69] [fg#8839ef]await[fg#4c4f69] [i,fg#4c4f69]tools[fg#179299].[i,fg#1e66f5]bash[fg#7c7f93]({[i,fg#1e66f5]command[fg#179299]:[i,fg#1e66f5] [fg#40a02b]'[i,fg#40a02b]cargo test[fg#40a02b]'[fg#7c7f93]});
+
+[-]Error: Command exited with code 101
+[-]tool calls: 8 succeeded, 1 failed

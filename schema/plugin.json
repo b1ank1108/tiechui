@@ -1,0 +1,1238 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PluginProtocol",
+  "description": "All typed payloads included in the generated protocol schema.",
+  "type": "object",
+  "required": [
+    "decision",
+    "envelope",
+    "extension",
+    "initialize",
+    "output",
+    "prompt",
+    "requests",
+    "status",
+    "verdict"
+  ],
+  "properties": {
+    "decision": {
+      "$ref": "#/definitions/ApprovalDecision"
+    },
+    "envelope": {
+      "$ref": "#/definitions/JsonRpcMessage"
+    },
+    "extension": {
+      "$ref": "#/definitions/PluginExtension"
+    },
+    "initialize": {
+      "$ref": "#/definitions/PluginInitialize"
+    },
+    "output": {
+      "$ref": "#/definitions/PluginOutput"
+    },
+    "prompt": {
+      "$ref": "#/definitions/PluginPrompt"
+    },
+    "requests": {
+      "$ref": "#/definitions/PluginRequest"
+    },
+    "status": {
+      "$ref": "#/definitions/PluginStatus"
+    },
+    "verdict": {
+      "$ref": "#/definitions/PluginVerdict"
+    }
+  },
+  "definitions": {
+    "ApprovalDecision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "allow_once"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Widens a read or write path scope to both directions when set.",
+          "type": "object",
+          "required": [
+            "both_directions",
+            "kind"
+          ],
+          "properties": {
+            "both_directions": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "allow_session"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "deny"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Elicitation answers.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "content": true,
+            "kind": {
+              "type": "string",
+              "enum": [
+                "accept"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "decline"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "cancel"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Failure": {
+      "type": "object",
+      "required": [
+        "error",
+        "id",
+        "jsonrpc"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/Error"
+        },
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "JsonRpcMessage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Request"
+        },
+        {
+          "$ref": "#/definitions/Notification"
+        },
+        {
+          "$ref": "#/definitions/Success"
+        },
+        {
+          "$ref": "#/definitions/Failure"
+        }
+      ]
+    },
+    "Notification": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PanelField": {
+      "type": "object",
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PanelNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "markdown"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "children",
+            "kind"
+          ],
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/PanelNode"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "list"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "fields",
+            "kind"
+          ],
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/PanelField"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "form"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "label",
+            "total",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "progress"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Params": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": true
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    },
+    "PluginCall": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "id",
+        "name"
+      ],
+      "properties": {
+        "arguments": true,
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "PluginCapability": {
+      "type": "string",
+      "enum": [
+        "tools",
+        "commands",
+        "tool.intercept",
+        "ui.notify",
+        "ui.select",
+        "ui.confirm",
+        "ui.input",
+        "status.set",
+        "ui.panel"
+      ]
+    },
+    "PluginCommand": {
+      "type": "object",
+      "required": [
+        "description",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginContributions": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginCommand"
+          }
+        },
+        "interceptors": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginStage"
+          }
+        },
+        "tools": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginTool"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginExtension": {
+      "type": "object",
+      "required": [
+        "capabilities",
+        "command"
+      ],
+      "properties": {
+        "args": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginCapability"
+          }
+        },
+        "command": {
+          "type": "string"
+        },
+        "contributions": {
+          "default": {
+            "commands": [],
+            "interceptors": [],
+            "tools": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/PluginContributions"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginInitialize": {
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "capabilities",
+        "contributions"
+      ],
+      "properties": {
+        "apiVersion": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginCapability"
+          }
+        },
+        "contributions": {
+          "$ref": "#/definitions/PluginContributions"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginIntercept": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "call",
+            "phase",
+            "stage"
+          ],
+          "properties": {
+            "call": {
+              "$ref": "#/definitions/PluginCall"
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "before"
+              ]
+            },
+            "stage": {
+              "$ref": "#/definitions/PluginStage"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "call",
+            "output",
+            "phase",
+            "stage"
+          ],
+          "properties": {
+            "call": {
+              "$ref": "#/definitions/PluginCall"
+            },
+            "output": true,
+            "phase": {
+              "type": "string",
+              "enum": [
+                "after"
+              ]
+            },
+            "stage": {
+              "$ref": "#/definitions/PluginStage"
+            }
+          }
+        }
+      ]
+    },
+    "PluginOutput": {
+      "type": "object",
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "isError": {
+          "default": false,
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginPanel": {
+      "type": "object",
+      "required": [
+        "nodes",
+        "title"
+      ],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PanelNode"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginPrompt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "options",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "select"
+              ]
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "confirm"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "input"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "panel"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "panel"
+              ]
+            },
+            "panel": {
+              "$ref": "#/definitions/PluginPanel"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PluginRequest": {
+      "description": "Method payloads; requests may additionally carry the transport's `_meta` object.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "initialize"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/PluginInitialize"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "tools/list"
+              ]
+            },
+            "params": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "tools/call"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "arguments",
+                "name"
+              ],
+              "properties": {
+                "arguments": true,
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "commands/list"
+              ]
+            },
+            "params": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "commands/run"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "arguments",
+                "name"
+              ],
+              "properties": {
+                "arguments": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "tool.intercept"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/PluginIntercept"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "ui.notify"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "text",
+                "title"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "ui.confirm"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "text",
+                "title"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "ui.input"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "text",
+                "title"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "ui.select"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "options",
+                "text",
+                "title"
+              ],
+              "properties": {
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "text": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "panel.show"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/PluginPanel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "status.set"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "notifications/cancelled"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "requestId"
+              ],
+              "properties": {
+                "requestId": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "notifications/progress"
+              ]
+            },
+            "params": {
+              "type": "object",
+              "required": [
+                "message",
+                "progress",
+                "progressToken"
+              ],
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "progress": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "progressToken": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "shutdown"
+              ]
+            },
+            "params": {
+              "type": "object"
+            }
+          }
+        }
+      ]
+    },
+    "PluginStage": {
+      "type": "string",
+      "enum": [
+        "before_policy",
+        "policy",
+        "after_policy"
+      ]
+    },
+    "PluginStatus": {
+      "type": "object",
+      "required": [
+        "plugin",
+        "text"
+      ],
+      "properties": {
+        "plugin": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "PluginTool": {
+      "type": "object",
+      "required": [
+        "description",
+        "inputSchema",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginVerdict": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "allow"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "reason"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "deny"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "arguments"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "rewrite"
+              ]
+            },
+            "arguments": true
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Request": {
+      "type": "object",
+      "required": [
+        "id",
+        "jsonrpc",
+        "method"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Success": {
+      "type": "object",
+      "required": [
+        "id",
+        "jsonrpc",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "result": true
+      },
+      "additionalProperties": false
+    },
+    "Version": {
+      "type": "string",
+      "enum": [
+        "2.0"
+      ]
+    }
+  }
+}

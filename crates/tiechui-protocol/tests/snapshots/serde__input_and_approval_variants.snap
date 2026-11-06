@@ -1,0 +1,46 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "json!({\n    \"input\": input().iter().map(round_trip).collect::<Vec<_>>(), \"decisions\":\n    ([ApprovalDecision::AllowOnce, ApprovalDecision::AllowSession\n    { both_directions: true }, ApprovalDecision::Deny\n    { reason: Some(\"use git diff\".into()) }, ApprovalDecision::Accept\n    { content: Some(json!({\"name\": \"x\"})) }, ApprovalDecision::Decline,\n    ApprovalDecision::Cancel,].iter().map(round_trip).collect::<Vec<_>>()),\n    \"delivery\":\n    ([InputDelivery::Steer,\n    InputDelivery::FollowUp].iter().map(round_trip).collect::<Vec<_>>()),\n})"
+---
+{
+  "decisions": [
+    {
+      "kind": "allow_once"
+    },
+    {
+      "both_directions": true,
+      "kind": "allow_session"
+    },
+    {
+      "kind": "deny",
+      "reason": "use git diff"
+    },
+    {
+      "content": {
+        "name": "x"
+      },
+      "kind": "accept"
+    },
+    {
+      "kind": "decline"
+    },
+    {
+      "kind": "cancel"
+    }
+  ],
+  "delivery": [
+    "steer",
+    "follow_up"
+  ],
+  "input": [
+    {
+      "kind": "text",
+      "text": "hello 世界"
+    },
+    {
+      "data": "AA==",
+      "kind": "image",
+      "mime_type": "image/png"
+    }
+  ]
+}

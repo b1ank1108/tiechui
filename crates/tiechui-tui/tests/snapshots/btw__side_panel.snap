@@ -1,0 +1,107 @@
+---
+source: crates/tiechui-tui/tests/btw.rs
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+
+[b,d]› [b]How does this stay separate?
+
+[fg#666c77]• [fg#666c77]Thought · Isolation
+[-]    [fg#666c77]+ Show thinking
+
+[fg#666c77]• [-]The [b]side conversation[-] keeps its own
+[-]  [-]history.
+[-]  [fg#666c77]- [-]No tools
+[-]  [fg#666c77]- [-]Share explicitly
+
+
+
+
+
+
+
+
+[fg#8fa8c9]────────────────────────────────────────
+[-]› [fg#666c77]Ask a follow-up question
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]side-model[fg#666c77] (high)[-]     [fg#9aa0aa]99% left[fg#666c77] / 10k
+[-]  [b,fg#a99ccf]Side[fg#a99ccf] · main needs input · ctrl+/ to
+[-]  [fg#a99ccf]switch · ctrl+c to close
+
+80 columns / dark
+
+[b,d]› [b]How does this stay separate?
+
+[fg#666c77]• [fg#666c77]Thought · Isolation
+[-]    [fg#666c77]+ Show thinking
+
+[fg#666c77]• [-]The [b]side conversation[-] keeps its own history.
+[-]  [fg#666c77]- [-]No tools
+[-]  [fg#666c77]- [-]Share explicitly
+
+
+
+
+
+
+
+
+
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]› [fg#666c77]Ask a follow-up question
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]side-model[fg#666c77] (high) · [fg#9aa0aa]/project[-]                                  [fg#9aa0aa]99% left[fg#666c77] / 10k
+[-]  [b,fg#a99ccf]Side[fg#a99ccf] from main thread · main needs input · ctrl+/ to switch · ctrl+c to
+[-]  [fg#a99ccf]close
+
+40 columns / light
+
+[b,d]› [b]How does this stay separate?
+
+[fg#9aa1ac]• [fg#9aa1ac]Thought · Isolation
+[-]    [fg#9aa1ac]+ Show thinking
+
+[fg#9aa1ac]• [-]The [b]side conversation[-] keeps its own
+[-]  [-]history.
+[-]  [fg#9aa1ac]- [-]No tools
+[-]  [fg#9aa1ac]- [-]Share explicitly
+
+
+
+
+
+
+
+
+[fg#4f6f9a]────────────────────────────────────────
+[-]› [fg#9aa1ac]Ask a follow-up question
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]side-model[fg#9aa1ac] (high)[-]     [fg#5f6672]99% left[fg#9aa1ac] / 10k
+[-]  [b,fg#7a68a8]Side[fg#7a68a8] · main needs input · ctrl+/ to
+[-]  [fg#7a68a8]switch · ctrl+c to close
+
+80 columns / light
+
+[b,d]› [b]How does this stay separate?
+
+[fg#9aa1ac]• [fg#9aa1ac]Thought · Isolation
+[-]    [fg#9aa1ac]+ Show thinking
+
+[fg#9aa1ac]• [-]The [b]side conversation[-] keeps its own history.
+[-]  [fg#9aa1ac]- [-]No tools
+[-]  [fg#9aa1ac]- [-]Share explicitly
+
+
+
+
+
+
+
+
+
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]› [fg#9aa1ac]Ask a follow-up question
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]side-model[fg#9aa1ac] (high) · [fg#5f6672]/project[-]                                  [fg#5f6672]99% left[fg#9aa1ac] / 10k
+[-]  [b,fg#7a68a8]Side[fg#7a68a8] from main thread · main needs input · ctrl+/ to switch · ctrl+c to
+[-]  [fg#7a68a8]close

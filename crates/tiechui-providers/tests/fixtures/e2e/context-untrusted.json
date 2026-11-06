@@ -1,0 +1,8 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": ["GLOBAL_CONTEXT_MARKER", "UNTRUSTED_ANCESTOR_CONTEXT_MARKER", "UNTRUSTED_PROJECT_CONTEXT_MARKER", "<cwd>"]
+  }
+]

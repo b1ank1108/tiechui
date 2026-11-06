@@ -1,0 +1,91 @@
+[workspace]
+members = ["modules/ptc", "modules/tool-search", "modules/subagents", "modules/compaction", "modules/goal", "modules/loop", "modules/btw", "modules/rewind", "modules/context", "crates/tiechui-protocol", "crates/tiechui-model", "crates/tiechui-config", "crates/tiechui-providers", "crates/tiechui-session", "crates/tiechui-exec", "crates/tiechui-tools", "crates/tiechui-plugin-api", "crates/tiechui-plugin-sdk", "modules/exec", "modules/ask", "crates/tiechui-core", "crates/tiechui-cli", "crates/tiechui-tui", "modules/editing", "modules/context-files", "modules/skills", "modules/mcp", "modules/permissions", "modules/hooks", "modules/plugins", "xtask"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+rquickjs = { version = "0.14.0", features = ["allocator"] }
+tiechui-module-ptc = { version = "0.1.0", path = "modules/ptc" }
+tiechui-module-tool-search = { version = "0.1.0", path = "modules/tool-search" }
+tiechui-module-subagents = { version = "0.1.0", path = "modules/subagents" }
+tiechui-module-compaction = { version = "0.1.0", path = "modules/compaction" }
+tiechui-module-goal = { version = "0.1.0", path = "modules/goal" }
+tiechui-module-loop = { version = "0.1.0", path = "modules/loop" }
+tiechui-module-btw = { version = "0.1.0", path = "modules/btw" }
+tiechui-module-rewind = { version = "0.1.0", path = "modules/rewind" }
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+base64 = "0.22.1"
+clap = "4"
+crossterm = { version = "0.29", features = ["event-stream"] }
+eventsource-stream = "0.2.3"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+httpdate = "1.0.3"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ignore = "0.4.23"
+globset = "0.4.21"
+nucleo = "0.5.0"
+insta = { version = "1.46.3", features = ["json"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui-core = { version = "0.1.2", features = ["std"] }
+jsonschema = { version = "0.33", default-features = false }
+libc = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
+regex = "1.12"
+rmcp = { version = "=3.5.0", default-features = false, features = ["client", "elicitation", "transport-async-rw", "transport-streamable-http-client"] }
+sse-stream = "0.2.6"
+axum = "0.8"
+saphyr = { version = "0.3.3", default-features = false }
+schemars = "0.8.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1.20"
+sha2 = "0.10.9"
+similar = "2.7"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "plist-load", "regex-fancy"] }
+tempfile = "3.23.0"
+tiechui-config = { version = "0.1.0", path = "crates/tiechui-config" }
+tiechui-core = { version = "0.1.0", path = "crates/tiechui-core" }
+tiechui-plugin-api = { version = "0.1.0", path = "crates/tiechui-plugin-api" }
+tiechui-plugin-sdk = { version = "0.1.0", path = "crates/tiechui-plugin-sdk" }
+ts-rs = { version = "12.0.1", features = ["serde-json-impl", "no-serde-warnings"] }
+tiechui-module-ask = { version = "0.1.0", path = "modules/ask" }
+tiechui-module-exec = { version = "0.1.0", path = "modules/exec" }
+tiechui-module-editing = { version = "0.1.0", path = "modules/editing" }
+tiechui-module-context = { version = "0.1.0", path = "modules/context" }
+tiechui-module-context-files = { version = "0.1.0", path = "modules/context-files" }
+tiechui-module-skills = { version = "0.1.0", path = "modules/skills" }
+tiechui-module-permissions = { version = "0.1.0", path = "modules/permissions" }
+tiechui-module-hooks = { version = "0.1.0", path = "modules/hooks" }
+tiechui-module-plugins = { version = "0.1.0", path = "modules/plugins" }
+tiechui-module-mcp = { version = "0.1.0", path = "modules/mcp" }
+tiechui-exec = { version = "0.1.0", path = "crates/tiechui-exec" }
+tiechui-model = { version = "0.1.0", path = "crates/tiechui-model" }
+tiechui-protocol = { version = "0.1.0", path = "crates/tiechui-protocol" }
+tiechui-providers = { version = "0.1.0", path = "crates/tiechui-providers" }
+tiechui-session = { version = "0.1.0", path = "crates/tiechui-session" }
+tiechui-tools = { version = "0.1.0", path = "crates/tiechui-tools" }
+tiechui-tui = { version = "0.1.0", path = "crates/tiechui-tui" }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-util = "0.7.18"
+tree-sitter = "0.25.10"
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+tree-sitter-bash = "0.25.1"
+toml = "0.9.5"
+toml_edit = "0.24.0"
+wiremock = "0.6"
+unicode-normalization = "0.1.24"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+url = "2.5"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+print_stdout = "deny"

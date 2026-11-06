@@ -1,0 +1,262 @@
+---
+source: crates/tiechui-tui/tests/app.rs
+assertion_line: 1455
+expression: "shots.join(\"\\n\\n\")"
+---
+80x30 light=false
+
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]                                                   
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]                                           
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]    1. Small change (Recommended)[fg#666c77,bg#292929]  Keep the current interface and fix the[bg#292929]       
+[bg#292929]       [fg#666c77,bg#292929]behavior.[bg#292929]                                                                
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign                    Replace the interface with a larger design.[bg#292929]  
+[bg#292929]    3. None of the above[fg#666c77,bg#292929]           Select to type your own answer.[bg#292929]              
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [b,fgCyan,bg#292929]tab to add notes[fg#666c77,bg#292929] | enter to submit answer | ←/→ to navigate questions[bg#292929]         
+[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                                                              
+[bg#292929]  [bg#292929]                                                                              
+
+notes
+
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]                                                   
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]                                           
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]    1. Small change (Recommended)[fg#666c77,bg#292929]  Keep the current interface and fix the[bg#292929]       
+[bg#292929]       [fg#666c77,bg#292929]behavior.[bg#292929]                                                                
+[bg#292929]    2. Redesign[fg#666c77,bg#292929]                    Replace the interface with a larger design.[bg#292929]  
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above           Select to type your own answer.[bg#292929]              
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                                                               
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes | enter to submit answer[bg#292929]                            
+[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]                                           
+[bg#292929]  [bg#292929]                                                                              
+
+confirmation
+
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]                                             
+[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                                                        
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2 unanswered questions.[bg#292929]                             
+[bg#292929]    2. Go back[fg#666c77,bg#292929]  Return to the first unanswered question.[bg#292929]                        
+[bg#292929]  [bg#292929]                                                                              
+[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go back[bg#292929]                                      
+[bg#292929]  [bg#292929]                                                                              
+
+40x30 light=false
+
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
+[bg#292929]  [bg#292929]                                      
+[bg#292929]    1. Small change (Recommended)[bg#292929]       
+[bg#292929]       [fg#666c77,bg#292929]Keep the current interface and[bg#292929]   
+[bg#292929]       [fg#666c77,bg#292929]fix the behavior.[bg#292929]                
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign  Replace the interface[bg#292929]  
+[bg#292929]  [b,fg#8fa8c9,bg#292929]     with a larger design.[bg#292929]            
+[bg#292929]    3. None of the above[fg#666c77,bg#292929]  Select to[bg#292929]     
+[bg#292929]       [fg#666c77,bg#292929]type your own answer.[bg#292929]            
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [b,fgCyan,bg#292929]tab to add notes[bg#292929]                      
+[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
+[bg#292929]  [fg#666c77,bg#292929]←/→ to navigate questions[bg#292929]             
+[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                      
+[bg#292929]  [bg#292929]                                      
+
+notes
+
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
+[bg#292929]  [bg#292929]                                      
+[bg#292929]    1. Small change (Recommended)[bg#292929]       
+[bg#292929]       [fg#666c77,bg#292929]Keep the current interface and[bg#292929]   
+[bg#292929]       [fg#666c77,bg#292929]fix the behavior.[bg#292929]                
+[bg#292929]    2. Redesign[fg#666c77,bg#292929]  Replace the interface[bg#292929]  
+[bg#292929]       [fg#666c77,bg#292929]with a larger design.[bg#292929]            
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above  Select to[bg#292929]     
+[bg#292929]  [b,fg#8fa8c9,bg#292929]     type your own answer.[bg#292929]            
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                       
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes[bg#292929]             
+[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
+[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]   
+[bg#292929]  [bg#292929]                                      
+
+confirmation
+
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]     
+[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2[bg#292929]           
+[bg#292929]  [b,fg#8fa8c9,bg#292929]     unanswered questions.[bg#292929]            
+[bg#292929]    2. Go back[fg#666c77,bg#292929]  Return to the first[bg#292929]     
+[bg#292929]       [fg#666c77,bg#292929]unanswered question.[bg#292929]             
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go…[bg#292929]  
+[bg#292929]  [bg#292929]                                      
+
+40x10 light=false
+
+[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign  Replace the interfac…[bg#292929]  
+[bg#292929]  [fg#666c77,bg#292929]option 2/3 | [b,fgCyan,bg#292929]tab to add notes[bg#292929]         
+[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
+[bg#292929]  [fg#666c77,bg#292929]←/→ to navigate questions[bg#292929]             
+[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                      
+
+notes
+
+[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above  Select to…[bg#292929]    
+[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                       
+[bg#292929]  [fg#666c77,bg#292929]option 3/3[bg#292929]                            
+[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes[bg#292929]             
+[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
+[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]   
+
+confirmation
+
+[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]     
+[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2[bg#292929]           
+[bg#292929]  [bg#292929]                                      
+[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go…[bg#292929]  
+[bg#292929]  [bg#292929]                                      
+
+80x30 light=true
+
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]                                                   
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]                                           
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]    1. Small change (Recommended)[fg#9aa1ac,bg#f0f0f0]  Keep the current interface and fix the[bg#f0f0f0]       
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]behavior.[bg#f0f0f0]                                                                
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign                    Replace the interface with a larger design.[bg#f0f0f0]  
+[bg#f0f0f0]    3. None of the above[fg#9aa1ac,bg#f0f0f0]           Select to type your own answer.[bg#f0f0f0]              
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [b,fgCyan,bg#f0f0f0]tab to add notes[fg#9aa1ac,bg#f0f0f0] | enter to submit answer | ←/→ to navigate questions[bg#f0f0f0]         
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                                                              
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+
+notes
+
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]                                                   
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]                                           
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]    1. Small change (Recommended)[fg#9aa1ac,bg#f0f0f0]  Keep the current interface and fix the[bg#f0f0f0]       
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]behavior.[bg#f0f0f0]                                                                
+[bg#f0f0f0]    2. Redesign[fg#9aa1ac,bg#f0f0f0]                    Replace the interface with a larger design.[bg#f0f0f0]  
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above           Select to type your own answer.[bg#f0f0f0]              
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                                                               
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes | enter to submit answer[bg#f0f0f0]                            
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]                                           
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+
+confirmation
+
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]                                             
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                                                        
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2 unanswered questions.[bg#f0f0f0]                             
+[bg#f0f0f0]    2. Go back[fg#9aa1ac,bg#f0f0f0]  Return to the first unanswered question.[bg#f0f0f0]                        
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go back[bg#f0f0f0]                                      
+[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+
+40x30 light=true
+
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]    1. Small change (Recommended)[bg#f0f0f0]       
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]Keep the current interface and[bg#f0f0f0]   
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]fix the behavior.[bg#f0f0f0]                
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign  Replace the interface[bg#f0f0f0]  
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     with a larger design.[bg#f0f0f0]            
+[bg#f0f0f0]    3. None of the above[fg#9aa1ac,bg#f0f0f0]  Select to[bg#f0f0f0]     
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]type your own answer.[bg#f0f0f0]            
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [b,fgCyan,bg#f0f0f0]tab to add notes[bg#f0f0f0]                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]←/→ to navigate questions[bg#f0f0f0]             
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                      
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+
+notes
+
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]    1. Small change (Recommended)[bg#f0f0f0]       
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]Keep the current interface and[bg#f0f0f0]   
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]fix the behavior.[bg#f0f0f0]                
+[bg#f0f0f0]    2. Redesign[fg#9aa1ac,bg#f0f0f0]  Replace the interface[bg#f0f0f0]  
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]with a larger design.[bg#f0f0f0]            
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above  Select to[bg#f0f0f0]     
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     type your own answer.[bg#f0f0f0]            
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                       
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes[bg#f0f0f0]             
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]   
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+
+confirmation
+
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]     
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2[bg#f0f0f0]           
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     unanswered questions.[bg#f0f0f0]            
+[bg#f0f0f0]    2. Go back[fg#9aa1ac,bg#f0f0f0]  Return to the first[bg#f0f0f0]     
+[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]unanswered question.[bg#f0f0f0]             
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go…[bg#f0f0f0]  
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+
+40x10 light=true
+
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign  Replace the interfac…[bg#f0f0f0]  
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]option 2/3 | [b,fgCyan,bg#f0f0f0]tab to add notes[bg#f0f0f0]         
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]←/→ to navigate questions[bg#f0f0f0]             
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                      
+
+notes
+
+[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above  Select to…[bg#f0f0f0]    
+[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                       
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]option 3/3[bg#f0f0f0]                            
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes[bg#f0f0f0]             
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]   
+
+confirmation
+
+[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]     
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2[bg#f0f0f0]           
+[bg#f0f0f0]  [bg#f0f0f0]                                      
+[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go…[bg#f0f0f0]  
+[bg#f0f0f0]  [bg#f0f0f0]

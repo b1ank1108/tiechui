@@ -1,0 +1,64 @@
+---
+source: crates/tiechui-tui/tests/goal.rs
+assertion_line: 55
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 columns / dark
+[b]Goal
+[fg#666c77]Status: [-]active
+[fg#666c77]Objective: [-]Verify the local artifacts
+[fg#666c77]Time used: [-]1m 04s
+[fg#666c77]Tokens used: [-]1.2K
+
+[fg#666c77]/goal edit · /goal pause · /goal clear
+
+[fg#8fa8c9]────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#666c77]? for shortcuts
+[-]  [fg#a99ccf]◈ Pursuing goal (1.2K tokens · 1m 0[fg#a99ccf]…
+
+80 columns / dark
+[b]Goal
+[fg#666c77]Status: [-]active
+[fg#666c77]Objective: [-]Verify the local artifacts
+[fg#666c77]Time used: [-]1m 04s
+[fg#666c77]Tokens used: [-]1.2K
+
+[fg#666c77]/goal edit · /goal pause · /goal clear
+
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#666c77]? for shortcuts
+[-]  [fg#a99ccf]◈ Pursuing goal (1.2K tokens · 1m 04s)
+
+40 columns / light
+[b]Goal
+[fg#9aa1ac]Status: [-]active
+[fg#9aa1ac]Objective: [-]Verify the local artifacts
+[fg#9aa1ac]Time used: [-]1m 04s
+[fg#9aa1ac]Tokens used: [-]1.2K
+
+[fg#9aa1ac]/goal edit · /goal pause · /goal clear
+
+[fg#4f6f9a]────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#9aa1ac]? for shortcuts
+[-]  [fg#7a68a8]◈ Pursuing goal (1.2K tokens · 1m 0[fg#7a68a8]…
+
+80 columns / light
+[b]Goal
+[fg#9aa1ac]Status: [-]active
+[fg#9aa1ac]Objective: [-]Verify the local artifacts
+[fg#9aa1ac]Time used: [-]1m 04s
+[fg#9aa1ac]Tokens used: [-]1.2K
+
+[fg#9aa1ac]/goal edit · /goal pause · /goal clear
+
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[b]› 
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa1ac]? for shortcuts
+[-]  [fg#7a68a8]◈ Pursuing goal (1.2K tokens · 1m 04s)

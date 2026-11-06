@@ -1,0 +1,129 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "files": {},
+      "cwd": "project/sub",
+      "home": "home",
+      "fragment": "<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "global_override",
+      "files": {
+        "home/AGENTS.override.md": "﻿Global\r\n",
+        "home/AGENTS.md": "ignored"
+      },
+      "cwd": "project/sub",
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/home/AGENTS.override.md\">\nGlobal\r\n\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "ancestors_above_git",
+      "files": {
+        "AGENTS.md": "Outer instructions\n",
+        "project/.git/HEAD": "ref: refs/heads/main\n",
+        "project/AGENTS.md": "Root instructions\n",
+        "project/sub/CLAUDE.md": "子目录😀\n",
+        "home/CLAUDE.md": "Global instructions\n"
+      },
+      "cwd": "project/sub",
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/home/CLAUDE.md\">\nGlobal instructions\n\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/AGENTS.md\">\nOuter instructions\n\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/AGENTS.md\">\nRoot instructions\n\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/sub/CLAUDE.md\">\n子目录😀\n\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "precedence",
+      "files": {
+        "project/AGENTS.override.md": "override",
+        "project/AGENTS.md": "ignored",
+        "project/CLAUDE.md": "ignored",
+        "project/sub/AGENTS.md": "agents",
+        "project/sub/CLAUDE.md": "ignored"
+      },
+      "cwd": "project/sub",
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/AGENTS.override.md\">\noverride\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/sub/AGENTS.md\">\nagents\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "directory_candidate_and_empty_file",
+      "dirs": [
+        "project/AGENTS.md"
+      ],
+      "files": {
+        "project/CLAUDE.md": "fallback\r\n",
+        "project/sub/AGENTS.md": ""
+      },
+      "cwd": "project/sub",
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/CLAUDE.md\">\nfallback\r\n\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/sub/AGENTS.md\">\n\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "global_ancestor_deduplicated",
+      "home": "project",
+      "files": {
+        "AGENTS.md": "outer",
+        "project/AGENTS.md": "global",
+        "project/sub/CLAUDE.md": "inner"
+      },
+      "cwd": "project/sub",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/AGENTS.md\">\nglobal\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/AGENTS.md\">\nouter\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/sub/CLAUDE.md\">\ninner\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/sub\n</cwd>"
+    },
+    {
+      "name": "nested_worktree_shadows_same_name",
+      "cwd": "project/nested/sub",
+      "files": {
+        "project/.git/HEAD": "ref: refs/heads/main\n",
+        "project/.git/worktrees/nested/HEAD": "ref: refs/heads/nested\n",
+        "project/.git/worktrees/nested/commondir": "../..\n",
+        "project/nested/.git": "gitdir: ../.git/worktrees/nested\n",
+        "project/AGENTS.md": "shadowed",
+        "project/nested/AGENTS.md": "worktree",
+        "project/nested/sub/CLAUDE.md": "inner"
+      },
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/nested/AGENTS.md\">\nworktree\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/nested/sub/CLAUDE.md\">\ninner\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/nested/sub\n</cwd>"
+    },
+    {
+      "name": "worktree_symlink_keeps_local_scope",
+      "cwd": "project/nested/sub",
+      "files": {
+        "project/.git/HEAD": "ref: refs/heads/main\n",
+        "project/.git/worktrees/nested/HEAD": "ref: refs/heads/nested\n",
+        "project/.git/worktrees/nested/commondir": "../..\n",
+        "project/nested/.git": "gitdir: ../.git/worktrees/nested\n",
+        "project/AGENTS.md": "shared instructions"
+      },
+      "symlinks": {
+        "project/nested/AGENTS.md": "project/AGENTS.md"
+      },
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/nested/AGENTS.md\">\nshared instructions\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/nested/sub\n</cwd>"
+    },
+    {
+      "name": "worktree_different_names_inherit",
+      "cwd": "project/nested/sub",
+      "files": {
+        "project/.git/HEAD": "ref: refs/heads/main\n",
+        "project/.git/worktrees/nested/HEAD": "ref: refs/heads/nested\n",
+        "project/.git/worktrees/nested/commondir": "../..\n",
+        "project/nested/.git": "gitdir: ../.git/worktrees/nested\n",
+        "project/AGENTS.md": "main",
+        "project/nested/CLAUDE.md": "worktree"
+      },
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/AGENTS.md\">\nmain\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/nested/CLAUDE.md\">\nworktree\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/nested/sub\n</cwd>"
+    },
+    {
+      "name": "bare_layout_does_not_shadow",
+      "cwd": "project/main/sub",
+      "files": {
+        "project/.bare/worktrees/main/HEAD": "ref: refs/heads/main\n",
+        "project/.bare/worktrees/main/commondir": "../..\n",
+        "project/main/.git": "gitdir: ../.bare/worktrees/main\n",
+        "project/AGENTS.md": "outer",
+        "project/main/AGENTS.md": "inner"
+      },
+      "home": "home",
+      "fragment": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{{ROOT}}/project/AGENTS.md\">\nouter\n</project_instructions>\n\n<project_instructions path=\"{{ROOT}}/project/main/AGENTS.md\">\ninner\n</project_instructions>\n</project_context>\n\n<cwd>\n{{ROOT}}/project/main/sub\n</cwd>"
+    }
+  ]
+}

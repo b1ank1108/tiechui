@@ -1,0 +1,8 @@
+{"format_version":1,"id":"fixture","cwd":"/","created_at":0}
+{"id":"e0","parent_id":null,"timestamp":0,"kind":"message","message":{"role":"user","content":[{"kind":"text","text":"Read the files"}]},"model":null}
+{"id":"e1","parent_id":"e0","timestamp":1,"kind":"message","message":{"role":"assistant","content":[{"kind":"tool_call","id":"a","name":"read","arguments":{"path":"a.txt"}},{"kind":"tool_call","id":"b","name":"read","arguments":{"path":"b.txt"}}]},"model":{"provider":"fixture","model":"fixture/model"},"stop_reason":"tool_use"}
+{"id":"e2","parent_id":"e1","timestamp":2,"kind":"message","message":{"role":"system","content":[{"kind":"text","text":"held one"}]},"model":null}
+{"id":"e3","parent_id":"e2","timestamp":3,"kind":"message","message":{"role":"tool","content":[{"kind":"tool_result","call_id":"b","is_error":false,"content":[{"kind":"text","text":"contents b"}]}]},"model":null}
+{"id":"e4","parent_id":"e3","timestamp":4,"kind":"message","message":{"role":"system","content":[{"kind":"text","text":"held two"}]},"model":null}
+{"id":"e5","parent_id":"e4","timestamp":5,"kind":"message","message":{"role":"tool","content":[{"kind":"tool_result","call_id":"orphan","is_error":false,"content":[{"kind":"text","text":"orphan result"}]}]},"model":null}
+{"id":"e6","parent_id":"e5","timestamp":6,"kind":"message","message":{"role":"tool","content":[{"kind":"tool_result","call_id":"a","is_error":false,"content":[{"kind":"text","text":"contents a"}]}]},"model":null}

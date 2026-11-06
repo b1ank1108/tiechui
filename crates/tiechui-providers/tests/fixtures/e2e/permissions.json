@@ -1,0 +1,5 @@
+[
+  {"path":"/v1/messages","status":200,"body_file":"permission-denied.sse","body_contains":["Permission fixture"]},
+  {"path":"/v1/messages","status":200,"body_file":"permission-continue.sse","body_contains":["call_bash","'bash'","is_error"]},
+  {"path":"/v1/messages","status":200,"body_file":"permission-answer.sse","body_contains":["call_continue","call_bash"]}
+]

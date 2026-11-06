@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铁锤 · Rust 终端编码代理</title>
+<meta name="description" content="Tiechui (tc), a terminal coding agent written in Rust.">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/big-shoulders-display@5/800.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-serif-sc@5/900.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside class="rail">
+  <a class="brand" href="#top"><b>铁锤</b><span>tc · ui</span></a>
+  <nav id="nav" aria-label="章节"></nav>
+  <div class="prefs">
+    <div class="pref"><span>主题</span><div data-pref="主题"></div></div>
+    <div class="pref"><span>列宽</span><div data-pref="列宽"></div></div>
+  </div>
+  <p class="rail-foot">主题与列宽的切换会同步到全页。</p>
+</aside>
+
+<main id="top">
+  <header class="hero">
+    <p class="overline">Tiechui · <em>tc</em> — a terminal coding agent in Rust</p>
+    <div class="mark"><h1 class="word">铁锤</h1><span class="vertical">终端编码代理</span></div>
+    <div class="anvil"></div>
+    <div class="hero-copy">
+      <p><strong>铁锤是用 Rust 写的终端编码代理。</strong>一个二进制，<code>tc</code> 与 <code>tiechui</code> 两个名字，提供交互式终端界面和无界面的 <code>exec</code>，两者共用同一套会话、模型接入、工具、权限与模块。</p>
+      <p>接入 Anthropic Messages 与 OpenAI Chat Completions 及兼容网关；会话是只追加的 JSONL，支持分支、恢复、回退与压缩；工具、命令、路径和 MCP 调用都经过规则化的权限闸门；提问、旁路对话、目标、定时提示、子代理、技能、钩子与 MCP 都以模块提供，插件可声明式打包或作为独立进程接入。</p>
+      <p>下面的画面都取自终端界面的测试快照，逐个单元格还原。</p>
+      <p id="stamp"></p>
+    </div>
+    <figure class="hero-side">
+      <div id="hero-frame"></div>
+      <figcaption>会话头</figcaption>
+    </figure>
+  </header>
+
+  <div id="plates"></div>
+
+  <footer>
+    <a href="https://github.com/b1ank1108/tiechui">github.com/b1ank1108/tiechui</a>
+    <span>画面数据：crates/tiechui-tui/tests/snapshots</span>
+    <span>刷新：python3 scripts/ui_gallery.py</span>
+  </footer>
+</main>
+
+<script src="snapshots.js"></script>
+<script src="term.js"></script>
+<script src="gallery.js"></script>
+</body>
+</html>

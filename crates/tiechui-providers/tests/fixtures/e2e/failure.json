@@ -1,0 +1,7 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 401,
+    "body_file": "failure-body.json"
+  }
+]

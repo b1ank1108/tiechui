@@ -1,0 +1,205 @@
+[
+  {
+    "name": "read",
+    "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to read (relative or absolute)"
+        },
+        "offset": {
+          "type": "number",
+          "description": "Line number to start reading from (1-indexed)"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum number of lines to read"
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based Unicode character column within the line selected by offset. Use with maxChars to continue a long line."
+        },
+        "maxChars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192,
+          "description": "Read at most this many Unicode characters from one line; defaults to 8192 when column is set."
+        }
+      }
+    }
+  },
+  {
+    "name": "grep",
+    "description": "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars. Use outputMode=files_with_matches to locate files without dumping content.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "pattern"
+      ],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Search pattern (regex or literal string)"
+        },
+        "path": {
+          "type": "string",
+          "description": "Directory or file to search (default: current directory)"
+        },
+        "glob": {
+          "type": "string",
+          "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"
+        },
+        "ignoreCase": {
+          "type": "boolean",
+          "description": "Case-insensitive search (default: false)"
+        },
+        "literal": {
+          "type": "boolean",
+          "description": "Treat pattern as literal string instead of regex (default: false)"
+        },
+        "context": {
+          "type": "number",
+          "description": "Number of lines to show before and after each match (default: 0)"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum results (default 100): matching blocks in content mode, files in other modes."
+        },
+        "outputMode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "content"
+            },
+            {
+              "type": "string",
+              "const": "files_with_matches"
+            },
+            {
+              "type": "string",
+              "const": "count"
+            }
+          ],
+          "description": "content (default): matching lines; files_with_matches: paths only, useful for locating files; count: regex occurrences per file."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Skip N matching blocks (content) or files (other modes). Use offset=0 on the first page for stable path ordering, then the returned nextOffset. Pages re-run the search; files may change."
+        },
+        "beforeContext": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines before matches; overrides context. Content mode only."
+        },
+        "afterContext": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines after matches; overrides context. Content mode only."
+        },
+        "multiline": {
+          "type": "boolean",
+          "description": "Allow regex matches across lines, with dot matching newlines. A multiline block counts as one result."
+        },
+        "onlyMatching": {
+          "type": "boolean",
+          "description": "Content mode: return only matched parts, with source line numbers; context is ignored."
+        },
+        "type": {
+          "type": "string",
+          "description": "ripgrep file type, for example ts, py, go or rust; combines with glob."
+        }
+      }
+    }
+  },
+  {
+    "name": "find",
+    "description": "Discover files and directories with an in-process glob search. Includes hidden entries, respects .gitignore and .ignore, skips .git, and does not follow directory symlinks. Returns relative paths sorted lexically. Defaults to 1000 results and 50KB of output.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "pattern"
+      ],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Glob pattern: without / matches basenames at any depth; with / matches paths relative to the search directory. Use **/ for any ancestor, e.g. **/src/**/*.rs."
+        },
+        "path": {
+          "type": "string",
+          "description": "Directory to search in (default: current directory)"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of sorted results (default: 1000; 0 means unlimited)"
+        }
+      }
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Edit one file by exact text replacement. All edits[] match against the original file and apply atomically; none apply if any oldText fails to match.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "path",
+        "edits"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to edit (relative or absolute)"
+        },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "oldText",
+              "newText"
+            ],
+            "properties": {
+              "oldText": {
+                "type": "string",
+                "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+              },
+              "newText": {
+                "type": "string",
+                "description": "Replacement text for this targeted edit."
+              }
+            }
+          },
+          "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+        }
+      }
+    }
+  },
+  {
+    "name": "write",
+    "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "path",
+        "content"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to write (relative or absolute)"
+        },
+        "content": {
+          "type": "string",
+          "description": "Content to write to the file"
+        }
+      }
+    }
+  }
+]

@@ -1,0 +1,69 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+expression: "maintenance(&Theme::fixture(ColorLevel::Ansi16, false), 40)"
+---
+== maintained
+[d]◇ [b]Maintained context[d] · ≈ −7.9k tokens
+[d]  └ [fgCyan]Status[-] 72k / 128k · normal · 3 cand[-]…
+[-]    [fgCyan]Compact[-] b4 Parser investigation, b5
+
+== deferred
+[d]◇ [b]Maintained context
+[d]  └ [fgCyan]Status[-] 96k / 128k · high · 3 candid[-]…
+[-]    [fgCyan]Compact[-] Parser investigation, c2[d] · [d]…
+
+== failed
+[b,fg@1]◇ [b]Maintained context
+[d]  └ [fgCyan]Compact[-] Parser investigation, c2[d] · [d]…
+
+== running
+[-]◇ [b]Maintaining context
+[d]  └ [fgCyan]Search[-] "parser timeout" · 3 hits
+[-]    [fgCyan]Read[-] b4[d] · running
+
+== maintained expanded
+[d]◇ [b]Maintained context[d] · ≈ −7.9k tokens
+[-]  [b]Called[-] [fgCyan]context_status[d] · 1s
+[d]  └ [d]{"budget":{"input_tokens_estimate":7
+[-]    [d]2000,"model_window_tokens":128000,"p
+[-]    [d]ressure":"normal"},"candidates":[{},
+[-]    [d]{},{}],"has_more":false,"maintenance
+[-]    [d]":{"state":"ready"},"ok":true}
+[-]  [b]Called[-] [fgCyan]compact_history[d] · 1s
+[-]    [d]{"ranges":[{"candidate_id":"c1","sum
+[-]    [d]mary":"Goal: stop the parser timing
+[-]    [d]out on large CRLF
+[-]    [d]inputs.","title":"Parser
+[-]    [d]investigation"},{"candidate_id":"c2"
+[-]    [d],"summary":"Removed duplicated CRLF
+[-]    [d]fixtures."}]}
+[d]  └ [d]{"applied":true,"blocks":[{"candidat
+[-]    [d]e_id":"c1","end_ref":"m00077","ref":
+[-]    [d]"b4","start_ref":"m00012"},{"candida
+[-]    [d]te_id":"c2","end_ref":"m00090","ref"
+[-]    [d]:"b5","start_ref":"m00078"}],"effect
+[-]    [d]":{"net_saved_tokens_estimate":7900}
+[-]    [d],"maintenance":{"state":"cooldown"},
+[-]    [d]"ok":true}
+
+== checkpoint
+[d]◇ [b]Compacted context[d] · 9.5k tokens
+[-]  [d]summarized · ctrl+o to view
+
+== checkpoint degraded
+[fg@3]◆ [b]Compacted context[d] · 9.5k tokens
+[-]  [d]summarized · [fg@3]partial[d] · ctrl+o to view
+[d]  └ [d]Earlier messages did not fit the
+[-]    [d]summary request.
+
+== checkpoint expanded
+[d]◇ [b]Compacted context[d] · 9.5k tokens
+[-]  [d]summarized
+
+[-]  [b]Goal
+
+[-]  [-]Continue the implementation.
+
+== paused
+[fg@3]▲ [fg@3]Automatic compaction paused: still
+[-]  [fg@3]above the threshold.

@@ -1,0 +1,15 @@
+event: message_start
+data: {"type":"message_start","message":{}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"fallback"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

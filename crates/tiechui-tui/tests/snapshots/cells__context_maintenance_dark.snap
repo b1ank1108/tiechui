@@ -1,0 +1,55 @@
+---
+source: crates/tiechui-tui/tests/cells.rs
+expression: "maintenance(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
+---
+== maintained
+[fg#666c77]◇ [b]Maintained context[fg#666c77] · ≈ −7.9k tokens
+[fg#666c77]  └ [fgCyan]Status[-] 72k / 128k · normal · 3 candidates
+[-]    [fgCyan]Compact[-] b4 Parser investigation, b5
+
+== deferred
+[fg#666c77]◇ [b]Maintained context
+[fg#666c77]  └ [fgCyan]Status[-] 96k / 128k · high · 3 candidates · cooldown
+[-]    [fgCyan]Compact[-] Parser investigation, c2[fg#666c77] · deferred · cooldown
+
+== failed
+[b,fg#d48a8a]◇ [b]Maintained context
+[fg#666c77]  └ [fgCyan]Compact[-] Parser investigation, c2[fg#666c77] · [fg#d48a8a]CANDIDATE_CHANGED[fg#666c77] · 1 of 2 candidates ch[fg#666c77]…
+
+== running
+[b,fg#d0d0d0]◇[-] [b]Maintaining context
+[fg#666c77]  └ [fgCyan]Search[-] "parser timeout" · 3 hits
+[-]    [fgCyan]Read[-] b4[fg#666c77] · running
+
+== maintained expanded
+[fg#666c77]◇ [b]Maintained context[fg#666c77] · ≈ −7.9k tokens
+[-]  [b]Called[-] [fgCyan]context_status[fg#666c77] · 1s
+[fg#666c77]  └ [fg#666c77]{"budget":{"input_tokens_estimate":72000,"model_window_tokens":128000,"press
+[-]    [fg#666c77]ure":"normal"},"candidates":[{},{},{}],"has_more":false,"maintenance":{"stat
+[-]    [fg#666c77]e":"ready"},"ok":true}
+[-]  [b]Called[-] [fgCyan]compact_history[fg#666c77] · 1s
+[-]    [fg#666c77]{"ranges":[{"candidate_id":"c1","summary":"Goal: stop the parser timing out
+[-]    [fg#666c77]on large CRLF inputs.","title":"Parser
+[-]    [fg#666c77]investigation"},{"candidate_id":"c2","summary":"Removed duplicated CRLF
+[-]    [fg#666c77]fixtures."}]}
+[fg#666c77]  └ [fg#666c77]{"applied":true,"blocks":[{"candidate_id":"c1","end_ref":"m00077","ref":"b4"
+[-]    [fg#666c77],"start_ref":"m00012"},{"candidate_id":"c2","end_ref":"m00090","ref":"b5","s
+[-]    [fg#666c77]tart_ref":"m00078"}],"effect":{"net_saved_tokens_estimate":7900},"maintenanc
+[-]    [fg#666c77]e":{"state":"cooldown"},"ok":true}
+
+== checkpoint
+[fg#666c77]◇ [b]Compacted context[fg#666c77] · 9.5k tokens summarized · ctrl+o to view
+
+== checkpoint degraded
+[fg#d6b07a]◆ [b]Compacted context[fg#666c77] · 9.5k tokens summarized · [fg#d6b07a]partial[fg#666c77] · ctrl+o to view
+[fg#666c77]  └ [fg#666c77]Earlier messages did not fit the summary request.
+
+== checkpoint expanded
+[fg#666c77]◇ [b]Compacted context[fg#666c77] · 9.5k tokens summarized
+
+[-]  [b]Goal
+
+[-]  [-]Continue the implementation.
+
+== paused
+[fg#d6b07a]▲ [fg#d6b07a]Automatic compaction paused: still above the threshold.

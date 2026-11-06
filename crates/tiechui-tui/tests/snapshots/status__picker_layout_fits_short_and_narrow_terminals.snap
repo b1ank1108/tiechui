@@ -1,0 +1,29 @@
+---
+source: crates/tiechui-tui/tests/status.rs
+expression: dump(&app.live().0)
+---
+
+[bg#292929]  [b,bg#292929]Configure Status Line[bg#292929]                                                                             
+[bg#292929]  [fg#666c77,bg#292929]Search [bg#292929]> [bg#292929]                                                                                         
+[bg#292929]                                                                                                    
+[fg#666c77,bg#292929]      Item                    Presentation    Preview[bg#292929]                                               
+[bg#292929]  [x] Use theme colors        [fg#666c77,bg#292929]Apply colors from the active theme[bg#292929]                                    
+[b,fg#8fa8c9,bg#292929]› [x] model                   [Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#9aa0aa,bg#292929]STEP_MODEL[bg#292929]                                            
+[bg#292929]  [ ] model-with-reasoning    [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#9aa0aa,bg#292929]STEP_MODEL[fg#666c77,bg#292929] (high)[bg#292929]                                     
+[bg#292929]  [ ] reasoning               [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#666c77,bg#292929]high[bg#292929]                                                  
+[bg#292929]  [ ] current-dir             [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#9aa0aa,bg#292929]/isolated[bg#292929]                                             
+[bg#292929]  [ ] project-name            [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#666c77,bg#292929]unavailable[bg#292929]                                           
+[bg#292929]  [ ] hostname                [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#666c77,bg#292929]unavailable[bg#292929]                                           
+[bg#292929]  [ ] git-branch              [b,fg#8fa8c9,bg#292929][Text][bg#292929] [fg#666c77,bg#292929] Icon [bg#292929]   [fg#666c77,bg#292929]unavailable[bg#292929]                                           
+[bg#292929]  [fg#666c77,bg#292929]1–8 / 22 · ↑/↓ select[bg#292929]                                                                             
+[-]  [fg#666c77]Current model name
+[-]  [b,fg#8fa8c9][Text][-] [fg#9aa0aa]STEP_MODEL[-]                                [fg#666c77] Icon [-] [fg#9aa0aa] STEP_MODEL
+
+[-]  [fg#666c77]Preview
+[bg#292929]                                                                                                    
+[bg#292929]› Message                                                                                           
+[bg#292929]                                                                                                    
+[-]  [fg#9aa0aa]STEP_MODEL
+[-]  [fg#666c77]space show/hide · tab text/icon · ←/→ order
+[-]  [fg#666c77]enter save · esc cancel
+[-]  [fg#666c77]Icon uses your terminal's Nerd Font.

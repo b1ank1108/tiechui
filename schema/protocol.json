@@ -1,0 +1,2701 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProtocolMessage",
+  "description": "The schema entry point for queued operations, events, and JSON-RPC envelopes.",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/Submission"
+    },
+    {
+      "$ref": "#/definitions/Event"
+    },
+    {
+      "$ref": "#/definitions/JsonRpcMessage"
+    }
+  ],
+  "definitions": {
+    "ApprovalDecision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "allow_once"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Widens a read or write path scope to both directions when set.",
+          "type": "object",
+          "required": [
+            "both_directions",
+            "kind"
+          ],
+          "properties": {
+            "both_directions": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "allow_session"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "deny"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Elicitation answers.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "content": true,
+            "kind": {
+              "type": "string",
+              "enum": [
+                "accept"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "decline"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "cancel"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalRequest": {
+      "description": "What the user is asked; at most one request is open at a time.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "plugin",
+            "prompt"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "plugin"
+              ]
+            },
+            "plugin": {
+              "type": "string"
+            },
+            "prompt": {
+              "$ref": "#/definitions/PluginPrompt"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "information"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "editor"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "panel"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "rewind"
+              ]
+            },
+            "panel": {
+              "$ref": "#/definitions/RewindPanel"
+            }
+          }
+        },
+        {
+          "description": "A tool call the permission policy asks about.",
+          "type": "object",
+          "required": [
+            "arguments",
+            "call_id",
+            "kind",
+            "origin",
+            "session_patterns",
+            "surface",
+            "tool",
+            "values"
+          ],
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "arguments": true,
+            "call_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "permission"
+              ]
+            },
+            "matched_pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin": {
+              "type": "string"
+            },
+            "session_patterns": {
+              "description": "What allowing for the session grants; empty when it cannot be offered.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "surface": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "values": {
+              "description": "What the rule was matched against, such as the command or the paths.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "description": "An MCP server's elicitation parameters, as sent.",
+          "type": "object",
+          "required": [
+            "kind",
+            "request",
+            "server"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "elicitation"
+              ]
+            },
+            "request": true,
+            "server": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "questions"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "questions"
+              ]
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Question"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CacheDiagnostics": {
+      "type": "object",
+      "required": [
+        "omitted",
+        "responses",
+        "unavailable"
+      ],
+      "properties": {
+        "folds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "forced": {
+          "description": "Folds that capacity pressure applied during a cache cooldown.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "omitted": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "reclaimed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "responses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CacheResponse"
+          }
+        },
+        "unavailable": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "CacheResponse": {
+      "type": "object",
+      "required": [
+        "cached",
+        "fresh",
+        "input",
+        "unattributed"
+      ],
+      "properties": {
+        "cached": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "compression": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "fresh": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "input": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unattributed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "CheckpointStats": {
+      "type": "object",
+      "required": [
+        "files"
+      ],
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/LineStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "CommandInfo": {
+      "type": "object",
+      "required": [
+        "description",
+        "name"
+      ],
+      "properties": {
+        "argument_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "CompactionPhase": {
+      "type": "string",
+      "enum": [
+        "prepare",
+        "summarize",
+        "restore",
+        "commit"
+      ]
+    },
+    "CompactionReason": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "threshold",
+        "overflow"
+      ]
+    },
+    "ContextItem": {
+      "type": "object",
+      "required": [
+        "category",
+        "group",
+        "json",
+        "label",
+        "source",
+        "text",
+        "tokens"
+      ],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ContextSnapshot": {
+      "type": "object",
+      "required": [
+        "cache",
+        "injections",
+        "input_tokens",
+        "messages",
+        "model",
+        "notices",
+        "system",
+        "tools",
+        "total",
+        "window"
+      ],
+      "properties": {
+        "cache": {
+          "$ref": "#/definitions/CacheDiagnostics"
+        },
+        "injections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContextItem"
+          }
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContextItem"
+          }
+        },
+        "model": {
+          "type": "string"
+        },
+        "notices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider_usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "system": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContextItem"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContextItem"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "window": {
+          "description": "Zero means unknown, as in ModelInfo.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ContextView": {
+      "type": "string",
+      "enum": [
+        "overview",
+        "system",
+        "tools",
+        "injections",
+        "messages",
+        "cache"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Event": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "event",
+        "thread_id"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "event": {
+          "$ref": "#/definitions/EventKind"
+        },
+        "submission_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread_id": {
+          "type": "string"
+        }
+      }
+    },
+    "EventKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "compaction_started"
+              ]
+            },
+            "reason": {
+              "$ref": "#/definitions/CompactionReason"
+            }
+          }
+        },
+        {
+          "description": "Retries count re-sent summary requests; shrinks count reductions of the summary input.",
+          "type": "object",
+          "required": [
+            "kind",
+            "phase",
+            "reason",
+            "retries",
+            "shrinks"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "compaction_progress"
+              ]
+            },
+            "phase": {
+              "$ref": "#/definitions/CompactionPhase"
+            },
+            "reason": {
+              "$ref": "#/definitions/CompactionReason"
+            },
+            "retries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "shrinks": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "aborted",
+            "kind",
+            "reason",
+            "will_retry"
+          ],
+          "properties": {
+            "aborted": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "compaction_ended"
+              ]
+            },
+            "paused": {
+              "description": "Why automatic compaction now waits for new input, a model response or `/compact`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "$ref": "#/definitions/CompactionReason"
+            },
+            "will_retry": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "description": "Recover saved attachments only if the editor is empty.",
+          "type": "object",
+          "required": [
+            "content",
+            "kind"
+          ],
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/InputContent"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "composer_restored"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "kind"
+          ],
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/InputContent"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "composer_refilled"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "draft_images_detached"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "data": true,
+            "kind": {
+              "type": "string",
+              "enum": [
+                "extension"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Whether the current branch has an unresolved model request failure.",
+          "type": "object",
+          "required": [
+            "available",
+            "kind"
+          ],
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "retry_available"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "thread"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thread_started"
+              ]
+            },
+            "replay": {
+              "description": "Replay a changed branch even when the client already shows this session.",
+              "type": "boolean"
+            },
+            "thread": {
+              "$ref": "#/definitions/Thread"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "turn"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "turn_started"
+              ]
+            },
+            "turn": {
+              "$ref": "#/definitions/Turn"
+            }
+          }
+        },
+        {
+          "description": "A retry is waiting when delay_ms is present, and starting when absent.",
+          "type": "object",
+          "required": [
+            "attempt",
+            "kind",
+            "message",
+            "turn_id"
+          ],
+          "properties": {
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "delay_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "request_retry"
+              ]
+            },
+            "max_retries": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "message": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "item",
+            "kind",
+            "turn_id"
+          ],
+          "properties": {
+            "item": {
+              "$ref": "#/definitions/Item"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "item_started"
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "delta",
+            "item_id",
+            "kind",
+            "turn_id"
+          ],
+          "properties": {
+            "delta": {
+              "type": "string"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "item_delta"
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "item",
+            "kind",
+            "turn_id"
+          ],
+          "properties": {
+            "item": {
+              "$ref": "#/definitions/Item"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "item_completed"
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "last",
+            "total",
+            "turn_id"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "token_usage_updated"
+              ]
+            },
+            "last": {
+              "description": "Token usage for the latest model request.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TokenUsage"
+                }
+              ]
+            },
+            "total": {
+              "description": "Cumulative token usage for the thread.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TokenUsage"
+                }
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "turn"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "turn_completed"
+              ]
+            },
+            "turn": {
+              "$ref": "#/definitions/Turn"
+            }
+          }
+        },
+        {
+          "description": "The next queued request, once the previous one is resolved.",
+          "type": "object",
+          "required": [
+            "approval_id",
+            "kind",
+            "request"
+          ],
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "approval_requested"
+              ]
+            },
+            "request": {
+              "$ref": "#/definitions/ApprovalRequest"
+            },
+            "turn_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Answered, withdrawn, or cancelled with its thread.",
+          "type": "object",
+          "required": [
+            "approval_id",
+            "kind"
+          ],
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "approval_resolved"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "error"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "After the thread starts and whenever the model or thinking level changes.",
+          "type": "object",
+          "required": [
+            "kind",
+            "model",
+            "thinking",
+            "total"
+          ],
+          "properties": {
+            "context": {
+              "description": "The latest request's usage on the current branch, if any.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TokenUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "session_updated"
+              ]
+            },
+            "model": {
+              "$ref": "#/definitions/ModelInfo"
+            },
+            "thinking": {
+              "$ref": "#/definitions/ThinkingLevel"
+            },
+            "total": {
+              "description": "Cumulative usage for the thread, including inactive branches.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TokenUsage"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "The complete queue state after any change, in delivery order.",
+          "type": "object",
+          "required": [
+            "follow_up",
+            "kind",
+            "steering"
+          ],
+          "properties": {
+            "follow_up": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/QueuedInput"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "queue_updated"
+              ]
+            },
+            "steering": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/QueuedInput"
+              }
+            }
+          }
+        },
+        {
+          "description": "Inputs actually removed by `Op::Retract`, in queue order.",
+          "type": "object",
+          "required": [
+            "inputs",
+            "kind"
+          ],
+          "properties": {
+            "inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/QueuedInput"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "input_retracted"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Every model the session can switch to, after the thread starts.",
+          "type": "object",
+          "required": [
+            "kind",
+            "models"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "models_updated"
+              ]
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelInfo"
+              }
+            }
+          }
+        },
+        {
+          "description": "Commands contributed by modules, after the thread starts.",
+          "type": "object",
+          "required": [
+            "kind",
+            "resources"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "resources_updated"
+              ]
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Resource"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "commands",
+            "kind"
+          ],
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CommandInfo"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "commands_updated"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "command_output"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "A frozen, read-only panel contributed by a command.",
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "panel",
+            "text",
+            "view"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "command_panel"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "panel": {
+              "$ref": "#/definitions/ContextSnapshot"
+            },
+            "text": {
+              "type": "string"
+            },
+            "view": {
+              "$ref": "#/definitions/ContextView"
+            }
+          }
+        }
+      ]
+    },
+    "Failure": {
+      "type": "object",
+      "required": [
+        "error",
+        "id",
+        "jsonrpc"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/Error"
+        },
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "InputContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "kind",
+            "mime_type"
+          ],
+          "properties": {
+            "data": {
+              "description": "Base64-encoded image bytes.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            },
+            "mime_type": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "InputDelivery": {
+      "description": "Both modes start a turn when the thread is idle.",
+      "oneOf": [
+        {
+          "description": "Apply the input at the next tool boundary of the current turn.",
+          "type": "string",
+          "enum": [
+            "steer"
+          ]
+        },
+        {
+          "description": "Run the input after the current turn completes.",
+          "type": "string",
+          "enum": [
+            "follow_up"
+          ]
+        }
+      ]
+    },
+    "Item": {
+      "description": "Known shapes are decoded first; future kinds or fields retain their complete payload.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/KnownItem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "JsonRpcMessage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Request"
+        },
+        {
+          "$ref": "#/definitions/Notification"
+        },
+        {
+          "$ref": "#/definitions/Success"
+        },
+        {
+          "$ref": "#/definitions/Failure"
+        }
+      ]
+    },
+    "KnownItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "kind",
+            "summary",
+            "tokens_before"
+          ],
+          "properties": {
+            "degraded": {
+              "description": "The summary omits earlier history that did not fit its request.",
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "compaction"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "tokens_before": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/InputContent"
+              }
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "user_message"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "assistant_message"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thinking"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "arguments",
+            "id",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "arguments": true,
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "call_id",
+            "id",
+            "is_error",
+            "kind",
+            "output"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_error": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            },
+            "output": true
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LineStats": {
+      "type": "object",
+      "required": [
+        "added",
+        "removed"
+      ],
+      "properties": {
+        "added": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "removed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelInfo": {
+      "type": "object",
+      "required": [
+        "context_window",
+        "id",
+        "provider",
+        "reasoning",
+        "thinking_levels"
+      ],
+      "properties": {
+        "context_window": {
+          "description": "Zero when the provider does not report it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "description": "The model's own id, without the provider prefix.",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "boolean"
+        },
+        "thinking_levels": {
+          "description": "Levels the model accepts, `off` first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ThinkingLevel"
+          }
+        }
+      }
+    },
+    "Notification": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Op": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "compact"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Whether the main composer or a blocking picker currently owns user input.",
+          "type": "object",
+          "required": [
+            "blocked",
+            "kind"
+          ],
+          "properties": {
+            "blocked": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "input_state"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Interrupt idle module work as well as an active turn.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "interrupt_idle"
+              ]
+            }
+          }
+        },
+        {
+          "description": "An action from a module's interactive surface.",
+          "type": "object",
+          "required": [
+            "data",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "data": true,
+            "kind": {
+              "type": "string",
+              "enum": [
+                "command_input"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Remove persisted refill attachments; ordinary composer edits are not saved.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "clear_draft"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Continue the most recent failed request, without adding input.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "retry"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "delivery",
+            "kind"
+          ],
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/InputContent"
+              }
+            },
+            "delivery": {
+              "$ref": "#/definitions/InputDelivery"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "user_input"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "turn_id"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "interrupt"
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "model",
+            "provider"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set_model"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "level"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set_thinking"
+              ]
+            },
+            "level": {
+              "$ref": "#/definitions/ThinkingLevel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "entry_id",
+            "kind"
+          ],
+          "properties": {
+            "entry_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "branch"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "reload"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "approval_id",
+            "decision",
+            "kind"
+          ],
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "decision": {
+              "$ref": "#/definitions/ApprovalDecision"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "approval_response"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Removes inputs that are still queued; consumed ones are left alone.",
+          "type": "object",
+          "required": [
+            "kind",
+            "submission_ids"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "retract"
+              ]
+            },
+            "submission_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "description": "A module command from `CommandsUpdated`; answered by `CommandOutput`.",
+          "type": "object",
+          "required": [
+            "arguments",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "arguments": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "run_command"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "The user's own shell command, run between turns and kept in the model context.",
+          "type": "object",
+          "required": [
+            "command",
+            "kind"
+          ],
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "run_shell"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "PanelField": {
+      "type": "object",
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PanelNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "markdown"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "children",
+            "kind"
+          ],
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/PanelNode"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "list"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "fields",
+            "kind"
+          ],
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/PanelField"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "form"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "label",
+            "total",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "progress"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Params": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": true
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    },
+    "PluginPanel": {
+      "type": "object",
+      "required": [
+        "nodes",
+        "title"
+      ],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PanelNode"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginPrompt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "options",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "select"
+              ]
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "confirm"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "input"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "panel"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "panel"
+              ]
+            },
+            "panel": {
+              "$ref": "#/definitions/PluginPanel"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProgramCall": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "id",
+        "name",
+        "state"
+      ],
+      "properties": {
+        "arguments": true,
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ProgramCallState"
+        }
+      }
+    },
+    "ProgramCallState": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "ProgramRun": {
+      "type": "object",
+      "required": [
+        "calls"
+      ],
+      "properties": {
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProgramCall"
+          }
+        }
+      }
+    },
+    "Question": {
+      "type": "object",
+      "required": [
+        "header",
+        "id",
+        "question"
+      ],
+      "properties": {
+        "header": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "options": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/QuestionOption"
+          }
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "QuestionOption": {
+      "description": "A question's exclusive choice; highlighting it does not submit an answer.",
+      "type": "object",
+      "required": [
+        "description",
+        "label"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "QueuedInput": {
+      "description": "A user input waiting in the steering or follow-up queue.",
+      "type": "object",
+      "required": [
+        "content",
+        "submission_id"
+      ],
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InputContent"
+          }
+        },
+        "submission_id": {
+          "type": "string"
+        }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "required": [
+        "id",
+        "jsonrpc",
+        "method"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Resource": {
+      "description": "Display metadata and the exact, explicitly selected input reference.",
+      "type": "object",
+      "required": [
+        "description",
+        "id",
+        "kind",
+        "name",
+        "reference",
+        "search_terms"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/ResourceKind"
+        },
+        "manual": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "search_terms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ResourceKind": {
+      "type": "string",
+      "enum": [
+        "Plugin",
+        "Skill",
+        "Task"
+      ]
+    },
+    "RewindPage": {
+      "type": "string",
+      "enum": [
+        "messages",
+        "checking",
+        "actions",
+        "recovery"
+      ]
+    },
+    "RewindPanel": {
+      "type": "object",
+      "required": [
+        "page",
+        "rows",
+        "selected"
+      ],
+      "properties": {
+        "page": {
+          "$ref": "#/definitions/RewindPage"
+        },
+        "preview": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CheckpointStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RewindRow"
+          }
+        },
+        "selected": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RewindRow": {
+      "type": "object",
+      "required": [
+        "entry_id",
+        "session_id",
+        "text",
+        "timestamp"
+      ],
+      "properties": {
+        "entry_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CheckpointStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Submission": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "id",
+        "op",
+        "thread_id"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/definitions/Op"
+        },
+        "thread_id": {
+          "type": "string"
+        }
+      }
+    },
+    "Success": {
+      "type": "object",
+      "required": [
+        "id",
+        "jsonrpc",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/Id"
+        },
+        "jsonrpc": {
+          "$ref": "#/definitions/Version"
+        },
+        "result": true
+      },
+      "additionalProperties": false
+    },
+    "ThinkingLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "Thread": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "id",
+        "turns"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Turn"
+          }
+        }
+      }
+    },
+    "TokenUsage": {
+      "type": "object",
+      "required": [
+        "cache_read",
+        "cache_write",
+        "input",
+        "output"
+      ],
+      "properties": {
+        "cache_read": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_write": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_write_1h": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cost_nano_usd": {
+          "description": "Estimated USD in billionths; absent when no prices were configured.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "input": {
+          "description": "Uncached input tokens; cache reads and writes are counted separately.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "output": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "reasoning": {
+          "description": "Reasoning is a subset of output tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Turn": {
+      "type": "object",
+      "required": [
+        "id",
+        "items",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Item"
+          }
+        },
+        "status": {
+          "$ref": "#/definitions/TurnStatus"
+        }
+      }
+    },
+    "TurnStatus": {
+      "type": "string",
+      "enum": [
+        "in_progress",
+        "completed",
+        "interrupted",
+        "failed"
+      ]
+    },
+    "Version": {
+      "type": "string",
+      "enum": [
+        "2.0"
+      ]
+    }
+  }
+}

@@ -1,0 +1,50 @@
+
+
+The following skills provide specialized instructions for specific tasks.
+Use the read tool to load a skill's file when the task matches its description.
+When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
+
+<available_skills>
+  <skill>
+    <name>aliases</name>
+    <description>Use an anchored description.</description>
+    <location>/skills-fixtures/aliases/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>alpha</name>
+    <description>Use &lt;tags&gt; &amp; &quot;quotes&quot; with an apostrophe: it&apos;s useful.</description>
+    <location>/skills-fixtures/alpha/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>fallback</name>
+    <description>A folded description spanning two lines.
+</description>
+    <location>/skills-fixtures/fallback/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>-Bad--Name-</name>
+    <description>Valid description with an invalid name.</description>
+    <location>/skills-fixtures/invalid/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>literal-block</name>
+    <description>Keep this newline
+between these lines.</description>
+    <location>/skills-fixtures/literal-block/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>quoted</name>
+    <description>A quoted true is not a boolean.</description>
+    <location>/skills-fixtures/quoted/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>root-file</name>
+    <description>Direct markdown children are skills too.</description>
+    <location>/skills-fixtures/root.md</location>
+  </skill>
+  <skill>
+    <name>yaml-types</name>
+    <description>no</description>
+    <location>/skills-fixtures/yaml-types/SKILL.md</location>
+  </skill>
+</available_skills>

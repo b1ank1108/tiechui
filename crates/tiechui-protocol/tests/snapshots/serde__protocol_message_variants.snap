@@ -1,0 +1,48 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  {
+    "epoch": 7,
+    "id": "submission-1",
+    "op": {
+      "content": [
+        {
+          "kind": "text",
+          "text": "hello 世界"
+        },
+        {
+          "data": "AA==",
+          "kind": "image",
+          "mime_type": "image/png"
+        }
+      ],
+      "delivery": "follow_up",
+      "kind": "user_input"
+    },
+    "thread_id": "thread-1"
+  },
+  {
+    "epoch": 7,
+    "event": {
+      "kind": "turn_started",
+      "turn": {
+        "id": "turn-1",
+        "items": [
+          {
+            "id": "item-1",
+            "kind": "assistant_message",
+            "text": "hello"
+          }
+        ],
+        "status": "in_progress"
+      }
+    },
+    "thread_id": "thread-1"
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "event"
+  }
+]

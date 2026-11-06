@@ -1,0 +1,224 @@
+---
+source: crates/tiechui-tui/tests/subagents.rs
+assertion_line: 96
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 / light=false / waiting
+[fg#666c77]Waiting
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs. Tests pass.
+[fg#666c77]• [fg#9aa0aa]reviewer[fg#666c77]  Cancelled
+[fg#666c77]Review parser changes
+[-]Finished reviewing the first file.
+
+40 / light=false / finished
+[fg#666c77]Finished waiting
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#666c77]Thinking
+[fg#666c77]Check boundaries before editing.
+[fg#666c77]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[fg#666c77]• [fg#9aa0aa]reviewer[fg#666c77]  Cancelled
+[fg#666c77]Review parser changes
+[-]Finished reviewing the first file.
+[fg#666c77]0 turns · ↑0 ↓0 R0 W0 · fixture/model
+
+40 / light=false / viewer
+[fg#8fa8c9]Subagents · Main needs input
+[fg#666c77]  Main session
+[fg#8fa8c9]› worker  Completed
+[fg#666c77]  reviewer  Cancelled
+
+
+
+
+
+
+
+
+[fg#666c77]^F search:  · ^S group · ^T think
+[fg#666c77]Enter view · Ctrl+X stop · Esc back
+
+40 / light=false / output
+[fg#8fa8c9]Subagents
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#666c77]Thinking
+[fg#666c77]Check boundaries before editing.
+[fg#666c77]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+
+
+
+
+[fg#666c77]^F search:  · ^S group · ^T think
+[fg#666c77]Enter view · Ctrl+X stop · Esc back
+
+80 / light=false / waiting
+[fg#666c77]Waiting
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs. Tests pass.
+[fg#666c77]• [fg#9aa0aa]reviewer[fg#666c77]  Cancelled
+[fg#666c77]Review parser changes
+[-]Finished reviewing the first file.
+
+80 / light=false / finished
+[fg#666c77]Finished waiting
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#666c77]Thinking
+[fg#666c77]Check boundaries before editing.
+[fg#666c77]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[fg#666c77]• [fg#9aa0aa]reviewer[fg#666c77]  Cancelled
+[fg#666c77]Review parser changes
+[-]Finished reviewing the first file.
+[fg#666c77]0 turns · ↑0 ↓0 R0 W0 · fixture/model
+
+80 / light=false / viewer
+[fg#8fa8c9]Subagents · Main needs input
+[fg#666c77]  Main session[-]               [fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#8fa8c9]› worker  Completed[-]          [fg#666c77]Update the parser 👩‍💻 中文
+[fg#666c77]  reviewer  Cancelled[-]        [-]Updated parser.rs.
+[-]                             [-]Tests pass.
+[-]                             [fg#666c77]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[fg#666c77]^F search:  · ^S group · ^T think
+[fg#666c77]Enter view · Ctrl+X stop · Esc back
+
+80 / light=false / output
+[fg#8fa8c9]Subagents
+[fg#666c77]• [fg#9aa0aa]worker[fg#8fb996]  Completed
+[fg#666c77]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#666c77]Thinking
+[fg#666c77]Check boundaries before editing.
+[fg#666c77]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+
+
+
+
+[fg#666c77]^F search:  · ^S group · ^T think
+[fg#666c77]Enter view · Ctrl+X stop · Esc back
+
+40 / light=true / waiting
+[fg#9aa1ac]Waiting
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs. Tests pass.
+[fg#9aa1ac]• [fg#5f6672]reviewer[fg#9aa1ac]  Cancelled
+[fg#9aa1ac]Review parser changes
+[-]Finished reviewing the first file.
+
+40 / light=true / finished
+[fg#9aa1ac]Finished waiting
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#9aa1ac]Thinking
+[fg#9aa1ac]Check boundaries before editing.
+[fg#9aa1ac]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[fg#9aa1ac]• [fg#5f6672]reviewer[fg#9aa1ac]  Cancelled
+[fg#9aa1ac]Review parser changes
+[-]Finished reviewing the first file.
+[fg#9aa1ac]0 turns · ↑0 ↓0 R0 W0 · fixture/model
+
+40 / light=true / viewer
+[fg#4f6f9a]Subagents · Main needs input
+[fg#9aa1ac]  Main session
+[fg#4f6f9a]› worker  Completed
+[fg#9aa1ac]  reviewer  Cancelled
+
+
+
+
+
+
+
+
+[fg#9aa1ac]^F search:  · ^S group · ^T think
+[fg#9aa1ac]Enter view · Ctrl+X stop · Esc back
+
+40 / light=true / output
+[fg#4f6f9a]Subagents
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#9aa1ac]Thinking
+[fg#9aa1ac]Check boundaries before editing.
+[fg#9aa1ac]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+
+
+
+
+[fg#9aa1ac]^F search:  · ^S group · ^T think
+[fg#9aa1ac]Enter view · Ctrl+X stop · Esc back
+
+80 / light=true / waiting
+[fg#9aa1ac]Waiting
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs. Tests pass.
+[fg#9aa1ac]• [fg#5f6672]reviewer[fg#9aa1ac]  Cancelled
+[fg#9aa1ac]Review parser changes
+[-]Finished reviewing the first file.
+
+80 / light=true / finished
+[fg#9aa1ac]Finished waiting
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#9aa1ac]Thinking
+[fg#9aa1ac]Check boundaries before editing.
+[fg#9aa1ac]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[fg#9aa1ac]• [fg#5f6672]reviewer[fg#9aa1ac]  Cancelled
+[fg#9aa1ac]Review parser changes
+[-]Finished reviewing the first file.
+[fg#9aa1ac]0 turns · ↑0 ↓0 R0 W0 · fixture/model
+
+80 / light=true / viewer
+[fg#4f6f9a]Subagents · Main needs input
+[fg#9aa1ac]  Main session[-]               [fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#4f6f9a]› worker  Completed[-]          [fg#9aa1ac]Update the parser 👩‍💻 中文
+[fg#9aa1ac]  reviewer  Cancelled[-]        [-]Updated parser.rs.
+[-]                             [-]Tests pass.
+[-]                             [fg#9aa1ac]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[-]                             
+[fg#9aa1ac]^F search:  · ^S group · ^T think
+[fg#9aa1ac]Enter view · Ctrl+X stop · Esc back
+
+80 / light=true / output
+[fg#4f6f9a]Subagents
+[fg#9aa1ac]• [fg#5f6672]worker[fg#4f8a5b]  Completed
+[fg#9aa1ac]Update the parser 👩‍💻 中文
+[-]Updated parser.rs.
+[-]Tests pass.
+[fg#9aa1ac]Thinking
+[fg#9aa1ac]Check boundaries before editing.
+[fg#9aa1ac]2 turns · ↑120 ↓30 R0 W0 · fixture/model
+
+
+
+
+[fg#9aa1ac]^F search:  · ^S group · ^T think
+[fg#9aa1ac]Enter view · Ctrl+X stop · Esc back

@@ -1,0 +1,33 @@
+[package]
+name = "tiechui-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+testing = ["dep:wiremock"]
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+eventsource-stream.workspace = true
+futures.workspace = true
+httpdate.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiechui-config.workspace = true
+tiechui-model.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+wiremock = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true

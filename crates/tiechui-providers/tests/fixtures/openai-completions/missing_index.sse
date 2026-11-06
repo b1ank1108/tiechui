@@ -1,0 +1,10 @@
+: IDs identify calls before an index is available and on subsequent unindexed deltas.
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read","arguments":"{\"path\":"}},{"id":"call_b","function":{"name":"read","arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":4,"id":"call_b","function":{"arguments":"\"b\""}},{"id":"call_a","function":{"arguments":"\"a\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":4,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

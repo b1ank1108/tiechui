@@ -1,0 +1,19 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: round_trip(&item)
+---
+{
+  "extra": {
+    "unknown": true
+  },
+  "id": "future-1",
+  "kind": "future.widget",
+  "payload": {
+    "entries": [
+      null,
+      false,
+      "opaque"
+    ],
+    "revision": 18446744073709551615
+  }
+}

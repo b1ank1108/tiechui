@@ -1,0 +1,778 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigLayer",
+  "type": "object",
+  "properties": {
+    "compaction": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CompactionConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mcp_servers": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/McpServerConfig"
+      }
+    },
+    "model": {
+      "description": "Default model reference in `<provider>/<id>` form.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "modules": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "permissions": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PermissionsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retry": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RetryConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "thinking": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThinkingLevel"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tui": {
+      "default": {
+        "copy_on_select": null,
+        "status_line": {
+          "icons": null,
+          "items": null,
+          "use_theme_colors": null
+        },
+        "theme": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/TuiLayer"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "AutoBenefit": {
+      "type": "string",
+      "enum": [
+        "auto"
+      ]
+    },
+    "CompactionConfig": {
+      "type": "object",
+      "properties": {
+        "compress": {
+          "default": {
+            "max_summary_length": 20000,
+            "min_compress_range": 5000,
+            "min_net_savings_tokens": 1000,
+            "min_summary_length": 50
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeCompress"
+            }
+          ]
+        },
+        "context_window_cap": {
+          "default": 300000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "decompress": {
+          "description": "Ignored since read_history replaced decompress; kept so older configurations still load.",
+          "default": {
+            "full": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeDecompress"
+            }
+          ]
+        },
+        "enabled": {
+          "description": "Automatically compact at the context threshold and recover overflow (default: true).",
+          "default": true,
+          "type": "boolean"
+        },
+        "fallback_context_window": {
+          "default": 32768,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "keep_recent_tokens": {
+          "description": "Recent history to retain at a safe message boundary (default: 20000).",
+          "default": 20000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "model_overrides": {
+          "description": "Per-model token overrides keyed by `<provider>/<model>`; unspecified fields inherit.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/CompactionTokenOverride"
+          }
+        },
+        "nudge": {
+          "default": {
+            "emergency_threshold_pct": 0.95,
+            "growth_cap": 100000,
+            "growth_ratio": 0.3333333333333333,
+            "max_context_limit_pct": 0.85,
+            "min_context_limit_pct": 0.45,
+            "min_growth_floor": 20000,
+            "min_growth_ratio": 0.45,
+            "min_pressure_benefit_tokens": "auto",
+            "tier2_growth_multiplier": 1.5
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeNudge"
+            }
+          ]
+        },
+        "output": {
+          "default": {
+            "enabled": true,
+            "min_chars": 20000
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeOutput"
+            }
+          ]
+        },
+        "preserve_recent_messages": {
+          "default": 5,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "preserve_recent_tokens": {
+          "default": 5000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "protected_tools": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reserve_tokens": {
+          "description": "Space reserved below the model window (default: 16384; zero is allowed).",
+          "default": 16384,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "search": {
+          "default": {
+            "default_limit": 10,
+            "max_limit": 30
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeSearch"
+            }
+          ]
+        },
+        "tiers": {
+          "default": {
+            "enabled": true,
+            "tier2_trigger": 5,
+            "tier3_trigger": 10
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RangeTiers"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompactionTokenOverride": {
+      "type": "object",
+      "properties": {
+        "keep_recent_tokens": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "reserve_tokens": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpServerConfig": {
+      "description": "Codex-compatible server settings. Unsupported fields remain diagnostic keys.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bearer_token_env_var": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disabled_tools": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "enabled_tools": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env_vars": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "http_headers": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "startup_timeout_sec": {
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tool_timeout_sec": {
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "url": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "PermissionAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "ask",
+        "deny"
+      ]
+    },
+    "PermissionMode": {
+      "oneOf": [
+        {
+          "description": "Rules decide; unmatched actions ask.",
+          "type": "string",
+          "enum": [
+            "rules"
+          ]
+        },
+        {
+          "description": "Workspace edits pass; a model classifier reviews the remaining asks.",
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        },
+        {
+          "description": "Approves every ask except protected paths and fail-closed project rules.",
+          "type": "string",
+          "enum": [
+            "yolo"
+          ]
+        }
+      ]
+    },
+    "PermissionRule": {
+      "type": "object",
+      "required": [
+        "action",
+        "pattern",
+        "surface"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/PermissionAction"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "surface": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PermissionsConfig": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Accepted only in user configuration; the CLI `--mode` overrides it.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rules": {
+          "description": "Omission uses the built-in defaults; an explicit empty list asks for everything.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/PermissionRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PressureBenefit": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        {
+          "$ref": "#/definitions/AutoBenefit"
+        }
+      ]
+    },
+    "RangeCompress": {
+      "type": "object",
+      "properties": {
+        "max_summary_length": {
+          "default": 20000,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "min_compress_range": {
+          "default": 5000,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "min_net_savings_tokens": {
+          "default": 1000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "min_summary_length": {
+          "default": 50,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RangeDecompress": {
+      "type": "object",
+      "properties": {
+        "full": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RangeNudge": {
+      "type": "object",
+      "properties": {
+        "emergency_threshold_pct": {
+          "default": 0.95,
+          "type": "number",
+          "maximum": 1.0,
+          "exclusiveMinimum": 0.0
+        },
+        "growth_cap": {
+          "default": 100000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "growth_ratio": {
+          "default": 0.3333333333333333,
+          "type": "number",
+          "maximum": 1.0,
+          "exclusiveMinimum": 0.0
+        },
+        "max_context_limit_pct": {
+          "default": 0.85,
+          "type": "number",
+          "maximum": 1.0,
+          "exclusiveMinimum": 0.0
+        },
+        "min_context_limit_pct": {
+          "default": 0.45,
+          "type": "number",
+          "maximum": 1.0,
+          "exclusiveMinimum": 0.0
+        },
+        "min_growth_floor": {
+          "default": 20000,
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 0.0
+        },
+        "min_growth_ratio": {
+          "default": 0.45,
+          "type": "number",
+          "maximum": 1.0,
+          "exclusiveMinimum": 0.0
+        },
+        "min_pressure_benefit_tokens": {
+          "default": "auto",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PressureBenefit"
+            }
+          ]
+        },
+        "tier2_growth_multiplier": {
+          "default": 1.5,
+          "type": "number",
+          "format": "double",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RangeOutput": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "min_chars": {
+          "default": 20000,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 2000.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RangeSearch": {
+      "type": "object",
+      "properties": {
+        "default_limit": {
+          "default": 10,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "max_limit": {
+          "default": 30,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RangeTiers": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "tier2_trigger": {
+          "default": 5,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        },
+        "tier3_trigger": {
+          "default": 10,
+          "type": "integer",
+          "format": "uint",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RetryConfig": {
+      "type": "object",
+      "properties": {
+        "base_delay_ms": {
+          "description": "Initial exponential backoff in milliseconds (default: 2000, must be positive).",
+          "default": 2000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "enabled": {
+          "description": "Enable automatic transient-error retries (default: true).",
+          "default": true,
+          "type": "boolean"
+        },
+        "max_delay_ms": {
+          "description": "Caps backoff; a longer server-requested delay fails immediately.",
+          "default": 60000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_retries": {
+          "description": "Retries after the initial request, independently for each tool step.",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "StatusLineItem": {
+      "type": "string",
+      "enum": [
+        "model",
+        "model-with-reasoning",
+        "reasoning",
+        "current-dir",
+        "project-name",
+        "hostname",
+        "git-branch",
+        "branch-changes",
+        "run-state",
+        "permission-mode",
+        "context-remaining",
+        "context-used",
+        "version",
+        "context-window-size",
+        "used-tokens",
+        "total-input-tokens",
+        "total-output-tokens",
+        "cache-hit-rate",
+        "estimated-thread-cost",
+        "thread-id",
+        "thread-title"
+      ]
+    },
+    "StatusLineLayer": {
+      "description": "Each field replaces the earlier layer's value on its own.",
+      "type": "object",
+      "properties": {
+        "icons": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/StatusLineItem"
+          }
+        },
+        "items": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/StatusLineItem"
+          }
+        },
+        "use_theme_colors": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThinkingLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "TuiLayer": {
+      "type": "object",
+      "properties": {
+        "copy_on_select": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status_line": {
+          "default": {
+            "icons": null,
+            "items": null,
+            "use_theme_colors": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/StatusLineLayer"
+            }
+          ]
+        },
+        "theme": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

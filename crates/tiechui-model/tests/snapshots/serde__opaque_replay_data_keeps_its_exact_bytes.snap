@@ -1,0 +1,30 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: round_trip(&message)
+---
+{
+  "content": [
+    {
+      "kind": "thinking",
+      "opaque": " \n{\"signature\":  \"AA==\",\"sequence\":[2, 1]}\t ",
+      "text": ""
+    },
+    {
+      "kind": "text",
+      "opaque": " \n{\"signature\":  \"AA==\",\"sequence\":[2, 1]}\t ",
+      "text": "answer"
+    },
+    {
+      "arguments": {
+        "limit": 20,
+        "path": "fixture.txt"
+      },
+      "id": "call-1",
+      "kind": "tool_call",
+      "name": "read",
+      "opaque": " \n{\"signature\":  \"AA==\",\"sequence\":[2, 1]}\t "
+    }
+  ],
+  "opaque": " \n{\"signature\":  \"AA==\",\"sequence\":[2, 1]}\t ",
+  "role": "assistant"
+}

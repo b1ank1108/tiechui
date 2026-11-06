@@ -1,0 +1,10 @@
+: The first identity is retained; later IDs on the same index are aliases.
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_b","function":{"name":"other","arguments":"\"a\""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

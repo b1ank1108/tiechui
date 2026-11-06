@@ -1,0 +1,10 @@
+---
+source: crates/tiechui-protocol/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  "in_progress",
+  "completed",
+  "interrupted",
+  "failed"
+]

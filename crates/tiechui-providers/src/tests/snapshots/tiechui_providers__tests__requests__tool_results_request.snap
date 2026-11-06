@@ -1,0 +1,108 @@
+---
+source: crates/tiechui-providers/src/tests/requests.rs
+expression: captured(request).await
+---
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Reading both files.",
+          "type": "text"
+        },
+        {
+          "id": "call_a",
+          "input": {
+            "path": "a.png"
+          },
+          "name": "read",
+          "type": "tool_use"
+        },
+        {
+          "id": "call_b",
+          "input": {
+            "path": "missing.txt"
+          },
+          "name": "read",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "Image contents:",
+              "type": "text"
+            },
+            {
+              "source": {
+                "data": "Zml4dHVyZQ==",
+                "media_type": "image/png",
+                "type": "base64"
+              },
+              "type": "image"
+            }
+          ],
+          "is_error": false,
+          "tool_use_id": "call_a",
+          "type": "tool_result"
+        },
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "content": [
+            {
+              "text": "File not found.",
+              "type": "text"
+            }
+          ],
+          "is_error": true,
+          "tool_use_id": "call_b",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "stream": true,
+  "thinking": {
+    "type": "disabled"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "read a file",
+      "eager_input_streaming": true,
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read"
+    }
+  ]
+}

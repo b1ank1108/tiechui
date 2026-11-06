@@ -1,0 +1,131 @@
+---
+source: crates/tiechui-tui/tests/resources.rs
+expression: "shots.join(\"\\n\\n\")"
+---
+menu 40 light=false · Files / All · Shift+Tab
+[fg#666c77]  Files · Files [All]
+[-]  @Café           [fg#666c77]A boun…e description
+[b,fg#8fa8c9]> $review[-]         [fg#666c77]A boun…e description
+[-]  @inspect files  [fg#666c77]A boun…e description
+[-]  src/            [fg#666c77]./
+[fg#666c77]  Skill · 4 matches
+[fg#666c77]  ↑↓ · Tab/Enter · Esc · Shift+Tab filt[fg#666c77]…
+
+accent-folded match
+[fg#666c77]  Files · Files [All]
+[b,fg#8fa8c9]> @Café[-]           [fg#666c77]A boun…e description
+[-]  @inspe[b]c[-]t [b]f[-]il[b]e[-]s  [fg#666c77]A boun…e description
+[fg#666c77]  Plugin · 2 matches
+[fg#666c77]  ↑↓ · Tab/Enter · Esc · Shift+Tab filt[fg#666c77]…
+
+permissions 40 light=false
+[fg#8fa8c9]Permissions
+[-]Mode: Rules (interactive)
+[-]Policy: /user/.tiechui/config.toml
+[-]Project: not loaded (untrusted)
+[-]No OS sandbox; session grants clear on
+[-]reload.
+[-]Effective rules (later matches win per
+[-]surface):
+[-]* · * · Allow · user
+[-]bash · rm * · Ask · user
+[-]Temporary session grants:
+[-]path_read · /project/docs/* · Allow
+[-]Recent decisions (this instance):
+[-]approved · bash · rm * · approval
+[fg#666c77]↑/↓ scroll · enter/esc close
+
+menu 80 light=false · Files / All · Shift+Tab
+[fg#666c77]  Files · Files [All]
+[-]  @Café           [fg#666c77]A bounded resource description[-]                          [fg#666c77]Plugin
+[b,fg#8fa8c9]> $review[-]         [fg#666c77]A bounded resource description[-]                          [fg#666c77]Skill
+[-]  @inspect files  [fg#666c77]A bounded resource description[-]                          [fg#666c77]Task
+[-]  src/            [fg#666c77]./[-]                                                      [fg#666c77]Dir
+[fg#666c77]  4 matches
+[fg#666c77]  ↑↓ · Tab open/complete · Enter insert · Esc · Shift+Tab filter
+
+accent-folded match
+[fg#666c77]  Files · Files [All]
+[b,fg#8fa8c9]> @Café[-]           [fg#666c77]A bounded resource description[-]                          [fg#666c77]Plugin
+[-]  @inspe[b]c[-]t [b]f[-]il[b]e[-]s  [fg#666c77]A bounded resource description[-]                          [fg#666c77]Task
+[fg#666c77]  2 matches
+[fg#666c77]  ↑↓ · Tab open/complete · Enter insert · Esc · Shift+Tab filter
+
+permissions 80 light=false
+[fg#8fa8c9]Permissions
+[-]Mode: Rules (interactive)
+[-]Policy: /user/.tiechui/config.toml
+[-]Project: not loaded (untrusted)
+[-]No OS sandbox; session grants clear on reload.
+[-]Effective rules (later matches win per surface):
+[-]* · * · Allow · user
+[-]bash · rm * · Ask · user
+[-]Temporary session grants:
+[-]path_read · /project/docs/* · Allow
+[-]Recent decisions (this instance):
+[-]approved · bash · rm * · approval
+[fg#666c77]↑/↓ scroll · enter/esc close
+
+menu 40 light=true · Files / All · Shift+Tab
+[fg#9aa1ac]  Files · Files [All]
+[-]  @Café           [fg#9aa1ac]A boun…e description
+[b,fg#4f6f9a]> $review[-]         [fg#9aa1ac]A boun…e description
+[-]  @inspect files  [fg#9aa1ac]A boun…e description
+[-]  src/            [fg#9aa1ac]./
+[fg#9aa1ac]  Skill · 4 matches
+[fg#9aa1ac]  ↑↓ · Tab/Enter · Esc · Shift+Tab filt[fg#9aa1ac]…
+
+accent-folded match
+[fg#9aa1ac]  Files · Files [All]
+[b,fg#4f6f9a]> @Café[-]           [fg#9aa1ac]A boun…e description
+[-]  @inspe[b]c[-]t [b]f[-]il[b]e[-]s  [fg#9aa1ac]A boun…e description
+[fg#9aa1ac]  Plugin · 2 matches
+[fg#9aa1ac]  ↑↓ · Tab/Enter · Esc · Shift+Tab filt[fg#9aa1ac]…
+
+permissions 40 light=true
+[fg#4f6f9a]Permissions
+[-]Mode: Rules (interactive)
+[-]Policy: /user/.tiechui/config.toml
+[-]Project: not loaded (untrusted)
+[-]No OS sandbox; session grants clear on
+[-]reload.
+[-]Effective rules (later matches win per
+[-]surface):
+[-]* · * · Allow · user
+[-]bash · rm * · Ask · user
+[-]Temporary session grants:
+[-]path_read · /project/docs/* · Allow
+[-]Recent decisions (this instance):
+[-]approved · bash · rm * · approval
+[fg#9aa1ac]↑/↓ scroll · enter/esc close
+
+menu 80 light=true · Files / All · Shift+Tab
+[fg#9aa1ac]  Files · Files [All]
+[-]  @Café           [fg#9aa1ac]A bounded resource description[-]                          [fg#9aa1ac]Plugin
+[b,fg#4f6f9a]> $review[-]         [fg#9aa1ac]A bounded resource description[-]                          [fg#9aa1ac]Skill
+[-]  @inspect files  [fg#9aa1ac]A bounded resource description[-]                          [fg#9aa1ac]Task
+[-]  src/            [fg#9aa1ac]./[-]                                                      [fg#9aa1ac]Dir
+[fg#9aa1ac]  4 matches
+[fg#9aa1ac]  ↑↓ · Tab open/complete · Enter insert · Esc · Shift+Tab filter
+
+accent-folded match
+[fg#9aa1ac]  Files · Files [All]
+[b,fg#4f6f9a]> @Café[-]           [fg#9aa1ac]A bounded resource description[-]                          [fg#9aa1ac]Plugin
+[-]  @inspe[b]c[-]t [b]f[-]il[b]e[-]s  [fg#9aa1ac]A bounded resource description[-]                          [fg#9aa1ac]Task
+[fg#9aa1ac]  2 matches
+[fg#9aa1ac]  ↑↓ · Tab open/complete · Enter insert · Esc · Shift+Tab filter
+
+permissions 80 light=true
+[fg#4f6f9a]Permissions
+[-]Mode: Rules (interactive)
+[-]Policy: /user/.tiechui/config.toml
+[-]Project: not loaded (untrusted)
+[-]No OS sandbox; session grants clear on reload.
+[-]Effective rules (later matches win per surface):
+[-]* · * · Allow · user
+[-]bash · rm * · Ask · user
+[-]Temporary session grants:
+[-]path_read · /project/docs/* · Allow
+[-]Recent decisions (this instance):
+[-]approved · bash · rm * · approval
+[fg#9aa1ac]↑/↓ scroll · enter/esc close

@@ -1,0 +1,10 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  "system",
+  "user",
+  "assistant",
+  "tool"
+]

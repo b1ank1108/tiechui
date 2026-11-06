@@ -1,0 +1,5 @@
+{"format_version":1,"id":"fixture","cwd":"/","created_at":0}
+{"id":"e0","parent_id":null,"timestamp":0,"kind":"message","message":{"role":"user","content":[{"kind":"text","text":"Read the files"}]},"model":null}
+{"id":"e1","parent_id":"e0","timestamp":1,"kind":"message","message":{"role":"assistant","content":[{"kind":"text","text":"Partial"},{"kind":"tool_call","id":"partial","name":"read","arguments":"{\"path\":"}]},"model":{"provider":"fixture","model":"fixture/model"},"stop_reason":"cancelled"}
+{"id":"e2","parent_id":"e1","timestamp":2,"kind":"message","message":{"role":"tool","content":[{"kind":"tool_result","call_id":"partial","is_error":true,"content":[{"kind":"text","text":"Operation aborted"}]}]},"model":null}
+{"id":"e3","parent_id":"e2","timestamp":3,"kind":"custom","custom_kind":"request_omission","data":["e1","e2"]}

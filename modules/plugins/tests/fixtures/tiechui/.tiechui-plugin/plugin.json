@@ -1,0 +1,30 @@
+{
+  "name": "tiechui-fixture",
+  "version": "1.0.0",
+  "skills": "./skills",
+  "mcpServers": {
+    "fixture": {
+      "command": "FIXTURE_SERVER",
+      "args": []
+    }
+  },
+  "hooks": [
+    {
+      "hooks": {
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "/bin/sh \"$PLUGIN_ROOT/hook.sh\""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "extension": {
+    "command": "must-not-run"
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "tiechui-module-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+ignore.workspace = true
+saphyr.workspace = true
+sha2.workspace = true
+tiechui-plugin-api.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

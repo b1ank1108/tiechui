@@ -1,0 +1,19 @@
+[
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": [
+      "\"model\":\"other\""
+    ]
+  },
+  {
+    "path": "/v1/messages",
+    "status": 200,
+    "body_file": "anthropic-resume.sse",
+    "body_contains": [
+      "\"model\":\"other\"",
+      "Continue"
+    ]
+  }
+]

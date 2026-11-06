@@ -1,0 +1,11 @@
+---
+source: crates/tiechui-model/tests/serde.rs
+expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
+---
+[
+  "end_turn",
+  "length",
+  "tool_use",
+  "cancelled",
+  "error"
+]

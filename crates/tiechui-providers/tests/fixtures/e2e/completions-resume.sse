@@ -1,0 +1,8 @@
+data: {"choices":[{"index":0,"delta":{"content":"Changed before to after."},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":18,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":11}}}
+
+data: [DONE]
+
