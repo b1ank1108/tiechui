@@ -141,7 +141,7 @@ profile 目录是 `$TIECHUI_HOME`，默认 `~/.tiechui`：
 ```toml
 [gateway]
 wire = "openai-completions"            # 或 "anthropic-messages"
-base_url = "https://gateway.example/v1"
+base_url = "https://gateway.example"   # 没有版本段时自动补 /v1
 api_key_env = "GATEWAY_API_KEY"        # 或 api_key = "..." 直接写入密钥
 
 [gateway.compat]                       # 仅用于非 OpenAI 服务
@@ -171,7 +171,8 @@ theme = "automatic"                    # 跟随终端背景
 ```
 
 - 省略 `base_url` 时，按协议默认为 `https://api.anthropic.com` 或
-  `https://api.openai.com/v1`。
+  `https://api.openai.com`。地址里没有版本段时自动补 `/v1`；自带版本段的（如
+  `/api/paas/v4`）原样使用。
 - `compat` 表让请求适配 DeepSeek 风格推理网关等服务。模型自己的 `compat` 表可以
   覆盖单个字段，适用于混合多个模型家族的网关。
 - 思考级别会被限制在模型 `thinking_levels` 声明的范围内。

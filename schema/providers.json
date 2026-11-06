@@ -267,7 +267,7 @@
           ]
         },
         "base_url": {
-          "description": "When absent, endpoint selection belongs to the provider implementation.",
+          "description": "API root; `/v1` is added unless a path segment is already a version. When absent, endpoint selection belongs to the provider implementation.",
           "type": [
             "string",
             "null"

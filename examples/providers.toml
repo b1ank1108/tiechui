@@ -13,7 +13,8 @@
 # wire = "openai-completions"
 # The other supported wire is "anthropic-messages".
 # Omit base_url for the wire's standard endpoint; .invalid is a placeholder here.
-# base_url = "https://gateway.example.invalid/v1"
+# /v1 is added unless the URL already has a version segment such as /v1 or /v4.
+# base_url = "https://gateway.example.invalid"
 # api_key_env = "EXAMPLE_API_KEY"
 
 # OpenAI-completions compatibility defaults for this provider. Change only for a

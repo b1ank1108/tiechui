@@ -29,7 +29,7 @@ impl Openai {
                 config,
                 key,
                 client,
-                "https://api.openai.com/v1",
+                "https://api.openai.com",
                 "/chat/completions",
                 "Bearer ",
             )?,

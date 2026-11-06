@@ -43,7 +43,7 @@ async fn text_answer_ends_before_usage_without_adding_a_blank_line() {
         let path = script.path().join("script.json");
         std::fs::write(
             &path,
-            r#"[{"path":"/chat/completions","status":200,"body_file":"answer.sse"}]"#,
+            r#"[{"path":"/v1/chat/completions","status":200,"body_file":"answer.sse"}]"#,
         )
         .unwrap();
         let fixture = Fixture::new("openai-completions", path.to_str().unwrap()).await;

@@ -150,7 +150,7 @@ declares your own endpoint and model, then selects it.
 ```toml
 [gateway]
 wire = "openai-completions"            # or "anthropic-messages"
-base_url = "https://gateway.example/v1"
+base_url = "https://gateway.example"   # /v1 is added unless the URL has a version
 api_key_env = "GATEWAY_API_KEY"        # or api_key = "..." to write the key inline
 
 [gateway.compat]                       # only for non-OpenAI services
@@ -180,7 +180,8 @@ theme = "automatic"                    # follows the terminal background
 ```
 
 - If `base_url` is omitted, the default is `https://api.anthropic.com` or
-  `https://api.openai.com/v1`, depending on the wire.
+  `https://api.openai.com`, depending on the wire. A URL without a version
+  segment gets `/v1`; one that has its own, such as `/api/paas/v4`, is kept.
 - The `compat` table adapts the request to services such as DeepSeek-style
   reasoning gateways. A model's own `compat` table overrides single members, for
   gateways that mix model families.

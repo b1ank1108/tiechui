@@ -7,9 +7,12 @@ rustls, and eventsource-stream.
 `from_config(name, entry)` resolves the key from `entry.api_key` or `entry.api_key_env`. Requests use qualified
 model IDs (`name/model-id`); the wire request uses the configured model ID. Token
 limits and capabilities come from the entry's model list. `base_url` is the API
-root: Anthropic defaults to `https://api.anthropic.com` and appends `/v1/messages`;
-OpenAI defaults to `https://api.openai.com/v1` and appends `/chat/completions`.
-Both preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
+root: Anthropic defaults to `https://api.anthropic.com` and appends `/messages`;
+OpenAI defaults to `https://api.openai.com` and appends `/chat/completions`.
+A root without a version segment (`v` and a digit, such as `v1`, `v4` or
+`v1beta`) gets `/v1` first, so `https://gateway.example` and
+`https://gateway.example/v1` reach the same endpoint while `/api/paas/v4` keeps
+its own version. Both preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
 uses native trust roots. A 300-second read timeout bounds silent connections.
 
 The Anthropic stream emits deltas in arrival order and an authoritative `ContentComplete`

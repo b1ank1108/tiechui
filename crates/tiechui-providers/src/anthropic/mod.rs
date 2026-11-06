@@ -26,7 +26,7 @@ impl Anthropic {
             key,
             client,
             "https://api.anthropic.com",
-            "/v1/messages",
+            "/messages",
             "",
         )
         .map(Self)

@@ -295,7 +295,8 @@ pub enum Wire {
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub wire: Wire,
-    /// When absent, endpoint selection belongs to the provider implementation.
+    /// API root; `/v1` is added unless a path segment is already a version. When absent,
+    /// endpoint selection belongs to the provider implementation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Inline key; set this or `api_key_env`, not both.

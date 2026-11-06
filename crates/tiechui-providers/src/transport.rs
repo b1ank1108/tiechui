@@ -67,9 +67,17 @@ impl Transport {
                 "base URL must be HTTP(S) without credentials, query, or fragment",
             ));
         }
+        // The API version is optional: a root with a version segment (`/v1`, `/api/paas/v4`,
+        // `/v1beta/openai`) keeps its own; any other root gets `/v1`.
+        let root = endpoint.path().trim_end_matches('/').to_owned();
+        let versioned = root.split('/').any(|segment| {
+            segment
+                .strip_prefix('v')
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        });
         endpoint.set_path(&format!(
-            "{}{suffix}",
-            endpoint.path().trim_end_matches('/')
+            "{root}{}{suffix}",
+            if versioned { "" } else { "/v1" }
         ));
         if key.is_empty() {
             return Err(ProviderError::new(ErrorKind::Auth, "empty API key"));

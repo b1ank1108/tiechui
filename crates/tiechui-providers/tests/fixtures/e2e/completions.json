@@ -1,6 +1,6 @@
 [
   {
-    "path": "/chat/completions",
+    "path": "/v1/chat/completions",
     "status": 200,
     "body_file": "completions-read.sse",
     "body_contains": [
@@ -14,7 +14,7 @@
     ]
   },
   {
-    "path": "/chat/completions",
+    "path": "/v1/chat/completions",
     "status": 200,
     "body_file": "completions-edit.sse",
     "body_contains": [
@@ -23,7 +23,7 @@
     ]
   },
   {
-    "path": "/chat/completions",
+    "path": "/v1/chat/completions",
     "status": 200,
     "body_file": "completions-answer.sse",
     "body_contains": [
@@ -31,7 +31,7 @@
     ]
   },
   {
-    "path": "/chat/completions",
+    "path": "/v1/chat/completions",
     "status": 200,
     "body_file": "completions-resume.sse",
     "body_contains": [

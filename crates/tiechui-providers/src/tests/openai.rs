@@ -172,7 +172,7 @@ async fn two_call_ids_on_index_zero_alias_the_first_block() {
 async fn mixed_gateway_models_override_single_compat_fields_on_each_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(PLAIN, "text/event-stream"))
         .expect(3)
         .mount(&server)
@@ -381,7 +381,7 @@ async fn truncated_and_invalid_streams_never_finish() {
 async fn first_turn_request_is_captured_with_api_root_and_auth() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/gateway/chat/completions"))
+        .and(path("/gateway/v1/chat/completions"))
         .and(header("authorization", "Bearer fixture-key"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(PLAIN, "text/event-stream"))
         .expect(1)
@@ -403,6 +403,40 @@ async fn first_turn_request_is_captured_with_api_root_and_auth() {
     let requests = server.received_requests().await.unwrap();
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     insta::assert_json_snapshot!("openai_first_turn", body);
+}
+
+#[tokio::test]
+async fn base_urls_gain_the_api_version_only_without_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(PLAIN, "text/event-stream"))
+        .mount(&server)
+        .await;
+    for (root, expected) in [
+        ("", "/v1/chat/completions"),
+        ("/v1/", "/v1/chat/completions"),
+        ("/api/paas/v4", "/api/paas/v4/chat/completions"),
+        ("/v1beta/openai", "/v1beta/openai/chat/completions"),
+        ("/proxy", "/proxy/v1/chat/completions"),
+    ] {
+        let events: Vec<_> = provider(&format!("{}{root}", server.uri()))
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{root}");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.last().unwrap().url.path(), expected, "{root}");
+    }
+    // Anthropic roots follow the same rule.
+    let anthropic = serve(super::PLAIN, 1).await;
+    assert!(
+        super::collect(&format!("{}/v1", anthropic.uri()), request())
+            .await
+            .iter()
+            .all(Result::is_ok)
+    );
 }
 
 #[test]
