@@ -74,15 +74,15 @@ fn label(mode: PermissionMode) -> &'static str {
     }
 }
 
-const USAGE: &str = "Usage: /permissions [rules|auto|yolo]";
+const USAGE: &str = "Usage: /permissions [rules|auto|yolo|show]";
 
 #[async_trait]
 impl Command for Diagnostics {
     fn info(&self) -> protocol::CommandInfo {
         protocol::CommandInfo {
             name: "permissions".into(),
-            description: "Show effective rules and recent decisions, or switch the mode".into(),
-            argument_hint: Some("[rules|auto|yolo]".into()),
+            description: "Switch the mode, or show effective rules and recent decisions".into(),
+            argument_hint: Some("[rules|auto|yolo|show]".into()),
         }
     }
     fn interactive(&self) -> bool {
@@ -93,7 +93,7 @@ impl Command for Diagnostics {
     }
     async fn run(&self, arguments: &str, cancel: CancellationToken) -> Result<String, ToolError> {
         check(&cancel)?;
-        if arguments.trim().is_empty() {
+        if matches!(arguments.trim(), "" | "show") {
             return Ok(self.text());
         }
         Ok(self.switch(arguments).unwrap_or_else(|| USAGE.into()))
@@ -105,7 +105,7 @@ impl Command for Diagnostics {
         cancel: CancellationToken,
     ) -> Result<String, ToolError> {
         check(&cancel)?;
-        if !arguments.trim().is_empty() {
+        if !matches!(arguments.trim(), "" | "show") {
             return Ok(self.switch(arguments).unwrap_or_else(|| USAGE.into()));
         }
         session

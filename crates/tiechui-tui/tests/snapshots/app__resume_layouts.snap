@@ -4,9 +4,9 @@ expression: "shots.join(\"\\n\\n\")"
 ---
 100x16
 Resume a previous session
-Type to search                                          Filter: [Cwd] All    Sort: [Updated] Created
+Type to search                                            Filter: Cwd  All    Sort: Updated  Created
 
-❯ fix the login form
+› fix the login form
   5m ago
 
   write release notes
@@ -16,31 +16,31 @@ Type to search                                          Filter: [Cwd] All    Sor
 
 
 
-────────────────────────────────────────────────────────────────────────────────────────────   1 / 2
-enter resume · esc back · ctrl+c quit · tab focus sort/filter · ←/→ change option
-ctrl+o dense view · ctrl+t transcript · ctrl+e expand
+
+enter resume · esc back · tab filter/sort · ←/→ change                                         1 / 2
+ctrl+e details · ctrl+o dense · ctrl+t transcript
 
 100x12
 Resume a previous session
-Type to search                                          Filter: [Cwd] All    Sort: [Updated] Created
+Type to search                                            Filter: Cwd  All    Sort: Updated  Created
 
-❯ 5m ago      fix the login form
+› 5m ago      fix the login form
   2h ago      write release notes
 
 
 
 
-────────────────────────────────────────────────────────────────────────────────────────────   1 / 2
-enter resume · esc back · ctrl+c quit · tab focus sort/filter · ←/→ change option
-ctrl+o comfortable view · ctrl+t transcript · ctrl+e expand
+
+enter resume · esc back · tab filter/sort · ←/→ change                                         1 / 2
+ctrl+e details · ctrl+o comfortable · ctrl+t transcript
 
 40x9
 Resume a previous session
 Type to search
 
-❯ fix the login form
+› fix the login form
   5m ago
 
   write release notes
-────────────────────────────────   1 / 2
-enter resume · esc back
+
+enter resume · esc back            1 / 2

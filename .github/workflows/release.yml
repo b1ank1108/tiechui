@@ -113,6 +113,7 @@ jobs:
               shutil.copy2(Path('scripts') / script, output / script)
           (output / 'SHA256SUMS').write_text('\n'.join(sums) + '\n')
           PY
+      # The annotated tag message becomes the release notes.
       - name: Create draft for manual publication
         env:
           GH_TOKEN: ${{ github.token }}
@@ -120,4 +121,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" release/* --draft --verify-tag --title "$TAG" \
-            --generate-notes
+            --notes-from-tag

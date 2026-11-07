@@ -11,7 +11,6 @@ use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use tokio_util::sync::CancellationToken;
 
-use crate::palette::{Rgb, best_color};
 use crate::prompt::Input;
 use crate::status::compact_path;
 use crate::theme::Theme;
@@ -515,28 +514,31 @@ impl Resume {
     }
 
     fn toolbar(&self, theme: &Theme) -> Line<'static> {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
         let value = |name: &'static str, active: bool, focused: bool| match (active, focused) {
-            (true, true) => {
-                Span::styled(format!("[{name}]"), Style::default().fg(Color::Indexed(5)))
-            }
-            (true, false) => Span::raw(format!("[{name}]")),
-            (false, _) => Span::styled(name, Style::default().add_modifier(Modifier::DIM)),
+            (true, true) => Span::styled(name, theme.accent.add_modifier(Modifier::BOLD)),
+            (true, false) => Span::styled(name, bold),
+            (false, _) => Span::styled(name, theme.dim),
         };
         Line::from(vec![
             Span::styled("Filter: ", theme.dim),
             value("Cwd", !self.all, !self.sort_focused),
-            Span::raw(" "),
+            Span::raw("  "),
             value("All", self.all, !self.sort_focused),
             Span::raw("    "),
             Span::styled("Sort: ", theme.dim),
             value("Updated", !self.created, self.sort_focused),
-            Span::raw(" "),
+            Span::raw("  "),
             value("Created", self.created, self.sort_focused),
         ])
     }
 
+    /// Key hints, the widest that fit, with the position on the right; the list's view keys
+    /// get a row of their own when they do not fit beside the rest.
     fn footer(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let back = if self.fresh { "start new" } else { "back" };
+        let view = if self.dense { "comfortable" } else { "dense" };
+        let views = format!("ctrl+e details · ctrl+o {view} · ctrl+t transcript");
         let hints = if self.full.is_some() {
             vec![
                 "↑/↓ scroll · PgUp/PgDn · Home/End · esc back · ctrl+c quit".to_owned(),
@@ -546,50 +548,46 @@ impl Resume {
             ]
         } else {
             vec![
-                format!(
-                    "enter resume · esc {back} · ctrl+c quit · tab focus sort/filter · ←/→ change option"
-                ),
-                format!("enter resume · esc {back} · tab focus · ←/→ option"),
+                format!("enter resume · esc {back} · tab filter/sort · ←/→ change · {views}"),
+                format!("enter resume · esc {back} · tab filter/sort · ←/→ change"),
                 format!("enter resume · esc {back}"),
                 "esc".into(),
                 "⎋".into(),
             ]
         };
-        let hint = hints
-            .iter()
-            .find(|hint| wrap::width(hint) <= width)
-            .map_or("", String::as_str);
-        let mut lines = vec![hint_line(hint, width, theme)];
-        if self.full.is_none() && rows >= 12 && width >= 40 {
-            let view = if self.dense { "comfortable" } else { "dense" };
-            lines.push(hint_line(
-                &format!("ctrl+o {view} view · ctrl+t transcript · ctrl+e expand"),
-                width,
-                theme,
-            ));
+        let count = if self.full.is_some() {
+            format!("{} / {}", self.scroll + 1, self.lines.max(1))
+        } else {
+            let position = if self.filtered.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            };
+            format!("{position} / {}", self.filtered.len())
+        };
+        let fits = |hint: &String| wrap::width(hint) + wrap::width(&count) + 3 <= width;
+        let (hint, count) = match hints.iter().position(fits) {
+            Some(index) if rows >= 8 => (index, Some(count)),
+            _ => (
+                hints
+                    .iter()
+                    .position(|hint| wrap::width(hint) <= width)
+                    .unwrap_or(hints.len() - 1),
+                None,
+            ),
+        };
+        let mut line = hint_line(&hints[hint], width, theme);
+        if let Some(count) = count {
+            let gap = width.saturating_sub(wrap::line_width(&line) + wrap::width(&count));
+            line.spans.push(Span::raw(" ".repeat(gap)));
+            line.spans.push(Span::styled(count, theme.dim));
+        }
+        let mut lines = vec![line];
+        if self.full.is_none() && hint == 1 && rows >= 12 {
+            lines.push(hint_line(&views, width, theme));
         }
         if rows >= 8 {
-            let count = if self.full.is_some() {
-                format!("{} / {}", self.scroll + 1, self.lines.max(1))
-            } else {
-                let position = if self.filtered.is_empty() {
-                    0
-                } else {
-                    self.selected + 1
-                };
-                format!("{position} / {}", self.filtered.len())
-            };
-            let rule = "─".repeat(width.saturating_sub(wrap::width(&count) + 3).max(1));
-            let gap = width.saturating_sub(wrap::width(&rule) + wrap::width(&count));
-            let text = if gap >= 2 {
-                format!("{rule}{}{count}", " ".repeat(gap))
-            } else {
-                rule
-            };
-            lines.insert(
-                0,
-                wrap::fit(vec![Span::styled(text, theme.dim)], width, false),
-            );
+            lines.insert(0, Line::default());
         }
         lines
     }
@@ -657,10 +655,9 @@ impl Resume {
         let session = &self.list()[self.filtered[index]];
         let active = index == self.selected;
         let expanded = self.expanded.contains(&session.path);
-        let zebra = index % 2 == 1;
         let cursor = if active {
             Span::styled(
-                if expanded { "⌄ " } else { "❯ " },
+                if expanded { "⌄ " } else { "› " },
                 styles.selected.add_modifier(Modifier::BOLD),
             )
         } else {
@@ -700,7 +697,7 @@ impl Resume {
                 .spans,
             );
         }
-        let mut lines = vec![styles.surface(Line::from(spans), width, active, zebra)];
+        let mut lines = vec![wrap::fit(spans, width, true)];
         let directory = compact_path(&session.cwd, self.home.as_deref());
         if expanded {
             let metadata = [
@@ -745,8 +742,7 @@ impl Resume {
             if self.all {
                 text.push_str(&format!(" · {}", single_line(&directory)));
             }
-            let style = if active { styles.selected } else { theme.dim };
-            lines.push(styles.surface(Line::from(Span::styled(text, style)), width, active, zebra));
+            lines.push(wrap::fit(vec![Span::styled(text, theme.dim)], width, true));
         }
         lines
     }
@@ -861,47 +857,16 @@ struct Styles {
     /// The tail's color for everything but the user's words.
     quiet: Color,
     user: Color,
-    selected_bg: Option<Color>,
-    zebra_bg: Option<Color>,
 }
 
 impl Styles {
     fn new(theme: &Theme) -> Self {
         let light = theme.palette.light();
-        let title = if light {
-            best_color(Rgb(0, 100, 0), theme.palette.level).unwrap_or(Color::Indexed(2))
-        } else {
-            Color::Indexed(6)
-        };
         Self {
-            title: Style::default().fg(title).add_modifier(Modifier::BOLD),
-            selected: Style::default().fg(Color::Indexed(if light { 5 } else { 3 })),
+            title: Style::default().add_modifier(Modifier::BOLD),
+            selected: theme.accent,
             quiet: Color::Indexed(if light { 7 } else { 8 }),
             user: Color::Indexed(if light { 8 } else { 7 }),
-            selected_bg: theme.palette.surface(0.12, 0.12),
-            zebra_bg: theme.palette.surface(0.055, 0.04),
-        }
-    }
-
-    /// Resume rows: the selected row on a 12% surface, every other row on a fainter one.
-    fn surface(
-        &self,
-        line: Line<'static>,
-        width: usize,
-        selected: bool,
-        zebra: bool,
-    ) -> Line<'static> {
-        let line = wrap::fit(line.spans, width, true);
-        let bg = if selected {
-            self.selected_bg
-        } else if zebra {
-            self.zebra_bg
-        } else {
-            None
-        };
-        match bg {
-            Some(bg) => pad(line, width, Style::default().bg(bg)),
-            None => line,
         }
     }
 }
@@ -1010,7 +975,7 @@ fn title(session: &Summary) -> String {
 }
 
 /// `key label` segments: the key at full strength, its label dim.
-fn hint_line(text: &str, width: usize, theme: &Theme) -> Line<'static> {
+pub(crate) fn hint_line(text: &str, width: usize, theme: &Theme) -> Line<'static> {
     let light = theme.palette.light();
     let (key, label) = if light {
         (

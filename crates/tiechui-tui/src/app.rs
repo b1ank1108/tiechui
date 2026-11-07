@@ -1223,7 +1223,7 @@ impl App {
             }
             Action::Builtin(Builtin::Model) => {
                 let choices = select::models(&self.models, self.session.model.as_ref());
-                self.choose("Select Model", choices, &arguments);
+                self.choose("Model", choices, &arguments);
             }
             Action::Builtin(Builtin::Thinking) => {
                 let levels = self
@@ -1232,7 +1232,7 @@ impl App {
                     .as_ref()
                     .map_or_else(|| vec![ThinkingLevel::Off], |m| m.thinking_levels.clone());
                 let choices = select::thinking(&levels, self.session.thinking);
-                self.choose("Thinking Level", choices, &arguments);
+                self.choose("Thinking", choices, &arguments);
             }
             Action::Builtin(Builtin::Statusline) => {
                 self.picker = Some(StatusPicker::new(&self.status_line));
@@ -1277,6 +1277,9 @@ impl App {
                     .collect();
                 text.push("? on an empty draft shows the keyboard shortcuts".into());
                 self.transcript.info("Commands".into(), text.join("\n"));
+            }
+            Action::Module if name == "permissions" && arguments.is_empty() => {
+                self.choose("Permissions", select::permissions(self.permission), "");
             }
             Action::Module => {
                 self.send(Op::RunCommand { name, arguments });
@@ -2833,9 +2836,9 @@ impl App {
         }
         if let Some(select) = &self.select {
             let top = lines.len();
-            let (rows, (row, column)) = select.render(self.width, self.height, &self.theme);
+            let (rows, cursor) = select.render(self.width, self.height, &self.theme);
             lines.extend(rows);
-            return (lines, Some((top + row, column)));
+            return (lines, cursor.map(|(row, column)| (top + row, column)));
         }
         if let Some(mut picker) = self.picker.take() {
             let top = lines.len();

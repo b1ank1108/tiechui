@@ -1150,7 +1150,7 @@ fn model_and_thinking_pickers_switch_through_the_session() {
     let rows = text(&app.live().0);
     assert!(
         rows.iter()
-            .any(|r| r.starts_with("› ✓ ds/flash  400k window")),
+            .any(|r| r.starts_with("› 1. ds/flash ✓") && r.contains("400k window")),
         "{rows:#?}"
     );
     app.key(key(KeyCode::Down));
@@ -1177,18 +1177,51 @@ fn model_and_thinking_pickers_switch_through_the_session() {
     let rows = text(&app.live().0);
     assert!(
         rows.iter()
-            .any(|r| r.starts_with("›   high  Deep reasoning (~16k tokens)")),
+            .any(|r| r.starts_with("› 1. high") && r.contains("Deep reasoning (~16k tokens)")),
         "{rows:#?}"
     );
-    assert!(!rows.iter().any(|r| r.contains("✓ low")));
+    assert!(!rows.iter().any(|r| r.contains("low ✓")));
     app.key(key(KeyCode::Esc));
     assert!(ops(&mut app).is_empty());
-    assert!(
-        !text(&app.live().0)
-            .iter()
-            .any(|r| r.contains("Thinking Level"))
-    );
+    assert!(!text(&app.live().0).iter().any(|r| r.contains("Thinking")));
     assert!(app.take_model_save().is_none());
+}
+
+#[test]
+fn permissions_offers_the_modes_and_picks_by_digit() {
+    let mut app = ready(80);
+    app.event(event(EventKind::CommandsUpdated {
+        commands: vec![CommandInfo {
+            name: "permissions".into(),
+            description: "Switch the mode".into(),
+            argument_hint: None,
+        }],
+    }));
+    typed(&mut app, "/permissions");
+    app.key(key(KeyCode::Enter));
+    let rows = text(&app.live().0);
+    assert!(
+        rows.iter().any(|r| r.starts_with("› 1. rules ✓")),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|r| r.contains("4. show")), "{rows:#?}");
+    app.key(key(KeyCode::Char('2')));
+    assert_eq!(
+        ops(&mut app),
+        [Op::RunCommand {
+            name: "permissions".into(),
+            arguments: "auto".into(),
+        }]
+    );
+    typed(&mut app, "/permissions yolo");
+    app.key(key(KeyCode::Enter));
+    assert_eq!(
+        ops(&mut app),
+        [Op::RunCommand {
+            name: "permissions".into(),
+            arguments: "yolo".into(),
+        }]
+    );
 }
 
 fn asked(id: &str, request: ApprovalRequest) -> Event {
@@ -1758,37 +1791,37 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
     let rows = page(&mut app, 20);
     assert_eq!(rows[0], "Resume a previous session");
     assert!(
-        rows[1].ends_with("Filter: [Cwd] All    Sort: [Updated] Created"),
+        rows[1].ends_with("Filter: Cwd  All    Sort: Updated  Created"),
         "{rows:#?}"
     );
     let titles: Vec<&String> = rows
         .iter()
-        .filter(|r| r.starts_with("❯ ") || r.starts_with("  ") && !r.starts_with("   "))
+        .filter(|r| r.starts_with("› ") || r.starts_with("  ") && !r.starts_with("   "))
         .collect();
-    assert_eq!(titles[0], "❯ fix the login form");
+    assert_eq!(titles[0], "› fix the login form");
     assert!(rows.contains(&"  5m ago".to_owned()), "{rows:#?}");
     assert!(rows.iter().any(|r| r.ends_with("1 / 2")));
 
     typed(&mut app, "release");
     let rows = page(&mut app, 20);
-    assert!(rows.contains(&"❯ write release notes".to_owned()));
+    assert!(rows.contains(&"› write release notes".to_owned()));
     assert!(!rows.iter().any(|r| r.contains("login")));
     typed(&mut app, " missing");
     assert!(page(&mut app, 20).contains(&"No matching sessions".to_owned()));
     app.key(key(KeyCode::Esc));
-    assert!(page(&mut app, 20).contains(&"❯ fix the login form".to_owned()));
+    assert!(page(&mut app, 20).contains(&"› fix the login form".to_owned()));
 
     app.key(key(KeyCode::Tab));
     app.key(key(KeyCode::Right));
     let rows = page(&mut app, 20);
-    assert!(rows[1].ends_with("Sort: Updated [Created]"));
+    assert!(rows[1].ends_with("Sort: Updated  Created"));
     let at = |title: &str| rows.iter().position(|r| r.ends_with(title));
     assert!(
         at("write release notes") < at("fix the login form"),
         "newest created first"
     );
     assert!(
-        rows.contains(&"❯ fix the login form".to_owned()),
+        rows.contains(&"› fix the login form".to_owned()),
         "the selection stays"
     );
     app.key(key(KeyCode::Down));
@@ -1815,7 +1848,7 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
         rows.contains(&"  1m ago · /elsewhere".to_owned()),
         "{rows:#?}"
     );
-    assert!(rows.contains(&"❯ tune the build".to_owned()), "{rows:#?}");
+    assert!(rows.contains(&"› tune the build".to_owned()), "{rows:#?}");
 
     app.key(key(KeyCode::Enter));
     assert!(app.pager_frame(20).is_none());

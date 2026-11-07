@@ -66,11 +66,12 @@ fn main_previews_fit_available_columns_without_splitting_graphemes() {
             record.tasks[0].output = source;
             let mut tool = Tool::new("dispatch".into(), "subagent".into(), json!({}));
             tool.output = Some(json!({"details": record}));
+            let agent = tiechui_tui::wrap::width(&record.tasks[0].agent);
             let lines = tiechui_tui::tools::render(&[tool], width, &theme, View::History);
-            assert_eq!(lines.len(), 4);
-            let expected = format!("{}…", grapheme.repeat((width - 1) / columns));
-            assert_eq!(lines[2].to_string(), expected);
-            assert_eq!(lines[3].to_string(), expected);
+            assert_eq!(lines.len(), 3);
+            let fit = |columns_left: usize| format!("{}…", grapheme.repeat(columns_left / columns));
+            assert!(lines[1].to_string().ends_with(&fit(width - agent - 9)));
+            assert_eq!(lines[2].to_string(), format!("      {}", fit(width - 7)));
             assert!(lines.iter().all(|line| line.width() <= width));
         }
     }

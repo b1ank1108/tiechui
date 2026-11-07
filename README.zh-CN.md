@@ -259,7 +259,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `/loop [interval] <prompt>`、`/cron-list`、`/cron-delete <id>` | 立即并按间隔运行提示；列出或取消定时任务 |
 | `/subagents` | 子任务及其输出 |
 | `/shells [output\|background\|stop <id>]` | shell 任务：查看输出、把运行中的命令转入后台、停止 |
-| `/permissions [rules\|auto\|yolo]` | 规则、授权和最近的决定；切换本会话的模式 |
+| `/permissions [rules\|auto\|yolo\|show]` | 选择本会话的模式，或查看规则、授权和最近的决定 |
 | `/status` | 模块状态、配置路径、诊断 |
 | `/trust [allow\|deny]` | 项目信任 |
 | `/skills` | 把技能插入草稿；界面外用 `chui skills list` |
@@ -470,7 +470,9 @@ Windows 构建和测试以不阻塞的方式运行。
 **发布**（`.github/workflows/release.yml`）由与 workspace 版本一致的 `v*` tag 触发：
 
 - 在原生 Linux x86_64 与 aarch64、macOS arm64 与 x86_64 runner 上构建 tarball，并为 Windows x86_64 构建 zip；
-- 把它们和合并的 `SHA256SUMS` 附加到**草稿** release，由你手动发布。
+- 把它们和合并的 `SHA256SUMS` 附加到**草稿** release，由你手动发布；
+- 带注释 tag 的说明（`git tag -a v0.2.0 -F notes.md`）就是 release 说明；
+- 发布 release 后，`.github/workflows/npm.yml` 发布 `@tiechui/cli`。
 
 ### 目录结构
 

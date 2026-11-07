@@ -277,7 +277,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 | `/loop [interval] <prompt>`, `/cron-list`, `/cron-delete <id>` | Run a prompt now and on an interval; list or cancel scheduled tasks |
 | `/subagents` | Child tasks and their output |
 | `/shells [output\|background\|stop <id>]` | Shell tasks: view output, move a running command to the background, stop it |
-| `/permissions [rules\|auto\|yolo]` | Rules, grants and recent decisions; switch the mode for this session |
+| `/permissions [rules\|auto\|yolo\|show]` | Pick the mode for this session, or show rules, grants and recent decisions |
 | `/status` | Module state, config paths, diagnostics |
 | `/trust [allow\|deny]` | Project trust |
 | `/skills` | Insert a skill into the draft; use `chui skills list` outside the TUI |
@@ -508,7 +508,9 @@ and macOS. A Windows build and test runs as a non-blocking attempt.
 the workspace version:
 
 - it builds tarballs on native Linux x86_64 and aarch64 and macOS arm64 and x86_64 runners, and a zip for Windows x86_64;
-- it attaches them and a combined `SHA256SUMS` to a **draft** release, which you publish by hand.
+- it attaches them and a combined `SHA256SUMS` to a **draft** release, which you publish by hand;
+- the annotated tag message (`git tag -a v0.2.0 -F notes.md`) becomes the release notes;
+- publishing the release runs `.github/workflows/npm.yml`, which publishes `@tiechui/cli`.
 
 ### Layout
 

@@ -114,8 +114,8 @@ project agent `permission` frontmatter. Changing child cwd never loads new
 policy; child grants cannot affect the parent or siblings. The CLI constructs a
 fresh guard per child, forwarding approvals through the parent queue.
 
-`/permissions` is a read-only, scrollable foreground panel showing the current
-mode, effective rules with origins, temporary grants and the latest 20 decisions (from a 100-entry buffer)
+`/permissions` picks the mode for the session; `/permissions show` is a read-only,
+scrollable foreground panel showing the current mode, effective rules with origins, temporary grants and the latest 20 decisions (from a 100-entry buffer)
 from this module instance. It never restores decisions or grants from a session
 log and never displays raw tool arguments. `/status` remains available from the
 CLI host when the permissions module is disabled.
