@@ -479,3 +479,116 @@ async fn turn_undo_and_rewind_through_app_server() {
     assert!(trashed.join("manifest.json").exists());
     fixture.server.verify().unwrap();
 }
+
+#[tokio::test]
+async fn providers_and_defaults_are_edited_and_reload_open_sessions() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let providers = fixture.home.join("providers.toml");
+    let config = fixture.home.join("config.toml");
+    client.ok("session/open", json!({"cwd": cwd})).await;
+    let listed = client.ok("providers/list", json!({})).await;
+    assert_eq!(
+        listed,
+        json!([{"name": "fixture", "wire": "openai-completions", "base_url": fixture.server.uri(),
+            "api_key": false, "api_key_env": "TC_E2E_FAKE_KEY", "models": [{"id": "model",
+            "context_window": 200000, "max_output": 4096, "levels": ["off"], "mapping": {},
+            "images": false}]}])
+    );
+
+    let second = json!({"id": "second", "context_window": 1000, "max_output": 100,
+        "levels": ["off", "low", "high"], "mapping": {"high": "max-effort"}, "images": true});
+    client
+        .ok(
+            "providers/save_model",
+            json!({"provider": "fixture", "previous": null, "model": second}),
+        )
+        .await;
+    let text = std::fs::read_to_string(&providers).unwrap();
+    assert!(
+        text.contains(
+            "thinking_levels = { minimal = false, medium = false, high = \"max-effort\" }"
+        )
+    );
+    assert_eq!(
+        client.ok("providers/list", json!({})).await[0]["models"][1],
+        second
+    );
+    // The open session reloads and lists the new model.
+    client
+        .until(|e| {
+            matches!(e, EventKind::ModelsUpdated { models } if models.iter().any(|m| m.id == "second"))
+        })
+        .await;
+    assert!(
+        client
+            .call(
+                "providers/save_model",
+                json!({"provider": "fixture", "previous": null, "model": second}),
+            )
+            .await
+            .is_err()
+    );
+
+    client
+        .ok(
+            "config/update",
+            json!({"key": "model", "value": "fixture/second"}),
+        )
+        .await;
+    client
+        .ok("config/update", json!({"key": "thinking", "value": "high"}))
+        .await;
+    for (key, value) in [
+        ("model", json!("fixture/none")),
+        ("tui.theme", json!("dark")),
+    ] {
+        assert!(
+            client
+                .call("config/update", json!({"key": key, "value": value}))
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "model = \"fixture/second\"\nthinking = \"high\"\n"
+    );
+
+    client
+        .ok(
+            "providers/save",
+            json!({"name": "other", "wire": "anthropic-messages", "base_url": null, "api_key": "k"}),
+        )
+        .await;
+    let listed = client.ok("providers/list", json!({})).await;
+    assert_eq!(listed[1]["name"], "other");
+    assert_eq!(listed[1]["api_key"], true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&providers).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // The scripted server answers only the conversation, so the check reports its refusal.
+    let tested = client
+        .ok(
+            "providers/test",
+            json!({"provider": "fixture", "id": "model"}),
+        )
+        .await;
+    assert!(tested["error"].is_string());
+    client
+        .ok("providers/delete", json!({"name": "other"}))
+        .await;
+    client
+        .ok(
+            "providers/delete_model",
+            json!({"provider": "fixture", "id": "second"}),
+        )
+        .await;
+    let listed = client.ok("providers/list", json!({})).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["models"].as_array().unwrap().len(), 1);
+}

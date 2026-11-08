@@ -2,6 +2,8 @@
 //! Each open session's events arrive as `session/event` notifications numbered per session;
 //! a snapshot's `seq` is the last number its events include.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -189,6 +191,84 @@ pub struct UndoCheck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RewindResult {
     pub conflicts: Vec<String>,
+}
+
+/// A provider declared in `providers.toml`. Its key is never sent.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderEntry {
+    pub name: String,
+    /// `anthropic-messages` or `openai-completions`.
+    pub wire: String,
+    pub base_url: Option<String>,
+    /// Whether a key is written in the file.
+    pub api_key: bool,
+    pub api_key_env: Option<String>,
+    pub models: Vec<ModelEntry>,
+}
+
+/// The parts of a declared model a client edits; saving keeps the rest of its table.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelEntry {
+    pub id: String,
+    pub context_window: u64,
+    pub max_output: u64,
+    /// Levels offered, as in `ModelInfo`; only `off` without reasoning.
+    pub levels: Vec<ThinkingLevel>,
+    /// The value sent to the provider for a level, where one is configured.
+    pub mapping: BTreeMap<ThinkingLevel, String>,
+    pub images: bool,
+}
+
+/// Declares a provider or updates one.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderSaveParams {
+    pub name: String,
+    pub wire: String,
+    pub base_url: Option<String>,
+    /// A key to write in place of `api_key_env`; `None` keeps the current one.
+    pub api_key: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderParams {
+    pub name: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelSaveParams {
+    pub provider: String,
+    /// The id of the model to update; `None` adds the model.
+    pub previous: Option<String>,
+    pub model: ModelEntry,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelParams {
+    pub provider: String,
+    pub id: String,
+}
+
+/// The `providers/test` result of one short request to the model.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderTest {
+    /// Why the request failed.
+    pub error: Option<String>,
+    pub millis: u64,
+}
+
+/// Sets a default for new sessions in the user's `config.toml`: `model` or `thinking`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigUpdateParams {
+    pub key: String,
+    pub value: serde_json::Value,
 }
 
 /// The `session/event` notification.

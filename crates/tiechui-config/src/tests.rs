@@ -1312,3 +1312,74 @@ fn compaction_keys_are_only_snake_case() {
         }
     }
 }
+
+#[test]
+fn provider_and_model_edits_keep_other_keys_and_reject_invalid_results() {
+    let temp = temp_dir();
+    let text = "# providers\n[local]\nwire = \"openai-completions\" # wire\napi_key_env = \"FIXTURE_API_KEY\"\nmodels = [{ id = \"small\", context_window = 32000, max_output = 4000, cache_retention = \"long\" }]\n";
+    let path = write(temp.path(), "providers.toml", text);
+    let model = |id: &str| ModelConfig {
+        id: id.into(),
+        cache_retention: Default::default(),
+        prices: None,
+        fallback_models: Vec::new(),
+        context_window: 64000,
+        max_output: 8000,
+        reasoning: true,
+        thinking: Default::default(),
+        thinking_levels: Some(BTreeMap::from([
+            (
+                ThinkingLevel::Minimal,
+                ThinkingLevelValue::Unsupported(UnsupportedLevel),
+            ),
+            (
+                ThinkingLevel::High,
+                ThinkingLevelValue::Wire("max-effort".into()),
+            ),
+        ])),
+        compat: None,
+        images: true,
+    };
+    save_model(&path, "local", Some("small"), &model("small")).unwrap();
+    save_model(&path, "local", None, &model("large")).unwrap();
+    assert!(save_model(&path, "local", None, &model("large")).is_err());
+    assert!(save_model(&path, "missing", None, &model("x")).is_err());
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.starts_with("# providers\n[local]\nwire = \"openai-completions\" # wire\n"));
+    assert!(saved.contains("[[local.models]]\nid = \"small\""));
+    assert!(saved.contains("thinking_levels = { minimal = false, high = \"max-effort\" }"));
+    let local = &load_providers(&path).unwrap()["local"];
+    assert_eq!(local.models[0].cache_retention, CacheRetention::Long);
+    assert_eq!(local.models[1].context_window, 64000);
+
+    save_provider(
+        &path,
+        "local",
+        "anthropic-messages",
+        Some("https://a.invalid"),
+        Some("key"),
+    )
+    .unwrap();
+    let local = &load_providers(&path).unwrap()["local"];
+    assert_eq!(
+        (local.wire, local.api_key_env.as_deref()),
+        (Wire::AnthropicMessages, None)
+    );
+    assert!(save_provider(&path, "local", "unknown", None, None).is_err());
+    assert!(save_provider(&path, "a/b", "anthropic-messages", None, None).is_err());
+    save_provider(&path, "other", "openai-completions", None, None).unwrap();
+    remove_model(&path, "local", "small").unwrap();
+    remove_provider(&path, "other").unwrap();
+    let providers = load_providers(&path).unwrap();
+    assert_eq!(providers.keys().collect::<Vec<_>>(), ["local"]);
+    assert_eq!(providers["local"].models.len(), 1);
+    assert!(remove_provider(&path, "other").is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}

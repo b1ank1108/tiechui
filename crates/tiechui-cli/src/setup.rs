@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use futures::StreamExt;
-use tiechui_config::{ApiKey, ConfigPaths, ProviderConfig, Wire};
+use tiechui_config::{ApiKey, ConfigPaths, ModelConfig, ProviderConfig, Wire};
 use tiechui_model::{Content, Message, ModelId, ModelRequest, ReasoningLevel, Role};
 use tiechui_tui::consent::{Answer, Input, Question, ask};
 use tokio_util::sync::CancellationToken;
@@ -169,7 +169,12 @@ pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
             })
             .collect();
         let model = format!("{name}/{}", ids[0]);
-        if let Err(error) = pending(&format!("Checking {model}…"), check(&name, &config)).await {
+        if let Err(error) = pending(
+            &format!("Checking {model}…"),
+            check(&name, &config, &config.models[0]),
+        )
+        .await
+        {
             match choose(
                 "The check failed",
                 vec![
@@ -230,9 +235,12 @@ fn key() -> Result<Option<Key>, String> {
     })
 }
 
-/// One request to the first model with its declared limits, ended at its first event.
-async fn check(name: &str, config: &ProviderConfig) -> Result<(), String> {
-    let model = &config.models[0];
+/// One request to the model with its declared limits, ended at its first event.
+pub(crate) async fn check(
+    name: &str,
+    config: &ProviderConfig,
+    model: &ModelConfig,
+) -> Result<(), String> {
     let provider = tiechui_providers::from_config(name, config).map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
     let request = ModelRequest {
@@ -249,7 +257,8 @@ async fn check(name: &str, config: &ProviderConfig) -> Result<(), String> {
         input_tokens: None,
         tools: Vec::new(),
         max_output: None,
-        reasoning: model.reasoning.then_some(ReasoningLevel::Low),
+        reasoning: Some(ReasoningLevel::Low)
+            .filter(|low| tiechui_providers::offered(model).contains(&Some(*low))),
     };
     let first = match provider.stream(request, cancel.clone()).await {
         Ok(mut stream) => stream.next().await,

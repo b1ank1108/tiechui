@@ -18,7 +18,7 @@ fn value(model: &ModelConfig, level: Option<ReasoningLevel>) -> Option<&Thinking
 
 /// Levels of a reasoning model are offered unless marked unsupported, xhigh and
 /// max only when mapped; other models only have off.
-pub(crate) fn offered(model: &ModelConfig) -> Vec<Option<ReasoningLevel>> {
+pub fn offered(model: &ModelConfig) -> Vec<Option<ReasoningLevel>> {
     if !model.reasoning {
         return vec![None];
     }

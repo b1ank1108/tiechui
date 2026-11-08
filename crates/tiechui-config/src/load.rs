@@ -207,11 +207,18 @@ fn parse_table(path: &Path, text: &str) -> Result<Table, ConfigError> {
 
 /// Validates every provider without reading credential values.
 pub fn load_providers(path: &Path) -> Result<BTreeMap<String, ProviderConfig>, ConfigError> {
-    let Some(text) = read_optional(path)? else {
-        return Ok(BTreeMap::new());
-    };
+    match read_optional(path)? {
+        Some(text) => parse_providers(path, &text),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+pub(crate) fn parse_providers(
+    path: &Path,
+    text: &str,
+) -> Result<BTreeMap<String, ProviderConfig>, ConfigError> {
     let providers: BTreeMap<String, ProviderConfig> = serde_path_to_error::deserialize(
-        Value::Table(parse_table(path, &text)?),
+        Value::Table(parse_table(path, text)?),
     )
     .map_err(|error| ConfigError::new(path, error.path().to_string(), error.inner().message()))?;
     for (name, provider) in &providers {

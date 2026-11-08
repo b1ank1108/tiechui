@@ -22,7 +22,10 @@ pub use load::{load, load_providers, load_with_mandatory_modules, providers_sche
 pub use mcp::McpServerConfig;
 pub use paths::ConfigPaths;
 pub use permissions::{PermissionAction, PermissionMode, PermissionRule, PermissionsConfig};
-pub use save::{add_provider, save_preference, save_status_line};
+pub use save::{
+    add_provider, remove_model, remove_provider, save_model, save_preference, save_provider,
+    save_status_line,
+};
 pub use trust::{TrustEntry, TrustStore};
 
 /// `HOME`, falling back to `USERPROFILE` where Windows leaves `HOME` unset.

@@ -2,10 +2,10 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use toml_edit::{Document, InlineTable, Item, Key, Table, Value};
+use toml_edit::{ArrayOfTables, Document, DocumentMut, InlineTable, Item, Key, Table, Value};
 
-use crate::load::read_optional;
-use crate::{ConfigError, StatusLineConfig, StatusLineItem};
+use crate::load::{parse_providers, read_optional};
+use crate::{ConfigError, ModelConfig, StatusLineConfig, StatusLineItem, ThinkingLevelValue};
 
 /// Edit one dotted TOML key, retaining surrounding comments and unrelated formatting.
 /// Quoted key segments are supported. Configuration validation happens when loading.
@@ -51,6 +51,187 @@ pub fn add_provider(path: &Path, name: &str, table: &str) -> Result<(), ConfigEr
     };
     let rendered = format!("{text}{separator}{table}");
     replace(path, name, original, &rendered)
+}
+
+/// Sets a provider's wire, address and, when given, inline key in place of `api_key_env`,
+/// declaring the provider if it is new. A file holding a key is readable by its owner alone.
+pub fn save_provider(
+    path: &Path,
+    name: &str,
+    wire: &str,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<(), ConfigError> {
+    if name.is_empty() || name.contains('/') {
+        return Err(ConfigError::new(
+            path,
+            name,
+            "provider names are not empty and have no /",
+        ));
+    }
+    edit_providers(path, name, |document| {
+        let fresh = !document.contains_key(name);
+        let provider = document
+            .entry(name)
+            .or_insert(Item::Table(Table::new()))
+            .as_table_mut()
+            .ok_or("the provider is not a table")?;
+        if fresh {
+            provider.decor_mut().set_prefix("\n");
+        }
+        put(provider, "wire", wire.into());
+        match base_url {
+            Some(url) => put(provider, "base_url", url.into()),
+            None => drop(provider.remove("base_url")),
+        }
+        if let Some(key) = api_key {
+            put(provider, "api_key", key.into());
+            provider.remove("api_key_env");
+        }
+        Ok(())
+    })?;
+    #[cfg(unix)]
+    if api_key.is_some() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| ConfigError::new(path, name, error.to_string()))?;
+    }
+    Ok(())
+}
+
+pub fn remove_provider(path: &Path, name: &str) -> Result<(), ConfigError> {
+    edit_providers(path, name, |document| {
+        document
+            .remove(name)
+            .map(drop)
+            .ok_or("the provider is not declared")
+    })
+}
+
+/// Writes a model's limits, reasoning, thinking levels and image input, keeping its other keys.
+/// `previous` names the model to update; without it the model is added.
+pub fn save_model(
+    path: &Path,
+    provider: &str,
+    previous: Option<&str>,
+    model: &ModelConfig,
+) -> Result<(), ConfigError> {
+    edit_providers(path, provider, |document| {
+        let models = models(document, provider)?;
+        if previous != Some(model.id.as_str()) && position(models, &model.id).is_some() {
+            return Err("the model is already declared");
+        }
+        let table = match previous {
+            Some(id) => {
+                let index = position(models, id).ok_or("the model is not declared")?;
+                models.get_mut(index).ok_or("the model is not declared")?
+            }
+            None => {
+                let mut table = Table::new();
+                table.decor_mut().set_prefix("\n");
+                models.push(table);
+                let last = models.len() - 1;
+                models.get_mut(last).ok_or("the model is not declared")?
+            }
+        };
+        let count = |n: u64| {
+            i64::try_from(n)
+                .map(Value::from)
+                .map_err(|_| "a limit is too large")
+        };
+        put(table, "id", model.id.as_str().into());
+        put(table, "context_window", count(model.context_window)?);
+        put(table, "max_output", count(model.max_output)?);
+        put(table, "reasoning", model.reasoning.into());
+        match model
+            .thinking_levels
+            .as_ref()
+            .filter(|levels| !levels.is_empty())
+        {
+            Some(levels) => {
+                let mut inline = InlineTable::new();
+                for (level, value) in levels {
+                    let name = serde_json::to_value(level)
+                        .ok()
+                        .and_then(|name| name.as_str().map(str::to_owned))
+                        .ok_or("a thinking level has no name")?;
+                    let value = match value {
+                        ThinkingLevelValue::Wire(wire) => Value::from(wire.as_str()),
+                        ThinkingLevelValue::Unsupported(_) => Value::from(false),
+                    };
+                    inline.insert(&name, value);
+                }
+                put(table, "thinking_levels", Value::InlineTable(inline));
+            }
+            None => drop(table.remove("thinking_levels")),
+        }
+        put(table, "images", model.images.into());
+        Ok(())
+    })
+}
+
+pub fn remove_model(path: &Path, provider: &str, id: &str) -> Result<(), ConfigError> {
+    edit_providers(path, provider, |document| {
+        let models = models(document, provider)?;
+        models.remove(position(models, id).ok_or("the model is not declared")?);
+        Ok(())
+    })
+}
+
+/// Edits `providers.toml` in place and saves it only if every provider still loads.
+fn edit_providers(
+    path: &Path,
+    name: &str,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<(), &'static str>,
+) -> Result<(), ConfigError> {
+    let original = read_optional(path)?;
+    let text = original.as_deref().unwrap_or("");
+    let mut document = Document::parse(text)
+        .map_err(|error| ConfigError::new(path, name, error.message()))?
+        .into_mut();
+    edit(&mut document).map_err(|message| ConfigError::new(path, name, message))?;
+    let rendered = preserve_unchanged_text(text, &document.to_string());
+    parse_providers(path, &rendered)?;
+    replace(path, name, original, &rendered)
+}
+
+/// A provider's models as `[[name.models]]` tables, converting an inline array.
+fn models<'a>(
+    document: &'a mut DocumentMut,
+    provider: &str,
+) -> Result<&'a mut ArrayOfTables, &'static str> {
+    let provider = document
+        .get_mut(provider)
+        .and_then(Item::as_table_mut)
+        .ok_or("the provider is not declared")?;
+    if let Some(inline) = provider.remove("models") {
+        let tables = inline
+            .into_array_of_tables()
+            .map_err(|_| "models are not tables")?;
+        provider.insert("models", Item::ArrayOfTables(tables));
+    }
+    provider
+        .entry("models")
+        .or_insert(Item::ArrayOfTables(ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .ok_or("models are not tables")
+}
+
+fn position(models: &ArrayOfTables, id: &str) -> Option<usize> {
+    models
+        .iter()
+        .position(|model| model.get("id").and_then(Item::as_str) == Some(id))
+}
+
+/// Replaces a value, keeping its comments, or adds it.
+fn put(table: &mut Table, key: &str, mut value: Value) {
+    match table.get_mut(key).and_then(Item::as_value_mut) {
+        Some(previous) => {
+            *value.decor_mut() = previous.decor().clone();
+            *previous = value;
+        }
+        None => drop(table.insert(key, Item::Value(value))),
+    }
 }
 
 /// Replaces `path` atomically unless it changed since `original` was read. New files are 0600.

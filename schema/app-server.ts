@@ -54,6 +54,8 @@ ahead: number,
  */
 behind: number, files: Array<CommitFile>, };
 
+export type ConfigUpdateParams = { key: string, value: JsonValue, };
+
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
 export type ContextSnapshot = { model: string, 
@@ -208,6 +210,16 @@ export type LiveState = "idle" | "running" | "waiting" | "failed";
 
 export type LogParams = { root: string, limit: number, };
 
+export type ModelEntry = { id: string, context_window: number, max_output: number, 
+/**
+ * Levels offered, as in `ModelInfo`; only `off` without reasoning.
+ */
+levels: Array<ThinkingLevel>, 
+/**
+ * The value sent to the provider for a level, where one is configured.
+ */
+mapping: { [key in ThinkingLevel]?: string }, images: boolean, };
+
 export type ModelInfo = { provider: string, 
 /**
  * The model's own id, without the provider prefix.
@@ -221,6 +233,14 @@ context_window: number, reasoning: boolean,
  * Levels the model accepts, `off` first.
  */
 thinking_levels: Array<ThinkingLevel>, };
+
+export type ModelParams = { provider: string, id: string, };
+
+export type ModelSaveParams = { provider: string, 
+/**
+ * The id of the model to update; `None` adds the model.
+ */
+previous: string | null, model: ModelEntry, };
 
 export type MoveParams = { root: string, from: string, to: string, };
 
@@ -241,6 +261,30 @@ export type PluginPanel = { title: string, nodes: Array<PanelNode>, };
 export type PluginPrompt = { "kind": "select", title: string, text: string, options: Array<string>, } | { "kind": "confirm", title: string, text: string, } | { "kind": "input", title: string, text: string, } | { "kind": "panel", panel: PluginPanel, };
 
 export type ProtocolMessage = Submission | Event | JsonRpcMessage;
+
+export type ProviderEntry = { name: string, 
+/**
+ * `anthropic-messages` or `openai-completions`.
+ */
+wire: string, base_url: string | null, 
+/**
+ * Whether a key is written in the file.
+ */
+api_key: boolean, api_key_env: string | null, models: Array<ModelEntry>, };
+
+export type ProviderParams = { name: string, };
+
+export type ProviderSaveParams = { name: string, wire: string, base_url: string | null, 
+/**
+ * A key to write in place of `api_key_env`; `None` keeps the current one.
+ */
+api_key: string | null, };
+
+export type ProviderTest = { 
+/**
+ * Why the request failed.
+ */
+error: string | null, millis: number, };
 
 export type PullRequest = { number: number, state: PullRequestState, url: string, };
 

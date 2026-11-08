@@ -71,6 +71,14 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::TurnChanges>();
                 d.visit::<app::UndoCheck>();
                 d.visit::<app::RewindResult>();
+                d.visit::<app::ProviderEntry>();
+                d.visit::<app::ModelEntry>();
+                d.visit::<app::ProviderSaveParams>();
+                d.visit::<app::ProviderParams>();
+                d.visit::<app::ModelSaveParams>();
+                d.visit::<app::ModelParams>();
+                d.visit::<app::ProviderTest>();
+                d.visit::<app::ConfigUpdateParams>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

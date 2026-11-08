@@ -17,6 +17,7 @@ use tiechui_model::{ModelCapabilities, ModelId, ModelRequest, ReasoningLevel, St
 use tokio_util::sync::CancellationToken;
 
 pub use error::{ErrorKind, ProviderError};
+pub use thinking::offered;
 use transport::client_builder;
 
 #[async_trait]

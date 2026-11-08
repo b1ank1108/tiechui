@@ -2,13 +2,14 @@
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
 mod projection;
+mod providers;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
@@ -43,6 +44,8 @@ struct Live {
     /// The epoch of the latest `ThreadStarted`.
     started: watch::Receiver<Option<SessionEpoch>>,
     pump: Mutex<Option<JoinHandle<()>>>,
+    /// The configuration changed since the session started.
+    stale: AtomicBool,
 }
 
 struct Server {
@@ -189,7 +192,10 @@ impl Server {
                 let opened = match method {
                     "session/open" => self.open(params).await,
                     "session/fork" => self.fork(params).await,
-                    "session/reload" => self.reload(params).await,
+                    "session/reload" => match parse::<ThreadParams>(params) {
+                        Ok(p) => self.reload(&p.thread_id).await,
+                        Err(error) => Err(error),
+                    },
                     _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
                 };
                 match opened {
@@ -214,6 +220,13 @@ impl Server {
             "session/trash" => self.trash(params).await,
             "trust" => self.trust(params).await,
             _ if turns::handles(method) => self.turn(method, params).await,
+            _ if providers::handles(method) => {
+                let reply = providers::handle(&self.home, method, params).await;
+                if reply.is_ok() && providers::edits(method) {
+                    self.refresh();
+                }
+                reply
+            }
             #[cfg(feature = "workspace")]
             _ if workspace::handles(method) => {
                 workspace::dispatch(&self.workspace, method, params).await
@@ -414,6 +427,7 @@ impl Server {
             projection: projection.clone(),
             started: started.clone(),
             pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
         });
         lock(&self.sessions).insert(thread.clone(), live.clone());
         let pump = tokio::spawn(self.clone().pump(
@@ -444,13 +458,22 @@ impl Server {
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    let mut projection = lock(&projection);
-                    let seq = projection.apply(&event);
-                    let epoch = matches!(event.event, EventKind::ThreadStarted { .. })
-                        .then_some(event.epoch);
-                    self.notify("session/event", SessionEvent { seq, event });
-                    if epoch.is_some() {
-                        ready.send_replace(epoch);
+                    let settled = matches!(
+                        event.event,
+                        EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
+                    );
+                    {
+                        let mut projection = lock(&projection);
+                        let seq = projection.apply(&event);
+                        let epoch = matches!(event.event, EventKind::ThreadStarted { .. })
+                            .then_some(event.epoch);
+                        self.notify("session/event", SessionEvent { seq, event });
+                        if epoch.is_some() {
+                            ready.send_replace(epoch);
+                        }
+                    }
+                    if settled && let Ok(live) = self.live(&thread) {
+                        self.settle(&thread, &live);
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -504,15 +527,14 @@ impl Server {
     }
 
     /// Starts the session again from its file, so configuration and modules reload.
-    async fn reload(self: &Arc<Self>, params: Value) -> Result<Arc<Live>, rpc::Error> {
-        let thread = parse::<ThreadParams>(params)?.thread_id;
-        let live = self.live(&thread)?;
+    async fn reload(self: &Arc<Self>, thread: &ThreadId) -> Result<Arc<Live>, rpc::Error> {
+        let live = self.live(thread)?;
         let options = Options {
             mode: mode(&live),
             ..Default::default()
         };
         let epoch = SessionEpoch(lock(&live.projection).epoch.0 + 1);
-        self.close(&thread).await;
+        self.close(thread).await;
         Ok(self
             .start(
                 options,
@@ -522,6 +544,39 @@ impl Server {
             )
             .await?
             .1)
+    }
+
+    /// Marks each open session stale so it reloads the changed configuration.
+    fn refresh(self: &Arc<Self>) {
+        let open: Vec<_> = lock(&self.sessions)
+            .iter()
+            .map(|(thread, live)| (thread.clone(), live.clone()))
+            .collect();
+        for (thread, live) in open {
+            live.stale.store(true, Ordering::Relaxed);
+            self.settle(&thread, &live);
+        }
+    }
+
+    /// Reloads a stale session, unless that would cut off a turn, an approval, a compaction
+    /// or queued input; it is tried again as each ends.
+    fn settle(self: &Arc<Self>, thread: &ThreadId, live: &Live) {
+        if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let server = self.clone();
+        let thread = thread.clone();
+        tokio::spawn(async move {
+            if let Err(error) = server.reload(&thread).await {
+                server.notify(
+                    "session/closed",
+                    SessionClosed {
+                        thread_id: thread,
+                        error: Some(error.message),
+                    },
+                );
+            }
+        });
     }
 
     /// Copies the branch through the named turn into a new session and opens it.

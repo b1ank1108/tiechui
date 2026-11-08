@@ -36,6 +36,19 @@ impl Projection {
         }
     }
 
+    /// Whether a turn, an approval, a compaction or queued input is under way.
+    pub fn busy(&self) -> bool {
+        let queued = matches!(
+            self.latest.get("queue").map(|e| &e.event),
+            Some(EventKind::QueueUpdated { steering, follow_up })
+                if !steering.is_empty() || !follow_up.is_empty()
+        );
+        queued
+            || !self.turn.is_empty()
+            || !self.approvals.is_empty()
+            || self.latest.contains_key("compaction")
+    }
+
     /// Numbers the event and folds it in.
     pub fn apply(&mut self, event: &Event) -> u64 {
         self.seq += 1;
