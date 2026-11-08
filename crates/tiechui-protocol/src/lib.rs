@@ -171,6 +171,9 @@ pub enum ApprovalRequest {
         origin: String,
         /// What allowing for the session grants; empty when it cannot be offered.
         session_patterns: Vec<String>,
+        /// For `write` and `edit`, the file before and after the call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<Box<FilePreview>>,
     },
     /// An MCP server's elicitation parameters, as sent.
     Elicitation {
@@ -180,6 +183,13 @@ pub enum ApprovalRequest {
     Questions {
         questions: Vec<Question>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+pub struct FilePreview {
+    pub before: String,
+    pub after: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -559,6 +569,6 @@ pub enum EventKind {
 #[serde(untagged)]
 pub enum ProtocolMessage {
     Submission(Submission),
-    Event(Event),
+    Event(Box<Event>),
     JsonRpc(rpc::JsonRpcMessage),
 }

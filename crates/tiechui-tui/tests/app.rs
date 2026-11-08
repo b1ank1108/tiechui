@@ -1247,6 +1247,7 @@ fn bash(command: &str) -> ApprovalRequest {
         matched_pattern: Some("rm *".into()),
         origin: "user".into(),
         session_patterns: vec!["rm *".into()],
+        preview: None,
     }
 }
 
@@ -1457,6 +1458,7 @@ fn prompt_layouts() {
                 matched_pattern: None,
                 origin: "builtin".into(),
                 session_patterns: vec!["/repo/src/*".into()],
+                preview: None,
             },
         ));
         shots.push(format!("{width}x{height}\n{}", screen(&mut app)));

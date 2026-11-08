@@ -90,7 +90,9 @@ write/edit contents), matched rule and values, source, cwd, proposed session
 scope, and a cancellation token. `chui` implements it through the session's
 interaction queue, which shows one prompt at a time alongside MCP elicitations.
 Decisions allow once, allow the displayed session scope, optionally widen a
-directional scope to both directions, or deny with a reason. Memory-only grants
+directional scope to both directions, or deny with a reason. A `write` or `edit`
+inside the workspace offers the whole workspace for both tools; elsewhere the
+scope is the file's directory. Memory-only grants
 are keyed by thread and `SessionEpoch`; new instances/epochs clear them. Late
 approval results cannot grant into a different epoch; replay restores no grants.
 

@@ -7,7 +7,7 @@ use tiechui_module_permissions::{
 };
 use tiechui_plugin_api::serde_json::{Value, json};
 use tiechui_plugin_api::{CancellationToken, ToolError, async_trait};
-use tiechui_protocol::{ApprovalDecision, ApprovalRequest};
+use tiechui_protocol::{ApprovalDecision, ApprovalRequest, FilePreview};
 
 pub(crate) struct Prompts(pub Interactions);
 
@@ -60,6 +60,8 @@ impl ApprovalRequester for Prompts {
         request: Request,
         cancel: CancellationToken,
     ) -> Result<Decision, ToolError> {
+        let preview = tiechui_module_editing::preview(&request.call, &request.cwd)
+            .map(|(before, after)| Box::new(FilePreview { before, after }));
         let request = ApprovalRequest::Permission {
             actor: request.actor.map(String::into_boxed_str),
             call_id: request.call.id,
@@ -70,6 +72,7 @@ impl ApprovalRequester for Prompts {
             matched_pattern: request.matched_pattern,
             origin: request.origin,
             session_patterns: request.session_patterns,
+            preview,
         };
         Ok(match self.0.ask(request, cancel).await {
             Some(ApprovalDecision::AllowOnce) => Decision::AllowOnce,

@@ -1138,6 +1138,7 @@ async fn ask_and_approvals_serialize_and_block_retry_until_interrupt() {
             matched_pattern: None,
             origin: "test".into(),
             session_patterns: vec![],
+            preview: None,
         },
         CancellationToken::new(),
     ));

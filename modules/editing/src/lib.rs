@@ -189,6 +189,45 @@ fn read_path(input: &str, cwd: &Path) -> Result<PathBuf, ToolError> {
         .unwrap_or(path))
 }
 
+/// Files larger than this get no approval preview.
+const PREVIEW_LIMIT: u64 = 256 * 1024;
+
+/// The file a `write` or `edit` call would change, before and after, for approval prompts;
+/// `None` when the call would fail, the file is not UTF-8 text or is too large.
+pub fn preview(call: &ToolCall, cwd: &Path) -> Option<(String, String)> {
+    use std::io::Read;
+    let edits = match call.name.as_str() {
+        "write" => None,
+        "edit" => Some(edit::arguments(&call.arguments).ok()?),
+        _ => return None,
+    };
+    let display = call.arguments["path"].as_str()?;
+    let path = resolve(display, cwd).ok()?;
+    let mut before = Vec::new();
+    match mutation::open_nofollow(std::fs::OpenOptions::new().read(true)).open(&path) {
+        Ok(file) => {
+            let meta = file.metadata().ok()?;
+            if !meta.is_file() || meta.len() > PREVIEW_LIMIT {
+                return None;
+            }
+            file.take(PREVIEW_LIMIT).read_to_end(&mut before).ok()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && edits.is_none() => {}
+        Err(_) => return None,
+    }
+    let after = match edits {
+        None => call.arguments["content"].as_str()?.as_bytes().to_vec(),
+        Some(edits) => edit::prepare(&before, edits, display, &[]).ok()?.bytes,
+    };
+    if after.len() as u64 > PREVIEW_LIMIT {
+        return None;
+    }
+    Some((
+        String::from_utf8(before).ok()?,
+        String::from_utf8(after).ok()?,
+    ))
+}
+
 impl tiechui_plugin_api::TurnObserver for EditingState {
     fn observe(&self, event: &tiechui_plugin_api::protocol::Event) {
         if matches!(&event.event, tiechui_plugin_api::protocol::EventKind::Extension { name, .. } if name == "workspace.files_changed")

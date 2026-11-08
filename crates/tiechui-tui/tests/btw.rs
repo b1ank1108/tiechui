@@ -230,6 +230,7 @@ fn main_approval_waits_behind_panel_and_switch_preserves_draft() {
             matched_pattern: None,
             origin: "fixture".into(),
             session_patterns: vec![],
+            preview: None,
         },
     }));
     let screen = plain(&app.pager_frame(24).unwrap());

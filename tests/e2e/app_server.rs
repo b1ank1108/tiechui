@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, SessionSummary, Snapshot};
-use tiechui_protocol::{ApprovalRequest, EventKind, Item, KnownItem, TurnStatus};
+use tiechui_protocol::{ApprovalRequest, EventKind, FilePreview, Item, KnownItem, TurnStatus};
 use tiechui_providers::testing::ScriptedServer;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -218,13 +218,20 @@ async fn sessions_converse_ask_approvals_and_fork_through_app_server() {
     assert!(last.seq > first.seq);
     let EventKind::ApprovalRequested {
         approval_id,
-        request: ApprovalRequest::Permission { tool, .. },
+        request: ApprovalRequest::Permission { tool, preview, .. },
         ..
     } = &last.event.event
     else {
         panic!("expected a permission request");
     };
     assert_eq!(tool, "edit");
+    assert_eq!(
+        preview,
+        &Some(Box::new(FilePreview {
+            before: "before\n".into(),
+            after: "after\n".into()
+        }))
+    );
 
     // A late snapshot shows the open turn and the pending approval; later events follow it.
     let waiting = snapshot(

@@ -654,3 +654,48 @@ async fn active_selection_and_observations_are_private_to_each_actor() {
     run(child.tools(), &ctx, "edit", edit).await.unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "child edit");
 }
+
+#[test]
+fn previews_show_the_file_a_write_or_edit_would_leave() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    fs::write(cwd.join("a.txt"), "one\ntwo\n").unwrap();
+    let preview = |name: &str, arguments: Value| {
+        tiechui_module_editing::preview(
+            &ToolCall {
+                id: "preview".into(),
+                name: name.into(),
+                arguments,
+                opaque: None,
+            },
+            cwd,
+        )
+    };
+    let edit = |old: &str| json!({"path":"a.txt","edits":[{"oldText":old,"newText":"2"}]});
+    assert_eq!(
+        preview("edit", edit("two")),
+        Some(("one\ntwo\n".into(), "one\n2\n".into()))
+    );
+    assert_eq!(preview("edit", edit("three")), None);
+    assert_eq!(
+        preview("write", json!({"path":"a.txt","content":"new"})),
+        Some(("one\ntwo\n".into(), "new".into()))
+    );
+    assert_eq!(
+        preview("write", json!({"path":"b/c.txt","content":"new"})),
+        Some((String::new(), "new".into()))
+    );
+    assert_eq!(
+        preview(
+            "edit",
+            json!({"path":"b/c.txt","edits":[{"oldText":"x","newText":"y"}]})
+        ),
+        None
+    );
+    assert_eq!(preview("read", json!({"path":"a.txt"})), None);
+    fs::write(cwd.join("big.txt"), "x".repeat(300 * 1024)).unwrap();
+    assert_eq!(
+        preview("write", json!({"path":"big.txt","content":""})),
+        None
+    );
+}

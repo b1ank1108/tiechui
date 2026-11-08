@@ -313,6 +313,7 @@ fn event_variants() {
                 matched_pattern: Some("rm *".into()),
                 origin: "user".into(),
                 session_patterns: vec!["rm *".into()],
+                preview: None,
             },
         },
         EventKind::ApprovalRequested {
@@ -352,10 +353,10 @@ fn protocol_message_variants() {
                 delivery: InputDelivery::FollowUp,
             },
         }),
-        ProtocolMessage::Event(Event {
+        ProtocolMessage::Event(Box::new(Event {
             submission_id: None,
             ..event(EventKind::TurnStarted { turn: turn() })
-        }),
+        })),
         ProtocolMessage::JsonRpc(JsonRpcMessage::Notification(Notification {
             jsonrpc: Version::V2,
             method: "event".into(),

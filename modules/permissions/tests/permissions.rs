@@ -750,6 +750,31 @@ async fn session_approval_keeps_direction_and_epoch_changes_clear_grants() {
 }
 
 #[tokio::test]
+async fn a_session_grant_for_a_workspace_change_covers_every_write_and_edit_there() {
+    let f = Fixture::new(None);
+    *f.prompter.decision.lock().unwrap() = Some(ApprovalDecision::AllowSession {
+        both_directions: false,
+    });
+    let edit = json!({"path":"src/a.txt","edits":[{"oldText":"a","newText":"b"}]});
+    assert_eq!(f.call("edit", edit).await, BeforeToolCall::Allow);
+    assert_eq!(f.asks(), 1);
+    assert_eq!(
+        f.prompter.requests.lock().unwrap()[0].session_patterns,
+        [f.cwd.join("*").to_string_lossy()]
+    );
+    *f.prompter.decision.lock().unwrap() = None;
+    assert_eq!(
+        f.call("write", json!({"path":"docs/b.txt","content":"b"}))
+            .await,
+        BeforeToolCall::Allow
+    );
+    assert_eq!(f.asks(), 1);
+    let outside = f.cwd.parent().unwrap().join("outside.txt");
+    denied(f.call("write", json!({"path":outside,"content":"c"})).await);
+    assert!(f.asks() > 1);
+}
+
+#[tokio::test]
 async fn session_grant_for_a_wrapper_does_not_cover_an_asking_nested_command() {
     let f = Fixture::new(Some(json!([
         allow(),

@@ -18,7 +18,11 @@ values: Array<string>, matched_pattern: string | null, origin: string,
 /**
  * What allowing for the session grants; empty when it cannot be offered.
  */
-session_patterns: Array<string>, } | { "kind": "elicitation", server: string, request: JsonValue, } | { "kind": "questions", questions: Array<Question>, };
+session_patterns: Array<string>, 
+/**
+ * For `write` and `edit`, the file before and after the call.
+ */
+preview?: FilePreview | null, } | { "kind": "elicitation", server: string, request: JsonValue, } | { "kind": "questions", questions: Array<Question>, };
 
 export type ArchiveParams = { path: string, archived: boolean, };
 
@@ -119,6 +123,8 @@ export type FileEntry = { path: string, dir: boolean,
 ignored: boolean, };
 
 export type FileParams = { root: string, path: string, };
+
+export type FilePreview = { before: string, after: string, };
 
 export type FileTree = { entries: Array<FileEntry>, 
 /**

@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Opens without following a final symlink and without blocking on FIFOs.
-fn open_nofollow(options: &mut OpenOptions) -> &mut OpenOptions {
+pub(crate) fn open_nofollow(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

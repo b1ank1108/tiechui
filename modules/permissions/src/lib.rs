@@ -349,10 +349,16 @@ impl Permissions {
             }
         }
         if let Some(tool) = tool {
+            // Allowing one change inside the workspace for the session allows all of them.
+            let pattern = if matches!(tool, "write" | "edit") && !access.outside(&self.cwd, cwd) {
+                self.cwd.join("*").to_string_lossy().into_owned()
+            } else {
+                access.session_pattern()
+            };
             gates.push(self.gate(
                 tool,
                 access.values.clone(),
-                vec![access.session_pattern()],
+                vec![pattern],
                 Some(access.values[0].clone()),
                 false,
             ));
@@ -693,6 +699,16 @@ impl Permissions {
                             for direction in ["read", "write"] {
                                 sessions.rules.push(Rule::new(
                                     &format!("{surface}_{direction}"),
+                                    pattern,
+                                    Action::Allow,
+                                    "session",
+                                ));
+                            }
+                        } else if matches!(surface, "write" | "edit") {
+                            // Writing and editing a file are one permission to the user.
+                            for tool in ["write", "edit"] {
+                                sessions.rules.push(Rule::new(
+                                    tool,
                                     pattern,
                                     Action::Allow,
                                     "session",

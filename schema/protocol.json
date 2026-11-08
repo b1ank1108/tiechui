@@ -241,6 +241,17 @@
             "origin": {
               "type": "string"
             },
+            "preview": {
+              "description": "For `write` and `edit`, the file before and after the call.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/FilePreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "session_patterns": {
               "description": "What allowing for the session grants; empty when it cannot be offered.",
               "type": "array",
@@ -1320,6 +1331,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "FilePreview": {
+      "type": "object",
+      "required": [
+        "after",
+        "before"
+      ],
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        }
+      }
     },
     "Id": {
       "anyOf": [
