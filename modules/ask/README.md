@@ -16,7 +16,9 @@ Only Proceed sends uncommitted answers as empty arrays. In confirmation, Esc or
 Backspace returns to the first unanswered question; Ctrl+C interrupts. With option
 notes visible, Esc clears and hides notes (as Tab does in notes). Otherwise Esc
 interrupts the turn.
-No timeout or highlighted default supplies an answer.
+No highlighted default supplies an answer. With `ask.auto_continue_after_sec`
+set, an unanswered question is withdrawn after that many seconds and the result,
+status `timed_out` with no answers, tells the model to continue on its own judgment.
 
 Results contain `answers: { id: { answers: string[] } }`: a selected label and,
 when present, `user_note: ...`. Question text and answers persist as presentation

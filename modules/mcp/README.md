@@ -71,7 +71,7 @@ Authorization headers and environment bearer tokens take precedence over OAuth.
 ## Dependencies and validation
 
 `rmcp` is pinned to 3.5.0. The HTTP adapter uses the shared reqwest 0.12/rustls
-client. `sse-stream` 0.2.6 is a direct dependency because rmcp's custom HTTP
+client with the user's `[network]` proxy and certificates. `sse-stream` 0.2.6 is a direct dependency because rmcp's custom HTTP
 backend exchanges its SSE types; it is already an rmcp transitive dependency. Test-only `axum` 0.8 hosts the rmcp loopback HTTP server.
 OAuth uses the same reqwest client and hashing/base64 dependencies, not rmcp's
 auth feature.

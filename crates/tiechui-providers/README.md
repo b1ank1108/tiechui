@@ -13,7 +13,8 @@ A root without a version segment (`v` and a digit, such as `v1`, `v4` or
 `v1beta`) gets `/v1` first, so `https://gateway.example` and
 `https://gateway.example/v1` reach the same endpoint while `/api/paas/v4` keeps
 its own version. Both preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
-uses native trust roots. A 300-second read timeout bounds silent connections.
+uses native trust roots plus the `[network]` `ca_cert` file; `[network]` `proxy`
+replaces the `*_PROXY` environment variables. A 300-second read timeout bounds silent connections.
 
 The Anthropic stream emits deltas in arrival order and an authoritative `ContentComplete`
 per known block, including opaque thinking signatures and redacted payloads.

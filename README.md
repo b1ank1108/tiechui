@@ -198,6 +198,9 @@ theme = "automatic"                    # follows the terminal background
 - Thinking levels are clamped to what the model declares in `thinking_levels`.
 - Models can also set `cache_retention`, `prices` and, on Anthropic,
   `fallback_models`.
+- `[network]` sets a proxy, hosts that bypass it and an extra CA file for model
+  and MCP requests. It and `[sessions]` (`archive_after_days`) are read only from
+  `~/.tiechui/config.toml`.
 
 Each provider takes its key from `api_key` in `providers.toml` or from the
 environment variable named by `api_key_env`, never both. An inline key stays out
