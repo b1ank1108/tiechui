@@ -3,6 +3,17 @@
   "title": "ConfigLayer",
   "type": "object",
   "properties": {
+    "ask": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AskConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "compaction": {
       "default": null,
       "anyOf": [
@@ -36,6 +47,17 @@
         "type": "boolean"
       }
     },
+    "network": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NetworkConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "permissions": {
       "default": null,
       "anyOf": [
@@ -52,6 +74,17 @@
       "anyOf": [
         {
           "$ref": "#/definitions/RetryConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sessions": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionsConfig"
         },
         {
           "type": "null"
@@ -88,6 +121,23 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "AskConfig": {
+      "type": "object",
+      "properties": {
+        "auto_continue_after_sec": {
+          "description": "Seconds to wait for answers before the agent continues on its own judgment; unset waits.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
     "AutoBenefit": {
       "type": "string",
       "enum": [
@@ -368,6 +418,37 @@
         }
       },
       "additionalProperties": true
+    },
+    "NetworkConfig": {
+      "description": "HTTP settings for provider and MCP requests.",
+      "type": "object",
+      "properties": {
+        "ca_cert": {
+          "description": "PEM file of root certificates trusted besides the system's.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "no_proxy": {
+          "description": "Comma-separated hosts, domains and IP ranges reached without `proxy`.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proxy": {
+          "description": "Proxy URL for every request; unset leaves the `*_PROXY` environment variables in effect.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "PermissionAction": {
       "type": "string",
@@ -666,6 +747,23 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionsConfig": {
+      "type": "object",
+      "properties": {
+        "archive_after_days": {
+          "description": "Days without activity after which `chui app-server` archives a session; unset keeps them.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991.0,
+          "minimum": 1.0
         }
       },
       "additionalProperties": false

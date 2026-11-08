@@ -8,9 +8,10 @@ license.workspace = true
 
 [dependencies]
 tiechui-plugin-api.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

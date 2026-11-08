@@ -1,13 +1,15 @@
-//! `providers/*` and `config/update`: the user's `providers.toml` and defaults, edited in place.
+//! `providers/*` and `config/*`: the user's `providers.toml` and `config.toml`, edited in place.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tiechui_config::{ModelConfig, ProviderConfig, ThinkingLevelValue, UnsupportedLevel};
+use tiechui_config::{
+    ModelConfig, NetworkConfig, ProviderConfig, ThinkingLevelValue, UnsupportedLevel,
+};
 use tiechui_protocol::ThinkingLevel;
 use tiechui_protocol::app::*;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +30,11 @@ pub(super) fn handles(method: &str) -> bool {
     edits(method)
         || matches!(
             method,
-            "providers/list" | "providers/test" | "providers/models" | "config/update"
+            "providers/list"
+                | "providers/test"
+                | "providers/models"
+                | "config/get"
+                | "config/update"
         )
 }
 
@@ -79,14 +85,14 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
         }
         "providers/test" => {
             let p: ModelParams = parse(params)?;
-            let provider = declared(file, p.provider.clone()).await?;
+            let (provider, network) = declared(home, p.provider.clone()).await?;
             let model = provider
                 .models
                 .iter()
                 .find(|model| model.id == p.id)
                 .ok_or_else(|| invalid(format!("{}/{} is not declared", p.provider, p.id)))?;
             let start = Instant::now();
-            let error = crate::setup::check(&p.provider, &provider, model)
+            let error = crate::setup::check(&p.provider, &provider, model, &network)
                 .await
                 .err();
             value(ProviderTest {
@@ -96,11 +102,17 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
         }
         "providers/models" => {
             let p: ProviderParams = parse(params)?;
-            let provider = declared(file, p.name).await?;
-            tiechui_providers::list_models(&provider, &CancellationToken::new())
+            let (provider, network) = declared(home, p.name).await?;
+            tiechui_providers::list_models(&provider, &network, &CancellationToken::new())
                 .await
                 .map_err(internal)
                 .and_then(value)
+        }
+        "config/get" => {
+            let user = home.join("config.toml");
+            blocking(move |_| crate::setup::user_config(&user))
+                .await
+                .and_then(|config| value(values(config)))
         }
         _ => {
             let p: ConfigUpdateParams = parse(params)?;
@@ -196,12 +208,43 @@ fn config(model: ModelEntry) -> ModelConfig {
     }
 }
 
-/// `config/update`: the user's default model or thinking level for new sessions.
+fn values(config: tiechui_config::Config) -> ConfigValues {
+    ConfigValues {
+        model: config.model,
+        thinking: config.thinking.map(convert),
+        proxy: config.network.proxy,
+        no_proxy: config.network.no_proxy,
+        ca_cert: config
+            .network
+            .ca_cert
+            .map(|path| path.display().to_string()),
+        auto_continue_after_sec: config.ask.auto_continue_after_sec,
+        archive_after_days: config.sessions.archive_after_days,
+    }
+}
+
+/// Keys besides `model` and `thinking`, which null removes.
+const OPTIONAL: [&str; 5] = [
+    "network.proxy",
+    "network.no_proxy",
+    "network.ca_cert",
+    "ask.auto_continue_after_sec",
+    "sessions.archive_after_days",
+];
+
+/// `config/update`: one key of the user's `config.toml`, kept only if the configuration still
+/// loads.
 fn update(home: &Path, params: ConfigUpdateParams) -> Result<(), String> {
     let path = home.join("config.toml");
-    match params.key.as_str() {
-        "model" => {
-            let model = params.value.as_str().ok_or("model is a string")?;
+    let original = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        read => Some(read.map_err(|e| e.to_string())?),
+    };
+    let key = params.key.as_str();
+    let save = |value| tiechui_config::save_preference(&path, key, value);
+    match (key, params.value) {
+        ("model", value) => {
+            let model = value.as_str().ok_or("model is a string")?;
             let (provider, id) = model.split_once('/').ok_or("model is <provider>/<id>")?;
             let providers = tiechui_config::load_providers(&home.join("providers.toml"))
                 .map_err(|e| e.to_string())?;
@@ -211,24 +254,51 @@ fn update(home: &Path, params: ConfigUpdateParams) -> Result<(), String> {
             {
                 return Err(format!("{model} is not declared"));
             }
-            tiechui_config::save_preference(&path, "model", model.into())
+            save(model.into())
         }
-        "thinking" => {
-            let level: ThinkingLevel =
-                serde_json::from_value(params.value).map_err(|e| e.to_string())?;
-            tiechui_config::save_preference(&path, "thinking", convert::<String>(level).into())
+        ("thinking", value) => {
+            let level: ThinkingLevel = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            save(convert::<String>(level).into())
         }
-        key => return Err(format!("{key} cannot be set here")),
+        (key, Value::Null) if OPTIONAL.contains(&key) => {
+            tiechui_config::remove_preference(&path, key)
+        }
+        ("network.proxy" | "network.no_proxy" | "network.ca_cert", Value::String(text)) => {
+            save(text.as_str().into())
+        }
+        ("ask.auto_continue_after_sec" | "sessions.archive_after_days", Value::Number(number)) => {
+            save(number.as_i64().ok_or("expected a whole number")?.into())
+        }
+        (key, _) if OPTIONAL.contains(&key) => return Err(format!("{key} has the wrong type")),
+        (key, _) => return Err(format!("{key} cannot be set here")),
     }
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let config = crate::setup::user_config(&path);
+    // Certificates are read only as clients are made.
+    let network = config.and_then(|config| config.network.apply(reqwest::Client::builder()));
+    network.map(drop).or_else(|error| {
+        match original {
+            Some(text) => std::fs::write(&path, text),
+            None => std::fs::remove_file(&path),
+        }
+        .map_err(|e| e.to_string())?;
+        Err(error)
+    })
 }
 
-async fn declared(file: PathBuf, name: String) -> Result<ProviderConfig, super::rpc::Error> {
+/// The provider with the user's network settings.
+async fn declared(
+    home: &Path,
+    name: String,
+) -> Result<(ProviderConfig, NetworkConfig), super::rpc::Error> {
+    let user = home.join("config.toml");
     blocking(move |_| {
-        tiechui_config::load_providers(&file)
-            .map_err(|e| e.to_string())?
+        let mut config = crate::setup::user_config(&user)?;
+        let provider = config
+            .providers
             .remove(&name)
-            .ok_or_else(|| format!("provider {name} is not declared"))
+            .ok_or_else(|| format!("provider {name} is not declared"))?;
+        Ok((provider, config.network))
     })
     .await
 }

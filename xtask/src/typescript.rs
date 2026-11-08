@@ -79,6 +79,7 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::ModelParams>();
                 d.visit::<app::ProviderTest>();
                 d.visit::<app::ConfigUpdateParams>();
+                d.visit::<app::ConfigValues>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

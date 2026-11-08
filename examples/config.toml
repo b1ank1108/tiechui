@@ -142,6 +142,24 @@ icons = []
 # Fullscreen is the default. Use CLI --no-alt-screen for native terminal scrollback;
 # there is no corresponding config key.
 
+[network]
+# Provider and MCP requests. User config only. Without proxy, HTTPS_PROXY, HTTP_PROXY,
+# ALL_PROXY and NO_PROXY apply.
+# proxy = "http://127.0.0.1:7890"
+# Hosts, domains and IP ranges reached directly while proxy is set.
+# no_proxy = "localhost, 127.0.0.1, .internal.example"
+# PEM root certificates trusted in addition to the system's.
+# ca_cert = "/absolute/path/to/ca.pem"
+
+[ask]
+# Questions wait for the user unless this many seconds pass, after which the agent
+# continues on its own judgment.
+# auto_continue_after_sec = 300
+
+[sessions]
+# chui app-server archives sessions without a message for this many days. User config only.
+# archive_after_days = 30
+
 [mcp_servers]
 # No MCP server is configured by default. A server uses either command (stdio)
 # or url (Streamable HTTP). Project servers require trust. Secrets stay in env.

@@ -3,9 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::Path;
 
 use futures::StreamExt;
-use tiechui_config::{ApiKey, ConfigPaths, ModelConfig, ProviderConfig, Wire};
+use tiechui_config::{
+    ApiKey, Config, ConfigPaths, ModelConfig, NetworkConfig, ProviderConfig, Wire,
+};
 use tiechui_model::{Content, Message, ModelId, ModelRequest, ReasoningLevel, Role};
 use tiechui_tui::consent::{Answer, Input, Question, ask};
 use tokio_util::sync::CancellationToken;
@@ -47,9 +50,21 @@ pub(crate) fn needed(paths: &ConfigPaths) -> bool {
     tiechui_config::load_providers(&paths.providers()).is_ok_and(|providers| providers.is_empty())
 }
 
+/// The user configuration alone: projects set neither providers nor the network.
+pub(crate) fn user_config(user: &Path) -> Result<Config, String> {
+    let paths = ConfigPaths {
+        user: user.to_owned(),
+        project: None,
+    };
+    tiechui_config::load(&paths, false, &toml::Table::new())
+        .map(|loaded| loaded.config)
+        .map_err(|e| e.to_string())
+}
+
 /// Asks, checks and saves; the selected `<provider>/<model>`, or `None` when the user quit.
 pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
     let taken = tiechui_config::load_providers(&paths.providers()).map_err(|e| e.to_string())?;
+    let network = user_config(&paths.user)?.network;
     loop {
         let Some(format) = choose(
             "Welcome to Tiechui",
@@ -91,7 +106,7 @@ pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
         let cancel = CancellationToken::new();
         let listed = pending(
             "Fetching models…",
-            tiechui_providers::list_models(&config, &cancel),
+            tiechui_providers::list_models(&config, &network, &cancel),
         )
         .await;
         let Some(ids) = (match listed {
@@ -171,7 +186,7 @@ pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
         let model = format!("{name}/{}", ids[0]);
         if let Err(error) = pending(
             &format!("Checking {model}…"),
-            check(&name, &config, &config.models[0]),
+            check(&name, &config, &config.models[0], &network),
         )
         .await
         {
@@ -240,8 +255,10 @@ pub(crate) async fn check(
     name: &str,
     config: &ProviderConfig,
     model: &ModelConfig,
+    network: &NetworkConfig,
 ) -> Result<(), String> {
-    let provider = tiechui_providers::from_config(name, config).map_err(|e| e.to_string())?;
+    let provider =
+        tiechui_providers::from_config(name, config, network).map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
     let request = ModelRequest {
         disable_cache: true,

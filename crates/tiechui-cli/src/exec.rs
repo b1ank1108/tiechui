@@ -393,7 +393,8 @@ pub(crate) async fn prepare(
         .get(&model.provider)
         .ok_or_else(|| config_error(format!("unknown provider {}", model.provider)))?;
     let provider =
-        tiechui_providers::from_config(&model.provider, provider_config).map_err(config_error)?;
+        tiechui_providers::from_config(&model.provider, provider_config, &loaded.config.network)
+            .map_err(config_error)?;
     if provider.capabilities(&model.model).context_window == 0 {
         return Err(config_error(format!("unknown model {}", model.model.0)));
     }
@@ -529,7 +530,7 @@ pub(crate) async fn prepare(
         if providers.contains_key(name) {
             continue;
         }
-        match tiechui_providers::from_config(name, config) {
+        match tiechui_providers::from_config(name, config, &loaded.config.network) {
             Ok(provider) => {
                 providers.insert(name.clone(), Arc::from(provider));
             }

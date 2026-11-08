@@ -47,7 +47,7 @@ pub(crate) async fn run(command: &str, args: &ArgMatches) -> Result<(), String> 
             .as_deref()
             .filter(|_| server.command.is_none())
             .ok_or("OAuth requires a Streamable HTTP server")?;
-        let store = OAuthStore::new(home, name, url);
+        let store = OAuthStore::new(home, name, url, loaded.config.network.clone());
         let operation = async {
             match command {
                 "login" => {

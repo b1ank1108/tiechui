@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tiechui_plugin_api::{
     CancellationToken, Concurrency, Module, ModuleConfig, Registry, Tool, ToolContext, ToolError,
@@ -27,9 +28,10 @@ impl Module for AskModule {
         "ask"
     }
 
-    fn register(&self, registry: &mut Registry, _: &ModuleConfig) -> Result<(), ToolError> {
+    fn register(&self, registry: &mut Registry, config: &ModuleConfig) -> Result<(), ToolError> {
         registry.register_tool(Arc::new(Ask {
             requester: self.0.clone(),
+            wait: config.ask.auto_continue_after_sec.map(Duration::from_secs),
             spec: ToolSpec {
                 name: "request_user_input".into(),
                 description: "Ask the user one to three short, self-contained questions. Prefer two or three mutually exclusive options, recommended choice first. The UI adds None of the above and optional notes. Omit options for free-text answers. Use it for missing information or preferences that affect the task. Do independent work before asking; prefer one concise question. Do not interpret a highlighted option, draft, cancellation or empty answer as the user's choice.".into(),
@@ -58,6 +60,8 @@ impl Module for AskModule {
 
 struct Ask {
     requester: Option<Arc<dyn QuestionRequester>>,
+    /// How long the user has to answer before the agent continues without them.
+    wait: Option<Duration>,
     spec: ToolSpec,
 }
 
@@ -129,9 +133,15 @@ impl Tool for Ask {
             let requester = self.requester.as_ref().ok_or_else(|| {
                 ToolError("request_user_input requires interactive TUI mode.".into())
             })?;
-            let response = requester
-                .request(questions.clone(), ctx.cancel.clone())
-                .await?;
+            let request = requester.request(questions.clone(), ctx.cancel.clone());
+            // Dropping the request withdraws the questions from the client.
+            let response = match self.wait {
+                Some(wait) => match tokio::time::timeout(wait, request).await {
+                    Ok(response) => response?,
+                    Err(_) => return Ok((questions, None)),
+                },
+                None => request.await?,
+            };
             if ctx.cancel.is_cancelled() || response.is_none() {
                 return Err(ToolError(
                     "request_user_input was cancelled before receiving a response.".into(),
@@ -151,11 +161,20 @@ impl Tool for Ask {
             {
                 return Err(ToolError("Invalid question response".into()));
             }
-            Ok::<_, ToolError>((questions, response))
+            Ok::<_, ToolError>((questions, Some(response)))
         }
         .await;
         match result {
-            Ok((questions, response)) => Ok(ToolOutput {
+            Ok((questions, None)) => Ok(ToolOutput {
+                details: Some(
+                    json!({"kind":"ask", "questions":questions, "response":{"answers":{}}, "status":"timed_out"}),
+                ),
+                ..ToolOutput::text(format!(
+                    "The user did not answer within {} seconds. Continue with your best judgment and state the assumptions you made.",
+                    self.wait.unwrap_or_default().as_secs()
+                ))
+            }),
+            Ok((questions, Some(response))) => Ok(ToolOutput {
                 details: Some(
                     json!({"kind":"ask", "questions":questions, "response":response, "status":"submitted"}),
                 ),
@@ -303,5 +322,46 @@ mod tests {
             details["message"],
             "request_user_input was cancelled before receiving a response."
         );
+    }
+
+    /// Never answers; records that the request was dropped.
+    struct Away(Arc<std::sync::atomic::AtomicBool>);
+    #[async_trait]
+    impl QuestionRequester for Away {
+        async fn request(
+            &self,
+            _: Vec<Question>,
+            _: CancellationToken,
+        ) -> Result<Option<Value>, ToolError> {
+            struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Dropped {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _dropped = Dropped(self.0.clone());
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_questions_continue_after_the_configured_wait() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut config = ModuleConfig::default();
+        config.ask.auto_continue_after_sec = Some(300);
+        let mut registry = Registry::default();
+        AskModule(Some(Arc::new(Away(dropped.clone()))))
+            .register(&mut registry, &config)
+            .unwrap();
+        let tool = registry.tools().get("request_user_input").unwrap();
+        let output = tool
+            .run(call(), context(CancellationToken::new()))
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        let details = output.details.unwrap();
+        assert_eq!(details["status"], "timed_out");
+        assert_eq!(details["response"], json!({"answers":{}}));
     }
 }

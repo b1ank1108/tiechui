@@ -25,6 +25,9 @@ struct Layer {
     permissions: Option<crate::PermissionsConfig>,
     mcp_servers: BTreeMap<String, crate::McpServerConfig>,
     tui: TuiLayer,
+    network: Option<crate::NetworkConfig>,
+    ask: Option<crate::AskConfig>,
+    sessions: Option<crate::SessionsConfig>,
 }
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
@@ -118,16 +121,25 @@ pub fn load_with_mandatory_modules(
                     }
                     Err(error) => return Err(error),
                 };
+                let mut user_only = vec![];
                 if let Some(permissions) = project_layer.permissions.take() {
                     if permissions.mode.is_some() {
-                        diagnostics.push(Diagnostic {
-                            file: path.to_owned(),
-                            key: "permissions.mode".into(),
-                            reason: IgnoredReason::UserOnly,
-                        });
+                        user_only.push("permissions.mode");
                     }
                     project_rules = permissions.rules.unwrap_or_default();
                 }
+                // A project could otherwise route requests, keys included, through its own proxy.
+                if project_layer.network.take().is_some() {
+                    user_only.push("network");
+                }
+                if project_layer.sessions.take().is_some() {
+                    user_only.push("sessions");
+                }
+                diagnostics.extend(user_only.into_iter().map(|key| Diagnostic {
+                    file: path.to_owned(),
+                    key: key.into(),
+                    reason: IgnoredReason::UserOnly,
+                }));
                 merge(
                     &mut merged,
                     project_layer,
@@ -154,6 +166,11 @@ pub fn load_with_mandatory_modules(
         &mut mcp_origins,
         &mut diagnostics,
     );
+    if let Some(network) = &merged.network {
+        network
+            .proxy()
+            .map_err(|message| ConfigError::new(&paths.user, "network", message))?;
+    }
     let config = Config {
         model: merged.model,
         thinking: merged.thinking,
@@ -168,6 +185,9 @@ pub fn load_with_mandatory_modules(
         mcp_servers: merged.mcp_servers,
         mcp_origins,
         tui: tui(merged.tui),
+        network: merged.network.unwrap_or_default(),
+        ask: merged.ask.unwrap_or_default(),
+        sessions: merged.sessions.unwrap_or_default(),
         providers: load_providers(&paths.providers())?,
     };
     Ok(LoadedConfig {
@@ -283,6 +303,23 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             "delays must be positive and max_delay_ms must be at least base_delay_ms",
         ));
     }
+    for (key, value) in [
+        (
+            "ask.auto_continue_after_sec",
+            layer
+                .ask
+                .as_ref()
+                .and_then(|ask| ask.auto_continue_after_sec),
+        ),
+        (
+            "sessions.archive_after_days",
+            layer.sessions.as_ref().and_then(|s| s.archive_after_days),
+        ),
+    ] {
+        if value == Some(0) {
+            return Err(ConfigError::new(path, key, "must be positive"));
+        }
+    }
     if let Some(compaction) = &layer.compaction {
         compaction
             .validate_range()
@@ -356,6 +393,15 @@ fn merge(
     }
     if layer.permissions.is_some() {
         base.permissions = layer.permissions;
+    }
+    if layer.network.is_some() {
+        base.network = layer.network;
+    }
+    if layer.ask.is_some() {
+        base.ask = layer.ask;
+    }
+    if layer.sessions.is_some() {
+        base.sessions = layer.sessions;
     }
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);

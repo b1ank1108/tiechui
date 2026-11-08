@@ -3004,6 +3004,7 @@ name = "tiechui-config"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "reqwest",
  "schemars 0.8.22",
  "serde",
  "serde_json",

@@ -94,7 +94,12 @@ async fn exercise(root: &Path) {
     mode(&trust_home, 0o700);
     mode(&trust_lock, 0o600);
 
-    let oauth = OAuthStore::new(&home, "fixture", "https://example.invalid/mcp");
+    let oauth = OAuthStore::new(
+        &home,
+        "fixture",
+        "https://example.invalid/mcp",
+        Default::default(),
+    );
     assert!(oauth.access_token(&cancel).await.unwrap().is_none());
     let oauth_dir = home.join("mcp-oauth");
     let lock = fs::read_dir(&oauth_dir)

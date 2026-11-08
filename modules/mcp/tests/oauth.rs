@@ -164,7 +164,7 @@ impl Fixture {
         format!("{}/mcp", self.server.base)
     }
     fn store(&self) -> OAuthStore {
-        OAuthStore::new(self.temp.path(), "fixture", &self.url())
+        OAuthStore::new(self.temp.path(), "fixture", &self.url(), Default::default())
     }
     async fn begin(&self) -> (Login, Url) {
         let login = Login::begin(self.store(), &[], &CancellationToken::new())
@@ -250,6 +250,7 @@ async fn login_refresh_rotation_permissions_status_transport_and_logout() {
         cancel.clone(),
         Arc::new(DeclineElicitation),
         Some(f.temp.path()),
+        Default::default(),
     );
     module.wait_for_startup(cancel.clone()).await;
     assert_eq!(
@@ -296,7 +297,13 @@ async fn expiry_without_refresh_and_changed_issuer_require_login() {
     assert!(f.store().access_token(&cancel).await.is_err());
     assert_eq!(f.server.refreshes.load(Ordering::SeqCst), 0);
     assert_eq!(
-        OAuthStore::new(f.temp.path(), "fixture", "http://127.0.0.1:1/mcp").status(),
+        OAuthStore::new(
+            f.temp.path(),
+            "fixture",
+            "http://127.0.0.1:1/mcp",
+            Default::default()
+        )
+        .status(),
         "logged_out"
     );
 }

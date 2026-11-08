@@ -472,12 +472,46 @@ async fn models_are_listed_from_the_versioned_root() {
             models: vec![],
             ..super::config(&format!("{}{root}", server.uri()))
         };
-        async move { crate::list_models(&config, &CancellationToken::new()).await }
+        async move { crate::list_models(&config, &Default::default(), &CancellationToken::new()).await }
     };
     assert_eq!(list(Wire::OpenaiCompletions, "").await.unwrap(), ["a", "b"]);
     assert_eq!(list(Wire::AnthropicMessages, "/v1").await.unwrap(), ["c"]);
     let error = list(Wire::OpenaiCompletions, "/denied").await.unwrap_err();
     assert_eq!(error.kind, ErrorKind::Auth);
+}
+
+#[tokio::test]
+async fn requests_go_through_the_configured_proxy() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "a"}]})))
+        .mount(&proxy)
+        .await;
+    let config = ProviderConfig {
+        wire: Wire::OpenaiCompletions,
+        api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
+        models: vec![],
+        ..super::config("http://127.0.0.1:1")
+    };
+    let mut network = tiechui_config::NetworkConfig {
+        proxy: Some(proxy.uri()),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        crate::list_models(&config, &network, &cancel)
+            .await
+            .unwrap(),
+        ["a"]
+    );
+    // Hosts in no_proxy are reached directly, and this one refuses connections.
+    network.no_proxy = Some("127.0.0.1".into());
+    let error = crate::list_models(&config, &network, &cancel)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::TransientNetwork);
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
 }
 
 #[test]

@@ -23,8 +23,8 @@ pub use mcp::McpServerConfig;
 pub use paths::ConfigPaths;
 pub use permissions::{PermissionAction, PermissionMode, PermissionRule, PermissionsConfig};
 pub use save::{
-    add_provider, remove_model, remove_provider, save_model, save_preference, save_provider,
-    save_status_line,
+    add_provider, remove_model, remove_preference, remove_provider, save_model, save_preference,
+    save_provider, save_status_line,
 };
 pub use trust::{TrustEntry, TrustStore};
 
@@ -55,6 +55,11 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     pub tui: TuiConfig,
+    /// User configuration only.
+    pub network: NetworkConfig,
+    pub ask: AskConfig,
+    /// User configuration only.
+    pub sessions: SessionsConfig,
     #[serde(skip)]
     #[schemars(skip)]
     pub mcp_origins: BTreeMap<String, PathBuf>,
@@ -158,6 +163,85 @@ impl Default for RetryConfig {
             max_delay_ms: 60000,
         }
     }
+}
+
+/// HTTP settings for provider and MCP requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// Proxy URL for every request; unset leaves the `*_PROXY` environment variables in effect.
+    pub proxy: Option<String>,
+    /// Comma-separated hosts, domains and IP ranges reached without `proxy`.
+    pub no_proxy: Option<String>,
+    /// PEM file of root certificates trusted besides the system's.
+    pub ca_cert: Option<PathBuf>,
+}
+
+impl NetworkConfig {
+    /// `builder` with the proxy and the extra root certificates, read now.
+    pub fn apply(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, String> {
+        if let Some(proxy) = self.proxy()? {
+            builder = builder.proxy(proxy);
+        }
+        if let Some(path) = &self.ca_cert {
+            let error = |e: &dyn fmt::Display| format!("network.ca_cert {}: {e}", path.display());
+            let pem = std::fs::read(path).map_err(|e| error(&e))?;
+            let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| error(&e))?;
+            if certs.is_empty() {
+                return Err(error(&"no certificates"));
+            }
+            builder = certs
+                .into_iter()
+                .fold(builder, reqwest::ClientBuilder::add_root_certificate);
+        }
+        Ok(builder)
+    }
+
+    pub(crate) fn proxy(&self) -> Result<Option<reqwest::Proxy>, String> {
+        let Some(url) = self.proxy.as_deref() else {
+            return Ok(None);
+        };
+        // reqwest takes these, then fails each request.
+        if let Some((scheme, _)) = url.split_once("://")
+            && !["http", "https"].contains(&scheme.to_ascii_lowercase().as_str())
+        {
+            return Err(format!("network.proxy: {scheme} proxies are not supported"));
+        }
+        let no_proxy = self
+            .no_proxy
+            .as_deref()
+            .and_then(reqwest::NoProxy::from_string);
+        match reqwest::Proxy::all(url) {
+            Ok(proxy) => Ok(Some(proxy.no_proxy(no_proxy))),
+            Err(e) => {
+                // reqwest wraps what is wrong with the URL in "builder error"s.
+                let mut cause: &dyn std::error::Error = &e;
+                while let Some(source) = cause.source() {
+                    cause = source;
+                }
+                Err(format!("network.proxy: {cause}"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AskConfig {
+    /// Seconds to wait for answers before the agent continues on its own judgment; unset waits.
+    #[schemars(range(min = 1, max = 9007199254740991u64))]
+    pub auto_continue_after_sec: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionsConfig {
+    /// Days without activity after which `chui app-server` archives a session; unset keeps them.
+    #[schemars(range(min = 1, max = 9007199254740991u64))]
+    pub archive_after_days: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

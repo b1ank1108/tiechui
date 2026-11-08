@@ -14,8 +14,8 @@ use tiechui_plugin_api::model::{ToolCall, ToolSpec};
 use tiechui_plugin_api::process::{ProcessGroup, deadline, seconds};
 use tiechui_plugin_api::serde_json::{self, Value, json};
 use tiechui_plugin_api::{
-    CancellationToken, Concurrency, McpServerDefinition, Tool, ToolContext, ToolError, ToolOutput,
-    async_trait,
+    CancellationToken, Concurrency, McpServerDefinition, NetworkConfig, Tool, ToolContext,
+    ToolError, ToolOutput, async_trait,
 };
 
 use crate::{Inner, ServerState};
@@ -75,6 +75,7 @@ async fn connect(
     handler: Handler,
     cancel: CancellationToken,
     oauth: Option<crate::oauth::OAuthStore>,
+    network: &NetworkConfig,
 ) -> Result<(RunningService<RoleClient, Handler>, Option<ProcessGroup>), ToolError> {
     let config = &definition.config;
     if definition.name.is_empty()
@@ -144,8 +145,9 @@ async fn connect(
                     })?;
                 transport.auth_header = Some(token);
             }
-            let http = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+            let http = network
+                .apply(reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()))
+                .map_err(ToolError)?
                 .build()
                 .map_err(error)?;
             let transport = StreamableHttpClientTransport::with_client(
@@ -179,8 +181,15 @@ pub(super) async fn run_server(
                 server: name.clone(),
                 elicitation,
             };
-            let (service, group) =
-                connect(&definition, cwd, handler, inner.cancel.child_token(), oauth).await?;
+            let (service, group) = connect(
+                &definition,
+                cwd,
+                handler,
+                inner.cancel.child_token(),
+                oauth,
+                &inner.network,
+            )
+            .await?;
             let info = service.peer_info();
             let resources = info
                 .as_ref()

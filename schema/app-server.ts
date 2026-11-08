@@ -56,6 +56,8 @@ behind: number, files: Array<CommitFile>, };
 
 export type ConfigUpdateParams = { key: string, value: JsonValue, };
 
+export type ConfigValues = { model: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, };
+
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
 export type ContextSnapshot = { model: string, 

@@ -468,7 +468,7 @@ async fn factory_environment_child() {
     };
     let mut config = config(&url);
     config.api_key_env = Some("TIECHUI_FACTORY_TEST_KEY".into());
-    let provider = crate::from_config("fixture", &config).unwrap();
+    let provider = crate::from_config("fixture", &config, &Default::default()).unwrap();
     let events: Vec<_> = provider
         .stream(request(), CancellationToken::new())
         .await
@@ -480,22 +480,31 @@ async fn factory_environment_child() {
 
     config.api_key_env = Some("TIECHUI_FACTORY_MISSING_KEY".into());
     assert_eq!(
-        crate::from_config("fixture", &config).err().unwrap().kind,
+        crate::from_config("fixture", &config, &Default::default())
+            .err()
+            .unwrap()
+            .kind,
         ErrorKind::Auth
     );
     config.api_key_env = None;
     assert_eq!(
-        crate::from_config("fixture", &config).err().unwrap().kind,
+        crate::from_config("fixture", &config, &Default::default())
+            .err()
+            .unwrap()
+            .kind,
         ErrorKind::Auth
     );
     config.wire = Wire::OpenaiCompletions;
     assert_eq!(
-        crate::from_config("fixture", &config).err().unwrap().kind,
+        crate::from_config("fixture", &config, &Default::default())
+            .err()
+            .unwrap()
+            .kind,
         ErrorKind::Auth
     );
     config.api_key_env = Some("TIECHUI_FACTORY_TEST_KEY".into());
     assert_eq!(
-        crate::from_config("fixture", &config)
+        crate::from_config("fixture", &config, &Default::default())
             .unwrap()
             .capabilities(&request().model)
             .context_window,

@@ -12,7 +12,7 @@ pub mod testing;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use tiechui_config::{ProviderConfig, Wire};
+use tiechui_config::{NetworkConfig, ProviderConfig, Wire};
 use tiechui_model::{ModelCapabilities, ModelId, ModelRequest, ReasoningLevel, StreamEvent, Usage};
 use tokio_util::sync::CancellationToken;
 
@@ -69,9 +69,10 @@ pub trait ModelProvider: Send + Sync {
 pub fn from_config(
     name: &str,
     config: &ProviderConfig,
+    network: &NetworkConfig,
 ) -> Result<Box<dyn ModelProvider>, ProviderError> {
     let key = api_key(config)?;
-    let client = client_builder().build().map_err(ProviderError::transport)?;
+    let client = client(network, client_builder())?;
     match config.wire {
         Wire::AnthropicMessages => Ok(Box::new(anthropic::Anthropic::new(
             name, config, &key, client,
@@ -83,13 +84,14 @@ pub fn from_config(
 /// The model ids the provider's `/models` endpoint lists, sorted.
 pub async fn list_models(
     config: &ProviderConfig,
+    network: &NetworkConfig,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>, ProviderError> {
     let key = api_key(config)?;
-    let client = client_builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(ProviderError::transport)?;
+    let client = client(
+        network,
+        client_builder().timeout(std::time::Duration::from_secs(30)),
+    )?;
     let request = match config.wire {
         Wire::AnthropicMessages => {
             let transport = transport::Transport::new(
@@ -125,6 +127,17 @@ pub async fn list_models(
         }
     };
     transport::list(request, cancel).await
+}
+
+fn client(
+    network: &NetworkConfig,
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, ProviderError> {
+    network
+        .apply(builder)
+        .map_err(|e| ProviderError::new(ErrorKind::InvalidRequest, e))?
+        .build()
+        .map_err(ProviderError::transport)
 }
 
 fn api_key(config: &ProviderConfig) -> Result<String, ProviderError> {

@@ -9,7 +9,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tiechui_plugin_api::{
-    CancellationToken, ToolError,
+    CancellationToken, NetworkConfig, ToolError,
     serde_json::{self, Value, json},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -47,10 +47,14 @@ fn web_url(value: &str) -> Result<Url, ToolError> {
     Ok(url)
 }
 
-fn client() -> Result<Client, ToolError> {
-    Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
+fn client(network: &NetworkConfig) -> Result<Client, ToolError> {
+    network
+        .apply(
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(30)),
+        )
+        .map_err(error)?
         .build()
         .map_err(|_| error("Cannot create OAuth HTTP client"))
 }
@@ -206,14 +210,16 @@ struct Credentials {
 pub struct OAuthStore {
     path: PathBuf,
     url: String,
+    network: NetworkConfig,
 }
 
 impl OAuthStore {
-    pub fn new(home: &Path, name: &str, url: &str) -> Self {
+    pub fn new(home: &Path, name: &str, url: &str, network: NetworkConfig) -> Self {
         let hash = Sha256::digest(format!("{name}\0{url}").as_bytes());
         Self {
             path: home.join("mcp-oauth").join(format!("{hash:x}.json")),
             url: url.into(),
+            network,
         }
     }
 
@@ -317,7 +323,7 @@ impl OAuthStore {
                     .refresh_token
                     .as_deref()
                     .ok_or_else(|| error("MCP OAuth token expired; run chui mcp login"))?;
-                let http = client()?;
+                let http = client(&self.network)?;
                 let metadata = discover(&http, &self.url).await?;
                 if metadata.issuer != stored.issuer {
                     return Err(error("OAuth issuer changed; run chui mcp login"));
@@ -406,7 +412,7 @@ impl Login {
         cancel: &CancellationToken,
     ) -> Result<Self, ToolError> {
         let operation = async {
-            let http = client()?;
+            let http = client(&store.network)?;
             let metadata = discover(&http, &store.url).await?;
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let callback_path = format!("/callback/{}", random()?);

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,7 +25,7 @@ use tiechui_protocol::{
 };
 use tiechui_session::{Entry, EntryKind, SessionStore};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -54,6 +55,8 @@ struct Server {
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
     schedules: tiechui_module_loop::Schedules,
     next: AtomicU64,
+    /// Wakes the archiving of inactive sessions early.
+    sweep: Notify,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
@@ -84,7 +87,9 @@ pub(crate) async fn run() -> i32 {
         sessions: Mutex::default(),
         schedules: Default::default(),
         next: AtomicU64::new(1),
+        sweep: Notify::new(),
     });
+    let archiving = tokio::spawn(server.clone().archive_inactive());
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut line = Vec::new();
     let code = loop {
@@ -112,6 +117,7 @@ pub(crate) async fn run() -> i32 {
     }
     #[cfg(feature = "workspace")]
     server.workspace.close();
+    archiving.abort();
     writer.abort();
     code
 }
@@ -221,9 +227,13 @@ impl Server {
             "trust" => self.trust(params).await,
             _ if turns::handles(method) => self.turn(method, params).await,
             _ if providers::handles(method) => {
+                let archiving = params["key"] == "sessions.archive_after_days";
                 let reply = providers::handle(&self.home, method, params).await;
                 if reply.is_ok() && providers::edits(method) {
                     self.refresh();
+                }
+                if reply.is_ok() && archiving {
+                    self.sweep.notify_one();
                 }
                 reply
             }
@@ -629,6 +639,37 @@ impl Server {
         value(submitted)
     }
 
+    /// Archives sessions whose last message is older than `sessions.archive_after_days`, at start,
+    /// daily and when the setting changes, notifying `session/archived` for each. Open sessions
+    /// are left alone.
+    async fn archive_inactive(self: Arc<Self>) {
+        loop {
+            let home = self.home.clone();
+            let open: Vec<_> = lock(&self.sessions)
+                .values()
+                .map(|live| live.path.clone())
+                .collect();
+            match blocking(move |cancel| archive_before(&home, &open, cancel)).await {
+                Ok(archived) => {
+                    for path in archived {
+                        self.notify(
+                            "session/archived",
+                            ArchiveParams {
+                                path: path.display().to_string(),
+                                archived: true,
+                            },
+                        );
+                    }
+                }
+                Err(error) => eprintln!("chui app-server: archiving: {}", error.message),
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(24 * 60 * 60)) => {}
+                () = self.sweep.notified() => {}
+            }
+        }
+    }
+
     async fn rename(&self, params: Value) -> Reply {
         let params: RenameParams = parse(params)?;
         update_meta(params.path, move |meta| meta.title = params.title).await
@@ -701,6 +742,34 @@ fn mode(live: &Live) -> Option<String> {
             }
             _ => None,
         })
+}
+
+/// The sessions it archived.
+fn archive_before(
+    home: &Path,
+    open: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Result<Vec<PathBuf>, String> {
+    let config = crate::setup::user_config(&home.join("config.toml"))?;
+    let Some(days) = config.sessions.archive_after_days else {
+        return Ok(vec![]);
+    };
+    let now = tiechui_session::now_ms();
+    let before = now.saturating_sub(days.saturating_mul(24 * 60 * 60 * 1000));
+    let (summaries, _) =
+        tiechui_session::summaries(home, None, cancel).map_err(|e| e.to_string())?;
+    let mut archived = vec![];
+    for mut summary in summaries {
+        if summary.meta.archived_at.is_none()
+            && summary.modified < before
+            && !open.contains(&summary.path)
+        {
+            summary.meta.archived_at = Some(now);
+            tiechui_session::save_meta(&summary.path, &summary.meta).map_err(|e| e.to_string())?;
+            archived.push(summary.path);
+        }
+    }
+    Ok(archived)
 }
 
 async fn update_meta(

@@ -263,12 +263,27 @@ pub struct ProviderTest {
     pub millis: u64,
 }
 
-/// Sets a default for new sessions in the user's `config.toml`: `model` or `thinking`.
+/// Sets one key of the user's `config.toml`: `model`, `thinking`, `network.proxy`,
+/// `network.no_proxy`, `network.ca_cert`, `ask.auto_continue_after_sec` or
+/// `sessions.archive_after_days`; null removes it.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigUpdateParams {
     pub key: String,
     pub value: serde_json::Value,
+}
+
+/// The `config/get` result: the user's values for the keys `config/update` sets.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigValues {
+    pub model: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    pub proxy: Option<String>,
+    pub no_proxy: Option<String>,
+    pub ca_cert: Option<String>,
+    pub auto_continue_after_sec: Option<u64>,
+    pub archive_after_days: Option<u64>,
 }
 
 /// The `session/event` notification.

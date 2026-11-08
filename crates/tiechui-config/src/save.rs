@@ -35,6 +35,29 @@ pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), C
     replace(path, key, original, &rendered)
 }
 
+/// Removes one dotted TOML key, retaining surrounding comments and unrelated formatting.
+pub fn remove_preference(path: &Path, key: &str) -> Result<(), ConfigError> {
+    let original = read_optional(path)?;
+    let text = original.as_deref().unwrap_or("");
+    let mut document: DocumentMut = text
+        .parse()
+        .map_err(|error: toml_edit::TomlError| ConfigError::new(path, key, error.message()))?;
+    let keys = Key::parse(key).map_err(|error| ConfigError::new(path, key, error.message()))?;
+    let (last, parents) = keys
+        .split_last()
+        .ok_or_else(|| ConfigError::new(path, key, "expected a non-empty key"))?;
+    let removed = parents
+        .iter()
+        .try_fold(document.as_item_mut(), |item, key| item.get_mut(key.get()))
+        .and_then(Item::as_table_like_mut)
+        .and_then(|table| table.remove(last.get()));
+    if removed.is_none() {
+        return Ok(());
+    }
+    let rendered = preserve_unchanged_text(text, &document.to_string());
+    replace(path, key, original, &rendered)
+}
+
 /// Appends a `[name]` provider table, rendered as TOML, unless `name` is already declared.
 pub fn add_provider(path: &Path, name: &str, table: &str) -> Result<(), ConfigError> {
     let original = read_optional(path)?;

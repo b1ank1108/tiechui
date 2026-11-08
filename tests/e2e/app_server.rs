@@ -481,6 +481,105 @@ async fn turn_undo_and_rewind_through_app_server() {
 }
 
 #[tokio::test]
+async fn user_settings_round_trip_and_inactive_sessions_are_archived() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    // Two sessions whose only message is from 1970 and from now.
+    let cancel = CancellationToken::new();
+    let session = |timestamp: u64| {
+        let path = tiechui_session::SessionStore::create(&fixture.home, &fixture.cwd, &cancel)
+            .unwrap()
+            .path()
+            .to_owned();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"id": format!("m{timestamp}"), "parent_id": null, "timestamp": timestamp,
+                "kind": "message", "model": null,
+                "message": {"role": "user", "content": [{"kind": "text", "text": "hi"}]}})
+        ));
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    };
+    let old = session(1000);
+    session(tiechui_session::now_ms());
+
+    let get = json!({"model": "fixture/model", "thinking": null, "proxy": null, "no_proxy": null,
+        "ca_cert": null, "auto_continue_after_sec": null, "archive_after_days": null});
+    assert_eq!(client.ok("config/get", json!({})).await, get);
+    for (key, value) in [
+        ("network.proxy", json!("http://127.0.0.1:9")),
+        ("network.no_proxy", json!("localhost")),
+        ("ask.auto_continue_after_sec", json!(300)),
+    ] {
+        client
+            .ok("config/update", json!({"key": key, "value": value}))
+            .await;
+    }
+    let mut expected = get.clone();
+    expected["proxy"] = json!("http://127.0.0.1:9");
+    expected["no_proxy"] = json!("localhost");
+    expected["auto_continue_after_sec"] = json!(300);
+    assert_eq!(client.ok("config/get", json!({})).await, expected);
+
+    // Rejected values leave the file as it was.
+    let text = std::fs::read_to_string(fixture.home.join("config.toml")).unwrap();
+    for (key, value) in [
+        ("network.proxy", json!("not a url")),
+        ("network.ca_cert", json!("/missing/ca.pem")),
+        ("ask.auto_continue_after_sec", json!(0)),
+        ("sessions.archive_after_days", json!("soon")),
+    ] {
+        assert!(
+            client
+                .call("config/update", json!({"key": key, "value": value}))
+                .await
+                .is_err(),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.home.join("config.toml")).unwrap(),
+        text
+    );
+    client
+        .ok(
+            "config/update",
+            json!({"key": "network.proxy", "value": null}),
+        )
+        .await;
+    assert_eq!(
+        client.ok("config/get", json!({})).await["proxy"],
+        json!(null)
+    );
+
+    // Setting the period archives the inactive session at once.
+    client
+        .ok(
+            "config/update",
+            json!({"key": "sessions.archive_after_days", "value": 30}),
+        )
+        .await;
+    let archived = client
+        .notice(|method, _| method == "session/archived")
+        .await;
+    assert_eq!(archived, json!({"path": old, "archived": true}));
+    let listed: Vec<SessionSummary> = serde_json::from_value(
+        client
+            .ok("session/list", json!({"cwd": cwd, "archived": true}))
+            .await,
+    )
+    .unwrap();
+    let archived: Vec<_> = listed
+        .into_iter()
+        .filter(|s| s.archived_at.is_some())
+        .map(|s| s.path)
+        .collect();
+    assert_eq!(archived, [old]);
+}
+
+#[tokio::test]
 async fn providers_and_defaults_are_edited_and_reload_open_sessions() {
     let fixture = Fixture::new().await;
     let mut client = fixture.client().await;

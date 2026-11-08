@@ -265,6 +265,49 @@ fn permission_mode_is_user_only() {
     assert_eq!(loaded.diagnostics[0].reason, IgnoredReason::UserOnly);
 }
 
+#[test]
+fn network_and_sessions_are_user_only_and_validated() {
+    let temp = temp_dir();
+    let paths = paths(
+        temp.path(),
+        "[network]\nproxy='http://127.0.0.1:8080'\nno_proxy='localhost'\n[ask]\nauto_continue_after_sec=300\n[sessions]\narchive_after_days=7\n",
+        "[network]\nproxy='http://project.invalid'\n[ask]\nauto_continue_after_sec=60\n[sessions]\narchive_after_days=1\n",
+    );
+    let loaded = load(&paths, true, &toml::Table::new()).unwrap();
+    assert_eq!(
+        loaded.config.network.proxy.as_deref(),
+        Some("http://127.0.0.1:8080")
+    );
+    assert_eq!(loaded.config.sessions.archive_after_days, Some(7));
+    assert_eq!(loaded.config.ask.auto_continue_after_sec, Some(60));
+    let ignored: Vec<_> = loaded
+        .diagnostics
+        .iter()
+        .filter(|d| d.reason == IgnoredReason::UserOnly)
+        .map(|d| d.key.as_str())
+        .collect();
+    assert_eq!(ignored, ["network", "sessions"]);
+
+    for (text, key) in [
+        (
+            "[ask]\nauto_continue_after_sec=0\n",
+            "ask.auto_continue_after_sec",
+        ),
+        (
+            "[sessions]\narchive_after_days=0\n",
+            "sessions.archive_after_days",
+        ),
+        ("[network]\nproxy='not a url'\n", "network"),
+        ("[network]\nproxy='socks5://127.0.0.1:1080'\n", "network"),
+    ] {
+        fs::write(&paths.user, text).unwrap();
+        assert_eq!(
+            load(&paths, false, &toml::Table::new()).unwrap_err().key,
+            key
+        );
+    }
+}
+
 fn temp_dir() -> TempDir {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/config-tests");
     fs::create_dir_all(&root).unwrap();
@@ -979,6 +1022,25 @@ fn saves_handle_inline_and_quoted_dotted_keys_and_new_files() {
     save_preference(&fresh, "modules.editing", true.into()).unwrap();
     let value: toml::Value = toml::from_str(&fs::read_to_string(fresh).unwrap()).unwrap();
     assert_eq!(value["modules"]["editing"].as_bool(), Some(true));
+}
+
+#[test]
+fn removed_preferences_keep_the_rest_of_the_file() {
+    let temp = temp_dir();
+    let text =
+        "# keep\nmodel = 'local/old'\n\n[network] # proxy\nproxy = 'http://a'\nno_proxy = 'b'\n";
+    let path = write(temp.path(), "config.toml", text);
+    remove_preference(&path, "network.proxy").unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        text.replace("proxy = 'http://a'\n", "")
+    );
+    remove_preference(&path, "network.ca_cert").unwrap();
+    remove_preference(&path, "sessions.archive_after_days").unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        text.replace("proxy = 'http://a'\n", "")
+    );
 }
 
 #[test]

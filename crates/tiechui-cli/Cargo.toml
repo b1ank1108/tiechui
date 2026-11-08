@@ -32,6 +32,7 @@ tiechui-module-plugins.workspace = true
 tiechui-plugin-api.workspace = true
 clap.workspace = true
 futures.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -58,7 +59,6 @@ default = ["workspace"]
 workspace = ["dep:tiechui-workspace"]
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile.workspace = true
 tiechui-providers = { workspace = true, features = ["testing"] }
 wiremock.workspace = true

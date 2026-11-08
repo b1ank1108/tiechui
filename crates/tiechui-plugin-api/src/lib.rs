@@ -9,7 +9,7 @@ pub use projection::*;
 mod session;
 pub use compaction::*;
 pub use session::*;
-pub use tiechui_config::{CompactionConfig, PressureBenefit};
+pub use tiechui_config::{CompactionConfig, NetworkConfig, PressureBenefit};
 pub use tiechui_config::{private, user_home};
 mod runtime;
 pub use runtime::*;

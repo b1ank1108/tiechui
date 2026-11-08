@@ -920,6 +920,8 @@ fn questions(tool: &Tool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     ];
     if cancelled {
         header.push(Span::styled(" (interrupted)", cyan));
+    } else if details["status"] == "timed_out" {
+        header.push(Span::styled(" (timed out)", cyan));
     }
     let mut rows = wrap(&header, width, &[], &[]);
     for question in questions {

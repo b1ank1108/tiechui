@@ -20,7 +20,7 @@ use tiechui_plugin_api::protocol::CommandInfo;
 use tiechui_plugin_api::tools::ToolSource;
 use tiechui_plugin_api::{
     CancellationToken, Command, McpOrigin, McpServerDefinition, McpSource, Module, ModuleConfig,
-    Registry, Tool, ToolError, async_trait, serde_json,
+    NetworkConfig, Registry, Tool, ToolError, async_trait, serde_json,
 };
 
 pub use client::{DeclineElicitation, ElicitationHandler};
@@ -59,6 +59,7 @@ struct Server {
 struct Inner {
     servers: RwLock<BTreeMap<String, Server>>,
     cancel: CancellationToken,
+    network: NetworkConfig,
 }
 
 struct Lifetime(CancellationToken);
@@ -116,7 +117,15 @@ impl McpModule {
         cancel: CancellationToken,
         elicitation: Arc<dyn ElicitationHandler>,
     ) -> Self {
-        Self::start_with_profile(definitions, cwd, project_trusted, cancel, elicitation, None)
+        Self::start_with_profile(
+            definitions,
+            cwd,
+            project_trusted,
+            cancel,
+            elicitation,
+            None,
+            NetworkConfig::default(),
+        )
     }
 
     pub fn start_with_profile(
@@ -126,11 +135,13 @@ impl McpModule {
         cancel: CancellationToken,
         elicitation: Arc<dyn ElicitationHandler>,
         home: Option<&Path>,
+        network: NetworkConfig,
     ) -> Self {
         let cancel = cancel.child_token();
         let inner = Arc::new(Inner {
             servers: RwLock::default(),
             cancel: cancel.clone(),
+            network,
         });
         let module = Self {
             inner: inner.clone(),
@@ -154,7 +165,7 @@ impl McpModule {
                             .keys()
                             .any(|key| key.eq_ignore_ascii_case("authorization"))
                 })
-                .map(|(home, url)| oauth::OAuthStore::new(home, &name, url));
+                .map(|(home, url)| oauth::OAuthStore::new(home, &name, url, inner.network.clone()));
             let origin = match &definition.origin {
                 McpOrigin::User(path) | McpOrigin::Project(path) => path.display().to_string(),
                 McpOrigin::Extension(id) => id.clone(),
@@ -247,7 +258,15 @@ impl McpModule {
                 definition.config.enabled = Some(false);
             }
         }
-        Self::start_with_profile(definitions, cwd, trusted, cancel, elicitation, home)
+        Self::start_with_profile(
+            definitions,
+            cwd,
+            trusted,
+            cancel,
+            elicitation,
+            home,
+            config.network.clone(),
+        )
     }
 
     pub fn statuses(&self) -> Vec<ServerStatus> {
