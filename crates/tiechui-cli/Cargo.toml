@@ -50,6 +50,12 @@ tiechui-tools.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util.workspace = true
 toml.workspace = true
+tiechui-workspace = { workspace = true, optional = true }
+
+[features]
+default = ["workspace"]
+# Files, Git and terminals in `chui app-server`.
+workspace = ["dep:tiechui-workspace"]
 
 [dev-dependencies]
 reqwest.workspace = true

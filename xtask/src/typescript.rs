@@ -38,7 +38,7 @@ fn declarations(visit: impl FnOnce(&mut Declarations)) -> String {
 }
 
 pub fn run(root: &Path, check: bool) -> Result<()> {
-    use tiechui_protocol::app;
+    use tiechui_protocol::{app, workspace};
     let files = [
         (
             "sdk/typescript/protocol.ts",
@@ -69,6 +69,34 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::TrustResult>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
+                d.visit::<workspace::RootParams>();
+                d.visit::<workspace::FileParams>();
+                d.visit::<workspace::FileTree>();
+                d.visit::<workspace::FileContent>();
+                d.visit::<workspace::WriteParams>();
+                d.visit::<workspace::WriteResult>();
+                d.visit::<workspace::MoveParams>();
+                d.visit::<workspace::SearchParams>();
+                d.visit::<workspace::SearchResult>();
+                d.visit::<workspace::FsChanged>();
+                d.visit::<workspace::GitChanged>();
+                d.visit::<workspace::GitStatus>();
+                d.visit::<workspace::CompareParams>();
+                d.visit::<workspace::Comparison>();
+                d.visit::<workspace::LogParams>();
+                d.visit::<workspace::GitCommit>();
+                d.visit::<workspace::ShowParams>();
+                d.visit::<workspace::Branches>();
+                d.visit::<workspace::PullRequest>();
+                d.visit::<workspace::GitRunParams>();
+                d.visit::<workspace::GitRunResult>();
+                d.visit::<workspace::TerminalCreateParams>();
+                d.visit::<workspace::TerminalParams>();
+                d.visit::<workspace::TerminalAttached>();
+                d.visit::<workspace::TerminalWriteParams>();
+                d.visit::<workspace::TerminalResizeParams>();
+                d.visit::<workspace::TerminalOutput>();
+                d.visit::<workspace::TerminalExit>();
                 d.visit::<tiechui_protocol::ContextSnapshot>();
                 d.visit::<tiechui_protocol::ShellsView>();
                 d.visit::<tiechui_protocol::SubagentsView>();

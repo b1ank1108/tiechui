@@ -22,6 +22,8 @@ session_patterns: Array<string>, } | { "kind": "elicitation", server: string, re
 
 export type ArchiveParams = { path: string, archived: boolean, };
 
+export type Branches = { local: Array<string>, remote: Array<string>, };
+
 export type CacheDiagnostics = { folds?: number, reclaimed?: number, 
 /**
  * Folds that capacity pressure applied during a cache cooldown.
@@ -34,9 +36,23 @@ export type CheckpointStats = { files: { [key in string]: LineStats | null }, er
 
 export type CommandInfo = { name: string, description: string, argument_hint?: string | null, };
 
+export type CommitFile = { path: string, status: GitFileStatus, added: number, removed: number, };
+
 export type CompactionPhase = "prepare" | "summarize" | "restore" | "commit";
 
 export type CompactionReason = "manual" | "threshold" | "overflow";
+
+export type CompareParams = { root: string, base: string, };
+
+export type Comparison = { merge_base: string | null, 
+/**
+ * Commits on HEAD that `base` lacks.
+ */
+ahead: number, 
+/**
+ * Commits on `base` that HEAD lacks.
+ */
+behind: number, files: Array<CommitFile>, };
 
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
@@ -80,6 +96,74 @@ total: TokenUsage, } | { "kind": "queue_updated", steering: Array<QueuedInput>, 
 
 export type Failure = { jsonrpc: Version, id: Id, error: Error, };
 
+export type FileContent = { 
+/**
+ * None for binary files.
+ */
+text: string | null, 
+/**
+ * SHA-256 of the bytes, for [`WriteParams::expected`].
+ */
+hash: string, size: number, };
+
+export type FileEntry = { path: string, dir: boolean, 
+/**
+ * Excluded by `.gitignore`; an ignored directory's entries are listed separately.
+ */
+ignored: boolean, };
+
+export type FileParams = { root: string, path: string, };
+
+export type FileTree = { entries: Array<FileEntry>, 
+/**
+ * The listing stopped at its entry limit.
+ */
+truncated: boolean, };
+
+export type FsChanged = { root: string, paths: Array<string>, };
+
+export type GitChange = { path: string, status: GitFileStatus, staged: boolean, added: number, removed: number, };
+
+export type GitChanged = { root: string, };
+
+export type GitCommit = { hash: string, parents: Array<string>, subject: string, author: string, 
+/**
+ * Unix milliseconds.
+ */
+at: number, 
+/**
+ * Decorations as `git log` prints them: `HEAD -> main`, `origin/main`, `tag: v1`.
+ */
+refs: Array<string>, files: Array<CommitFile>, };
+
+export type GitFileStatus = "M" | "A" | "D" | "U" | "R" | "C";
+
+export type GitOp = { "kind": "stage", paths: Array<string>, } | { "kind": "unstage", paths: Array<string>, } | { "kind": "discard", paths: Array<string>, } | { "kind": "commit", message: string, } | { "kind": "fetch" } | { "kind": "pull", ff_only: boolean, } | { "kind": "push", force: boolean, } | { "kind": "publish" } | { "kind": "sync" } | { "kind": "rebase", onto: string, } | { "kind": "abort" } | { "kind": "continue" } | { "kind": "checkout", branch: string, create: boolean, } | { "kind": "create_pr" };
+
+export type GitOperation = "merge" | "rebase";
+
+export type GitRunParams = { root: string, op: GitOp, };
+
+export type GitRunResult = { 
+/**
+ * Combined output of the commands.
+ */
+output: string, };
+
+export type GitStatus = { 
+/**
+ * None when HEAD is detached.
+ */
+branch: string | null, 
+/**
+ * None before the first commit.
+ */
+head: string | null, upstream: string | null, ahead: number, behind: number, operation: GitOperation | null, changes: Array<GitChange>, 
+/**
+ * Unmerged paths.
+ */
+conflicts: Array<string>, };
+
 export type Id = string | number | null;
 
 export type InitializeParams = { protocol_version: number, };
@@ -88,7 +172,11 @@ export type InitializeResult = { protocol_version: number, server_version: strin
 /**
  * The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
  */
-home: string, };
+home: string, 
+/**
+ * Optional method groups: `workspace` for `fs/*`, `git/*` and `terminal/*`.
+ */
+capabilities: Array<string>, };
 
 export type InputContent = { "kind": "text", text: string, } | { "kind": "image", mime_type: string, 
 /**
@@ -116,6 +204,8 @@ export type LineStats = { added: number, removed: number, };
 
 export type LiveState = "idle" | "running" | "waiting" | "failed";
 
+export type LogParams = { root: string, limit: number, };
+
 export type ModelInfo = { provider: string, 
 /**
  * The model's own id, without the provider prefix.
@@ -129,6 +219,8 @@ context_window: number, reasoning: boolean,
  * Levels the model accepts, `off` first.
  */
 thinking_levels: Array<ThinkingLevel>, };
+
+export type MoveParams = { root: string, from: string, to: string, };
 
 export type Notification = { jsonrpc: Version, method: string, params?: Params, };
 
@@ -147,6 +239,10 @@ export type PluginPanel = { title: string, nodes: Array<PanelNode>, };
 export type PluginPrompt = { "kind": "select", title: string, text: string, options: Array<string>, } | { "kind": "confirm", title: string, text: string, } | { "kind": "input", title: string, text: string, } | { "kind": "panel", panel: PluginPanel, };
 
 export type ProtocolMessage = Submission | Event | JsonRpcMessage;
+
+export type PullRequest = { number: number, state: PullRequestState, url: string, };
+
+export type PullRequestState = "open" | "draft" | "merged" | "closed";
 
 export type Question = { id: string, header: string, question: string, options?: Array<QuestionOption> | null, };
 
@@ -171,6 +267,32 @@ export type RewindPage = "messages" | "checking" | "actions" | "recovery";
 export type RewindPanel = { rows: Array<RewindRow>, selected: number, page: RewindPage, preview: CheckpointStats | null, };
 
 export type RewindRow = { session_id: string, entry_id: string, text: string, timestamp: number, stats: CheckpointStats | null, };
+
+export type RootParams = { root: string, };
+
+export type SearchGroup = { path: string, hits: Array<SearchHit>, };
+
+export type SearchHit = { 
+/**
+ * One-based.
+ */
+line: number, text: string, 
+/**
+ * UTF-16 offsets into `text`.
+ */
+ranges: Array<[number, number]>, };
+
+export type SearchParams = { root: string, query: string, regex: boolean, case_sensitive: boolean, whole_word: boolean, 
+/**
+ * Globs as in `.gitignore`; a pattern without `/` matches at any depth.
+ */
+include: Array<string>, exclude: Array<string>, };
+
+export type SearchResult = { groups: Array<SearchGroup>, total: number, 
+/**
+ * The search stopped at its hit limit.
+ */
+truncated: boolean, };
 
 export type SessionClosed = { thread_id: ThreadId, error: string | null, };
 
@@ -230,6 +352,8 @@ started_at: number, ended_at: number | null, exit_code: number | null, };
 
 export type ShellsView = { revision: number, tasks: Array<ShellTask>, open: boolean, detail: ShellDetail | null, };
 
+export type ShowParams = { root: string, rev: string, path: string, };
+
 export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, seq: number, events: Array<Event>, };
 
 export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };
@@ -243,6 +367,36 @@ export type SubmitParams = { thread_id: ThreadId, op: Op, };
 export type SubmitResult = { submission_id: SubmissionId, };
 
 export type Success = { jsonrpc: Version, id: Id, result: JsonValue, };
+
+export type TerminalAttached = { 
+/**
+ * The last 64 KiB.
+ */
+buffer: string, 
+/**
+ * Output bytes so far; later `terminal/output` notifications have a greater `seq`.
+ */
+seq: number, 
+/**
+ * The shell has exited with this code.
+ */
+exit: number | null, };
+
+export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, };
+
+export type TerminalExit = { id: string, code: number, };
+
+export type TerminalOutput = { id: string, 
+/**
+ * Output bytes so far, including `data`.
+ */
+seq: number, data: string, };
+
+export type TerminalParams = { id: string, };
+
+export type TerminalResizeParams = { id: string, cols: number, rows: number, };
+
+export type TerminalWriteParams = { id: string, data: string, };
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -295,3 +449,11 @@ export type TurnParams = { thread_id: ThreadId, item_id: string, };
 export type TurnStatus = "in_progress" | "completed" | "interrupted" | "failed";
 
 export type Version = "2.0";
+
+export type WriteParams = { root: string, path: string, text: string, 
+/**
+ * Fails when the file's hash differs, or it exists while this is empty; None overwrites.
+ */
+expected: string | null, };
+
+export type WriteResult = { hash: string, };

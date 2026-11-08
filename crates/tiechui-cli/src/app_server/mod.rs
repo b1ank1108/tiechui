@@ -2,6 +2,8 @@
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
 mod projection;
+#[cfg(feature = "workspace")]
+mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +50,8 @@ struct Server {
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
     schedules: tiechui_module_loop::Schedules,
     next: AtomicU64,
+    #[cfg(feature = "workspace")]
+    workspace: Arc<tiechui_workspace::Workspace>,
 }
 
 pub(crate) async fn run() -> i32 {
@@ -70,6 +74,8 @@ pub(crate) async fn run() -> i32 {
     });
     let server = Arc::new(Server {
         home,
+        #[cfg(feature = "workspace")]
+        workspace: workspace::new(out.clone()),
         out,
         sessions: Mutex::default(),
         schedules: Default::default(),
@@ -100,6 +106,8 @@ pub(crate) async fn run() -> i32 {
     for thread in open {
         server.close(&thread).await;
     }
+    #[cfg(feature = "workspace")]
+    server.workspace.close();
     writer.abort();
     code
 }
@@ -204,6 +212,10 @@ impl Server {
             "session/archive" => self.archive(params).await,
             "session/trash" => self.trash(params).await,
             "trust" => self.trust(params).await,
+            #[cfg(feature = "workspace")]
+            _ if workspace::handles(method) => {
+                workspace::dispatch(&self.workspace, method, params).await
+            }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
         };
         self.respond(id, reply);
@@ -221,6 +233,11 @@ impl Server {
             protocol_version: APP_PROTOCOL_VERSION,
             server_version: env!("CARGO_PKG_VERSION").into(),
             home: self.home.display().to_string(),
+            capabilities: if cfg!(feature = "workspace") {
+                vec!["workspace".into()]
+            } else {
+                vec![]
+            },
         })
     }
 

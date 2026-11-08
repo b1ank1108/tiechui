@@ -1,0 +1,23 @@
+[package]
+name = "tiechui-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+ignore.workspace = true
+notify.workspace = true
+portable-pty.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tiechui-protocol.workspace = true
+trash.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -17,6 +17,8 @@ exceptions = [
     # Planned fuzzy matcher, used unmodified.
     { name = "nucleo", version = "=0.5.0", allow = ["MPL-2.0"] },
     { name = "nucleo-matcher", version = "=0.3.1", allow = ["MPL-2.0"] },
+    # Public-domain file watcher for workspace services.
+    { name = "notify", version = "=8.2.2", allow = ["CC0-1.0"] },
 ]
 
 [bans]

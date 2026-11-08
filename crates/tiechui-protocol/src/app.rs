@@ -22,6 +22,8 @@ pub struct InitializeResult {
     pub server_version: String,
     /// The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
     pub home: String,
+    /// Optional method groups: `workspace` for `fs/*`, `git/*` and `terminal/*`.
+    pub capabilities: Vec<String>,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

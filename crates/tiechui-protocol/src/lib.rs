@@ -17,6 +17,7 @@ pub use rewind::*;
 pub mod app;
 mod context;
 pub mod rpc;
+pub mod workspace;
 pub use context::*;
 
 use schemars::JsonSchema;

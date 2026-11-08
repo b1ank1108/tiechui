@@ -19,6 +19,8 @@ struct Client {
     lines: Lines<BufReader<ChildStdout>>,
     next: u64,
     events: Vec<SessionEvent>,
+    /// Other notifications.
+    notices: Vec<Value>,
 }
 
 impl Client {
@@ -47,10 +49,31 @@ impl Client {
                     None => Ok(message["result"].clone()),
                 };
             }
-            if message["method"] == "session/event" {
-                self.events
-                    .push(serde_json::from_value(message["params"].clone()).unwrap());
+            self.buffer(message);
+        }
+    }
+
+    fn buffer(&mut self, message: Value) {
+        if message["method"] == "session/event" {
+            self.events
+                .push(serde_json::from_value(message["params"].clone()).unwrap());
+        } else if message.get("method").is_some() {
+            self.notices.push(message);
+        }
+    }
+
+    /// Takes the params of the first buffered or incoming notification that matches.
+    async fn notice(&mut self, matches: impl Fn(&str, &Value) -> bool) -> Value {
+        loop {
+            let found = self
+                .notices
+                .iter()
+                .position(|n| matches(n["method"].as_str().unwrap_or_default(), &n["params"]));
+            if let Some(index) = found {
+                return self.notices.remove(index)["params"].take();
             }
+            let message = self.read().await;
+            self.buffer(message);
         }
     }
 
@@ -65,10 +88,7 @@ impl Client {
                 return self.events.drain(..=index).collect();
             }
             let message = self.read().await;
-            if message["method"] == "session/event" {
-                self.events
-                    .push(serde_json::from_value(message["params"].clone()).unwrap());
-            }
+            self.buffer(message);
         }
     }
 }
@@ -147,6 +167,7 @@ impl Fixture {
             lines,
             next: 0,
             events: vec![],
+            notices: vec![],
         }
     }
 }
@@ -315,4 +336,66 @@ async fn sessions_converse_ask_approvals_and_fork_through_app_server() {
             .is_err()
     );
     fixture.server.verify().unwrap();
+}
+
+#[tokio::test]
+async fn workspace_services_through_app_server() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let init = client
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    assert_eq!(init["capabilities"], json!(["workspace"]));
+    let root = fixture.cwd.display().to_string();
+    let tree = client.ok("fs/tree", json!({"root": root})).await;
+    assert_eq!(
+        tree["entries"],
+        json!([{"path": "hello.txt", "dir": false, "ignored": false}])
+    );
+    let file = json!({"root": root, "path": "hello.txt"});
+    assert_eq!(client.ok("fs/read", file.clone()).await["text"], "before\n");
+    let stale = json!({"root": root, "path": "hello.txt", "text": "x", "expected": "0"});
+    assert!(client.call("fs/write", stale).await.is_err());
+    assert!(
+        client
+            .call("fs/read", json!({"root": "relative", "path": "a"}))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client.ok("git/status", json!({"root": root})).await,
+        Value::Null
+    );
+
+    client.ok("fs/watch", json!({"root": root})).await;
+    let new = json!({"root": root, "path": "new.txt", "text": "x", "expected": ""});
+    client.ok("fs/write", new).await;
+    client
+        .notice(|method, params| {
+            method == "fs/changed"
+                && params["paths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("new.txt"))
+        })
+        .await;
+
+    let terminal = json!({"id": "t", "cwd": root, "cols": 80, "rows": 24});
+    client.ok("terminal/create", terminal).await;
+    let echo = json!({"id": "t", "data": "echo tiechui-$((40 + 2))\n"});
+    client.ok("terminal/write", echo).await;
+    let mut output = String::new();
+    while !output.contains("tiechui-42") {
+        let notice = client.notice(|method, _| method == "terminal/output").await;
+        output.push_str(notice["data"].as_str().unwrap());
+    }
+    let attached = client.ok("terminal/attach", json!({"id": "t"})).await;
+    assert!(attached["buffer"].as_str().unwrap().contains("tiechui-42"));
+    client.ok("terminal/kill", json!({"id": "t"})).await;
+    assert!(
+        client
+            .call("terminal/attach", json!({"id": "t"}))
+            .await
+            .is_err()
+    );
 }
