@@ -214,6 +214,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 - `--approval`，见[权限与信任](#权限与信任)。
 
 其他子命令有 `setup`、`doctor`、`trust`、`plugin`、`skills`、`hooks` 和 `mcp`，都支持 `--help`。
+`chui app-server` 通过 stdio 上的 JSON-RPC 向桌面客户端提供会话，类型生成在 `schema/app-server.ts`。
 内置工具是 `read`、`write`、`edit`、`grep`、`find` 和 `bash`，以及管理后台命令的
 `shell_list`、`shell_output` 和 `shell_stop`。模块、插件和 MCP 服务器会添加更多工具。
 

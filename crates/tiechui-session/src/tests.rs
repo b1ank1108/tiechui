@@ -1146,3 +1146,32 @@ fn lexical_cwd_survives_resume_and_both_spellings_match_the_filter() {
         assert_eq!(summaries.len(), 2);
     }
 }
+
+#[test]
+fn meta_survives_a_held_writer_reaches_summaries_and_moves_to_trash() {
+    let fixture = Fixture::new();
+    let mut store = fixture.create();
+    add(&mut store, "first", &fixture.cancel);
+    let path = store.path().to_owned();
+    assert_eq!(meta(&path).unwrap(), Meta::default());
+    let renamed = Meta {
+        title: Some("Renamed".into()),
+        archived_at: Some(7),
+    };
+    save_meta(&path, &renamed).unwrap();
+    let (listed, _) = summaries(&fixture.home, Some(&fixture.cwd), &fixture.cancel).unwrap();
+    assert_eq!(listed[0].meta, renamed);
+    assert_eq!(listed[0].first_message, "first");
+    drop(store);
+    let moved = trash(&fixture.home, &path).unwrap();
+    assert!(!path.exists() && moved.exists());
+    assert_eq!(meta(&moved).unwrap(), renamed);
+    assert!(
+        list(&fixture.home, &fixture.cwd, &fixture.cancel)
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    save_meta(&moved, &Meta::default()).unwrap();
+    assert!(!moved.with_extension("meta.json").exists());
+}

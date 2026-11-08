@@ -37,6 +37,8 @@ fn event(kind: EventKind) -> Event {
 
 fn turn(status: TurnStatus) -> Turn {
     Turn {
+        started_at: 0,
+        ended_at: None,
         id: TurnId("turn".into()),
         status,
         items: vec![],
@@ -153,6 +155,8 @@ fn native_compaction_status_summary_and_resume() {
             id: ThreadId("t".into()),
             epoch: SessionEpoch(0),
             turns: vec![Turn {
+                started_at: 0,
+                ended_at: None,
                 id: TurnId("saved".into()),
                 status: TurnStatus::Completed,
                 items: vec![Item::Known(item)],

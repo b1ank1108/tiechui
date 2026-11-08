@@ -400,6 +400,8 @@ impl SessionActor {
                         tokens_before: *tokens_before,
                         degraded: details["degraded"] == true,
                     })],
+                    started_at: entry.timestamp,
+                    ended_at: Some(entry.timestamp),
                 });
                 continue;
             }
@@ -450,10 +452,13 @@ impl SessionActor {
                     id: TurnId(entry.id.clone()),
                     status: TurnStatus::Completed,
                     items: vec![],
+                    started_at: entry.timestamp,
+                    ended_at: None,
                 });
             }
             if let Some(turn) = turns.last_mut() {
                 turn.items.extend(items.into_iter().map(Item::Known));
+                turn.ended_at = Some(entry.timestamp);
             }
         }
         Ok(turns)
@@ -2094,6 +2099,8 @@ impl SessionActor {
             )),
             status: TurnStatus::InProgress,
             items: vec![],
+            started_at: tiechui_session::now_ms(),
+            ended_at: None,
         };
         self.emit(EventKind::TurnStarted { turn: turn.clone() });
         self.turn = Some(turn);
@@ -2292,6 +2299,7 @@ impl SessionActor {
         if let Some(mut turn) = self.turn.take() {
             self.settled = Some(status);
             turn.status = status;
+            turn.ended_at = Some(tiechui_session::now_ms());
             self.emit(EventKind::TurnCompleted { turn });
         }
         self.submission = None;

@@ -11,7 +11,7 @@ use tiechui_tui::{Client, Opened, Target};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::exec::{Failure, Open, Prepared, locations, prepare, startup};
+use crate::exec::{Failure, Open, Options, Prepared, locations, prepare, startup};
 use tiechui_module_loop::Schedules;
 
 /// The session the TUI shows.
@@ -53,8 +53,9 @@ async fn open(
         tui,
         cwd,
         path,
+        ..
     } = prepare(
-        args,
+        &Options::from_args(args),
         shutdown.clone(),
         true,
         open,
@@ -94,7 +95,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
             return code;
         }
     };
-    let (cwd, canonical, paths, home) = match locations(args) {
+    let (cwd, canonical, paths, home) = match locations(&Options::from_args(args)) {
         Ok(locations) => locations,
         Err((code, message)) => {
             eprintln!("chui: {message}");
@@ -261,7 +262,8 @@ impl tiechui_tui::Services for Services {
                                 cwd: session.header.cwd,
                                 created_at: session.header.created_at,
                                 modified: session.modified,
-                                first_message: session.first_message,
+                                // A title set in the desktop app replaces the opening message.
+                                first_message: session.meta.title.unwrap_or(session.first_message),
                                 text: session.text,
                             })
                             .collect()

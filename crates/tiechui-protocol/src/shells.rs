@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SHELLS_EVENT: &str = "tiechui.exec.tasks";
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellState {
@@ -33,6 +34,7 @@ impl ShellState {
     }
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellMode {
@@ -49,6 +51,7 @@ impl ShellMode {
     }
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ShellTask {
     pub id: String,
@@ -84,6 +87,7 @@ impl ShellTask {
 }
 
 /// The retained output tail of one task, sent when a client asks for it.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ShellDetail {
     pub id: String,
@@ -91,6 +95,7 @@ pub struct ShellDetail {
     pub log_path: Option<String>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ShellsView {
     pub revision: u64,

@@ -32,6 +32,8 @@ fn item() -> Item {
 
 fn turn() -> Turn {
     Turn {
+        started_at: 0,
+        ended_at: None,
         id: TurnId("turn-1".into()),
         status: TurnStatus::InProgress,
         items: vec![item()],
@@ -292,6 +294,8 @@ fn event_variants() {
         },
         EventKind::TurnCompleted {
             turn: Turn {
+                started_at: 0,
+                ended_at: None,
                 status: TurnStatus::Completed,
                 ..turn()
             },

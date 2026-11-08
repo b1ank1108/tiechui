@@ -82,6 +82,8 @@ impl ChildRunner for Runner {
         };
         events(event(EventKind::TurnCompleted {
             turn: Turn {
+                started_at: 0,
+                ended_at: None,
                 id: turn_id,
                 status,
                 items: vec![],

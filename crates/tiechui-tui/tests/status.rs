@@ -590,6 +590,8 @@ fn event(kind: EventKind) -> Event {
 
 fn turn(status: TurnStatus) -> Turn {
     Turn {
+        started_at: 0,
+        ended_at: None,
         id: TurnId("turn".into()),
         status,
         items: Vec::new(),

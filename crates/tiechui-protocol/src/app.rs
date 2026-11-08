@@ -1,0 +1,170 @@
+//! `chui app-server`: JSON-RPC 2.0 methods for desktop clients, one JSON message per line.
+//! Each open session's events arrive as `session/event` notifications numbered per session;
+//! a snapshot's `seq` is the last number its events include.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{Event, Op, SubmissionId, ThinkingLevel, ThreadId};
+
+pub const APP_PROTOCOL_VERSION: u32 = 1;
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InitializeParams {
+    pub protocol_version: u32,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InitializeResult {
+    pub protocol_version: u32,
+    pub server_version: String,
+    /// The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
+    pub home: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionListParams {
+    pub cwd: String,
+    /// Include archived sessions.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// What an open session is doing.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveState {
+    Idle,
+    Running,
+    /// Waiting for an approval response.
+    Waiting,
+    /// The last model request failed and can be retried.
+    Failed,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSummary {
+    pub thread_id: ThreadId,
+    pub path: String,
+    pub cwd: String,
+    /// Unix milliseconds.
+    pub created_at: u64,
+    /// Unix milliseconds of the latest user or assistant message.
+    pub modified: u64,
+    pub first_message: String,
+    pub title: Option<String>,
+    pub archived_at: Option<u64>,
+    /// The session file this one was forked from.
+    pub parent: Option<String>,
+    /// Present while the session is open in this server.
+    pub live: Option<LiveState>,
+}
+
+/// Opens the session file at `path`, or starts a new session in `cwd`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SessionOpenParams {
+    pub cwd: Option<String>,
+    pub path: Option<String>,
+    /// `<provider>/<model id>`.
+    pub model: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    /// `rules`, `auto` or `yolo`; otherwise the configured mode.
+    pub mode: Option<String>,
+}
+
+/// Events that rebuild the session's current state, as if received from its start.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Snapshot {
+    pub thread_id: ThreadId,
+    pub path: String,
+    pub cwd: String,
+    pub seq: u64,
+    pub events: Vec<Event>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadParams {
+    pub thread_id: ThreadId,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitParams {
+    pub thread_id: ThreadId,
+    pub op: Op,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitResult {
+    pub submission_id: SubmissionId,
+}
+
+/// Names a turn by the id of its user message item, live or replayed.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnParams {
+    pub thread_id: ThreadId,
+    pub item_id: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RenameParams {
+    pub path: String,
+    /// None restores the first message as the title.
+    pub title: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArchiveParams {
+    pub path: String,
+    pub archived: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PathParams {
+    pub path: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustParams {
+    pub cwd: String,
+    /// None reads the current decision.
+    pub allow: Option<bool>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustResult {
+    /// None when the directory has no decision.
+    pub allowed: Option<bool>,
+}
+
+/// The `session/event` notification.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionEvent {
+    pub seq: u64,
+    pub event: Event,
+}
+
+/// The `session/closed` notification, sent when a session ends without `session/close`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionClosed {
+    pub thread_id: ThreadId,
+    pub error: Option<String>,
+}

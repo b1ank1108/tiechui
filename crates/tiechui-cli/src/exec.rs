@@ -61,17 +61,45 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
     }
 }
 
-/// The working directory as given, its canonical form, the config paths, and the Tiechui home.
-pub(crate) fn locations(
-    args: &ArgMatches,
-) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
-    locations_at(args.get_one::<String>("cwd").map_or_else(
-        || std::env::current_dir().map_err(config_error),
-        |path| Ok(PathBuf::from(path)),
-    )?)
+/// What the command line, or an app-server client, asks of the sessions it opens.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Options {
+    pub cwd: Option<PathBuf>,
+    pub resume: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub mode: Option<String>,
+    pub approval: Option<String>,
 }
 
-fn locations_at(given: PathBuf) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
+impl Options {
+    /// Arguments the subcommand does not define are absent.
+    pub(crate) fn from_args(args: &ArgMatches) -> Self {
+        let get = |id: &str| args.try_get_one::<String>(id).ok().flatten().cloned();
+        Self {
+            cwd: get("cwd").map(PathBuf::from),
+            resume: get("resume"),
+            model: get("model"),
+            thinking: get("thinking"),
+            mode: get("mode"),
+            approval: get("approval"),
+        }
+    }
+}
+
+/// The working directory as given, its canonical form, the config paths, and the Tiechui home.
+pub(crate) fn locations(
+    options: &Options,
+) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
+    locations_at(match &options.cwd {
+        Some(path) => path.clone(),
+        None => std::env::current_dir().map_err(config_error)?,
+    })
+}
+
+pub(crate) fn locations_at(
+    given: PathBuf,
+) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
     let given = tiechui_session::resolve_cwd(&given).map_err(config_error)?;
     let cwd = given
         .canonicalize()
@@ -97,6 +125,8 @@ pub(crate) enum Open {
 
 pub(crate) struct Prepared {
     pub handle: SessionHandle,
+    /// The session's thread id.
+    pub id: String,
     pub tui: tiechui_config::TuiConfig,
     /// The working directory as given.
     pub cwd: PathBuf,
@@ -108,7 +138,7 @@ pub(crate) struct Prepared {
 /// An interactive session asks the client through its interaction queue; others use the
 /// headless approval policy and decline elicitations.
 pub(crate) async fn prepare(
-    args: &ArgMatches,
+    options: &Options,
     cancel: CancellationToken,
     interactive: bool,
     open: Open,
@@ -118,7 +148,7 @@ pub(crate) async fn prepare(
 ) -> Result<Prepared, Failure> {
     let (interactions, inbox) = Interactions::new();
     let (context_files_cwd, cwd, paths, home) = match &open {
-        Open::Args => locations(args)?,
+        Open::Args => locations(options)?,
         Open::New(cwd) => locations_at(cwd.clone())?,
         Open::Path(path) => {
             let (path, header_cancel) = (path.clone(), cancel.clone());
@@ -158,7 +188,7 @@ pub(crate) async fn prepare(
     let approval = if interactive {
         None
     } else {
-        args.get_one::<String>("approval").map(String::as_str)
+        options.approval.as_deref()
     };
     let user_home = tiechui_config::user_home().unwrap_or_else(|| home.clone());
     let permissions = if interactive {
@@ -185,15 +215,15 @@ pub(crate) async fn prepare(
         vec![]
     };
     let mut cli = toml::Table::new();
-    for key in ["model", "thinking"] {
-        if let Some(value) = args.get_one::<String>(key) {
+    for (key, value) in [("model", &options.model), ("thinking", &options.thinking)] {
+        if let Some(value) = value {
             cli.insert(key.into(), toml::Value::String(value.clone()));
         }
     }
     let loaded = tiechui_config::load_with_mandatory_modules(&paths, trusted, &cli, &mandatory)
         .map_err(config_error)?;
     permissions.mode().set(
-        match args.get_one::<String>("mode").map(String::as_str) {
+        match options.mode.as_deref() {
             Some("auto") => Some(PermissionMode::Auto),
             Some("yolo") => Some(PermissionMode::Yolo),
             Some(_) => Some(PermissionMode::Rules),
@@ -294,7 +324,7 @@ pub(crate) async fn prepare(
         }
     }
     let resume = match &open {
-        Open::Args => args.get_one::<String>("resume").cloned(),
+        Open::Args => options.resume.clone(),
         _ => None,
     };
     let session = match &open {
@@ -349,7 +379,7 @@ pub(crate) async fn prepare(
         .map(parse_model)
         .transpose()?;
     // The command line's model replaces a resumed session's own only at startup.
-    let model = if matches!(open, Open::Args) && args.contains_id("model") {
+    let model = if matches!(open, Open::Args) && options.model.is_some() {
         configured.clone()
     } else {
         saved.or(configured)
@@ -558,6 +588,7 @@ pub(crate) async fn prepare(
     }));
     let tui = loaded.config.tui.clone();
     let path = store.path().to_owned();
+    let id = store.header().id.clone();
     let handle = SessionActor::spawn(
         store,
         SessionConfig {
@@ -582,6 +613,7 @@ pub(crate) async fn prepare(
     );
     Ok(Prepared {
         handle,
+        id,
         tui,
         cwd: given,
         path,
@@ -637,6 +669,7 @@ async fn execute(
     let shutdown = CancellationToken::new();
     let mut warnings = Vec::new();
     let schedules = Default::default();
+    let options = Options::from_args(args);
     let mut handle = tokio::select! {
         biased;
         signal = signals.recv() => {
@@ -644,7 +677,7 @@ async fn execute(
             signal.ok_or_else(|| runtime_error("signal listener stopped"))?.map_err(runtime_error)?;
             return Ok(130);
         }
-        result = prepare(args, shutdown.clone(), false, Open::Args, SessionEpoch(0), &schedules, &mut warnings) => {
+        result = prepare(&options, shutdown.clone(), false, Open::Args, SessionEpoch(0), &schedules, &mut warnings) => {
             for warning in &warnings {
                 eprintln!("{warning}");
             }

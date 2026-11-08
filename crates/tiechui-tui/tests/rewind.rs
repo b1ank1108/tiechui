@@ -148,6 +148,8 @@ fn double_escape_timing_input_focus_interruptions_and_draft_payloads() {
     esc(&mut app, now);
     assert!(app.take_submissions().is_empty());
     let turn = Turn {
+        started_at: 0,
+        ended_at: None,
         id: TurnId("turn".into()),
         status: TurnStatus::InProgress,
         items: vec![],
@@ -157,6 +159,8 @@ fn double_escape_timing_input_focus_interruptions_and_draft_payloads() {
     assert!(matches!(app.take_submissions()[0].op, Op::Interrupt { .. }));
     app.event(event(EventKind::TurnCompleted {
         turn: Turn {
+            started_at: 0,
+            ended_at: None,
             status: TurnStatus::Interrupted,
             ..turn
         },
@@ -349,6 +353,8 @@ fn reload_restore_preserves_nonempty_composer_but_explicit_refill_replaces_it() 
 fn reload_does_not_replay_or_resurrect_command_text_and_branch_navigation_replays() {
     let mut app = ready();
     let turns = vec![Turn {
+        started_at: 0,
+        ended_at: None,
         id: TurnId("old".into()),
         status: TurnStatus::Completed,
         items: vec![Item::Known(KnownItem::AssistantMessage {

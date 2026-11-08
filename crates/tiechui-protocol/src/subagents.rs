@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SUBAGENTS_EVENT: &str = "tiechui.subagents";
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -21,6 +22,7 @@ impl AgentState {
     }
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentTask {
     pub agent: String,
@@ -36,6 +38,7 @@ pub struct AgentTask {
     pub model: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentDispatch {
     pub id: String,
@@ -44,6 +47,7 @@ pub struct AgentDispatch {
     pub tasks: Vec<AgentTask>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SubagentsView {
     pub records: Vec<AgentDispatch>,

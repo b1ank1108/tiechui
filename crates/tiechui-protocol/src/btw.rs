@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const BTW_EVENT: &str = "btw";
 pub const BTW_SHARE: &str = "tiechui.btw.shared";
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BtwAction {
     Send { content: Vec<InputContent> },
@@ -14,6 +15,7 @@ pub enum BtwAction {
     Share,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BtwEvent {
     Update {
@@ -27,6 +29,7 @@ pub enum BtwEvent {
     },
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BtwView {
     pub id: String,
@@ -39,6 +42,7 @@ pub struct BtwView {
     pub notice: Option<String>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BtwMessage {
     pub user: bool,

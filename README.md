@@ -229,7 +229,8 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 - `--approval`, described in [Permissions and trust](#permissions-and-trust).
 
 Other subcommands are `setup`, `doctor`, `trust`, `plugin`, `skills`, `hooks`
-and `mcp`, and each has `--help`. The built-in tools are `read`, `write`, `edit`,
+and `mcp`, and each has `--help`. `chui app-server` serves sessions to desktop
+clients over JSON-RPC on stdio; its types are generated in `schema/app-server.ts`. The built-in tools are `read`, `write`, `edit`,
 `grep`, `find` and `bash`, plus `shell_list`, `shell_output` and `shell_stop` for
 background commands. Modules, plugins and MCP servers add more.
 

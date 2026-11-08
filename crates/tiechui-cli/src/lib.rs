@@ -1,5 +1,6 @@
 //! Shared command-line entry point for the `tiechui` and `chui` binaries.
 
+mod app_server;
 mod approvals;
 mod diagnostics;
 mod doctor;
@@ -153,6 +154,10 @@ pub fn run(name: &'static str) {
                 )
                 .arg(Arg::new("resume").long("resume").value_name("ID")),
         )
+        .subcommand(
+            Command::new("app-server")
+                .about("Serve sessions to desktop clients over JSON-RPC on stdio"),
+        )
         .get_matches();
     if let Some(("doctor", args)) = matches.subcommand() {
         if let Err(error) = doctor::run(args) {
@@ -225,6 +230,7 @@ pub fn run(name: &'static str) {
     let code = match matches.subcommand() {
         Some(("exec", args)) => runtime.block_on(exec::run(args)),
         Some(("setup", _)) => runtime.block_on(setup::command()),
+        Some(("app-server", _)) => runtime.block_on(app_server::run()),
         None => runtime.block_on(interactive::run(&matches)),
         Some(_) => return,
     };

@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A branch entry exposed to contributions, with model-only data omitted.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BranchEntry {
     pub id: String,
@@ -12,18 +13,21 @@ pub struct BranchEntry {
     pub custom: Option<(String, serde_json::Value)>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LineStats {
     pub added: usize,
     pub removed: usize,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CheckpointStats {
     pub files: std::collections::BTreeMap<String, Option<LineStats>>,
     pub error: Option<String>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RewindRow {
     pub session_id: String,
@@ -33,6 +37,7 @@ pub struct RewindRow {
     pub stats: Option<CheckpointStats>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RewindPage {
@@ -42,6 +47,7 @@ pub enum RewindPage {
     Recovery,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RewindPanel {
     pub rows: Vec<RewindRow>,

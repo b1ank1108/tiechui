@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::TokenUsage;
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextView {
@@ -17,6 +18,7 @@ pub enum ContextView {
     Cache,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextItem {
     pub label: String,
@@ -28,6 +30,7 @@ pub struct ContextItem {
     pub json: bool,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CacheResponse {
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -38,6 +41,7 @@ pub struct CacheResponse {
     pub unattributed: u64,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CacheDiagnostics {
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -52,6 +56,7 @@ pub struct CacheDiagnostics {
     pub unavailable: usize,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextSnapshot {
     pub model: String,

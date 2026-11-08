@@ -14,6 +14,7 @@ pub use program::*;
 mod rewind;
 pub use btw::*;
 pub use rewind::*;
+pub mod app;
 mod context;
 pub mod rpc;
 pub use context::*;
@@ -25,31 +26,38 @@ use serde_json::{Map, Value};
 /// The session's permission mode as a string: `rules`, `auto` or `yolo`.
 pub const PERMISSION_MODE_EVENT: &str = "tiechui.permissions.mode";
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ThreadId(pub String);
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct TurnId(pub String);
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ItemId(pub String);
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct SubmissionId(pub String);
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ApprovalId(pub String);
 
 /// Identifies a session generation so stale asynchronous results can be discarded.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct SessionEpoch(pub u64);
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputContent {
@@ -64,6 +72,7 @@ pub enum InputContent {
 }
 
 /// Both modes start a turn when the thread is idle.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InputDelivery {
@@ -73,6 +82,7 @@ pub enum InputDelivery {
     FollowUp,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
@@ -85,6 +95,7 @@ pub enum ThinkingLevel {
     Max,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionReason {
@@ -93,6 +104,7 @@ pub enum CompactionReason {
     Overflow,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionPhase {
@@ -103,6 +115,7 @@ pub enum CompactionPhase {
 }
 
 /// A question's exclusive choice; highlighting it does not submit an answer.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionOption {
@@ -110,6 +123,7 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Question {
@@ -121,6 +135,7 @@ pub struct Question {
 }
 
 /// What the user is asked; at most one request is open at a time.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalRequest {
@@ -184,6 +199,7 @@ pub enum ApprovalDecision {
     Cancel,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Op {
@@ -242,6 +258,7 @@ pub enum Op {
     },
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelInfo {
     pub provider: String,
@@ -254,6 +271,7 @@ pub struct ModelInfo {
     pub thinking_levels: Vec<ThinkingLevel>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommandInfo {
     pub name: String,
@@ -263,12 +281,14 @@ pub struct CommandInfo {
 }
 
 /// A user input waiting in the steering or follow-up queue.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct QueuedInput {
     pub submission_id: SubmissionId,
     pub content: Vec<InputContent>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Submission {
     pub id: SubmissionId,
@@ -277,6 +297,7 @@ pub struct Submission {
     pub op: Op,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Thread {
     pub id: ThreadId,
@@ -284,13 +305,21 @@ pub struct Thread {
     pub turns: Vec<Turn>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Turn {
     pub id: TurnId,
     pub status: TurnStatus,
     pub items: Vec<Item>,
+    /// Unix milliseconds; zero in older clients' data.
+    #[serde(default)]
+    pub started_at: u64,
+    /// Unix milliseconds of the turn's last entry, once it has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
@@ -301,6 +330,7 @@ pub enum TurnStatus {
 }
 
 /// Known shapes are decoded first; future kinds or fields retain their complete payload.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Item {
@@ -313,6 +343,7 @@ pub enum Item {
     },
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KnownItem {
@@ -349,6 +380,7 @@ pub enum KnownItem {
     },
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,6 +390,7 @@ pub struct Event {
     pub event: EventKind,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TokenUsage {
     /// Uncached input tokens; cache reads and writes are counted separately.
@@ -383,6 +416,7 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
@@ -517,6 +551,7 @@ pub enum EventKind {
 }
 
 /// The schema entry point for queued operations, events, and JSON-RPC envelopes.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ProtocolMessage {

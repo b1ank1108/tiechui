@@ -8,7 +8,7 @@ use tiechui_model::{Content, Message, Role};
 use tokio_util::sync::CancellationToken;
 
 use crate::storage::list_all;
-use crate::{EntryKind, Header, SessionError, SessionStore, check_cancel};
+use crate::{EntryKind, Header, Meta, SessionError, SessionStore, check_cancel};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
@@ -19,6 +19,7 @@ pub struct Summary {
     pub first_message: String,
     /// Every user and assistant text, for search.
     pub text: String,
+    pub meta: Meta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,7 @@ fn summary(path: &Path, cancel: &CancellationToken) -> Result<Option<Summary>, S
         modified,
         first_message: first_message.unwrap_or_default(),
         text: texts.join(" "),
+        meta: crate::meta(path)?,
     }))
 }
 

@@ -2,6 +2,7 @@
 
 mod browse;
 mod entry;
+mod meta;
 mod storage;
 
 use std::collections::{HashMap, HashSet};
@@ -14,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use browse::{Part, PartKind, Summary, preview, summaries};
 pub use entry::{Entry, EntryKind, FORMAT_VERSION, Header, ModelRef};
-pub use storage::{SessionInfo, SessionList, list, resolve_cwd, session_dir};
+pub use meta::{Meta, meta, save_meta, trash};
+pub use storage::{SessionInfo, SessionList, list, now_ms, resolve_cwd, session_dir};
 
 #[derive(Debug)]
 pub struct SessionError {

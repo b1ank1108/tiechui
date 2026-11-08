@@ -36,6 +36,7 @@ expression: "values.iter().map(round_trip).collect::<Vec<_>>()"
             "text": "hello"
           }
         ],
+        "started_at": 0,
         "status": "in_progress"
       }
     },

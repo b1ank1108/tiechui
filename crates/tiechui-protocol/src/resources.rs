@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ResourceKind {
     Plugin,
@@ -9,6 +10,7 @@ pub enum ResourceKind {
 }
 
 /// Display metadata and the exact, explicitly selected input reference.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Resource {
     pub id: String,
@@ -27,6 +29,7 @@ pub struct Resource {
 
 pub const RESOURCE_PICKER_EVENT: &str = "composer.resource_picker";
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcePickerRequest {
     pub kind: ResourceKind,
