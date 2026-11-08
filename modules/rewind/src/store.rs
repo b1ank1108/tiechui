@@ -29,12 +29,21 @@ struct Manifest {
     root: PathBuf,
     checkpoints: BTreeMap<String, Files>,
     head: Files,
+    /// The versions an undone turn had left, by its first anchor.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    undone: BTreeMap<String, Files>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
     pub target: Files,
     pub current: Files,
     pub stats: CheckpointStats,
+}
+
+/// The files a turn changed, as (before, after) the turn.
+pub struct Turn {
+    pub files: BTreeMap<String, (Option<Version>, Option<Version>)>,
+    pub reverted: bool,
 }
 
 #[derive(Clone)]
@@ -174,6 +183,7 @@ impl Store {
                 root: self.root.clone(),
                 checkpoints: BTreeMap::new(),
                 head: BTreeMap::new(),
+                undone: BTreeMap::new(),
             }),
             Err(error) => Err(error),
         }
@@ -396,17 +406,7 @@ impl Store {
     }
     pub fn plan(&self, ids: &[String], cancel: &CancellationToken) -> Result<Plan> {
         let data = self.load()?;
-        let mut target = Files::new();
-        for id in ids {
-            check(cancel)?;
-            if let Some(files) = data.checkpoints.get(id) {
-                for (file, version) in files {
-                    target
-                        .entry(file.clone())
-                        .or_insert_with(|| version.clone());
-                }
-            }
-        }
+        let mut target = earliest(&data, ids, cancel)?;
         let mut current = Files::new();
         let mut stats = CheckpointStats::default();
         let deadline = Instant::now() + Duration::from_millis(500);
@@ -500,8 +500,12 @@ impl Store {
         Ok(lock)
     }
     pub fn finish(&self, files: &Files) -> Result<()> {
+        self.settle(files, |_| {})
+    }
+    fn settle(&self, files: &Files, change: impl FnOnce(&mut Manifest)) -> Result<()> {
         let mut data = self.load()?;
         data.head.extend(files.clone());
+        change(&mut data);
         self.atomic("manifest.json", &data)?;
         fs::remove_file(self.directory.join("transaction.json"))?;
         File::open(&self.directory)?.sync_all()?;
@@ -578,6 +582,105 @@ impl Store {
         }
         self.atomic("manifest.json", &data)
     }
+    /// The files tracked under a turn's own anchors, after it as an undo recorded them,
+    /// else as the next of the `later` anchors found them, else as last written.
+    pub fn turn(
+        &self,
+        own: &[String],
+        later: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Turn> {
+        let data = self.load()?;
+        let undone = own.first().and_then(|id| data.undone.get(id));
+        let files = earliest(&data, own, cancel)?
+            .into_iter()
+            .filter_map(|(file, before)| {
+                let after = undone
+                    .and_then(|files| files.get(&file))
+                    .or_else(|| {
+                        later
+                            .iter()
+                            .find_map(|id| data.checkpoints.get(id)?.get(&file))
+                    })
+                    .or_else(|| data.head.get(&file))?
+                    .clone();
+                (after != before).then_some((file, (before, after)))
+            })
+            .collect();
+        Ok(Turn {
+            files,
+            reverted: undone.is_some(),
+        })
+    }
+    /// Undoes a turn, or reapplies an undone one, if its files are as it left them.
+    pub fn toggle(
+        &self,
+        own: &[String],
+        later: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Turn> {
+        let turn = self.turn(own, later, cancel)?;
+        if turn.files.is_empty() {
+            return Err(ToolError("The turn changed no tracked files".into()));
+        }
+        let (current, target) = turn
+            .files
+            .iter()
+            .map(|(file, (before, after))| {
+                let (from, to) = if turn.reverted {
+                    (before, after)
+                } else {
+                    (after, before)
+                };
+                ((file.clone(), from.clone()), (file.clone(), to.clone()))
+            })
+            .unzip();
+        let plan = Plan {
+            target,
+            current,
+            stats: CheckpointStats::default(),
+        };
+        let _lock = self.restore(&plan, cancel)?;
+        self.settle(&plan.target, |data| {
+            if turn.reverted {
+                data.undone.remove(&own[0]);
+            } else {
+                data.undone.insert(own[0].clone(), plan.current.clone());
+            }
+        })?;
+        self.turn(own, later, cancel)
+    }
+    /// Restores what the checkpoints of `ids` track to before the first of them, unless some
+    /// files changed since last written; then those are returned and nothing is restored.
+    pub fn rewind(&self, ids: &[String], cancel: &CancellationToken) -> Result<Vec<String>> {
+        let data = self.load()?;
+        let mut conflicts = vec![];
+        for file in earliest(&data, ids, cancel)?.into_keys() {
+            if data.head.get(&file) != Some(&self.capture(&file, cancel)?) {
+                conflicts.push(file);
+            }
+        }
+        if conflicts.is_empty() {
+            let plan = self.plan(ids, cancel)?;
+            if !plan.target.is_empty() {
+                let _lock = self.restore(&plan, cancel)?;
+                self.finish(&plan.target)?;
+            }
+        }
+        Ok(conflicts)
+    }
+}
+
+/// Each file's version at the first of `ids` that tracks it.
+fn earliest(data: &Manifest, ids: &[String], cancel: &CancellationToken) -> Result<Files> {
+    let mut files = Files::new();
+    for id in ids {
+        check(cancel)?;
+        for (file, version) in data.checkpoints.get(id).into_iter().flatten() {
+            files.entry(file.clone()).or_insert_with(|| version.clone());
+        }
+    }
+    Ok(files)
 }
 
 pub fn line_stats(before: &[u8], current: &[u8]) -> Option<LineStats> {

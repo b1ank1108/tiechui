@@ -2,6 +2,7 @@
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
 mod projection;
+mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
 
@@ -212,6 +213,7 @@ impl Server {
             "session/archive" => self.archive(params).await,
             "session/trash" => self.trash(params).await,
             "trust" => self.trust(params).await,
+            _ if turns::handles(method) => self.turn(method, params).await,
             #[cfg(feature = "workspace")]
             _ if workspace::handles(method) => {
                 workspace::dispatch(&self.workspace, method, params).await
@@ -589,12 +591,28 @@ impl Server {
             self.close(&thread).await;
         }
         let home = self.home.clone();
-        let moved =
-            blocking(move |_| tiechui_session::trash(&home, &path).map_err(|e| e.to_string()))
-                .await?;
+        // Rewind storage follows the session, next to it in the trash.
+        let moved = blocking(move |cancel| {
+            let rewind = turns::storage_of(&home, &path, cancel);
+            let moved = tiechui_session::trash(&home, &path).map_err(|e| e.to_string())?;
+            if let Some(rewind) = rewind {
+                std::fs::rename(&rewind, moved.with_extension("rewind"))
+                    .map_err(|e| format!("{}: {e}", rewind.display()))?;
+            }
+            Ok(moved)
+        })
+        .await?;
         value(PathParams {
             path: moved.display().to_string(),
         })
+    }
+
+    async fn turn(&self, method: &str, params: Value) -> Reply {
+        let params: TurnParams = parse(params)?;
+        let path = self.live(&params.thread_id)?.path.clone();
+        let home = self.home.clone();
+        let method = method.to_owned();
+        blocking(move |cancel| turns::handle(&home, &path, &method, &params.item_id, cancel)).await
     }
 
     async fn trust(&self, params: Value) -> Reply {

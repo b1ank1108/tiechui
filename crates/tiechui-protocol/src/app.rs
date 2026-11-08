@@ -155,6 +155,42 @@ pub struct TrustResult {
     pub allowed: Option<bool>,
 }
 
+/// A file a turn changed through tracked edits; `None` while the file is absent.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileChange {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// The `turn/changes` and `turn/undo` result.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnChanges {
+    pub changes: Vec<FileChange>,
+    /// Whether the turn has been undone.
+    pub reverted: bool,
+}
+
+/// The `turn/check` result: files still as the turn left them (as before it, once undone),
+/// files changed since, and the shell commands the turn ran, which undo does not track.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UndoCheck {
+    pub safe: Vec<String>,
+    pub r#unsafe: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+/// The `turn/rewind` result. Files are restored to before the turn only when none of them
+/// changed since last written by the agent; otherwise those are listed.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RewindResult {
+    pub conflicts: Vec<String>,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

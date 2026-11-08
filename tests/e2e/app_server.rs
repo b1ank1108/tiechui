@@ -399,3 +399,83 @@ async fn workspace_services_through_app_server() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn turn_undo_and_rewind_through_app_server() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let hello = fixture.cwd.join("hello.txt");
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"cwd": cwd, "mode": "yolo"}))
+            .await,
+    );
+    let thread = json!(opened.thread_id);
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id": thread, "op": {"kind": "user_input", "delivery": "follow_up",
+                "content": [{"kind": "text", "text": "Change hello.txt to after"}]}}),
+        )
+        .await;
+    let finished = client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let EventKind::TurnCompleted { turn } = &finished.last().unwrap().event.event else {
+        unreachable!()
+    };
+    let message = turn
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Known(KnownItem::UserMessage { id, .. }) => Some(id.0.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let params = json!({"thread_id": thread, "item_id": message});
+    let changes = |reverted: bool| {
+        json!({"changes": [{"path": "hello.txt", "before": "before\n", "after": "after\n"}],
+            "reverted": reverted})
+    };
+    assert_eq!(
+        client.ok("turn/changes", params.clone()).await,
+        changes(false)
+    );
+    assert_eq!(
+        client.ok("turn/check", params.clone()).await,
+        json!({"safe": ["hello.txt"], "unsafe": [], "ignored": []})
+    );
+
+    // Undo and redo, then refuse both while the file differs from what the turn left.
+    assert_eq!(client.ok("turn/undo", params.clone()).await, changes(true));
+    assert_eq!(std::fs::read_to_string(&hello).unwrap(), "before\n");
+    assert_eq!(client.ok("turn/undo", params.clone()).await, changes(false));
+    assert_eq!(std::fs::read_to_string(&hello).unwrap(), "after\n");
+    std::fs::write(&hello, "edited\n").unwrap();
+    assert_eq!(
+        client.ok("turn/check", params.clone()).await["unsafe"],
+        json!(["hello.txt"])
+    );
+    assert!(client.call("turn/undo", params.clone()).await.is_err());
+    assert_eq!(
+        client.ok("turn/rewind", params.clone()).await,
+        json!({"conflicts": ["hello.txt"]})
+    );
+    assert_eq!(std::fs::read_to_string(&hello).unwrap(), "edited\n");
+
+    std::fs::write(&hello, "after\n").unwrap();
+    assert_eq!(
+        client.ok("turn/rewind", params.clone()).await,
+        json!({"conflicts": []})
+    );
+    assert_eq!(std::fs::read_to_string(&hello).unwrap(), "before\n");
+
+    // Its file versions follow the session into the trash.
+    let trashed = client
+        .ok("session/trash", json!({"path": opened.path}))
+        .await;
+    let trashed = Path::new(trashed["path"].as_str().unwrap()).with_extension("rewind");
+    assert!(trashed.join("manifest.json").exists());
+    fixture.server.verify().unwrap();
+}

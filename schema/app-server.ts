@@ -96,6 +96,8 @@ total: TokenUsage, } | { "kind": "queue_updated", steering: Array<QueuedInput>, 
 
 export type Failure = { jsonrpc: Version, id: Id, error: Error, };
 
+export type FileChange = { path: string, before: string | null, after: string | null, };
+
 export type FileContent = { 
 /**
  * None for binary files.
@@ -265,6 +267,8 @@ export type ResourceKind = "Plugin" | "Skill" | "Task";
 export type RewindPage = "messages" | "checking" | "actions" | "recovery";
 
 export type RewindPanel = { rows: Array<RewindRow>, selected: number, page: RewindPage, preview: CheckpointStats | null, };
+
+export type RewindResult = { conflicts: Array<string>, };
 
 export type RewindRow = { session_id: string, entry_id: string, text: string, timestamp: number, stats: CheckpointStats | null, };
 
@@ -442,11 +446,19 @@ started_at: number,
  */
 ended_at?: number | null, };
 
+export type TurnChanges = { changes: Array<FileChange>, 
+/**
+ * Whether the turn has been undone.
+ */
+reverted: boolean, };
+
 export type TurnId = string;
 
 export type TurnParams = { thread_id: ThreadId, item_id: string, };
 
 export type TurnStatus = "in_progress" | "completed" | "interrupted" | "failed";
+
+export type UndoCheck = { safe: Array<string>, unsafe: Array<string>, ignored: Array<string>, };
 
 export type Version = "2.0";
 

@@ -85,7 +85,8 @@ async fn blocking<T: Send + 'static>(
     .map_err(|e| ToolError(e.to_string()))?
 }
 
-fn storage(
+/// A session's store, which inherits the parent session's checkpoints on first use.
+pub fn storage(
     base: &Path,
     cwd: &Path,
     id: &str,
