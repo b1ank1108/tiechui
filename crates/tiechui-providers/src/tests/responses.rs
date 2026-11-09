@@ -74,6 +74,41 @@ fn thinking(delta: &str) -> StreamEvent {
 }
 
 #[tokio::test]
+async fn refusal_text_survives_completion_with_and_without_deltas() {
+    for streamed in [false, true] {
+        let mut fixture = event(json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"message","role":"assistant","content":[]}}));
+        if streamed {
+            fixture.push_str(&event(
+                json!({"type":"response.refusal.delta","output_index":0,
+                "content_index":0,"delta":"I cannot help with that."}),
+            ));
+        }
+        fixture.push_str(&event(
+            json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"Response: "},
+                {"type":"refusal","refusal":"I cannot help with that."}]}}),
+        ));
+        fixture.push_str(&event(json!({"type":"response.completed","response":{
+            "status":"completed","usage":{"input_tokens":1,"output_tokens":1}}})));
+        let events = collect(&fixture).await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert!(
+            events.contains(&Ok(complete(0, text("Response: I cannot help with that.")))),
+            "{events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finish {
+                reason: StopReason::EndTurn,
+                ..
+            }))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn text_and_usage_arrive_with_the_completed_response() {
     assert_eq!(
         collect(PLAIN).await,

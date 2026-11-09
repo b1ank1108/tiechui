@@ -80,7 +80,14 @@ fn joined(parts: &Value, kinds: &[&str], separator: &str) -> String {
         .into_iter()
         .flatten()
         .filter(|part| kinds.iter().any(|kind| part["type"] == *kind))
-        .filter_map(|part| part["text"].as_str())
+        .filter_map(|part| {
+            part[if part["type"] == "refusal" {
+                "refusal"
+            } else {
+                "text"
+            }]
+            .as_str()
+        })
         .collect::<Vec<_>>()
         .join(separator)
 }
