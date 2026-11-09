@@ -253,15 +253,14 @@ async fn stop_reason_without_terminal_event_is_truncated() {
 
 #[tokio::test]
 async fn malformed_or_incomplete_streams_never_finish() {
-    let plain = PLAIN.replace("\r\n", "\n");
     let cases = [
         "event: message_start\ndata: broken\n\n".to_owned(),
-        plain.replace("\"index\":0,\"delta\"", "\"index\":9,\"delta\""),
-        plain.replace(
+        PLAIN.replace("\"index\":0,\"delta\"", "\"index\":9,\"delta\""),
+        PLAIN.replace(
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "",
         ),
-        plain.replace("\"stop_reason\":\"end_turn\"", "\"stop_reason\":null"),
+        PLAIN.replace("\"stop_reason\":\"end_turn\"", "\"stop_reason\":null"),
         THINKING.replace("sample.txt", "sample\\\".txt"),
     ];
     for fixture in cases {

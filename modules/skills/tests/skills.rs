@@ -79,12 +79,8 @@ fn catalog_and_validation_diagnostics_match_golden() {
     let normalize = |text: &str| {
         text.replace(path.to_str().unwrap(), "/skills-fixtures")
             .replace(std::path::MAIN_SEPARATOR, "/")
-            .replace("\r\n", "\n")
     };
-    assert_eq!(
-        normalize(&loaded.catalog()),
-        include_str!("catalog.golden").replace("\r\n", "\n")
-    );
+    assert_eq!(normalize(&loaded.catalog()), include_str!("catalog.golden"));
     let actual = serde_json::json!({
         "skills": loaded.skills.iter().map(|skill| serde_json::json!({
             "name": skill.name, "description": skill.description,
