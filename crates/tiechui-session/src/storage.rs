@@ -9,6 +9,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Diagnostic, Entry, FORMAT_VERSION, Header, SessionError, SessionStore, check_cancel};
 
+fn session_options(writable: bool) -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(not(windows))]
+    options.append(writable);
+    #[cfg(windows)]
+    options.write(writable);
+    options
+}
+
 #[cfg(not(windows))]
 fn lock_writer(file: &File) -> std::io::Result<()> {
     file.try_lock().map_err(Into::into)
@@ -242,8 +252,8 @@ impl SessionStore {
             .map_err(|error| SessionError::new(directory, error))?;
         let id = new_id();
         let path = directory.join(format!("{id}.jsonl"));
-        let mut options = OpenOptions::new();
-        options.read(true).append(true).create_new(true);
+        let mut options = session_options(true);
+        options.create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -314,9 +324,7 @@ impl SessionStore {
         let path = path
             .canonicalize()
             .map_err(|error| SessionError::new(path, error))?;
-        let file = OpenOptions::new()
-            .read(true)
-            .append(writable)
+        let file = session_options(writable)
             .open(&path)
             .map_err(|error| SessionError::new(&path, error))?;
         if writable {
@@ -439,6 +447,13 @@ impl SessionStore {
         committed.extend_from_slice(line);
         if !committed.ends_with(b"\n") {
             committed.push(b'\n');
+        }
+        #[cfg(windows)]
+        {
+            use std::io::{Seek, SeekFrom};
+            self.file
+                .seek(SeekFrom::End(0))
+                .map_err(|error| SessionError::new(&self.path, error))?;
         }
         self.file
             .write_all(&committed)
