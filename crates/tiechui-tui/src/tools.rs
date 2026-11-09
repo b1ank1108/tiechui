@@ -72,28 +72,55 @@ enum Action {
     Search,
     List,
     Ran,
+    /// A background shell task: started, read, stopped or listed.
+    Shell,
     Updated,
     Called,
 }
 
 impl Action {
-    fn of(name: &str) -> Self {
-        match name {
+    fn of(tool: &Tool) -> Self {
+        match tool.name.as_str() {
             "read" => Self::Read,
             "grep" | "find" => Self::Search,
             "ls" => Self::List,
+            // A background command that ended at once reports like a foreground one.
+            "bash"
+                if shell(tool).is_some()
+                    || (!tool.done() && tool.arguments["background"] == true) =>
+            {
+                Self::Shell
+            }
             "bash" => Self::Ran,
+            "shell_output" | "shell_stop" | "shell_list" => Self::Shell,
             "edit" | "write" => Self::Updated,
             _ => Self::Called,
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self, tool: &Tool, live: bool) -> &'static str {
         match self {
             Self::Read => "Read",
             Self::Search => "Search",
             Self::List => "List",
             Self::Ran => "Ran",
+            Self::Shell => match (tool.name.as_str(), live) {
+                ("bash", true) => "Starting",
+                ("bash", false) => "Started",
+                ("shell_stop", true) => "Stopping",
+                ("shell_stop", false) => "Stopped",
+                ("shell_list", true) => "Listing",
+                ("shell_list", false) => "Listed",
+                (_, true) => "Waiting",
+                _ if tool
+                    .output
+                    .as_ref()
+                    .is_some_and(|o| !shell_text(o).is_empty()) =>
+                {
+                    "Output"
+                }
+                _ => "Waited",
+            },
             Self::Updated => "Updated",
             Self::Called => "Called",
         }
@@ -102,9 +129,61 @@ impl Action {
 
 fn exploration(tool: &Tool) -> bool {
     matches!(
-        Action::of(&tool.name),
+        Action::of(tool),
         Action::Read | Action::Search | Action::List
     ) && !(tool.done() && tool.error)
+}
+
+/// The task a shell tool reports on, as the exec module records it in `details`.
+fn shell(tool: &Tool) -> Option<&Value> {
+    tool.output
+        .as_ref()
+        .map(|output| &output["details"]["shell"])
+        .filter(|shell| shell.is_object())
+}
+
+fn task_id(tool: &Tool) -> Option<&str> {
+    shell(tool)
+        .and_then(|shell| shell["task_id"].as_str())
+        .or_else(|| argument(tool, &["task_id"]))
+}
+
+/// The output a shell tool returned, without the bracketed status line kept for the model.
+fn shell_text(output: &Value) -> String {
+    if let Some(text) = output["structured_content"]["output"].as_str() {
+        return plain(text).trim_end().to_owned();
+    }
+    if output["details"]["shell"]["new_output"] == false {
+        return String::new();
+    }
+    let text = output_text(output);
+    let body = match text.rsplit_once("\n\n[") {
+        Some((body, note)) if note.ends_with(']') => body.trim_end(),
+        _ => &text,
+    };
+    match body {
+        "(no new output)" | "(no output yet)" => String::new(),
+        body => body.to_owned(),
+    }
+}
+
+/// `exit 0`, or the task's state while it has no exit code.
+fn shell_state(tool: &Tool) -> Option<String> {
+    let shell = shell(tool)?;
+    if let Some(code) = shell["exit_code"].as_i64() {
+        return Some(format!("exit {code}"));
+    }
+    // A start says it is running.
+    let state = shell["state"].as_str().filter(|_| tool.name != "bash")?;
+    Some(state.replace('_', " "))
+}
+
+/// A `shell_output` read's task, so consecutive reads of one task share a group.
+fn poll(tool: &Tool) -> Option<&str> {
+    if tool.name != "shell_output" || (tool.done() && tool.error) {
+        return None;
+    }
+    task_id(tool)
 }
 
 fn maintenance(tool: &Tool) -> Option<&'static str> {
@@ -114,8 +193,8 @@ fn maintenance(tool: &Tool) -> Option<&'static str> {
         .map(|(_, label)| *label)
 }
 
-/// Consecutive explorations share a group, as do consecutive history tools; everything else
-/// stands alone, in call order.
+/// Consecutive explorations share a group, as do consecutive history tools and consecutive
+/// reads of one shell task; everything else stands alone, in call order.
 pub fn groups(tools: &[Tool]) -> Vec<Range<usize>> {
     let mut groups: Vec<Range<usize>> = Vec::new();
     for (index, tool) in tools.iter().enumerate() {
@@ -125,6 +204,7 @@ pub fn groups(tools: &[Tool]) -> Vec<Range<usize>> {
                 if first.is_some_and(|first| {
                     (exploration(tool) && exploration(first))
                         || (maintenance(tool).is_some() && maintenance(first).is_some())
+                        || poll(tool).is_some_and(|id| poll(first) == Some(id))
                 }) =>
             {
                 last.end = index + 1
@@ -178,9 +258,28 @@ fn command(tool: &Tool) -> String {
 }
 
 fn subject(tool: &Tool) -> String {
-    let value = match Action::of(&tool.name) {
+    let value = match Action::of(tool) {
         Action::Called => return single_line(&tool.name),
         Action::Ran => Some(command(tool)),
+        Action::Shell if tool.name == "shell_list" => Some("shells".into()),
+        Action::Shell => {
+            let command = shell(tool)
+                .and_then(|shell| shell["command"].as_str())
+                .or_else(|| argument(tool, &["command"]))
+                .map(|command| {
+                    let command = plain(command);
+                    let mut first = command.lines().next().unwrap_or_default().to_owned();
+                    if command.trim_end().contains('\n') {
+                        first.push_str(" …");
+                    }
+                    first
+                });
+            let parts: Vec<String> = [task_id(tool).map(str::to_owned), command]
+                .into_iter()
+                .flatten()
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(" · "))
+        }
         Action::Search => {
             let parts: Vec<&str> = ["pattern", "path"]
                 .iter()
@@ -194,7 +293,11 @@ fn subject(tool: &Tool) -> String {
 }
 
 pub(crate) fn summary(tool: &Tool) -> String {
-    format!("{} {}", Action::of(&tool.name).label(), subject(tool))
+    format!(
+        "{} {}",
+        Action::of(tool).label(tool, !tool.done()),
+        subject(tool)
+    )
 }
 
 /// Text parts of a `ToolOutput`, without trailing blank lines.
@@ -247,7 +350,7 @@ fn explored(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Line
     }
     let mut steps: Vec<(Action, Vec<&Tool>)> = Vec::new();
     for tool in tools {
-        let action = Action::of(&tool.name);
+        let action = Action::of(tool);
         match steps.last_mut() {
             Some((previous, step)) if *previous == action => {
                 if !step.iter().any(|seen| subject(seen) == subject(tool)) {
@@ -260,7 +363,7 @@ fn explored(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Line
     let mut rows = Vec::new();
     for (index, (action, step)) in steps.into_iter().enumerate() {
         let lead = if index == 0 { "  └ " } else { "    " };
-        let label = action.label();
+        let label = action.label(step[0], false);
         let mut content = Vec::new();
         let paths: Vec<String> = step
             .iter()
@@ -542,7 +645,7 @@ fn single(
     view: View,
     bullet: bool,
 ) -> Vec<Line<'static>> {
-    let kind = Action::of(&tool.name);
+    let kind = Action::of(tool);
     let expanded = matches!(view, View::Transcript);
     let live = match view {
         View::Live { phase, now } if !tool.done() => Some((phase, now)),
@@ -553,17 +656,28 @@ fn single(
         Action::Called if live.is_some() => "Calling",
         Action::Ran if live.is_some() && tool.started.is_some() => "Running",
         Action::Ran if live.is_some() => "Run",
-        Action::Ran | Action::Called => kind.label(),
+        Action::Ran | Action::Called => kind.label(tool, false),
         _ if failed => "Failed",
-        _ => kind.label(),
+        _ => kind.label(tool, live.is_some()),
     };
+    // A starting command's title already says it is running.
+    let starting = kind == Action::Shell && tool.name == "bash";
     let mut suffix = String::new();
-    if live.is_some() && kind != Action::Ran {
+    if live.is_some() && kind != Action::Ran && !starting {
         suffix.push_str(if tool.started.is_some() {
             " · running"
         } else {
             " · pending"
         });
+    }
+    if kind == Action::Shell
+        && !failed
+        && let Some(state) = shell_state(tool)
+    {
+        suffix.push_str(&format!(" · {state}"));
+    }
+    if let Some(reads) = shell(tool).and_then(|shell| shell["reads"].as_u64()) {
+        suffix.push_str(&format!(" · {reads} reads"));
     }
     if let Some(duration) = tool
         .duration
@@ -725,7 +839,20 @@ fn preview(
             .collect();
         return (lines, hidden);
     }
-    let text = output.map(output_text).unwrap_or_default();
+    let text = match output {
+        Some(output) if Action::of(tool) == Action::Shell && !tool.error => {
+            match tool.name.as_str() {
+                "shell_list" => output_text(output),
+                // A stop or an empty read says all it needs in its title.
+                "shell_stop" => return (Vec::new(), 0),
+                _ => match shell_text(output) {
+                    text if text.is_empty() => return (Vec::new(), 0),
+                    text => text,
+                },
+            }
+        }
+        output => output.map(output_text).unwrap_or_default(),
+    };
     if text.is_empty() {
         let lines = if tool.done() {
             vec![Line::from(vec![
@@ -870,9 +997,54 @@ pub fn render(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Li
     }
     match tools {
         [first, ..] if maintenance(first).is_some() => maintained(tools, width, theme, view),
+        [first, _, ..] if poll(first).is_some() => polled(tools, width, theme, view),
         [tool] if !exploration(tool) => single(tool, width, theme, view, true),
         _ => explored(tools, width, theme, view),
     }
+}
+
+/// Consecutive reads of one shell task as one read: the latest state, the output they
+/// returned between them, and the time spent; the transcript shows each read.
+fn polled(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Line<'static>> {
+    if matches!(view, View::Transcript) {
+        return tools
+            .iter()
+            .flat_map(|tool| single(tool, width, theme, view, true))
+            .collect();
+    }
+    let last = &tools[tools.len() - 1];
+    let latest = tools.iter().rev().find_map(shell);
+    let text: Vec<String> = tools
+        .iter()
+        .filter_map(|tool| tool.output.as_ref())
+        .map(shell_text)
+        .filter(|text| !text.is_empty())
+        .collect();
+    let mut shell = latest.cloned().unwrap_or_else(|| serde_json::json!({}));
+    // Only merged reads carry a count, shown after the state.
+    shell["reads"] = tools.len().into();
+    let output = serde_json::json!({
+        "content": [],
+        "is_error": false,
+        "details": {"shell": shell},
+        "structured_content": {"output": text.join("\n")},
+    });
+    let mut arguments = last.arguments.clone();
+    if let Some(command) = latest.and_then(|shell| shell["command"].as_str()) {
+        // The running read has no result to name the command yet.
+        arguments["command"] = command.into();
+    }
+    let merged = Tool {
+        arguments,
+        output: last.done().then(|| output.clone()),
+        partial: (!last.done()).then_some(output),
+        error: false,
+        duration: last
+            .done()
+            .then(|| tools.iter().filter_map(|tool| tool.duration).sum()),
+        ..last.clone()
+    };
+    single(&merged, width, theme, view, true)
 }
 
 fn questions(tool: &Tool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -1093,6 +1265,191 @@ mod tests {
             tool("read_history", json!({}), None),
         ];
         assert_eq!(groups(&tools), [0..1, 1..4, 4..5, 5..6]);
+    }
+
+    fn shell_tool(name: &str, arguments: Value, text: &str, shell: Option<Value>) -> Tool {
+        let mut tool = tool(name, arguments, Some((text, false)));
+        if let Some(shell) = shell {
+            tool.output.as_mut().unwrap()["details"] = json!({ "shell": shell });
+        }
+        tool
+    }
+
+    fn task(state: &str, new_output: Option<bool>) -> Value {
+        let mut shell = json!({
+            "task_id": "sh1", "command": "npm run dev\n  --port 3000", "state": state, "exit_code": null,
+        });
+        if let Some(new_output) = new_output {
+            shell["new_output"] = json!(new_output);
+        }
+        shell
+    }
+
+    fn rows(tools: &[Tool], view: View) -> Vec<String> {
+        let theme = Theme::fixture(crate::palette::ColorLevel::TrueColor, false);
+        render(tools, 80, &theme, view)
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn shell_tools_name_their_task_without_arguments_or_status_lines() {
+        let read = shell_tool(
+            "shell_output",
+            json!({"task_id":"sh1","wait_ms":5000}),
+            "one\ntwo\n\n[sh1 · running · cursor 8]",
+            Some(task("running", Some(true))),
+        );
+        assert_eq!(
+            rows(&[read], View::History),
+            [
+                "• Output sh1 · npm run dev … · running",
+                "  └ one",
+                "    two"
+            ]
+        );
+        let empty = shell_tool(
+            "shell_output",
+            json!({"task_id":"sh1"}),
+            "(no new output)\n\n[sh1 · running · cursor 8]",
+            Some(task("running", Some(false))),
+        );
+        assert_eq!(
+            rows(&[empty], View::History),
+            ["• Waited sh1 · npm run dev … · running"]
+        );
+        // Sessions from before the details only have the arguments and the text.
+        let legacy = shell_tool(
+            "shell_output",
+            json!({"task_id":"sh1","wait_ms":5000}),
+            "(no new output)\n\n[sh1 · running · cursor 8]",
+            None,
+        );
+        assert_eq!(rows(&[legacy], View::History), ["• Waited sh1"]);
+        let mut stop = task("cancelled", None);
+        stop["command"] = json!("sleep 30");
+        let stop = shell_tool(
+            "shell_stop",
+            json!({"task_id":"sh1"}),
+            "sh1 cancelled · 0s.",
+            Some(stop),
+        );
+        assert_eq!(
+            rows(&[stop], View::History),
+            ["• Stopped sh1 · sleep 30 · cancelled"]
+        );
+        let list = shell_tool(
+            "shell_list",
+            json!({}),
+            "sh1  background  running  00:02  npm run dev",
+            None,
+        );
+        assert_eq!(
+            rows(&[list], View::History),
+            [
+                "• Listed shells",
+                "  └ sh1  background  running  00:02  npm run dev"
+            ]
+        );
+    }
+
+    #[test]
+    fn background_starts_show_early_output_unless_the_command_already_ended() {
+        let arguments = json!({"command":"npm run dev","background":true});
+        let mut started = task("running", Some(true));
+        started["command"] = json!("npm run dev");
+        let start = shell_tool(
+            "bash",
+            arguments.clone(),
+            "ready\n\n[sh1 · started in the background · cursor 5 · you will be told when it finishes]",
+            Some(started),
+        );
+        assert_eq!(
+            rows(&[start], View::History),
+            ["• Started sh1 · npm run dev", "  └ ready"]
+        );
+        let ended = shell_tool("bash", arguments.clone(), "done", None);
+        assert_eq!(
+            rows(&[ended], View::History),
+            ["• Ran npm run dev", "  └ done"]
+        );
+        let mut live = tool("bash", arguments, None);
+        live.started = Some(Instant::now());
+        let view = View::Live {
+            phase: Duration::ZERO,
+            now: Instant::now(),
+        };
+        assert!(rows(&[live], view)[0].ends_with(" Starting npm run dev"));
+    }
+
+    #[test]
+    fn consecutive_reads_of_one_task_merge_into_one_wait() {
+        let read = |text: &str, new_output: bool, seconds: u64| {
+            let mut tool = shell_tool(
+                "shell_output",
+                json!({"task_id":"sh1","wait_ms":5000}),
+                &format!("{text}\n\n[sh1 · running · cursor 1]"),
+                Some(task("running", Some(new_output))),
+            );
+            tool.duration = Some(Duration::from_secs(seconds));
+            tool
+        };
+        let mut other = read("x", true, 0);
+        other.arguments = json!({"task_id":"sh2"});
+        other.output.as_mut().unwrap()["details"]["shell"]["task_id"] = json!("sh2");
+        let mut failed = tool(
+            "shell_output",
+            json!({"task_id":"sh1"}),
+            Some(("No shell task sh1", true)),
+        );
+        failed.error = true;
+        let tools = [
+            read("(no new output)", false, 2),
+            read("compiled", true, 3),
+            read("(no new output)", false, 4),
+            other,
+            failed,
+            read("(no new output)", false, 0),
+        ];
+        assert_eq!(groups(&tools), [0..3, 3..4, 4..5, 5..6]);
+        assert_eq!(
+            rows(&tools[..3], View::History),
+            [
+                "• Output sh1 · npm run dev … · running · 3 reads · 9s",
+                "  └ compiled"
+            ]
+        );
+        assert_eq!(
+            rows(&[tools[0].clone(), tools[2].clone()], View::History),
+            ["• Waited sh1 · npm run dev … · running · 2 reads · 6s"]
+        );
+        let transcript = rows(&tools[..3], View::Transcript);
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|row| row.starts_with("• "))
+                .count(),
+            3
+        );
+        let theme = Theme::fixture(crate::palette::ColorLevel::TrueColor, false);
+        assert_eq!(fold(&tools[..3], 80, &theme), Some(Fold::Details));
+        let mut waiting = tool(
+            "shell_output",
+            json!({"task_id":"sh1","wait_ms":5000}),
+            None,
+        );
+        waiting.started = Some(Instant::now());
+        let view = View::Live {
+            phase: Duration::ZERO,
+            now: Instant::now(),
+        };
+        let live = rows(&[tools[1].clone(), waiting], view);
+        assert!(
+            live[0].ends_with(" Waiting sh1 · npm run dev … · running"),
+            "{live:?}"
+        );
+        assert_eq!(live[1..], ["  └ compiled"]);
     }
 
     #[test]
