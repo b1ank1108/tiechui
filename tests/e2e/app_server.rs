@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,7 +12,7 @@ use tiechui_protocol::app::{SessionEvent, SessionSummary, Snapshot};
 use tiechui_protocol::{ApprovalRequest, EventKind, FilePreview, Item, KnownItem, TurnStatus};
 use tiechui_providers::testing::ScriptedServer;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::sync::CancellationToken;
 
 struct Client {
@@ -155,9 +157,7 @@ impl Fixture {
     }
 
     async fn client(&self) -> Client {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_chui"))
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+        let mut child = support::command()
             .env("TIECHUI_HOME", &self.home)
             .env("HOME", self.root.path())
             .env("TC_E2E_FAKE_KEY", "not-a-real-key")

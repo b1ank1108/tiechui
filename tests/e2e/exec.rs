@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Output;
 #[cfg(unix)]
@@ -145,10 +147,8 @@ models = [{{ id = "model", context_window = 200000, max_output = 4096 }}]
     }
 
     fn command(&self, prompt: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_chui"));
+        let mut command = support::command();
         command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env("TIECHUI_HOME", &self.home)
             .env("HOME", self.root.path())
             .env("TC_E2E_FAKE_KEY", "not-a-real-key")
@@ -342,8 +342,7 @@ async fn resume_rediscovers_context_and_audits_only_changes_to_paths_and_byte_co
         "TRUSTED_PROJECT_CONTEXT_MARKER",
     )
     .unwrap();
-    let trust = Command::new(env!("CARGO_BIN_EXE_chui"))
-        .env_clear()
+    let trust = support::command()
         .env("TIECHUI_HOME", &fixture.home)
         .env("HOME", fixture.root.path())
         .args(["trust", "allow", "--cwd"])
