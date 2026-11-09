@@ -39,7 +39,15 @@ pub(crate) fn load(
     let fields = match yaml
         .filter(|yaml| !yaml.is_empty())
         // Block scalars clip as if the frontmatter ended with a newline.
-        .map(|yaml| Value::load_from_str(&format!("{yaml}\n")))
+        .map(|yaml| {
+            Value::load_from_str(&format!("{yaml}\n")).or_else(|original| {
+                // Third-party skills sometimes leave prose containing `: ` unquoted.
+                // Repair only after a parse failure, and retain the original diagnostic.
+                repair_scalars(yaml)
+                    .and_then(|repaired| Value::load_from_str(&format!("{repaired}\n")).ok())
+                    .ok_or(original)
+            })
+        })
         .transpose()
     {
         Ok(value) => value
@@ -125,4 +133,73 @@ pub(crate) fn load(
 // ECMAScript trim excludes NEL but includes BOM; Rust's trim does the reverse.
 fn js_trim(value: &str) -> &str {
     value.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
+}
+
+/// Codex-compatible fallback for unquoted scalar prose. Never edits the source file.
+fn repair_scalars(yaml: &str) -> Option<String> {
+    let mut changed = false;
+    let mut block_indent = None;
+    let mut lines = Vec::new();
+    for line in yaml.lines() {
+        let indent = line.bytes().take_while(|b| *b == b' ').count();
+        if let Some(block) = block_indent {
+            if line.trim().is_empty() || indent > block {
+                lines.push(line.to_owned());
+                continue;
+            }
+            block_indent = None;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            lines.push(line.to_owned());
+            continue;
+        };
+        if key.trim().is_empty() || !value.chars().next().is_none_or(char::is_whitespace) {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let trimmed = value.trim_start();
+        let whitespace = &value[..value.len() - trimmed.len()];
+        let mut scalar = trimmed;
+        let mut comment = "";
+        for (index, ch) in trimmed.char_indices() {
+            if ch == '#'
+                && (index == 0
+                    || trimmed[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace))
+            {
+                let start = trimmed[..index].trim_end().len();
+                scalar = &trimmed[..start];
+                comment = &trimmed[start..];
+                break;
+            }
+        }
+        let scalar = scalar.trim_end();
+        let first = scalar.chars().next();
+        if matches!(first, Some('|' | '>')) {
+            block_indent = Some(indent);
+        }
+        if matches!(first, None | Some('|' | '>' | '\'' | '"')) {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let colon = scalar.char_indices().any(|(at, ch)| {
+            ch == ':'
+                && scalar[at + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+        });
+        let invalid_flow =
+            matches!(first, Some('[' | '{' | '@' | '`')) && Value::load_from_str(scalar).is_err();
+        if colon || invalid_flow {
+            let quoted = scalar.replace('\'', "''");
+            lines.push(format!("{key}:{whitespace}'{quoted}'{comment}"));
+            changed = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    changed.then(|| lines.join("\n"))
 }

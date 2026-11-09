@@ -162,12 +162,12 @@ fn untrusted_project_is_skipped_before_parsing_and_cannot_shadow_user() {
     skill(&fixture.cwd.join(".agents/skills/a/SKILL.md"), "shared");
     write(
         &fixture.cwd.join(".tiechui/skills/a/SKILL.md"),
-        "---\nname: [invalid yaml\n---\n",
+        "---\ndescription: \"unterminated\n---\n",
     );
     skill(&fixture.user.join(".agents/skills/a/SKILL.md"), "shared");
     write(
         &fixture.cwd.join(".claude/skills/bad/SKILL.md"),
-        "---\nname: [invalid yaml\n---\n",
+        "---\ndescription: \"unterminated\n---\n",
     );
     let loaded = fixture.load(false, vec![]);
     assert_eq!(loaded.skills.len(), 1);
@@ -219,7 +219,7 @@ fn frontmatter_types_newlines_bom_and_utf16_limits() {
                 "😀".repeat(513)
             ),
         ),
-        ("broken", "---\nname: [unterminated\n---\n".into()),
+        ("broken", "---\nname: \"unterminated\n---\n".into()),
         (
             "duplicate",
             "---\nname: first\nname: second\ndescription: Duplicate names are invalid YAML.\n---\n"
@@ -234,7 +234,7 @@ fn frontmatter_types_newlines_bom_and_utf16_limits() {
     ] {
         write(&root.join(dir).join("SKILL.md"), &content);
     }
-    write(&root.join("broken.md"), "---\nname: [unterminated\n---\n");
+    write(&root.join("broken.md"), "---\nname: \"unterminated\n---\n");
     let loaded = fixture.load(true, vec![]);
     assert_eq!(loaded.skills.len(), 2);
     assert_eq!(loaded.skills[0].name, "fallback");
@@ -266,6 +266,85 @@ fn frontmatter_types_newlines_bom_and_utf16_limits() {
         .find(|d| d.path.ends_with("duplicate/SKILL.md"))
         .unwrap();
     assert!(duplicate.message.contains("duplicated key in mapping"));
+}
+
+#[test]
+fn repairs_unquoted_prose_without_modifying_files_or_valid_yaml_values() {
+    let fixture = Fixture::new();
+    let root = fixture.home.join("skills");
+    let cases = [
+        (
+            "prose",
+            "description: What's included: builds and tests # comment\nargument-hint: <duration: e.g. 7d>\nmetadata:\n  short-description: Deploy to: production\ntags: [next,@supabase/ssr]\ndisable-model-invocation: true\n",
+            "What's included: builds and tests",
+            true,
+        ),
+        (
+            "literal",
+            "description: |-\n  Build for AWS: ECS\n  examples: keep: these\n\n  # literal comment\nargument-hint: <duration: e.g. 7d>\n",
+            "Build for AWS: ECS\nexamples: keep: these\n\n# literal comment",
+            false,
+        ),
+        (
+            "folded",
+            "description: >-\n  Build for AWS: ECS\n  and deploy\nargument-hint: @workspace\n",
+            "Build for AWS: ECS and deploy",
+            false,
+        ),
+        (
+            "quoted",
+            "description: \"Keep # and colon: here\"\nargument-hint: `target`\ndisable-model-invocation: 'true'\n",
+            "Keep # and colon: here",
+            false,
+        ),
+        (
+            "anchored",
+            "summary: &summary '  Keep spaces  '\ndescription: *summary\nargument-hint: {invalid\n",
+            "  Keep spaces  ",
+            false,
+        ),
+    ];
+    for (name, fields, _, _) in cases {
+        write(
+            &root.join(name).join("SKILL.md"),
+            &format!("---\n{fields}---\nBODY"),
+        );
+    }
+    let loaded = fixture.load(true, vec![]);
+    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+    assert_eq!(loaded.skills.len(), cases.len());
+    for (name, fields, description, manual) in cases {
+        let skill = loaded
+            .skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .unwrap();
+        assert_eq!(skill.description, description);
+        assert_eq!(skill.disable_model_invocation, manual);
+        assert_eq!(
+            fs::read_to_string(&skill.path).unwrap(),
+            format!("---\n{fields}---\nBODY")
+        );
+    }
+}
+
+#[test]
+fn failed_scalar_repair_reports_the_original_yaml_error() {
+    use saphyr::{LoadableYamlNode, YamlOwned};
+    let fixture = Fixture::new();
+    let yaml = "description: Build for AWS: ECS\nname: first\nname: second\n";
+    let original = YamlOwned::load_from_str(yaml).unwrap_err();
+    write(
+        &fixture.home.join("skills/bad/SKILL.md"),
+        &format!("---\n{yaml}---\n"),
+    );
+    let loaded = fixture.load(true, vec![]);
+    assert!(loaded.skills.is_empty());
+    assert_eq!(loaded.diagnostics.len(), 1);
+    assert_eq!(
+        loaded.diagnostics[0].message,
+        format!("invalid YAML: {original}")
+    );
 }
 
 #[test]

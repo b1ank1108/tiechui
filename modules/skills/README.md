@@ -32,7 +32,10 @@ Name and description validation warnings count UTF-16 code units, with limits of
 64 and 1024. Missing descriptions exclude a skill; other validation warnings
 retain it. YAML is parsed with [Saphyr](https://docs.rs/saphyr/0.3.3/saphyr/), a
 maintained pure-Rust YAML 1.2 library with no `unsafe-libyaml` dependency. The
-parser applies no scalar repair or whitespace normalization.
+parser retries failed YAML with Codex-compatible quoting of unquoted scalar prose
+such as `description: Build for AWS: ECS`. Quoted values and block scalar bodies
+are preserved. Repair happens only in memory, and a failed retry reports the
+original YAML error. Successfully parsed metadata is not whitespace-normalized.
 `disable-model-invocation` must be a boolean `true` to hide a skill from the prompt.
 Automatic discovery contributes metadata only; the model can load a matching file
 with `read`. Explicit `$name` or a selected path-bound reference loads the skill
