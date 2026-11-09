@@ -13,7 +13,6 @@ pub(crate) fn load(
     cancel: &CancellationToken,
 ) -> Result<(), ToolError> {
     let mut files = HashSet::new();
-    let mut collisions = Vec::new();
     for root in roots {
         check(cancel)?;
         let mut scan = Scan {
@@ -21,13 +20,11 @@ pub(crate) fn load(
             cancel,
             result,
             files: &mut files,
-            collisions: &mut collisions,
             active: HashSet::new(),
             rules: Vec::new(),
         };
         scan.directory(&root.path, true)?;
     }
-    result.diagnostics.extend(collisions);
     Ok(())
 }
 
@@ -36,7 +33,6 @@ struct Scan<'a> {
     cancel: &'a CancellationToken,
     result: &'a mut SkillsModule,
     files: &'a mut HashSet<PathBuf>,
-    collisions: &'a mut Vec<Diagnostic>,
     active: HashSet<PathBuf>,
     rules: Vec<String>,
 }
@@ -99,31 +95,16 @@ impl Scan<'_> {
     }
 
     fn file(&mut self, path: &Path) -> Result<(), ToolError> {
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        if !self.files.insert(real) {
+            return Ok(());
+        }
         let Some(skill) =
             frontmatter::load(path, self.root, &mut self.result.diagnostics, self.cancel)?
         else {
             return Ok(());
         };
-        let real = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-        if self.files.contains(&real) {
-            return Ok(());
-        }
-        if let Some(winner) = self
-            .result
-            .skills
-            .iter()
-            .find(|other| other.name == skill.name)
-        {
-            self.collisions.push(Diagnostic {
-                kind: "collision",
-                path: path.to_owned(),
-                message: format!("name \"{}\" collision", skill.name),
-                winner_path: Some(winner.path.clone()),
-            });
-        } else {
-            self.files.insert(real);
-            self.result.skills.push(skill);
-        }
+        self.result.skills.push(skill);
         Ok(())
     }
 

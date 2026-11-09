@@ -369,9 +369,25 @@ pub fn popup(
                     Some(source) => source.into(),
                     None => kind.into(),
                 };
+                let duplicate = skill
+                    && matches.iter().any(|other| {
+                        other.resource.as_ref().is_some_and(|other| {
+                            other.kind == ResourceKind::Skill
+                                && other.name == resource.name
+                                && other.id != resource.id
+                        })
+                    });
                 Row {
                     label: format!("{}{}", if skill { '$' } else { '@' }, resource.name),
-                    description: resource.description.clone(),
+                    description: if duplicate {
+                        resource
+                            .path
+                            .as_ref()
+                            .unwrap_or(&resource.description)
+                            .clone()
+                    } else {
+                        resource.description.clone()
+                    },
                     source: source + if resource.manual { " · manual" } else { "" },
                     indices: candidate.indices.iter().map(|i| i + 1).collect(),
                 }

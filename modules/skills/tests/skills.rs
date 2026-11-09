@@ -98,7 +98,7 @@ fn catalog_and_validation_diagnostics_match_golden() {
 }
 
 #[test]
-fn default_roots_are_ordered() {
+fn default_roots_are_ordered_and_same_name_skills_coexist() {
     let fixture = Fixture::new();
     let plugin = fixture.temp.path().join("plugin");
     let roots = [
@@ -127,10 +127,15 @@ fn default_roots_are_ordered() {
         [
             "duplicate",
             "unique-0",
+            "duplicate",
             "unique-1",
+            "duplicate",
             "unique-2",
+            "duplicate",
             "unique-3",
+            "duplicate",
             "unique-4",
+            "duplicate",
             "unique-5"
         ]
     );
@@ -147,12 +152,9 @@ fn default_roots_are_ordered() {
         })
         .collect();
     assert!(locations.windows(2).all(|pair| pair[0] < pair[1]));
-    assert_eq!(loaded.diagnostics.len(), roots.len() - 1);
-    for (diagnostic, loser) in loaded.diagnostics.iter().zip(&roots[1..]) {
-        assert_eq!(diagnostic.kind, "collision");
-        assert_eq!(diagnostic.message, "name \"duplicate\" collision");
-        assert_eq!(diagnostic.path, loser.join("a/SKILL.md"));
-        assert_eq!(diagnostic.winner_path, Some(roots[0].join("a/SKILL.md")));
+    assert!(loaded.diagnostics.is_empty());
+    for (skill, root) in loaded.skills.iter().step_by(2).zip(&roots) {
+        assert_eq!(skill.path, root.join("a/SKILL.md"));
     }
 }
 
@@ -181,16 +183,12 @@ fn untrusted_project_is_skipped_before_parsing_and_cannot_shadow_user() {
     );
     let loaded = fixture.load(true, vec![]);
     assert_eq!(loaded.skills[0].root.source, "user");
-    let collision = loaded
-        .diagnostics
-        .iter()
-        .find(|d| d.kind == "collision")
-        .unwrap();
+    assert_eq!(loaded.skills.len(), 2);
     assert_eq!(
-        collision.path,
+        loaded.skills[1].path,
         fixture.cwd.join(".agents/skills/a/SKILL.md")
     );
-    assert_eq!(collision.winner_path, Some(loaded.skills[0].path.clone()));
+    assert_eq!(loaded.diagnostics.len(), 1);
     assert!(
         loaded
             .diagnostics
@@ -465,6 +463,10 @@ async fn skills_disabled_in_config_are_left_out_of_the_session() {
     let fixture = Fixture::new();
     skill(&fixture.home.join("skills/kept/SKILL.md"), "kept");
     skill(&fixture.home.join("skills/unwanted/SKILL.md"), "unwanted");
+    skill(
+        &fixture.user.join(".agents/skills/unwanted/SKILL.md"),
+        "unwanted",
+    );
     let mut config = ModuleConfig::default();
     config.skills.disabled = vec!["unwanted".into()];
     let mut registry = Registry::default();
@@ -585,6 +587,89 @@ async fn explicit_skills_load_on_submission_with_exact_source_binding() {
             .0
             .contains("Cannot load skill")
     );
+}
+
+#[tokio::test]
+async fn same_name_skills_require_paths_and_never_rebind_stale_selections() {
+    use tiechui_plugin_api::protocol::InputContent;
+    let fixture = Fixture::new();
+    let roots = [
+        fixture.user.join(".agents/skills"),
+        fixture.user.join(".claude/skills"),
+    ];
+    for (index, root) in roots.iter().enumerate() {
+        write(
+            &root.join("review/SKILL.md"),
+            &format!(
+                "---\nname: review\ndescription: Review changes\ndisable-model-invocation: true\n---\nBODY_{index}\n"
+            ),
+        );
+    }
+    let loaded = fixture.load(true, vec![]);
+    let mut registry = Registry::default();
+    loaded
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    let resources = registry.resources();
+    assert_eq!(resources.len(), 2);
+    assert_ne!(resources[0].id, resources[1].id);
+    assert_ne!(resources[0].reference, resources[1].reference);
+    for (prompt, bodies) in [
+        ("$review".to_string(), vec![]),
+        (
+            format!("$review {}", resources[1].reference),
+            vec!["BODY_1"],
+        ),
+        (
+            format!("{} {}", resources[0].reference, resources[1].reference),
+            vec!["BODY_0", "BODY_1"],
+        ),
+        (
+            format!("{} {}", resources[1].reference, resources[1].reference),
+            vec!["BODY_1"],
+        ),
+        ("[$review](</missing/SKILL.md>)".to_string(), vec![]),
+        (format!("`{}`", resources[1].reference), vec![]),
+    ] {
+        let fragments = registry.context_providers()[0]
+            .fragments(
+                &TurnInput {
+                    cwd: fixture.cwd.clone(),
+                    content: vec![InputContent::Text {
+                        text: prompt.clone(),
+                    }],
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fragments.len(), bodies.len(), "{prompt}");
+        for (fragment, body) in fragments.iter().zip(bodies) {
+            assert!(fragment.contains(body), "{prompt}: {fragment}");
+        }
+    }
+    fs::remove_file(&loaded.skills[1].path).unwrap();
+    let remaining = fixture.load(true, vec![]);
+    let input = |text: String| TurnInput {
+        cwd: fixture.cwd.clone(),
+        content: vec![InputContent::Text { text }],
+    };
+    assert!(
+        remaining
+            .fragments(
+                &input(resources[1].reference.clone()),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let fragments = remaining
+        .fragments(&input("$review".into()), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(fragments.len(), 1);
+    assert!(fragments[0].contains("BODY_0"));
 }
 
 fn text(text: &str) -> Content {

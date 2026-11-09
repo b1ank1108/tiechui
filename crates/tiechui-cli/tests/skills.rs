@@ -57,27 +57,24 @@ fn skills_list_discovers_agents_and_claude_by_default() {
     );
     assert!(command(&user, &cwd, &["trust", "allow"]).status.success());
     let trusted = list();
-    assert_eq!(trusted["skills"].as_array().unwrap().len(), 3);
+    assert_eq!(trusted["skills"].as_array().unwrap().len(), 4);
     assert_eq!(trusted["skills"][0]["source"], "user");
     assert_eq!(
         trusted["skills"][0]["root"],
         serde_json::json!(user.join(".agents/skills"))
     );
     assert_eq!(trusted["skills"][1]["name"], "claude-user");
-    assert_eq!(trusted["skills"][2]["name"], "claude-project");
+    assert_eq!(trusted["skills"][2]["name"], "shared");
+    assert_eq!(trusted["skills"][3]["name"], "claude-project");
     assert_eq!(trusted["skills"][1]["disable_model_invocation"], true);
-    assert_eq!(trusted["diagnostics"][0]["type"], "collision");
+    assert_eq!(trusted["diagnostics"], serde_json::json!([]));
     assert_eq!(
-        trusted["diagnostics"][0]["path"],
+        trusted["skills"][2]["path"],
         serde_json::json!(
             cwd.canonicalize()
                 .unwrap()
                 .join(".agents/skills/shared/SKILL.md")
         )
-    );
-    assert_eq!(
-        trusted["diagnostics"][0]["winner_path"],
-        trusted["skills"][0]["path"]
     );
     let output = command(&user, &cwd, &["skills", "list"]);
     assert!(output.status.success(), "{output:?}");
@@ -85,13 +82,13 @@ fn skills_list_discovers_agents_and_claude_by_default() {
     for expected in [
         "shared",
         "root:",
-        "collision:",
         "claude-user",
         "disable-model-invocation: true",
     ] {
         assert!(output.contains(expected), "{output}");
     }
     assert!(!output.contains("BODY"));
+    assert!(!output.contains("collision:"));
 }
 
 #[tokio::test]

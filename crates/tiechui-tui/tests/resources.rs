@@ -400,6 +400,47 @@ fn streamed_resources_preserve_selection_and_new_mentions_reset_filter() {
 }
 
 #[test]
+fn same_name_skills_show_paths_and_preserve_the_selected_source_on_refresh() {
+    let mut app = app();
+    let mut resources = ["/agents/review/SKILL.md", "/claude/review/SKILL.md"]
+        .map(|path| {
+            let mut skill = resource(ResourceKind::Skill, "review");
+            skill.id = format!("skill:{path}");
+            skill.path = Some(path.into());
+            skill.reference = format!("[$review](<{path}>)");
+            skill.source = Some("user".into());
+            skill.search_terms = vec![path.into()];
+            skill
+        })
+        .to_vec();
+    let selected_reference = resources[1].reference.clone();
+    app.event(event(EventKind::ResourcesUpdated {
+        resources: resources.clone(),
+    }));
+    app.paste("$review");
+    let shown = screen(&mut app);
+    assert!(shown.contains("/agents/review/SKILL.md"), "{shown}");
+    assert!(shown.contains("/claude/review/SKILL.md"), "{shown}");
+    key(&mut app, KeyCode::Down);
+    resources.reverse();
+    app.event(event(EventKind::ResourcesUpdated {
+        resources: resources.clone(),
+    }));
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(&app.take_submissions()[0].op, Op::UserInput { content, .. }
+        if content == &[InputContent::Text { text: format!("{selected_reference} ") }])
+    );
+    let matched = mentions::catalog(&resources, "claude", Mode::All, true);
+    assert_eq!(matched.len(), 1);
+    assert_eq!(
+        matched[0].resource.as_ref().unwrap().reference,
+        selected_reference
+    );
+}
+
+#[test]
 fn menus_stay_above_composer_and_keep_selection_and_cursor_on_short_screens() {
     for width in [40, 80] {
         let mut app = app();

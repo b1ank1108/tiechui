@@ -3,7 +3,7 @@
 mod discovery;
 mod frontmatter;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -39,7 +39,6 @@ pub struct Diagnostic {
     pub kind: &'static str,
     pub path: PathBuf,
     pub message: String,
-    pub winner_path: Option<PathBuf>,
 }
 
 impl Diagnostic {
@@ -48,7 +47,6 @@ impl Diagnostic {
             kind: "warning",
             path: path.to_owned(),
             message: message.into(),
-            winner_path: None,
         }
     }
 }
@@ -145,7 +143,6 @@ impl SkillsModule {
             })).collect::<Vec<_>>(),
             "diagnostics": self.diagnostics.iter().map(|diagnostic| serde_json::json!({
                 "type": diagnostic.kind, "path": diagnostic.path, "message": diagnostic.message,
-                "winner_path": diagnostic.winner_path,
             })).collect::<Vec<_>>(),
         })
     }
@@ -187,9 +184,9 @@ impl Module for SkillsModule {
                     reference: reference(skill),
                     source: Some(skill.root.source.into()),
                     manual: skill.disable_model_invocation,
-                    path: Some(path),
+                    path: Some(path.clone()),
                     owner,
-                    search_terms: vec![],
+                    search_terms: vec![path],
                 }
             })
             .collect();
@@ -440,11 +437,16 @@ impl ContextProvider for SkillsModule {
         } else {
             vec![catalog]
         };
+        let mut name_counts = HashMap::new();
         for skill in &self.skills {
+            *name_counts.entry(skill.name.as_str()).or_insert(0) += 1;
+        }
+        for skill in &self.skills {
+            let unambiguous = name_counts[skill.name.as_str()] == 1;
             if input
                 .content
                 .iter()
-                .any(|part| matches!(part, InputContent::Text { text } if selected(skill, text)))
+                .any(|part| matches!(part, InputContent::Text { text } if selected(skill, text, unambiguous)))
             {
                 use tokio::io::AsyncReadExt;
                 let mut bytes = Vec::new();
@@ -486,7 +488,7 @@ fn reference(skill: &Skill) -> String {
     )
 }
 
-fn selected(skill: &Skill, text: &str) -> bool {
+fn selected(skill: &Skill, text: &str, unambiguous: bool) -> bool {
     let bound = reference(skill);
     if text
         .match_indices(&bound)
@@ -494,7 +496,7 @@ fn selected(skill: &Skill, text: &str) -> bool {
     {
         return true;
     }
-    if literal_dollar(&skill.name) {
+    if !unambiguous || literal_dollar(&skill.name) {
         return false;
     }
     text.char_indices()
