@@ -495,6 +495,75 @@ pub struct AgentDeleteParams {
     pub path: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HooksListParams {
+    /// The project whose hooks a session there loads; without one, the user's and plugins' alone.
+    pub cwd: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HookList {
+    /// `$TIECHUI_HOME/hooks.json`.
+    pub path: String,
+    pub hooks: Vec<HookEntry>,
+    /// Files, handlers and plugins that could not be loaded.
+    pub diagnostics: Vec<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HookEntry {
+    /// Names the handler for `hooks/save`, `hooks/delete` and `hooks/approve`.
+    pub key: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    /// Seconds.
+    pub timeout: u64,
+    pub path: String,
+    /// `user`, `project` or `plugin`.
+    pub source: String,
+    /// `user` and `trusted` handlers run; `unapproved` and `changed` ones wait for
+    /// `hooks/approve`, `untrusted_project` ones for project trust.
+    pub trust: String,
+    /// Handlers in `hooks.json` files can be saved and deleted.
+    pub editable: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HookSaveParams {
+    /// Required for the `project` scope.
+    pub cwd: Option<String>,
+    /// `user` saves to `$TIECHUI_HOME/hooks.json`, `project` to `<cwd>/.agents/hooks.json`.
+    pub scope: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    /// Seconds.
+    pub timeout: u64,
+    /// The key of the handler being edited: changed in place, or moved when the scope, event
+    /// or matcher changes.
+    pub previous: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HookDeleteParams {
+    pub cwd: Option<String>,
+    pub key: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HookApproveParams {
+    pub cwd: Option<String>,
+    /// Handlers to approve as they are now; others and ones not awaiting approval are left alone.
+    pub keys: Vec<String>,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

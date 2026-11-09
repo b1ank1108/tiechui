@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tiechui_module_hooks::{Event, HooksModule, approve, trust};
+use tiechui_module_hooks::{Event, Handler, HooksModule, approve, edit, trust};
 use tiechui_plugin_api::{
     ApprovalVerdict, BeforeToolCall, CancellationToken, LifecycleContext, LifecycleEvent, Module,
     ModuleConfig, Registry, ToolContext,
@@ -727,4 +727,111 @@ fn normalized_hash_matches_canonical_json_with_default_fields() {
         None,
     );
     assert_eq!(f.load(true).hooks()[0].trust, "changed");
+}
+
+#[test]
+fn edits_keep_approvals_and_approve_the_written_handler() {
+    let f = Fixture::new();
+    let path = f.cwd.join(".agents/hooks.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let group =
+        |command: &str| json!({"hooks": [{"type": "command", "command": command, "async": true}]});
+    std::fs::write(
+        &path,
+        json!({"hooks": {"Stop": [group("first"), group("second")]}}).to_string(),
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    approve(&f.home, &f.load(true).hooks()[1..], &cancel).unwrap();
+    let listed = || {
+        f.load(true)
+            .hooks()
+            .iter()
+            .map(|hook| (hook.command.clone(), hook.trust.clone(), hook.key.clone()))
+            .collect::<Vec<_>>()
+    };
+    let handler = |project, event, matcher: Option<&str>, command: &str| Handler {
+        project,
+        event,
+        matcher: matcher.map(Into::into),
+        command: command.into(),
+        timeout: 5,
+    };
+    let first = listed()[0].2.clone();
+    edit(
+        &f.cwd,
+        &f.home,
+        Some(&first),
+        Some(handler(true, Event::Stop, None, " edited ")),
+        &cancel,
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"async\": true") && text.contains("\"timeout\": 5"));
+    assert_eq!(listed()[0].0, "edited");
+    assert!(listed().iter().all(|(_, trust, _)| trust == "trusted"));
+
+    edit(&f.cwd, &f.home, Some(&first), None, &cancel).unwrap();
+    let [(command, trust, second)] = &listed()[..] else {
+        unreachable!()
+    };
+    assert_eq!((command.as_str(), trust.as_str()), ("second", "trusted"));
+    assert_eq!(second, &first);
+
+    edit(
+        &f.cwd,
+        &f.home,
+        None,
+        Some(handler(true, Event::PreToolUse, Some("Bash"), "added")),
+        &cancel,
+    )
+    .unwrap();
+    edit(
+        &f.cwd,
+        &f.home,
+        Some(second),
+        Some(handler(false, Event::Stop, None, "second")),
+        &cancel,
+    )
+    .unwrap();
+    let hooks = f.load(true);
+    let summary: Vec<_> = hooks
+        .hooks()
+        .iter()
+        .map(|hook| {
+            (
+                hook.command.as_str(),
+                hook.source(),
+                hook.trust.as_str(),
+                hook.matcher.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("second", "user", "user", None),
+            ("added", "project", "trusted", Some("Bash"))
+        ]
+    );
+
+    let claude = f.cwd.join(".claude/settings.json");
+    f.write(
+        &claude,
+        Event::Stop,
+        json!([{"type": "command", "command": "x"}]),
+        None,
+    );
+    let key = f.load(true).hooks().last().unwrap().key.clone();
+    let error = edit(&f.cwd, &f.home, Some(&key), None, &cancel).unwrap_err();
+    assert_eq!(error.0, "Only hooks in hooks.json files can be edited");
+    let error = edit(
+        &f.cwd,
+        &f.home,
+        None,
+        Some(handler(false, Event::Stop, None, " ")),
+        &cancel,
+    )
+    .unwrap_err();
+    assert_eq!(error.0, "The command is empty");
 }

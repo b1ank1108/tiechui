@@ -234,7 +234,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
 Other subcommands are `setup`, `doctor`, `trust`, `plugin`, `skills`, `hooks`
 and `mcp`, and each has `--help`. `chui app-server` serves sessions to desktop
-clients over JSON-RPC on stdio, along with files, Git and terminals for their projects and the user's providers, settings and MCP servers; its types are generated in `schema/app-server.ts`. The built-in tools are `read`, `write`, `edit`,
+clients over JSON-RPC on stdio, along with files, Git and terminals for their projects and the user's providers, settings, MCP servers, skills, prompts, agents and hooks; its types are generated in `schema/app-server.ts`. The built-in tools are `read`, `write`, `edit`,
 `grep`, `find` and `bash`, plus `shell_list`, `shell_output` and `shell_stop` for
 background commands. Modules, plugins and MCP servers add more.
 
@@ -442,7 +442,8 @@ after it; `/name text` sends the body with `$ARGUMENTS` replaced as a user messa
 See [modules/prompts](modules/prompts/README.md).
 
 **Hooks:** `chui hooks list` lists them and `chui hooks trust` approves command
-hooks.
+hooks. Desktop clients edit only `hooks.json` files; a handler saved there is
+approved, and handlers approved before stay so.
 
 ### MCP
 

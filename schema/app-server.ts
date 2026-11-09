@@ -227,6 +227,72 @@ head: string | null, upstream: string | null, ahead: number, behind: number, ope
  */
 conflicts: Array<string>, };
 
+export type HookApproveParams = { cwd: string | null, 
+/**
+ * Handlers to approve as they are now; others and ones not awaiting approval are left alone.
+ */
+keys: Array<string>, };
+
+export type HookDeleteParams = { cwd: string | null, key: string, };
+
+export type HookEntry = { 
+/**
+ * Names the handler for `hooks/save`, `hooks/delete` and `hooks/approve`.
+ */
+key: string, event: string, matcher: string | null, command: string, 
+/**
+ * Seconds.
+ */
+timeout: number, path: string, 
+/**
+ * `user`, `project` or `plugin`.
+ */
+source: string, 
+/**
+ * `user` and `trusted` handlers run; `unapproved` and `changed` ones wait for
+ * `hooks/approve`, `untrusted_project` ones for project trust.
+ */
+trust: string, 
+/**
+ * Handlers in `hooks.json` files can be saved and deleted.
+ */
+editable: boolean, };
+
+export type HookList = { 
+/**
+ * `$TIECHUI_HOME/hooks.json`.
+ */
+path: string, hooks: Array<HookEntry>, 
+/**
+ * Files, handlers and plugins that could not be loaded.
+ */
+diagnostics: Array<string>, };
+
+export type HookSaveParams = { 
+/**
+ * Required for the `project` scope.
+ */
+cwd: string | null, 
+/**
+ * `user` saves to `$TIECHUI_HOME/hooks.json`, `project` to `<cwd>/.agents/hooks.json`.
+ */
+scope: string, event: string, matcher: string | null, command: string, 
+/**
+ * Seconds.
+ */
+timeout: number, 
+/**
+ * The key of the handler being edited: changed in place, or moved when the scope, event
+ * or matcher changes.
+ */
+previous: string | null, };
+
+export type HooksListParams = { 
+/**
+ * The project whose hooks a session there loads; without one, the user's and plugins' alone.
+ */
+cwd: string | null, };
+
 export type Id = string | number | null;
 
 export type InitializeParams = { protocol_version: number, };

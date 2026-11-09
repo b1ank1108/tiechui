@@ -100,6 +100,12 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::AgentEntry>();
                 d.visit::<app::AgentSaveParams>();
                 d.visit::<app::AgentDeleteParams>();
+                d.visit::<app::HooksListParams>();
+                d.visit::<app::HookList>();
+                d.visit::<app::HookEntry>();
+                d.visit::<app::HookSaveParams>();
+                d.visit::<app::HookDeleteParams>();
+                d.visit::<app::HookApproveParams>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

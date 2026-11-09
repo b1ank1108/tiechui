@@ -1094,3 +1094,115 @@ async fn agent_definitions_are_listed_saved_moved_and_deleted() {
         .await;
     assert!(!project.exists());
 }
+
+#[tokio::test]
+async fn hooks_are_saved_approved_and_deleted() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let list = || json!({"cwd": cwd});
+    let summary = |list: &Value| -> Vec<(String, String, String)> {
+        list["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h["command"].as_str().unwrap().into(),
+                    h["source"].as_str().unwrap().into(),
+                    h["trust"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let save = |scope: &str, command: &str, previous: Value| {
+        json!({"cwd": cwd, "scope": scope, "event": "PreToolUse", "matcher": "Bash",
+            "command": command, "timeout": 30, "previous": previous})
+    };
+    let hooks = client.ok("hooks/list", list()).await;
+    assert_eq!(
+        hooks["path"],
+        fixture.home.join("hooks.json").display().to_string()
+    );
+    assert_eq!(hooks["hooks"], json!([]));
+
+    client
+        .ok("hooks/save", save("project", "true", Value::Null))
+        .await;
+    let hooks = client.ok("hooks/list", list()).await;
+    assert_eq!(
+        summary(&hooks),
+        [("true".into(), "project".into(), "untrusted_project".into())]
+    );
+    let entry = &hooks["hooks"][0];
+    assert_eq!(
+        (
+            &entry["event"],
+            &entry["matcher"],
+            &entry["timeout"],
+            &entry["editable"]
+        ),
+        (
+            &json!("PreToolUse"),
+            &json!("Bash"),
+            &json!(30),
+            &json!(true)
+        )
+    );
+    client.ok("trust", json!({"cwd": cwd, "allow": true})).await;
+    let hooks = client.ok("hooks/list", list()).await;
+    assert_eq!(hooks["hooks"][0]["trust"], "trusted");
+
+    let file = fixture
+        .cwd
+        .canonicalize()
+        .unwrap()
+        .join(".agents/hooks.json");
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    document["hooks"]["Stop"] = json!([{"hooks": [{"type": "command", "command": "false"}]}]);
+    std::fs::write(&file, document.to_string()).unwrap();
+    let hooks = client.ok("hooks/list", list()).await;
+    let stop = hooks["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["command"] == "false")
+        .unwrap();
+    assert_eq!(stop["trust"], "unapproved");
+    client
+        .ok("hooks/approve", json!({"cwd": cwd, "keys": [stop["key"]]}))
+        .await;
+    let hooks = client.ok("hooks/list", list()).await;
+    assert!(
+        summary(&hooks)
+            .iter()
+            .all(|(_, _, trust)| trust == "trusted")
+    );
+
+    let key = hooks["hooks"][0]["key"].clone();
+    client.ok("hooks/save", save("user", "echo", key)).await;
+    let hooks = client.ok("hooks/list", list()).await;
+    assert_eq!(
+        summary(&hooks),
+        [
+            ("echo".into(), "user".into(), "user".into()),
+            ("false".into(), "project".into(), "trusted".into())
+        ]
+    );
+    let error = client
+        .call(
+            "hooks/save",
+            json!({"cwd": cwd, "scope": "user", "event": "Nope",
+            "matcher": null, "command": "true", "timeout": 1, "previous": null}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error["message"], "Nope is not a hook event");
+    for hook in hooks["hooks"].as_array().unwrap() {
+        client
+            .ok("hooks/delete", json!({"cwd": cwd, "key": hook["key"]}))
+            .await;
+    }
+    let hooks = client.ok("hooks/list", list()).await;
+    assert_eq!(hooks["hooks"], json!([]));
+}

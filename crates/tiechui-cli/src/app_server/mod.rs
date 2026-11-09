@@ -2,6 +2,7 @@
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
 mod agents;
+mod hooks;
 mod mcp;
 mod projection;
 mod prompts;
@@ -250,6 +251,13 @@ impl Server {
                 reply
             }
             _ if agents::handles(method) => agents::handle(&self.home, method, params).await,
+            _ if hooks::handles(method) => {
+                let reply = hooks::handle(&self.home, method, params).await;
+                if reply.is_ok() && method != "hooks/list" {
+                    self.refresh();
+                }
+                reply
+            }
             _ if prompts::handles(method) => {
                 let reply = prompts::handle(&self.home, method, params).await;
                 if reply.is_ok() && method != "prompts/list" {

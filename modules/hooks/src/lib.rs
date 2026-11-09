@@ -4,7 +4,7 @@ mod config;
 mod output;
 mod runner;
 
-pub use config::{Hook, approve, trust, trust_with_sources};
+pub use config::{Handler, Hook, approve, edit, trust, trust_with_sources};
 pub use output::Outcome;
 
 use std::path::Path;
@@ -52,7 +52,7 @@ impl Event {
             Self::SessionEnd => "SessionEnd",
         }
     }
-    fn from_wire(name: &str) -> Option<Self> {
+    pub fn from_wire(name: &str) -> Option<Self> {
         [
             Self::SessionStart,
             Self::UserPromptSubmit,

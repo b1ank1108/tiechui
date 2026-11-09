@@ -7,7 +7,8 @@ use std::sync::Arc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tiechui_plugin_api::{CancellationToken, HookFile, HookSource, ToolError, serde_json};
+use tiechui_plugin_api::serde_json::{self, json};
+use tiechui_plugin_api::{CancellationToken, HookFile, HookSource, ToolError};
 
 use crate::{Event, check};
 
@@ -66,6 +67,23 @@ pub struct Hook {
 }
 
 impl Hook {
+    /// `user`, `project` or `plugin`.
+    pub fn source(&self) -> &'static str {
+        match (&self.plugin, self.project) {
+            (Some(_), _) => "plugin",
+            (None, true) => "project",
+            (None, false) => "user",
+        }
+    }
+
+    /// Whether [`edit`] may change it: only handlers in `hooks.json` files, whose other content
+    /// is hooks alone.
+    pub fn editable(&self) -> bool {
+        self.plugin.is_none()
+            && self.pointer.is_none()
+            && self.path.file_name() == Some("hooks.json".as_ref())
+    }
+
     pub(crate) fn matches(&self, input: Option<&str>) -> bool {
         if matches!(self.event, Event::UserPromptSubmit | Event::Stop) {
             return true;
@@ -367,6 +385,207 @@ pub fn trust_with_sources(
         }
         Ok(count)
     })
+}
+
+/// A command handler as clients write it.
+pub struct Handler {
+    /// Saved to the project's `.agents/hooks.json` rather than the user's `hooks.json`.
+    pub project: bool,
+    pub event: Event,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub timeout: u64,
+}
+
+/// Removes the handler named `previous`, adds `handler`, or replaces one with the other: in
+/// place when the scope, event and matcher stay, keeping the handler's other fields. Files are
+/// rewritten with sorted keys. Project handlers approved before stay approved, and the written
+/// one is approved: its author has just reviewed it.
+pub fn edit(
+    cwd: &Path,
+    home: &Path,
+    previous: Option<&str>,
+    handler: Option<Handler>,
+    cancel: &CancellationToken,
+) -> Result<(), ToolError> {
+    let cwd = cwd.canonicalize()?;
+    if handler
+        .as_ref()
+        .is_some_and(|handler| handler.command.trim().is_empty())
+    {
+        return Err(ToolError("The command is empty".into()));
+    }
+    update_state(home, cancel, |state| {
+        let (hooks, _) = discover(&cwd, home, true, &[], cancel)?;
+        let previous = previous
+            .map(|key| {
+                hooks
+                    .iter()
+                    .find(|hook| hook.key == key)
+                    .ok_or_else(|| ToolError("The hook no longer exists".into()))
+            })
+            .transpose()?;
+        if previous.is_some_and(|hook| !hook.editable()) {
+            return Err(ToolError(
+                "Only hooks in hooks.json files can be edited".into(),
+            ));
+        }
+        fn pattern(event: Event, value: Option<&str>) -> Option<&str> {
+            matcher(event, value).filter(|m| !m.is_empty())
+        }
+        let in_place = previous.zip(handler.as_ref()).is_some_and(|(hook, new)| {
+            hook.project == new.project
+                && hook.event == new.event
+                && pattern(hook.event, hook.matcher.as_deref())
+                    == pattern(new.event, new.matcher.as_deref())
+        });
+        let mut files = Vec::new();
+        if let Some(hook) = previous {
+            let document = document(&mut files, &hook.path)?;
+            match &handler {
+                Some(new) if in_place => replace(document, hook, new),
+                _ => remove(document, hook),
+            }
+            .ok_or_else(|| invalid(&hook.path))?;
+        }
+        let written = match (handler, previous) {
+            (Some(_), Some(hook)) if in_place => Some((
+                hook.path.clone(),
+                hook.event,
+                hook.group_index,
+                hook.handler_index,
+            )),
+            (Some(new), previous) => {
+                let path = match previous {
+                    Some(hook) if hook.project == new.project => hook.path.clone(),
+                    _ if new.project => cwd.join(".agents/hooks.json"),
+                    _ => home.join("hooks.json"),
+                };
+                let mut group = json!({"hooks": [{"type": "command", "command": new.command.trim(),
+                    "timeout": new.timeout}]});
+                if let Some(matcher) = pattern(new.event, new.matcher.as_deref()) {
+                    group["matcher"] = json!(matcher);
+                }
+                let index = add(document(&mut files, &path)?, new.event, group)
+                    .ok_or_else(|| invalid(&path))?;
+                Some((path, new.event, index, 0))
+            }
+            (None, _) => None,
+        };
+        let touched = |path: &Path| files.iter().any(|(file, _)| file == path);
+        let approved: Vec<_> = hooks
+            .iter()
+            .filter(|hook| touched(&hook.path) && state.get(&hook.key) == Some(&hook.hash))
+            .map(|hook| hook.hash.clone())
+            .collect();
+        for (path, document) in &files {
+            write(path, document)?;
+        }
+        let (hooks, _) = discover(&cwd, home, true, &[], cancel)?;
+        for hook in hooks
+            .into_iter()
+            .filter(|hook| hook.project && touched(&hook.path))
+        {
+            let new = written
+                .as_ref()
+                .is_some_and(|(path, event, group, handler)| {
+                    (path, *event, *group, *handler)
+                        == (&hook.path, hook.event, hook.group_index, hook.handler_index)
+                });
+            if new || approved.contains(&hook.hash) {
+                state.insert(hook.key, hook.hash);
+            }
+        }
+        Ok(())
+    })
+}
+
+fn invalid(path: &Path) -> ToolError {
+    ToolError(format!("{}: not a hooks file", path.display()))
+}
+
+/// The parsed file at `path`, read once; a missing file is empty.
+fn document<'a>(
+    files: &'a mut Vec<(PathBuf, serde_json::Value)>,
+    path: &Path,
+) -> Result<&'a mut serde_json::Value, ToolError> {
+    let index = match files.iter().position(|(file, _)| file == path) {
+        Some(index) => index,
+        None => {
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
+                Err(error) => return Err(ToolError(format!("{}: {error}", path.display()))),
+            };
+            let document = parse(&bytes, None)
+                .and_then(|_| serde_json::from_slice::<serde_json::Value>(&bytes))
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .ok_or_else(|| invalid(path))?;
+            files.push((path.to_owned(), document));
+            files.len() - 1
+        }
+    };
+    Ok(&mut files[index].1)
+}
+
+fn replace(document: &mut serde_json::Value, hook: &Hook, new: &Handler) -> Option<()> {
+    let handler = document
+        .get_mut("hooks")?
+        .get_mut(hook.event.wire())?
+        .get_mut(hook.group_index)?
+        .get_mut("hooks")?
+        .get_mut(hook.handler_index)?
+        .as_object_mut()?;
+    handler.insert("command".into(), json!(new.command.trim()));
+    handler.insert("timeout".into(), json!(new.timeout));
+    Some(())
+}
+
+/// Drops the handler, and its group and event when they are left empty.
+fn remove(document: &mut serde_json::Value, hook: &Hook) -> Option<()> {
+    let events = document.get_mut("hooks")?.as_object_mut()?;
+    let groups = events.get_mut(hook.event.wire())?.as_array_mut()?;
+    let handlers = groups
+        .get_mut(hook.group_index)?
+        .get_mut("hooks")?
+        .as_array_mut()?;
+    if hook.handler_index >= handlers.len() {
+        return None;
+    }
+    handlers.remove(hook.handler_index);
+    if handlers.is_empty() {
+        groups.remove(hook.group_index);
+        if groups.is_empty() {
+            events.remove(hook.event.wire());
+        }
+    }
+    Some(())
+}
+
+/// Appends a group to the event, returning its index.
+fn add(document: &mut serde_json::Value, event: Event, group: serde_json::Value) -> Option<usize> {
+    let groups = document
+        .as_object_mut()?
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()?
+        .entry(event.wire())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()?;
+    groups.push(group);
+    Some(groups.len() - 1)
+}
+
+fn write(path: &Path, document: &serde_json::Value) -> Result<(), ToolError> {
+    let dir = path.parent().ok_or_else(|| invalid(path))?;
+    fs::create_dir_all(dir).map_err(|e| ToolError(e.to_string()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| ToolError(e.to_string()))?;
+    serde_json::to_writer_pretty(&mut temp, document).map_err(|e| ToolError(e.to_string()))?;
+    temp.write_all(b"\n")
+        .map_err(|e| ToolError(e.to_string()))?;
+    temp.persist(path).map_err(|e| ToolError(e.to_string()))?;
+    Ok(())
 }
 
 /// Approves exactly these handlers, so a file edited after they were reviewed stays unapproved.
