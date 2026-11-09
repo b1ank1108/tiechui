@@ -233,8 +233,18 @@ impl Server {
             _ if turns::handles(method) => self.turn(method, params).await,
             _ if providers::handles(method) => {
                 let archiving = params["key"] == "sessions.archive_after_days";
+                let runtime_config = method == "config/update"
+                    && matches!(
+                        params["key"].as_str(),
+                        Some(
+                            "network.proxy"
+                                | "network.no_proxy"
+                                | "network.ca_cert"
+                                | "ask.auto_continue_after_sec"
+                        )
+                    );
                 let reply = providers::handle(&self.home, method, params).await;
-                if reply.is_ok() && providers::edits(method) {
+                if reply.is_ok() && (providers::edits(method) || runtime_config) {
                     self.refresh();
                 }
                 if reply.is_ok() && archiving {

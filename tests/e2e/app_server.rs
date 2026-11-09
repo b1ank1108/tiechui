@@ -637,6 +637,216 @@ async fn user_settings_round_trip_and_inactive_sessions_are_archived() {
 }
 
 #[tokio::test]
+async fn runtime_settings_reload_open_sessions_but_defaults_do_not() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let opened = snapshot(client.ok("session/open", json!({"cwd":fixture.cwd})).await);
+    let thread = json!({"thread_id":opened.thread_id});
+    let mut epoch = opened.events[0].epoch.0;
+    client.events.clear();
+    for (key, value) in [
+        ("network.proxy", json!("http://127.0.0.1:9")),
+        ("network.no_proxy", json!("localhost")),
+        ("ask.auto_continue_after_sec", json!(1)),
+        ("network.proxy", Value::Null),
+        ("network.no_proxy", Value::Null),
+        ("ask.auto_continue_after_sec", Value::Null),
+        ("network.ca_cert", Value::Null),
+    ] {
+        client
+            .ok("config/update", json!({"key":key,"value":value}))
+            .await;
+        let replay = client
+            .until(|event| matches!(event, EventKind::ThreadStarted { .. }))
+            .await;
+        epoch += 1;
+        assert_eq!(replay.last().unwrap().event.epoch.0, epoch, "{key}");
+        let current = snapshot(client.ok("session/snapshot", thread.clone()).await);
+        assert_eq!(current.events[0].epoch.0, epoch);
+    }
+    for (key, value) in [
+        ("model", json!("fixture/model")),
+        ("thinking", json!("off")),
+    ] {
+        client
+            .ok("config/update", json!({"key":key,"value":value}))
+            .await;
+    }
+    assert!(
+        client
+            .call(
+                "config/update",
+                json!({"key":"ask.auto_continue_after_sec","value":0})
+            )
+            .await
+            .is_err()
+    );
+    let current = snapshot(client.ok("session/snapshot", thread).await);
+    assert_eq!(current.events[0].epoch.0, epoch);
+}
+
+#[tokio::test]
+async fn runtime_settings_wait_for_an_active_approval_before_reloading() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"cwd":fixture.cwd,"mode":"rules"}))
+            .await,
+    );
+    let thread = opened.thread_id;
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id":thread,"op":{"kind":"user_input","delivery":"steer",
+        "content":[{"kind":"text","text":"Change hello.txt to after"}]}}),
+        )
+        .await;
+    let events = client
+        .until(|event| matches!(event, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &events.last().unwrap().event.event
+    else {
+        unreachable!()
+    };
+    client
+        .ok(
+            "config/update",
+            json!({"key":"network.no_proxy","value":"localhost"}),
+        )
+        .await;
+    client
+        .ok(
+            "config/update",
+            json!({"key":"ask.auto_continue_after_sec","value":1}),
+        )
+        .await;
+    let waiting = snapshot(
+        client
+            .ok("session/snapshot", json!({"thread_id":thread}))
+            .await,
+    );
+    assert_eq!(waiting.events[0].epoch.0, 0);
+    assert!(
+        waiting
+            .events
+            .iter()
+            .any(|event| matches!(event.event, EventKind::ApprovalRequested { .. }))
+    );
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id":thread,"op":{"kind":"approval_response",
+        "approval_id":approval_id,"decision":{"kind":"allow_once"}}}),
+        )
+        .await;
+    client
+        .until(|event| matches!(event, EventKind::ThreadStarted { .. }))
+        .await;
+    let reloaded = snapshot(
+        client
+            .ok("session/snapshot", json!({"thread_id":thread}))
+            .await,
+    );
+    assert_eq!(reloaded.events[0].epoch.0, 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.cwd.join("hello.txt")).unwrap(),
+        "after\n"
+    );
+    fixture.server.verify().unwrap();
+}
+
+#[tokio::test]
+async fn changed_ask_timeout_is_used_by_an_already_open_session() {
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let fixture = Fixture::new().await;
+    let provider = MockServer::start().await;
+    let args = json!({"questions":[{"id":"choice","header":"Choice","question":"Which option?"}]});
+    let ask = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"index":0,
+        "delta":{"tool_calls":[{"index":0,"id":"call_ask","type":"function","function":{
+            "name":"request_user_input","arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]})
+    );
+    let answer = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"index":0,
+        "delta":{"content":"Finished"},"finish_reason":"stop"}]})
+    );
+    Mock::given(method("POST"))
+        .and(body_string_contains(
+            "The user did not answer within 1 seconds.",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(answer, "text/event-stream"))
+        .with_priority(1)
+        .expect(1)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ask, "text/event-stream"))
+        .with_priority(2)
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let providers = fixture.home.join("providers.toml");
+    let config = std::fs::read_to_string(&providers).unwrap();
+    std::fs::write(
+        &providers,
+        config.replace(&fixture.server.uri(), &provider.uri()),
+    )
+    .unwrap();
+    let mut client = fixture.client().await;
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"cwd":fixture.cwd,"mode":"yolo"}))
+            .await,
+    );
+    client.events.clear();
+    client
+        .ok(
+            "config/update",
+            json!({"key":"ask.auto_continue_after_sec","value":1}),
+        )
+        .await;
+    client
+        .until(|event| matches!(event, EventKind::ThreadStarted { .. }))
+        .await;
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id":opened.thread_id,"op":{"kind":"user_input",
+        "delivery":"steer","content":[{"kind":"text","text":"Ask me a question"}]}}),
+        )
+        .await;
+    client
+        .until(|event| {
+            matches!(
+                event,
+                EventKind::ApprovalRequested {
+                    request: ApprovalRequest::Questions { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+    let finished = client
+        .until(|event| matches!(event, EventKind::TurnCompleted { .. }))
+        .await;
+    assert!(
+        finished
+            .iter()
+            .any(|event| matches!(event.event.event, EventKind::ApprovalResolved { .. }))
+    );
+    let EventKind::TurnCompleted { turn } = &finished.last().unwrap().event.event else {
+        unreachable!()
+    };
+    assert_eq!(turn.status, TurnStatus::Completed);
+    provider.verify().await;
+}
+
+#[tokio::test]
 async fn providers_and_defaults_are_edited_and_reload_open_sessions() {
     let fixture = Fixture::new().await;
     let mut client = fixture.client().await;
