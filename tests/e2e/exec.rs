@@ -52,7 +52,17 @@ async fn search_tools_run_in_headless_exec() {
     .unwrap();
     let fixture = Fixture::new("openai-completions", path.to_str().unwrap()).await;
     std::fs::write(fixture.cwd.join("match.txt"), "needle\n").unwrap();
-    let output = fixture.run("Search", &["--json", "--mode", "yolo"]).await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        fixture
+            .command("Search")
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .args(["--json", "--mode", "yolo"])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(output.status.success(), "{output:?}");
     let messages = fixture.store().build_context();
     for id in ["grep-call", "find-call"] {
