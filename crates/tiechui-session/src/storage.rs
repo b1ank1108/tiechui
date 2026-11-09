@@ -9,6 +9,46 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Diagnostic, Entry, FORMAT_VERSION, Header, SessionError, SessionStore, check_cancel};
 
+#[cfg(not(windows))]
+fn lock_writer(file: &File) -> std::io::Result<()> {
+    file.try_lock().map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn lock_writer(file: &File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+
+    // Windows locks deny reads too; reserve a byte beyond any session data instead.
+    let mut overlapped = OVERLAPPED {
+        Anonymous: OVERLAPPED_0 {
+            Anonymous: OVERLAPPED_0_0 {
+                Offset: u32::MAX - 1,
+                OffsetHigh: i32::MAX as u32,
+            },
+        },
+        ..Default::default()
+    };
+    // SAFETY: the file handle is valid and the synchronous call borrows `overlapped`.
+    if unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Percent-encode the canonical cwd, shortening long names with a stable hash.
 pub fn session_dir(home: &Path, cwd: &Path) -> Result<PathBuf, SessionError> {
     let cwd = canonical_cwd(cwd)?;
@@ -220,7 +260,7 @@ impl SessionStore {
             parent_session,
         };
         let result = (|| {
-            file.try_lock().map_err(|error| {
+            lock_writer(&file).map_err(|error| {
                 SessionError::new(&path, format!("cannot acquire writer lock: {error}"))
             })?;
             let mut line =
@@ -280,7 +320,7 @@ impl SessionStore {
             .open(&path)
             .map_err(|error| SessionError::new(&path, error))?;
         if writable {
-            file.try_lock().map_err(|error| {
+            lock_writer(&file).map_err(|error| {
                 SessionError::new(&path, format!("cannot acquire writer lock: {error}"))
             })?;
         }

@@ -623,6 +623,22 @@ fn symlink_cannot_bypass_writer_lock() {
     );
 }
 
+#[test]
+fn hard_link_cannot_bypass_writer_lock() {
+    let fixture = Fixture::new();
+    let store = fixture.create();
+    let alias = fixture.home.join("alias.jsonl");
+    fs::hard_link(store.path(), &alias).unwrap();
+    assert!(
+        SessionStore::open(&alias, &fixture.cancel)
+            .unwrap_err()
+            .message
+            .contains("writer lock")
+    );
+    drop(store);
+    SessionStore::open(&alias, &fixture.cancel).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn created_files_and_all_new_directories_are_owner_only() {

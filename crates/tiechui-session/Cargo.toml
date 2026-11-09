@@ -12,6 +12,9 @@ serde_json.workspace = true
 tiechui-model.workspace = true
 tokio-util.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 
