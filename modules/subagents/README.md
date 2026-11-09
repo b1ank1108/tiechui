@@ -11,7 +11,9 @@ Built-in scout, planner, reviewer and worker agents ship with their own prompts
 and no fixed model. Markdown definitions in `~/.tiechui/agents` and the nearest
 ancestor `.agents/agents` and `.claude/agents` use YAML frontmatter: `name`, `description`, optional
 `tools` (comma-separated or a YAML sequence), and optional `model` (`provider/id`).
-User definitions win by name. Untrusted project definitions require explicit
+User definitions win by name. Each dispatch reads the definitions afresh;
+`definitions::render` rewrites a file's `name`, `description`, `tools`, `model`
+and prompt and keeps its other frontmatter, for the app-server's `agents/save`. Untrusted project definitions require explicit
 confirmation through the parent's interaction queue, including when a model
 supplies an unknown confirmation-bypass parameter; headless execution refuses
 them. Confirmation authorizes the definitions, not new project policy sources.

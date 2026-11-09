@@ -65,8 +65,8 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
     }
 }
 
-/// The canonical project directory, or the home for user prompts alone.
-fn project(home: &Path, cwd: Option<String>) -> Result<PathBuf, String> {
+/// The canonical project directory, or the home for user files alone.
+pub(super) fn project(home: &Path, cwd: Option<String>) -> Result<PathBuf, String> {
     cwd.map_or_else(
         || Ok(home.to_owned()),
         |cwd| fs::canonicalize(cwd).map_err(|e| e.to_string()),
@@ -83,13 +83,7 @@ fn source(cwd: &Path, home: &Path, path: &Path) -> Option<&'static str> {
 }
 
 fn save(home: &Path, p: PromptSaveParams) -> Result<(), String> {
-    let name = p.name.trim();
-    if name.is_empty()
-        || name.starts_with('.')
-        || name.contains(|c: char| c.is_whitespace() || "/\\".contains(c))
-    {
-        return Err(format!("/{name} is not a command name"));
-    }
+    let name = file_name(&p.name)?;
     let scope = match (p.scope.as_str(), &p.cwd) {
         ("user", _) => "user",
         ("project", Some(_)) => "project",
@@ -108,14 +102,37 @@ fn save(home: &Path, p: PromptSaveParams) -> Result<(), String> {
             target.clone_from(previous);
         }
     }
-    if previous.as_ref() != Some(&target) && target.exists() {
-        return Err(format!("/{name} already exists"));
+    let text = render(&p.description, p.argument_hint.as_deref(), &p.body);
+    replace(&target, previous.as_deref(), &text, &format!("/{name}"))
+}
+
+/// A name that becomes `<name>.md`.
+pub(super) fn file_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains(|c: char| c.is_whitespace() || "/\\".contains(c))
+    {
+        return Err(format!("{name} is not a valid name"));
+    }
+    Ok(name)
+}
+
+/// Writes `target`, then removes `previous` if the file moved; refuses to overwrite another
+/// file, which `label` names.
+pub(super) fn replace(
+    target: &Path,
+    previous: Option<&Path>,
+    text: &str,
+    label: &str,
+) -> Result<(), String> {
+    if previous != Some(target) && target.exists() {
+        return Err(format!("{label} already exists"));
     }
     if let Some(dir) = target.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let text = render(&p.description, p.argument_hint.as_deref(), &p.body);
-    fs::write(&target, text).map_err(|e| e.to_string())?;
+    fs::write(target, text).map_err(|e| e.to_string())?;
     match previous {
         Some(previous) if previous != target => {
             fs::remove_file(previous).map_err(|e| e.to_string())

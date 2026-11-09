@@ -1,5 +1,5 @@
 //! Bounded dispatches of isolated actors, with parent-owned approvals and cancellation.
-mod definitions;
+pub mod definitions;
 mod output;
 
 use std::{

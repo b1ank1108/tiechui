@@ -997,3 +997,100 @@ async fn prompts_are_saved_as_commands_that_send_their_expanded_text() {
     let list = client.ok("prompts/list", json!({"cwd": cwd})).await;
     assert_eq!(names(&list), []);
 }
+
+#[tokio::test]
+async fn agent_definitions_are_listed_saved_moved_and_deleted() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let entries = |list: &Value| -> Vec<(String, String)> {
+        list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["name"].as_str().unwrap().into(),
+                    a["source"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let builtins = ["scout", "planner", "reviewer", "worker"]
+        .map(|name| (name.to_owned(), "builtin".to_owned()));
+    let list = client.ok("agents/list", json!({"cwd": cwd})).await;
+    assert_eq!(
+        list["dir"],
+        fixture.home.join("agents").display().to_string()
+    );
+    let mut names = entries(&list);
+    names.sort();
+    let mut expected = builtins.to_vec();
+    expected.sort();
+    assert_eq!(names, expected);
+    assert!(list["agents"][0]["path"].is_null());
+
+    let user = fixture.home.join("agents/custom.md");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    std::fs::write(
+        &user,
+        "---\nname: custom\ndescription: old\npermission:\n  mode: rules\n---\nOld",
+    )
+    .unwrap();
+    let save = |scope: &str, previous: Value| {
+        json!({"cwd": cwd, "scope": scope, "name": "custom", "description": "Checks: things",
+            "tools": ["read", "grep"], "model": "fixture/model", "prompt": "Check it", "previous": previous})
+    };
+    client.ok("agents/save", save("user", json!(user))).await;
+    let text = std::fs::read_to_string(&user).unwrap();
+    assert!(
+        text.contains(
+            "tools: [\"read\",\"grep\"]\nmodel: \"fixture/model\"\npermission:\n  mode: rules\n"
+        ),
+        "{text}"
+    );
+    let list = client.ok("agents/list", json!({"cwd": null})).await;
+    let custom = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "custom")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        custom,
+        json!({"name": "custom", "description": "Checks: things", "tools": ["read", "grep"],
+            "model": "fixture/model", "prompt": "Check it", "path": user, "source": "user"})
+    );
+    let error = client
+        .call("agents/save", save("user", Value::Null))
+        .await
+        .unwrap_err();
+    assert_eq!(error["message"], "custom already exists");
+
+    client.ok("agents/save", save("project", json!(user))).await;
+    assert!(!user.exists());
+    let project = fixture
+        .cwd
+        .canonicalize()
+        .unwrap()
+        .join(".agents/agents/custom.md");
+    assert!(
+        std::fs::read_to_string(&project)
+            .unwrap()
+            .contains("permission:")
+    );
+    let list = client.ok("agents/list", json!({"cwd": cwd})).await;
+    assert!(entries(&list).contains(&("custom".into(), "project".into())));
+    let outside = fixture.cwd.join("hello.txt");
+    assert!(
+        client
+            .call("agents/delete", json!({"cwd": cwd, "path": outside}))
+            .await
+            .is_err()
+    );
+    client
+        .ok("agents/delete", json!({"cwd": cwd, "path": project}))
+        .await;
+    assert!(!project.exists());
+}

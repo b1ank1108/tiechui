@@ -95,6 +95,11 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::PromptEntry>();
                 d.visit::<app::PromptSaveParams>();
                 d.visit::<app::PromptDeleteParams>();
+                d.visit::<app::AgentsListParams>();
+                d.visit::<app::AgentList>();
+                d.visit::<app::AgentEntry>();
+                d.visit::<app::AgentSaveParams>();
+                d.visit::<app::AgentDeleteParams>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

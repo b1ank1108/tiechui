@@ -3,11 +3,12 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use tiechui_plugin_api::{CancellationToken, ToolError};
+use tiechui_plugin_api::{CancellationToken, ToolError, serde_json};
 
 #[derive(Clone)]
 pub struct Definition {
     pub name: String,
+    pub description: String,
     pub prompt: String,
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
@@ -22,7 +23,7 @@ fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
     let doc = docs.first()?;
     let value = |key| doc.as_mapping_get(key);
     let string = |key| value(key).and_then(YamlOwned::as_str).map(str::to_owned);
-    string("description")?;
+    let description = string("description")?;
     let tools = value("tools")
         .map(|v| {
             if let Some(s) = v.as_str() {
@@ -45,6 +46,7 @@ fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
         .filter(|v| !v.is_empty());
     Some(Definition {
         name: string("name")?,
+        description,
         prompt: prompt.trim().into(),
         tools,
         model: string("model"),
@@ -75,24 +77,14 @@ pub fn discover(
             }
         }
     }
-    let project = cwd
-        .ancestors()
-        .find_map(|p| {
-            let paths: Vec<_> = [".claude/agents", ".agents/agents"]
-                .into_iter()
-                .map(|name| p.join(name))
-                .filter(|p| p.is_dir())
-                .collect();
-            (!paths.is_empty()).then_some(paths)
-        })
-        .unwrap_or_default();
     // User definitions deliberately win over project definitions with the same name.
-    for (directory, project) in project
-        .into_iter()
-        .filter(|_| scope != "user")
-        .map(|p| (p, true))
-        .chain((scope != "project").then(|| (home.join("agents"), false)))
-    {
+    for (directory, project) in directories(home, cwd).into_iter().filter(|(_, project)| {
+        if *project {
+            scope != "user"
+        } else {
+            scope != "project"
+        }
+    }) {
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
@@ -117,4 +109,66 @@ pub fn discover(
         }
     }
     Ok(agents)
+}
+
+/// Definition directories in load order, flagged when they belong to the project: the
+/// nearest ancestor's `.claude/agents` and `.agents/agents`, then `<home>/agents`.
+pub fn directories(home: &Path, cwd: &Path) -> Vec<(PathBuf, bool)> {
+    let mut directories: Vec<_> = cwd
+        .ancestors()
+        .find_map(|p| {
+            let paths: Vec<_> = [".claude/agents", ".agents/agents"]
+                .into_iter()
+                .map(|name| (p.join(name), true))
+                .filter(|(p, _)| p.is_dir())
+                .collect();
+            (!paths.is_empty()).then_some(paths)
+        })
+        .unwrap_or_default();
+    directories.push((home.join("agents"), false));
+    directories
+}
+
+/// A definition file with these fields; frontmatter keys other than `name`, `description`,
+/// `tools` and `model` in `existing` are kept.
+pub fn render(existing: &str, definition: &Definition) -> String {
+    let quote = |value: &str| serde_json::Value::from(value.replace('\n', " ")).to_string();
+    let mut text = format!(
+        "---\nname: {}\ndescription: {}\n",
+        quote(&definition.name),
+        quote(&definition.description)
+    );
+    if let Some(tools) = &definition.tools {
+        text.push_str(&format!(
+            "tools: {}\n",
+            serde_json::Value::from(tools.clone())
+        ));
+    }
+    if let Some(model) = &definition.model {
+        text.push_str(&format!("model: {}\n", quote(model)));
+    }
+    let existing = existing
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n");
+    let header = existing
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .map_or("", |(header, _)| header);
+    let mut kept = true;
+    for line in header.lines() {
+        // Indented lines and block sequence items continue the key above; comments stay.
+        if !line.starts_with([' ', '\t', '-', '#'])
+            && let Some((key, _)) = line.split_once(':')
+        {
+            kept = !["name", "description", "tools", "model"].contains(&key.trim());
+        }
+        if kept || line.starts_with('#') {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    text.push_str("---\n\n");
+    text.push_str(definition.prompt.trim());
+    text.push('\n');
+    text
 }

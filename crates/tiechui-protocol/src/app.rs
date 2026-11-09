@@ -439,6 +439,62 @@ pub struct PromptDeleteParams {
     pub path: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentsListParams {
+    /// The project whose agent definitions a dispatch there finds; without one, the user's alone.
+    pub cwd: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentList {
+    /// `$TIECHUI_HOME/agents`.
+    pub dir: String,
+    /// Built-in agents, then definitions by name; a user definition hides a project one.
+    pub agents: Vec<AgentEntry>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentEntry {
+    pub name: String,
+    pub description: String,
+    /// The only tools the agent may use; all of them when absent.
+    pub tools: Option<Vec<String>>,
+    /// `provider/id`; the parent's model when absent.
+    pub model: Option<String>,
+    pub prompt: String,
+    /// Absent for built-in agents.
+    pub path: Option<String>,
+    /// `builtin`, `user` or `project`.
+    pub source: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentSaveParams {
+    /// Required for the `project` scope.
+    pub cwd: Option<String>,
+    /// `user` saves to `$TIECHUI_HOME/agents`, `project` to `<cwd>/.agents/agents`.
+    pub scope: String,
+    pub name: String,
+    pub description: String,
+    pub tools: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub prompt: String,
+    /// The file being edited: rewritten in place keeping its other frontmatter, or removed
+    /// when the name or scope changes.
+    pub previous: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentDeleteParams {
+    pub cwd: Option<String>,
+    pub path: String,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

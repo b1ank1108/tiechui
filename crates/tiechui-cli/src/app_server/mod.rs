@@ -1,6 +1,7 @@
 //! `chui app-server`: sessions for desktop clients, over JSON-RPC 2.0 on stdio with one
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
+mod agents;
 mod mcp;
 mod projection;
 mod prompts;
@@ -248,6 +249,7 @@ impl Server {
                 }
                 reply
             }
+            _ if agents::handles(method) => agents::handle(&self.home, method, params).await,
             _ if prompts::handles(method) => {
                 let reply = prompts::handle(&self.home, method, params).await;
                 if reply.is_ok() && method != "prompts/list" {

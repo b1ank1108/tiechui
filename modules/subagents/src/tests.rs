@@ -296,6 +296,39 @@ async fn project_definitions_support_claude_and_prefer_agents() {
 }
 
 #[tokio::test]
+async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
+    let h = Harness::new();
+    let directory = h.service.home.join("agents");
+    std::fs::create_dir_all(&directory).unwrap();
+    let existing = "---\nname: old\ndescription: >\n  folded\npermission:\n  rules:\n  - allow: read\ntools:\n- bash\n# kept\n---\nOld";
+    let definition = definitions::Definition {
+        name: "custom".into(),
+        description: "Review: \"changes\"\nonly".into(),
+        prompt: "\nNew prompt\n".into(),
+        tools: Some(vec!["read".into(), "grep".into()]),
+        model: Some("fake/b".into()),
+        project: false,
+        path: PathBuf::new(),
+    };
+    let text = definitions::render(existing, &definition);
+    assert!(
+        text.contains("permission:\n  rules:\n  - allow: read\n# kept\n---"),
+        "{text}"
+    );
+    std::fs::write(directory.join("custom.md"), text).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    let custom = &agents["custom"];
+    assert_eq!(custom.description, "Review: \"changes\" only");
+    assert_eq!(custom.prompt, "New prompt");
+    assert_eq!(
+        custom.tools.as_deref(),
+        Some(&["read".to_owned(), "grep".to_owned()][..])
+    );
+    assert_eq!(custom.model.as_deref(), Some("fake/b"));
+    assert!(!agents["scout"].description.is_empty());
+}
+
+#[tokio::test]
 async fn discovery_precedence_trust_cannot_be_bypassed_and_records_restore() {
     let mut h = Harness::new();
     let project = h.root.path().join(".agents/agents");
