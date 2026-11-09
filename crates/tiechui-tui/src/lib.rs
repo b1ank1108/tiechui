@@ -46,6 +46,9 @@ pub mod tools;
 mod transcript;
 pub mod wrap;
 
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -203,6 +206,10 @@ fn restore() {
 
 fn setup(out: &mut impl Write, fullscreen: bool) -> io::Result<()> {
     enable_raw_mode()?;
+    // Crossterm's Windows backend saves the input mode on the first enable;
+    // disabling capture before that fails with "Initial console modes not set".
+    #[cfg(windows)]
+    execute!(out, crossterm::event::EnableMouseCapture)?;
     if fullscreen {
         alternate(out, true)?;
     }
