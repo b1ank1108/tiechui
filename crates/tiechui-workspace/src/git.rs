@@ -415,7 +415,8 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
         }
         GitOp::Unstage { paths } => {
             if git(&["rev-parse", "--verify", "-q", "HEAD"])
-                .status()?
+                .output()?
+                .status
                 .success()
             {
                 git_with(root, &["restore", "--staged"], paths)?;
@@ -426,7 +427,8 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
         GitOp::Discard { paths } => {
             // Unstaged, new files are untracked: delete those, then restore the rest.
             if git(&["rev-parse", "--verify", "-q", "HEAD"])
-                .status()?
+                .output()?
+                .status
                 .success()
             {
                 git_with(root, &["reset", "-q"], paths)?;

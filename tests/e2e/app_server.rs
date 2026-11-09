@@ -417,6 +417,47 @@ async fn workspace_services_through_app_server() {
 }
 
 #[tokio::test]
+async fn git_unstage_and_discard_keep_stdout_valid_json_rpc() {
+    let fixture = Fixture::new().await;
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&fixture.cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "-q"]);
+    let mut client = fixture.client().await;
+    let root = fixture.cwd.display().to_string();
+    let op = |kind| json!({"root":root, "op":{"kind":kind,"paths":["hello.txt"]}});
+    // An unborn repository uses `rm --cached` and has no HEAD output either.
+    client.ok("git/run", op("stage")).await;
+    client.ok("git/run", op("unstage")).await;
+    client.ok("git/run", op("stage")).await;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "initial",
+    ]);
+    std::fs::write(fixture.cwd.join("hello.txt"), "after\n").unwrap();
+    client.ok("git/run", op("stage")).await;
+    client.ok("git/run", op("unstage")).await;
+    client.ok("git/run", op("discard")).await;
+    // Client::read rejects any non-JSON line, including a leaked commit hash.
+    assert_eq!(
+        client
+            .ok("fs/read", json!({"root":root,"path":"hello.txt"}))
+            .await["text"],
+        "before\n"
+    );
+}
+
+#[tokio::test]
 async fn turn_undo_and_rewind_through_app_server() {
     let fixture = Fixture::new().await;
     let mut client = fixture.client().await;
