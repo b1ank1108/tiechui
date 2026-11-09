@@ -24,12 +24,14 @@ impl Rule {
 }
 
 /// Tools that only read or stay within the session; the rest ask unless rules allow them.
-const SAFE_TOOLS: [&str; 22] = [
+const SAFE_TOOLS: [&str; 24] = [
     "read",
     "grep",
     "find",
     "ls",
-    "goal",
+    "create_goal",
+    "get_goal",
+    "update_goal",
     "context",
     "tool_search",
     "request_user_input",
