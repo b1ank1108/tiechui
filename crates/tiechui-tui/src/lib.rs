@@ -171,6 +171,7 @@ impl Default for Options {
 static ENHANCED: AtomicBool = AtomicBool::new(false);
 static ALT_ENHANCED: AtomicBool = AtomicBool::new(false);
 static ALTERNATE: AtomicBool = AtomicBool::new(false);
+static MOUSE: terminal::MouseCapture = terminal::MouseCapture::new();
 
 fn alternate(out: &mut impl Write, enter: bool) -> io::Result<()> {
     if ALTERNATE.swap(enter, Ordering::SeqCst) != enter {
@@ -189,6 +190,7 @@ fn alternate(out: &mut impl Write, enter: bool) -> io::Result<()> {
 
 fn restore() {
     let mut out = io::stdout();
+    let _ = MOUSE.disable(&mut out);
     let _ = alternate(&mut out, false);
     if ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
@@ -198,7 +200,6 @@ fn restore() {
         DisableBracketedPaste,
         crossterm::event::DisableFocusChange
     );
-    let _ = execute!(out, crossterm::event::DisableMouseCapture);
     let _ = write!(out, "\x1b[?2026l\x1b[0m\x1b[?25h");
     let _ = out.flush();
     let _ = disable_raw_mode();
@@ -206,18 +207,13 @@ fn restore() {
 
 fn setup(out: &mut impl Write, fullscreen: bool) -> io::Result<()> {
     enable_raw_mode()?;
-    // Crossterm's Windows backend saves the input mode on the first enable;
-    // disabling capture before that fails with "Initial console modes not set".
-    #[cfg(windows)]
-    execute!(out, crossterm::event::EnableMouseCapture)?;
     if fullscreen {
         alternate(out, true)?;
     }
     execute!(
         out,
         EnableBracketedPaste,
-        crossterm::event::EnableFocusChange,
-        crossterm::event::DisableMouseCapture
+        crossterm::event::EnableFocusChange
     )?;
     // Disambiguated keys make Shift+Enter, Alt combinations and a lone Esc reliable.
     if supports_keyboard_enhancement().unwrap_or(false) {
@@ -311,9 +307,9 @@ async fn session(
         if mouse != (app.fullscreen() || app.context_open()) {
             mouse = app.fullscreen() || app.context_open();
             if mouse {
-                execute!(out, crossterm::event::EnableMouseCapture)?;
+                MOUSE.enable(out)?;
             } else {
-                execute!(out, crossterm::event::DisableMouseCapture)?;
+                MOUSE.disable(out)?;
             }
         }
         if let Some(text) = app.take_copy() {

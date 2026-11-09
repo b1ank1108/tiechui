@@ -1,8 +1,71 @@
 //! Terminal setup and the OSC 10/11 color query.
 
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
+
 use crate::palette::Rgb;
 
 pub type Colors = (Option<Rgb>, Option<Rgb>);
+
+/// Track capture separately from the event loop so panic and exit cleanup can release it.
+pub(crate) struct MouseCapture {
+    active: AtomicBool,
+}
+
+impl MouseCapture {
+    pub(crate) const fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn enable(&self, out: &mut impl Write) -> io::Result<()> {
+        // A partial write can enable reporting even when the command returns an error.
+        self.active.store(true, Ordering::Relaxed);
+        execute!(out, EnableMouseCapture)?;
+        #[cfg(windows)]
+        {
+            // ConPTY needs SGR reports to translate mouse input into console records.
+            out.write_all(b"\x1b[?1006h")?;
+            out.flush()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn disable(&self, out: &mut impl Write) -> io::Result<()> {
+        if !self.active.load(Ordering::Relaxed) {
+            // On Windows, Crossterm can only restore the mode after capture was enabled.
+            return Ok(());
+        }
+        let result = execute!(out, DisableMouseCapture);
+        #[cfg(windows)]
+        let result = {
+            // Reset the encoding even if restoring the console input mode failed.
+            let encoding = out.write_all(b"\x1b[?1006l").and_then(|()| out.flush());
+            result.and(encoding)
+        };
+        if result.is_err() {
+            #[cfg(not(windows))]
+            for sequence in [
+                b"\x1b[?1006l",
+                b"\x1b[?1015l",
+                b"\x1b[?1003l",
+                b"\x1b[?1002l",
+                b"\x1b[?1000l",
+            ] {
+                let _ = out.write_all(sequence);
+            }
+            let _ = out.flush();
+            // Keep capture marked active so later cleanup can retry.
+            return result;
+        }
+        self.active.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 /// Crossterm exposes OSC as Alt+] followed by keys. Keep those replies out of editors,
 /// including replies fragmented across event-loop iterations or arriving after startup.
@@ -125,6 +188,47 @@ pub fn parse_replies(bytes: &[u8]) -> (Option<Rgb>, Option<Rgb>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn mouse_capture_cleanup_is_paired_and_retries_partial_failures() -> io::Result<()> {
+        struct FailsAfter(usize);
+        impl Write for FailsAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("terminal disconnected"));
+                }
+                let count = self.0.min(bytes.len());
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("terminal disconnected"))
+            }
+        }
+
+        let capture = MouseCapture::new();
+        let mut output = Vec::new();
+        capture.disable(&mut output)?;
+        assert!(output.is_empty());
+        assert!(capture.enable(&mut FailsAfter(8)).is_err());
+        capture.disable(&mut output)?;
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?1000l"));
+        output.clear();
+        capture.disable(&mut output)?;
+        assert!(output.is_empty());
+
+        capture.enable(&mut output)?;
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?1006h"));
+        assert!(capture.disable(&mut FailsAfter(8)).is_err());
+        output.clear();
+        capture.disable(&mut output)?;
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?1006l"));
+        output.clear();
+        capture.disable(&mut output)?;
+        assert!(output.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn replies_with_bel_st_and_short_channels_parse() {
