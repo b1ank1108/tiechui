@@ -237,10 +237,15 @@ pub(super) async fn run_server(
                 }
             }
             let stopped = service.cancellation_token();
-            tokio::select! {
+            let result = tokio::select! {
                 _ = inner.cancel.cancelled() => { stopped.cancel(); Ok(()) },
                 result = service.waiting() => Err(ToolError(format!("MCP connection closed: {result:?}"))),
+            };
+            #[cfg(windows)]
+            if let Some(mut group) = _group {
+                let _ = group.child.kill().await;
             }
+            result
         }
         Err(error) => Err(error),
     };
