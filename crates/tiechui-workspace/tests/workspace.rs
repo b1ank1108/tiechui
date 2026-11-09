@@ -361,6 +361,13 @@ fn terminals_replay_output_after_attach() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(workspace.attach_terminal("t").unwrap().exit, Some(3));
+    workspace
+        .resize_terminal(&TerminalResizeParams {
+            id: "t".into(),
+            cols: 120,
+            rows: 40,
+        })
+        .unwrap();
     workspace.kill_terminal("t");
     assert!(workspace.attach_terminal("t").is_err());
 }

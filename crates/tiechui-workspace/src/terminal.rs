@@ -141,10 +141,10 @@ impl Terminal {
 
     pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let master = lock(&self.master);
-        let master = master
-            .as_ref()
-            .ok_or_else(|| crate::Error("terminal has exited".into()))?;
-        Ok(master.resize(size(cols, rows))?)
+        if let Some(master) = master.as_ref() {
+            master.resize(size(cols, rows))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn kill(&self) {
