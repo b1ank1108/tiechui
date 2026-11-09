@@ -601,6 +601,13 @@ fn writer_lock_lasts_until_drop_and_read_only_open_can_coexist() {
             .message
             .contains("writer lock")
     );
+    #[cfg(unix)]
+    assert_eq!(
+        SessionStore::open(&path, &fixture.cancel)
+            .unwrap_err()
+            .message,
+        "cannot acquire writer lock: lock acquisition failed because the operation would block"
+    );
     let reader = SessionStore::open_read_only(&path, &fixture.cancel).unwrap();
     assert!(reader.entries().is_empty());
     assert!(SessionStore::open(&path, &fixture.cancel).is_err());

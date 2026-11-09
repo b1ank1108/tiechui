@@ -20,8 +20,8 @@ fn session_options(writable: bool) -> OpenOptions {
 }
 
 #[cfg(not(windows))]
-fn lock_writer(file: &File) -> std::io::Result<()> {
-    file.try_lock().map_err(Into::into)
+fn lock_writer(file: &File) -> Result<(), std::fs::TryLockError> {
+    file.try_lock()
 }
 
 #[cfg(windows)]
