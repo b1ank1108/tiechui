@@ -34,13 +34,22 @@ impl Client {
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
+        let id = self.send(method, params).await;
+        self.reply(id).await
+    }
+
+    async fn send(&mut self, method: &str, params: Value) -> u64 {
         self.next += 1;
-        let id = self.next;
-        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let request =
+            json!({"jsonrpc": "2.0", "id": self.next, "method": method, "params": params});
         self.stdin
             .write_all(format!("{request}\n").as_bytes())
             .await
             .unwrap();
+        self.next
+    }
+
+    async fn reply(&mut self, id: u64) -> Result<Value, Value> {
         loop {
             let message = self.read().await;
             if message["id"] == id {
@@ -697,4 +706,133 @@ async fn providers_and_defaults_are_edited_and_reload_open_sessions() {
     let listed = client.ok("providers/list", json!({})).await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["models"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn mcp_servers_are_edited_started_and_signed_in_to() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let oauth = MockServer::start().await;
+    let base = oauth.uri();
+    for (route, body) in [
+        (
+            "/.well-known/oauth-protected-resource/mcp",
+            json!({"resource": format!("{base}/mcp"), "authorization_servers": [base]}),
+        ),
+        (
+            "/.well-known/oauth-authorization-server",
+            json!({"issuer": base, "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+                "registration_endpoint": format!("{base}/register"),
+                "code_challenge_methods_supported": ["S256"]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&oauth)
+            .await;
+    }
+    for (route, body) in [
+        ("/register", json!({"client_id": "fixture"})),
+        (
+            "/token",
+            json!({"access_token": "fake", "token_type": "Bearer", "expires_in": 3600}),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&oauth)
+            .await;
+    }
+    client.ok("session/open", json!({"cwd": cwd})).await;
+
+    let server = |name: &str, command: Value, url: Value, enabled: bool| {
+        json!({"name": name, "command": command, "args": ["--flag"], "env": {}, "url": url,
+            "http_headers": {}, "tool_timeout_sec": 30.0, "enabled": enabled})
+    };
+    let local = server("local", json!("/nonexistent/mcp-server"), json!(null), true);
+    let remote = server("remote", json!(null), json!(format!("{base}/mcp")), false);
+    for server in [&local, &remote] {
+        client
+            .ok("mcp/save", json!({"previous": null, "server": server}))
+            .await;
+    }
+    // The open session reloads.
+    client
+        .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+        .await;
+    for (previous, server) in [
+        (
+            json!(null),
+            server("both", json!("x"), json!("http://a"), true),
+        ),
+        (json!(null), server("none", json!(null), json!(""), true)),
+        (json!(null), server("local", json!("x"), json!(null), true)),
+        (json!("missing"), server("x", json!("x"), json!(null), true)),
+    ] {
+        assert!(
+            client
+                .call("mcp/save", json!({"previous": previous, "server": server}))
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        client.ok("mcp/list", json!({})).await,
+        json!([local, remote])
+    );
+    let status = client.ok("mcp/status", json!({})).await;
+    assert_eq!(
+        (
+            &status[0]["state"],
+            &status[1]["state"],
+            &status[1]["oauth"]
+        ),
+        (&json!("failed"), &json!("disabled"), &json!("logged_out"))
+    );
+    assert!(status[0]["error"].is_string());
+
+    let login = client.send("mcp/login", json!({"name": "remote"})).await;
+    let page = client.notice(|method, _| method == "mcp/authorize").await;
+    assert_eq!(page["name"], "remote");
+    let page = reqwest::Url::parse(page["url"].as_str().unwrap()).unwrap();
+    let fields: std::collections::BTreeMap<_, _> = page.query_pairs().into_owned().collect();
+    let mut callback = reqwest::Url::parse(&fields["redirect_uri"]).unwrap();
+    callback
+        .query_pairs_mut()
+        .extend_pairs([("code", "fixture"), ("state", fields["state"].as_str())]);
+    assert!(reqwest::get(callback).await.unwrap().status().is_success());
+    client.reply(login).await.unwrap();
+    assert_eq!(
+        client.ok("mcp/status", json!({})).await[1]["oauth"],
+        "authenticated"
+    );
+    client.ok("mcp/logout", json!({"name": "remote"})).await;
+    assert_eq!(
+        client.ok("mcp/status", json!({})).await[1]["oauth"],
+        "logged_out"
+    );
+    assert!(
+        client
+            .call("mcp/login", json!({"name": "local"}))
+            .await
+            .is_err()
+    );
+
+    let renamed = server(
+        "renamed",
+        json!("/nonexistent/mcp-server"),
+        json!(null),
+        false,
+    );
+    client
+        .ok("mcp/save", json!({"previous": "local", "server": renamed}))
+        .await;
+    client.ok("mcp/delete", json!({"name": "remote"})).await;
+    assert_eq!(client.ok("mcp/list", json!({})).await, json!([renamed]));
 }

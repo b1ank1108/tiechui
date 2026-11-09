@@ -1044,6 +1044,76 @@ fn removed_preferences_keep_the_rest_of_the_file() {
 }
 
 #[test]
+fn mcp_server_saves_change_the_edited_keys_and_keep_the_rest() {
+    let temp = temp_dir();
+    let text = "model = 'local/small'\n\n# github\n[mcp_servers.github]\nurl = 'https://a.invalid/mcp' # remote\nbearer_token_env_var = 'GH_TOKEN'\nenabled = false\n";
+    let path = write(temp.path(), "config.toml", text);
+    let http = McpServerConfig {
+        url: Some("https://b.invalid/mcp".into()),
+        http_headers: BTreeMap::from([("X-Team".into(), "a b".into())]),
+        tool_timeout_sec: Some(30.0),
+        ..Default::default()
+    };
+    save_mcp_server(&path, Some("github"), "gh", &http).unwrap();
+    let stdio = McpServerConfig {
+        command: Some("npx".into()),
+        args: vec!["-y".into(), "a b".into()],
+        env: BTreeMap::from([("KEY".into(), "v".into())]),
+        enabled: Some(false),
+        ..Default::default()
+    };
+    save_mcp_server(&path, None, "local", &stdio).unwrap();
+    assert!(save_mcp_server(&path, None, "gh", &stdio).is_err());
+    assert!(save_mcp_server(&path, Some("missing"), "x", &stdio).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "model = 'local/small'\n\n# github\n[mcp_servers.gh]\nurl = \"https://b.invalid/mcp\" # remote\nbearer_token_env_var = 'GH_TOKEN'\nhttp_headers = { X-Team = \"a b\" }\ntool_timeout_sec = 30.0\n\n[mcp_servers.local]\ncommand = \"npx\"\nargs = [\"-y\", \"a b\"]\nenv = { KEY = \"v\" }\nenabled = false\n"
+    );
+    let inline = write(
+        temp.path(),
+        "inline.toml",
+        "mcp_servers = { a = { command = 'a' } }\n",
+    );
+    save_mcp_server(&inline, None, "b", &stdio).unwrap();
+    let inline = ConfigPaths {
+        user: inline,
+        project: None,
+    };
+    let servers = load(&inline, false, &toml::Table::new())
+        .unwrap()
+        .config
+        .mcp_servers;
+    assert_eq!((servers.len(), &servers["b"]), (2, &stdio));
+    let paths = ConfigPaths {
+        user: path.clone(),
+        project: None,
+    };
+    let servers = load(&paths, false, &toml::Table::new())
+        .unwrap()
+        .config
+        .mcp_servers;
+    assert_eq!(
+        servers["gh"],
+        McpServerConfig {
+            bearer_token_env_var: Some("GH_TOKEN".into()),
+            ..http
+        }
+    );
+    assert_eq!(servers["local"], stdio);
+    remove_mcp_server(&path, "gh").unwrap();
+    assert!(remove_mcp_server(&path, "gh").is_err());
+    assert_eq!(
+        load(&paths, false, &toml::Table::new())
+            .unwrap()
+            .config
+            .mcp_servers
+            .keys()
+            .collect::<Vec<_>>(),
+        ["local"]
+    );
+}
+
+#[test]
 fn added_providers_append_to_the_file_without_replacing_one() {
     let temp = temp_dir();
     let path = temp.path().join("providers.toml");

@@ -80,6 +80,12 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::ProviderTest>();
                 d.visit::<app::ConfigUpdateParams>();
                 d.visit::<app::ConfigValues>();
+                d.visit::<app::McpServerEntry>();
+                d.visit::<app::McpSaveParams>();
+                d.visit::<app::McpParams>();
+                d.visit::<app::McpState>();
+                d.visit::<app::McpStatus>();
+                d.visit::<app::McpAuthorize>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

@@ -225,6 +225,11 @@ fn parse_table(path: &Path, text: &str) -> Result<Table, ConfigError> {
         .map_err(|error: toml::de::Error| ConfigError::new(path, "<document>", error.message()))
 }
 
+/// Rejects a config file that would not load.
+pub(crate) fn check_layer(path: &Path, text: &str) -> Result<(), ConfigError> {
+    parse_layer(path, parse_table(path, text)?).map(drop)
+}
+
 /// Validates every provider without reading credential values.
 pub fn load_providers(path: &Path) -> Result<BTreeMap<String, ProviderConfig>, ConfigError> {
     match read_optional(path)? {

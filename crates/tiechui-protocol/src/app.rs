@@ -286,6 +286,68 @@ pub struct ConfigValues {
     pub archive_after_days: Option<u64>,
 }
 
+/// A server of `[mcp_servers]` in the user's `config.toml`, as far as clients edit it; saving
+/// keeps its other keys.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerEntry {
+    pub name: String,
+    /// Starts a stdio server; otherwise `url` is a Streamable HTTP endpoint.
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub url: Option<String>,
+    pub http_headers: BTreeMap<String, String>,
+    pub tool_timeout_sec: Option<f64>,
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct McpSaveParams {
+    /// The server to update, which takes the new name; `None` adds the server.
+    pub previous: Option<String>,
+    pub server: McpServerEntry,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpParams {
+    pub name: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpState {
+    Starting,
+    Ready,
+    Disabled,
+    Failed,
+    Stopped,
+}
+
+/// A server of `mcp/list` once it has started, from `mcp/status`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpStatus {
+    pub name: String,
+    pub state: McpState,
+    pub tools: Vec<String>,
+    pub error: Option<String>,
+    /// For HTTP servers that may sign in: `authenticated`, `expired`, `logged_out` or
+    /// `invalid_credentials`.
+    pub oauth: Option<String>,
+}
+
+/// The `mcp/authorize` notification: the page to open for the `mcp/login` waiting on it.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpAuthorize {
+    pub name: String,
+    pub url: String,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -124,7 +124,9 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
 
 /// Edits read, change and replace a whole file, so they run one at a time to keep each other's
 /// changes.
-async fn write<E: ToString>(edit: impl FnOnce() -> Result<(), E> + Send + 'static) -> Reply {
+pub(super) async fn write<E: ToString>(
+    edit: impl FnOnce() -> Result<(), E> + Send + 'static,
+) -> Reply {
     static WRITES: Mutex<()> = Mutex::new(());
     blocking(move |_| {
         let _write = lock(&WRITES);
@@ -303,8 +305,8 @@ async fn declared(
     .await
 }
 
-/// Levels and wires share their names between the protocol and the configuration.
-fn convert<T: DeserializeOwned>(from: impl Serialize) -> T {
+/// Levels, wires and MCP server states have the same names in the protocol as at their source.
+pub(super) fn convert<T: DeserializeOwned>(from: impl Serialize) -> T {
     serde_json::to_value(from)
         .and_then(serde_json::from_value)
         .expect("the same name on both sides")

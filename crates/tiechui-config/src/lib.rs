@@ -23,8 +23,8 @@ pub use mcp::McpServerConfig;
 pub use paths::ConfigPaths;
 pub use permissions::{PermissionAction, PermissionMode, PermissionRule, PermissionsConfig};
 pub use save::{
-    add_provider, remove_model, remove_preference, remove_provider, save_model, save_preference,
-    save_provider, save_status_line,
+    add_provider, remove_mcp_server, remove_model, remove_preference, remove_provider,
+    save_mcp_server, save_model, save_preference, save_provider, save_status_line,
 };
 pub use trust::{TrustEntry, TrustStore};
 

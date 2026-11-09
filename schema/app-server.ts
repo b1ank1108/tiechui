@@ -218,6 +218,31 @@ export type LiveState = "idle" | "running" | "waiting" | "failed";
 
 export type LogParams = { root: string, limit: number, };
 
+export type McpAuthorize = { name: string, url: string, };
+
+export type McpParams = { name: string, };
+
+export type McpSaveParams = { 
+/**
+ * The server to update, which takes the new name; `None` adds the server.
+ */
+previous: string | null, server: McpServerEntry, };
+
+export type McpServerEntry = { name: string, 
+/**
+ * Starts a stdio server; otherwise `url` is a Streamable HTTP endpoint.
+ */
+command: string | null, args: Array<string>, env: { [key in string]: string }, url: string | null, http_headers: { [key in string]: string }, tool_timeout_sec: number | null, enabled: boolean, };
+
+export type McpState = "starting" | "ready" | "disabled" | "failed" | "stopped";
+
+export type McpStatus = { name: string, state: McpState, tools: Array<string>, error: string | null, 
+/**
+ * For HTTP servers that may sign in: `authenticated`, `expired`, `logged_out` or
+ * `invalid_credentials`.
+ */
+oauth: string | null, };
+
 export type ModelEntry = { id: string, context_window: number, max_output: number, 
 /**
  * Levels offered, as in `ModelInfo`; only `off` without reasoning.

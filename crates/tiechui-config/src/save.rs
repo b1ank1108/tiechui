@@ -1,11 +1,16 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use toml_edit::{ArrayOfTables, Document, DocumentMut, InlineTable, Item, Key, Table, Value};
+use toml_edit::{
+    Array, ArrayOfTables, Document, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value,
+};
 
-use crate::load::{parse_providers, read_optional};
-use crate::{ConfigError, ModelConfig, StatusLineConfig, StatusLineItem, ThinkingLevelValue};
+use crate::load::{check_layer, parse_providers, read_optional};
+use crate::{
+    ConfigError, McpServerConfig, ModelConfig, StatusLineConfig, StatusLineItem, ThinkingLevelValue,
+};
 
 /// Edit one dotted TOML key, retaining surrounding comments and unrelated formatting.
 /// Quoted key segments are supported. Configuration validation happens when loading.
@@ -201,11 +206,111 @@ pub fn remove_model(path: &Path, provider: &str, id: &str) -> Result<(), ConfigE
     })
 }
 
+/// Writes an MCP server's command or address, arguments, environment, headers, call timeout and
+/// switch, keeping its other keys. `previous` names the server to update, which takes `name`;
+/// without it the server is added.
+pub fn save_mcp_server(
+    path: &Path,
+    previous: Option<&str>,
+    name: &str,
+    server: &McpServerConfig,
+) -> Result<(), ConfigError> {
+    if name.is_empty() {
+        return Err(ConfigError::new(path, name, "server names are not empty"));
+    }
+    let edit = |document: &mut DocumentMut| {
+        let inline = document
+            .get("mcp_servers")
+            .is_some_and(Item::is_inline_table);
+        let servers = document
+            .entry("mcp_servers")
+            .or_insert_with(|| {
+                let mut table = Table::new();
+                table.set_implicit(true);
+                Item::Table(table)
+            })
+            .as_table_like_mut()
+            .ok_or("mcp_servers is not a table")?;
+        let mut item = match previous {
+            Some(previous) => servers
+                .remove(previous)
+                .ok_or("the server is not declared")?,
+            None if inline => Item::Value(Value::InlineTable(InlineTable::new())),
+            None => {
+                let mut table = Table::new();
+                table.decor_mut().set_prefix("\n");
+                Item::Table(table)
+            }
+        };
+        if servers.contains_key(name) {
+            return Err("the server is already declared");
+        }
+        let table = item
+            .as_table_like_mut()
+            .ok_or("the server is not a table")?;
+        let text = |text: &Option<String>| text.as_deref().map(Value::from);
+        let pairs = |pairs: &BTreeMap<String, String>| {
+            (!pairs.is_empty()).then(|| {
+                Value::InlineTable(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect(),
+                )
+            })
+        };
+        let args = (!server.args.is_empty())
+            .then(|| Value::Array(server.args.iter().map(String::as_str).collect::<Array>()));
+        for (key, value) in [
+            ("command", text(&server.command)),
+            ("args", args),
+            ("env", pairs(&server.env)),
+            ("url", text(&server.url)),
+            ("http_headers", pairs(&server.http_headers)),
+            ("tool_timeout_sec", server.tool_timeout_sec.map(Value::from)),
+            (
+                "enabled",
+                (server.enabled == Some(false)).then(|| false.into()),
+            ),
+        ] {
+            match value {
+                Some(value) => put(table, key, value),
+                None => drop(table.remove(key)),
+            }
+        }
+        servers.insert(name, item);
+        Ok(())
+    };
+    edit_file(path, name, edit, check_layer)
+}
+
+pub fn remove_mcp_server(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let edit = |document: &mut DocumentMut| {
+        document
+            .get_mut("mcp_servers")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|servers| servers.remove(name))
+            .map(drop)
+            .ok_or("the server is not declared")
+    };
+    edit_file(path, name, edit, check_layer)
+}
+
 /// Edits `providers.toml` in place and saves it only if every provider still loads.
 fn edit_providers(
     path: &Path,
     name: &str,
     edit: impl FnOnce(&mut DocumentMut) -> Result<(), &'static str>,
+) -> Result<(), ConfigError> {
+    edit_file(path, name, edit, parse_providers)
+}
+
+/// Edits a file in place and saves it only if `check` accepts the result.
+fn edit_file<T>(
+    path: &Path,
+    name: &str,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<(), &'static str>,
+    check: impl FnOnce(&Path, &str) -> Result<T, ConfigError>,
 ) -> Result<(), ConfigError> {
     let original = read_optional(path)?;
     let text = original.as_deref().unwrap_or("");
@@ -214,7 +319,7 @@ fn edit_providers(
         .into_mut();
     edit(&mut document).map_err(|message| ConfigError::new(path, name, message))?;
     let rendered = preserve_unchanged_text(text, &document.to_string());
-    parse_providers(path, &rendered)?;
+    check(path, &rendered)?;
     replace(path, name, original, &rendered)
 }
 
@@ -247,7 +352,7 @@ fn position(models: &ArrayOfTables, id: &str) -> Option<usize> {
 }
 
 /// Replaces a value, keeping its comments, or adds it.
-fn put(table: &mut Table, key: &str, mut value: Value) {
+fn put(table: &mut dyn TableLike, key: &str, mut value: Value) {
     match table.get_mut(key).and_then(Item::as_value_mut) {
         Some(previous) => {
             *value.decor_mut() = previous.decor().clone();

@@ -1,6 +1,7 @@
 //! `chui app-server`: sessions for desktop clients, over JSON-RPC 2.0 on stdio with one
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
+mod mcp;
 mod projection;
 mod providers;
 mod turns;
@@ -234,6 +235,14 @@ impl Server {
                 }
                 if reply.is_ok() && archiving {
                     self.sweep.notify_one();
+                }
+                reply
+            }
+            _ if mcp::handles(method) => {
+                let notify = |authorize| self.notify("mcp/authorize", authorize);
+                let reply = mcp::handle(&self.home, method, params, notify).await;
+                if reply.is_ok() && mcp::edits(method) {
+                    self.refresh();
                 }
                 reply
             }
