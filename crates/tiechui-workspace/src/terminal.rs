@@ -21,7 +21,7 @@ struct Output {
 }
 
 pub(crate) struct Terminal {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     output: Arc<Mutex<Output>>,
@@ -58,13 +58,32 @@ impl Terminal {
         let mut reader = pair.master.try_clone_reader()?;
         let terminal = Arc::new(Self {
             writer: Mutex::new(pair.master.take_writer()?),
-            master: Mutex::new(pair.master),
+            master: Mutex::new(Some(pair.master)),
             child: Mutex::new(child),
             output: Arc::default(),
         });
         let id = params.id.clone();
         let output = terminal.output.clone();
         let weak = Arc::downgrade(&terminal);
+        #[cfg(windows)]
+        {
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                while let Some(terminal) = weak.upgrade() {
+                    let exited = lock(&terminal.child)
+                        .try_wait()
+                        .map_or(true, |status| status.is_some());
+                    if exited {
+                        // ConPTY retains its output pipe until the pseudoconsole closes.
+                        let master = lock(&terminal.master).take();
+                        drop(master);
+                        break;
+                    }
+                    drop(terminal);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            });
+        }
         std::thread::spawn(move || {
             let mut chunk = [0; 8192];
             let mut pending = Vec::new();
@@ -121,7 +140,11 @@ impl Terminal {
     }
 
     pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        Ok(lock(&self.master).resize(size(cols, rows))?)
+        let master = lock(&self.master);
+        let master = master
+            .as_ref()
+            .ok_or_else(|| crate::Error("terminal has exited".into()))?;
+        Ok(master.resize(size(cols, rows))?)
     }
 
     pub(crate) fn kill(&self) {
