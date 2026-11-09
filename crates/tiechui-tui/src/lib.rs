@@ -269,8 +269,12 @@ async fn session(
     mut options: Options,
     out: &mut io::Stdout,
 ) -> io::Result<()> {
-    write!(out, "\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c")?;
-    out.flush()?;
+    // On Windows the replies arrive as plain keys that `ReplyFilter` does not recognize.
+    #[cfg(not(windows))]
+    {
+        write!(out, "\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c")?;
+        out.flush()?;
+    }
     let env = |key: &str| std::env::var(key).ok();
     let theme = Theme::new(Palette {
         level: detect_color_level(&env),
