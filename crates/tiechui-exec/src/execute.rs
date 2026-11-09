@@ -129,10 +129,7 @@ pub async fn execute(
             }
         }
     }
-    #[cfg(windows)]
     tree.disarm()?;
-    #[cfg(not(windows))]
-    tree.disarm();
     let signal = sys::signal(&status);
     Ok(ProcessResult {
         exit_code: if signal.is_some() {

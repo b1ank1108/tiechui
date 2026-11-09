@@ -117,8 +117,9 @@ impl Tree {
     }
 
     /// Call once the root has been reaped and the group must outlive this handle.
-    pub fn disarm(&mut self) {
+    pub fn disarm(&mut self) -> io::Result<()> {
         self.armed = false;
+        Ok(())
     }
 }
 

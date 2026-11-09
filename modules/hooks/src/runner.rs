@@ -113,9 +113,6 @@ async fn execute(
         }
         output
     };
-    #[cfg(windows)]
     tree.disarm()?;
-    #[cfg(not(windows))]
-    tree.disarm();
     Ok(output)
 }
