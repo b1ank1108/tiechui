@@ -32,6 +32,8 @@ fn thinking() -> Arg {
 
 pub fn run(name: &'static str) {
     let matches = Command::new(name)
+        // Usage shows `chui`, not argv[0] such as `chui.exe`.
+        .bin_name(name)
         .version(env!("CARGO_PKG_VERSION"))
         .about("Tiechui, a Rust terminal coding agent")
         .subcommand(Command::new("doctor")
