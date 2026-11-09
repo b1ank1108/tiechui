@@ -307,16 +307,25 @@ fn terminals_replay_output_after_attach() {
     };
     workspace.create_terminal(create.clone()).unwrap();
     assert!(workspace.create_terminal(create).is_err());
-    workspace
-        .write_terminal("t", "echo tiechui-$((40 + 2))\n")
-        .unwrap();
+    let command = if cfg!(windows) {
+        "set /a tc=40+2\r\necho tiechui-%tc%\r\n"
+    } else {
+        "echo tiechui-$((40 + 2))\n"
+    };
+    workspace.write_terminal("t", command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !workspace
-        .attach_terminal("t")
-        .unwrap()
-        .buffer
-        .contains("tiechui-42")
-    {
+    #[cfg(windows)]
+    let mut cursor_reported = false;
+    loop {
+        let attached = workspace.attach_terminal("t").unwrap();
+        if attached.buffer.contains("tiechui-42") {
+            break;
+        }
+        #[cfg(windows)]
+        if !cursor_reported && attached.buffer.contains("\x1b[6n") {
+            workspace.write_terminal("t", "\x1b[1;1R").unwrap();
+            cursor_reported = true;
+        }
         assert!(Instant::now() < deadline, "no terminal output");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -336,7 +345,16 @@ fn terminals_replay_output_after_attach() {
             rows: 30,
         })
         .unwrap();
-    workspace.write_terminal("t", "exit 3\n").unwrap();
+    workspace
+        .write_terminal(
+            "t",
+            if cfg!(windows) {
+                "exit 3\r\n"
+            } else {
+                "exit 3\n"
+            },
+        )
+        .unwrap();
     while workspace.attach_terminal("t").unwrap().exit.is_none() {
         assert!(Instant::now() < deadline, "the shell did not exit");
         std::thread::sleep(Duration::from_millis(50));
