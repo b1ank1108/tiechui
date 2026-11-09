@@ -168,6 +168,7 @@ impl Store {
         file.as_file().sync_all()?;
         file.persist(self.directory.join(name))
             .map_err(|e| ToolError(e.to_string()))?;
+        #[cfg(unix)]
         File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
@@ -465,6 +466,7 @@ impl Store {
             }
             self.safe_path(file)?;
             temp.persist(&path).map_err(|e| ToolError(e.to_string()))?;
+            #[cfg(unix)]
             File::open(parent)?.sync_all()?;
         } else {
             match fs::remove_file(&path) {
@@ -508,6 +510,7 @@ impl Store {
         change(&mut data);
         self.atomic("manifest.json", &data)?;
         fs::remove_file(self.directory.join("transaction.json"))?;
+        #[cfg(unix)]
         File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
