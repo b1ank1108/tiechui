@@ -685,6 +685,32 @@ fn history_persists_and_browses_from_an_empty_draft() {
 }
 
 #[test]
+fn recalled_slash_commands_keep_browsing_history() {
+    let mut app = ready(60);
+    typed(&mut app, "one");
+    app.key(key(KeyCode::Enter));
+    typed(&mut app, "/statusline");
+    app.key(key(KeyCode::Enter));
+    app.key(key(KeyCode::Esc));
+    app.key(key(KeyCode::Up));
+    assert_eq!(draft(&mut app), ["› /statusline"]);
+    assert!(
+        !text(&app.live().0)
+            .iter()
+            .any(|r| r.contains("Tab complete"))
+    );
+    app.key(key(KeyCode::Up));
+    assert_eq!(draft(&mut app), ["› one"]);
+    app.key(key(KeyCode::Down));
+    app.key(key(KeyCode::Backspace));
+    assert!(
+        text(&app.live().0)
+            .iter()
+            .any(|r| r.contains("Tab complete"))
+    );
+}
+
+#[test]
 fn stash_swaps_drafts_and_restores_after_a_temporary_submit() {
     let mut app = ready(40);
     app.paste("long draft");

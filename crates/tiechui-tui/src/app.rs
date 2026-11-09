@@ -1317,13 +1317,17 @@ impl App {
         self.send(op);
     }
 
-    /// The `/` menu, while the draft is a single `/word`.
+    /// The `/` menu, while the draft is a single `/word`. An unedited recall stays
+    /// out of it so Up and Down keep browsing history.
     fn refresh_menu(&mut self) {
         let text = self.composer.text();
+        let recalled = self
+            .browsing
+            .is_some_and(|(_, revision)| revision == self.composer.revision());
         let query = text
             .trim_start()
             .strip_prefix('/')
-            .filter(|_| self.composer.cursor() > text.len() - text.trim_start().len())
+            .filter(|_| !recalled && self.composer.cursor() > text.len() - text.trim_start().len())
             .filter(|rest| !rest.contains(char::is_whitespace) && !rest.contains('/'));
         let Some(query) = query else {
             self.menu = None;
