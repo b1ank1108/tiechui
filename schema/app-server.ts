@@ -293,6 +293,48 @@ export type PluginPanel = { title: string, nodes: Array<PanelNode>, };
 
 export type PluginPrompt = { "kind": "select", title: string, text: string, options: Array<string>, } | { "kind": "confirm", title: string, text: string, } | { "kind": "input", title: string, text: string, } | { "kind": "panel", panel: PluginPanel, };
 
+export type PromptDeleteParams = { cwd: string | null, path: string, };
+
+export type PromptEntry = { name: string, description: string, argument_hint: string | null, 
+/**
+ * The template; `$ARGUMENTS` stands for the text after the command.
+ */
+body: string, path: string, 
+/**
+ * `user` or `project`.
+ */
+source: string, };
+
+export type PromptList = { 
+/**
+ * `$TIECHUI_HOME/prompts`.
+ */
+dir: string, prompts: Array<PromptEntry>, 
+/**
+ * Unreadable files, names defined twice and untrusted project prompts.
+ */
+warnings: Array<string>, };
+
+export type PromptSaveParams = { 
+/**
+ * Required for the `project` scope.
+ */
+cwd: string | null, 
+/**
+ * `user` saves to `$TIECHUI_HOME/prompts`, `project` to `<cwd>/.agents/prompts`.
+ */
+scope: string, name: string, description: string, argument_hint: string | null, body: string, 
+/**
+ * The file being edited: rewritten in place, or removed when the name or scope changes.
+ */
+previous: string | null, };
+
+export type PromptsListParams = { 
+/**
+ * The project whose prompts a session there adds; without one, the user's alone.
+ */
+cwd: string | null, };
+
 export type ProtocolMessage = Submission | Event | JsonRpcMessage;
 
 export type ProviderEntry = { name: string, 

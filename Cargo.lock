@@ -2981,6 +2981,7 @@ dependencies = [
  "tiechui-module-mcp",
  "tiechui-module-permissions",
  "tiechui-module-plugins",
+ "tiechui-module-prompts",
  "tiechui-module-ptc",
  "tiechui-module-rewind",
  "tiechui-module-skills",
@@ -3237,6 +3238,15 @@ dependencies = [
  "tiechui-plugin-sdk",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "tiechui-module-prompts"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tiechui-plugin-api",
+ "tokio",
 ]
 
 [[package]]

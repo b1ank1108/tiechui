@@ -43,6 +43,7 @@ tiechui-model.workspace = true
 tiechui-module-editing.workspace = true
 tiechui-module-context-files.workspace = true
 tiechui-module-skills.workspace = true
+tiechui-module-prompts.workspace = true
 tiechui-module-mcp.workspace = true
 tiechui-protocol.workspace = true
 tiechui-providers.workspace = true

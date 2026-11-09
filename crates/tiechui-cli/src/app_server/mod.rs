@@ -3,6 +3,7 @@
 
 mod mcp;
 mod projection;
+mod prompts;
 mod providers;
 mod skills;
 mod turns;
@@ -243,6 +244,13 @@ impl Server {
                 let notify = |authorize| self.notify("mcp/authorize", authorize);
                 let reply = mcp::handle(&self.home, method, params, notify).await;
                 if reply.is_ok() && mcp::edits(method) {
+                    self.refresh();
+                }
+                reply
+            }
+            _ if prompts::handles(method) => {
+                let reply = prompts::handle(&self.home, method, params).await;
+                if reply.is_ok() && method != "prompts/list" {
                     self.refresh();
                 }
                 reply

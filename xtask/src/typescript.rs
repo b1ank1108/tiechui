@@ -90,6 +90,11 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::SkillList>();
                 d.visit::<app::SkillEntry>();
                 d.visit::<app::SkillEnableParams>();
+                d.visit::<app::PromptsListParams>();
+                d.visit::<app::PromptList>();
+                d.visit::<app::PromptEntry>();
+                d.visit::<app::PromptSaveParams>();
+                d.visit::<app::PromptDeleteParams>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
                 d.visit::<workspace::RootParams>();

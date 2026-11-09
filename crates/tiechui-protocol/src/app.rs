@@ -387,6 +387,58 @@ pub struct SkillEnableParams {
     pub enabled: bool,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptsListParams {
+    /// The project whose prompts a session there adds; without one, the user's alone.
+    pub cwd: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptList {
+    /// `$TIECHUI_HOME/prompts`.
+    pub dir: String,
+    pub prompts: Vec<PromptEntry>,
+    /// Unreadable files, names defined twice and untrusted project prompts.
+    pub warnings: Vec<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptEntry {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    /// The template; `$ARGUMENTS` stands for the text after the command.
+    pub body: String,
+    pub path: String,
+    /// `user` or `project`.
+    pub source: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptSaveParams {
+    /// Required for the `project` scope.
+    pub cwd: Option<String>,
+    /// `user` saves to `$TIECHUI_HOME/prompts`, `project` to `<cwd>/.agents/prompts`.
+    pub scope: String,
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    pub body: String,
+    /// The file being edited: rewritten in place, or removed when the name or scope changes.
+    pub previous: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptDeleteParams {
+    pub cwd: Option<String>,
+    pub path: String,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

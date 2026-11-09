@@ -35,6 +35,7 @@ loop = true
 mcp = true
 # Project config cannot disable the mandatory permission module.
 permissions = true
+prompts = true
 rewind = true
 skills = true
 subagents = true

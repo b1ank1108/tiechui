@@ -2073,6 +2073,84 @@ impl tiechui_plugin_api::Command for Echo {
     }
 }
 
+struct Template;
+
+#[async_trait]
+impl tiechui_plugin_api::Command for Template {
+    fn info(&self) -> CommandInfo {
+        CommandInfo {
+            name: "template".into(),
+            description: "Send a prompt".into(),
+            argument_hint: None,
+        }
+    }
+    fn allows_busy(&self, _: &str) -> bool {
+        true
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+    async fn run(&self, _: &str, _: CancellationToken) -> Result<String, ToolError> {
+        unreachable!()
+    }
+    async fn session_run(
+        &self,
+        arguments: &str,
+        session: tiechui_plugin_api::CommandSession,
+        _: CancellationToken,
+    ) -> Result<String, ToolError> {
+        let text = format!("expanded {arguments}");
+        let content = vec![InputContent::Text { text }];
+        session
+            .host
+            .apply(tiechui_plugin_api::SessionEffect::Submit { content })
+            .await?;
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn submitted_command_input_runs_now_when_idle_and_follows_a_running_turn() {
+    let mut h = Harness::with_contributions(
+        vec![
+            answer("one"),
+            reply(vec![call("wait")]),
+            answer("two"),
+            answer("three"),
+        ],
+        Arc::new(BoundedRetry::default()),
+        json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}),
+        |registry| registry.register_command(Arc::new(Template)),
+    )
+    .await;
+    let run = |arguments: &str| Op::RunCommand {
+        name: "template".into(),
+        arguments: arguments.into(),
+    };
+    h.send(run("a")).await;
+    assert_eq!(users(&h.request().await), ["expanded a"]);
+    h.end(TurnStatus::Completed).await;
+    let release = h.gate_tool("wait");
+    h.input("task", InputDelivery::Steer).await;
+    recv(&mut h.started).await;
+    h.send(run("b")).await;
+    let event = h
+        .until(|event| matches!(event, EventKind::QueueUpdated { follow_up, .. } if !follow_up.is_empty()))
+        .await;
+    let EventKind::QueueUpdated { follow_up, .. } = event.event else {
+        unreachable!()
+    };
+    assert_eq!(follow_up[0].submission_id, SubmissionId("command-2".into()));
+    release.send(()).unwrap();
+    h.request().await;
+    h.request().await;
+    h.end(TurnStatus::Completed).await;
+    let request = h.request().await;
+    assert_eq!(users(&request), ["expanded a", "task", "expanded b"]);
+    h.end(TurnStatus::Completed).await;
+    h.stop().await;
+}
+
 struct Shell(ToolSpec);
 
 #[async_trait]

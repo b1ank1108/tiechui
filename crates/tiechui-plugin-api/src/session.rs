@@ -37,6 +37,10 @@ pub enum SessionEffect {
     Refill {
         content: Vec<InputContent>,
     },
+    /// Queues a user message, sent once the session is idle as if the user had typed it.
+    Submit {
+        content: Vec<InputContent>,
+    },
     DetachImages,
     /// Stops session background work and waits for it to settle, e.g. before restoring files.
     Quiesce,

@@ -133,6 +133,7 @@ pub(crate) fn has_project_resources(cwd: &Path, home: &Path) -> bool {
                 "hooks.json",
                 "plugins",
                 "prompts",
+                "commands",
                 "agents",
             ]
             .iter()

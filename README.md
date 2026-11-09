@@ -33,7 +33,7 @@
 - **Sessions you can rewind.** Append-only JSONL with branches, resume, rewind and compaction.
 - **A permission gate.** Rules for tools, shell commands, paths and MCP calls, in three modes: `rules`, `auto` (a model reviews what the rules would ask about) and `yolo`.
 - **Background shells.** Long-running commands move to the background; the model is told when they finish.
-- **Modules.** Questions, side chats, goals, scheduled prompts, subagents, skills, hooks and MCP.
+- **Modules.** Questions, side chats, goals, scheduled prompts, subagents, skills, prompt templates, hooks and MCP.
 - **Plugins.** Declarative T1 packages, out-of-process T2 JSON-RPC plugins with Rust and TypeScript SDKs, and a Git marketplace.
 
 The interactive UI and `exec` run on the same session actor, providers, tools,
@@ -273,7 +273,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 | --- | --- |
 | `/model [provider/id]`, `/thinking [level]` | Switch model or thinking level |
 | `/new`, `/resume`, `/retry` | New session, saved session, retry the failed request |
-| `/reload` | Reload config, context files, skills, MCP, plugins and hooks |
+| `/reload` | Reload config, context files, skills, prompts, MCP, plugins and hooks |
 | `/compact [instructions]` | Summarize older context now |
 | `/context [system\|tools\|injections\|messages\|cache]` | Inspect what is sent to the model |
 | `/rewind [detach]` | Restore code, conversation or both to an earlier turn |
@@ -290,7 +290,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 | `/theme`, `/statusline` | Syntax theme picker, status line items |
 | `/help`, `/quit` | Shortcuts, exit |
 
-Disabling a module removes its commands. Plugins can add commands.
+Disabling a module removes its commands. Plugins and [prompt templates](#skills-prompts-context-files-and-hooks) can add commands.
 
 ### Features
 
@@ -385,7 +385,7 @@ Headless runs choose `--approval`:
 | `yolo` | Same as `--mode yolo` when `--mode` is absent |
 
 `chui trust allow|deny|status --cwd DIR` (or `/trust`) decides whether a project's
-`.agents/` configuration, rules, skills and hooks load, with `.claude/`
+`.agents/` configuration, rules, skills, prompts and hooks load, with `.claude/`
 compatibility. Command hooks and T2 plugin capabilities have their own approvals. See
 [modules/permissions](modules/permissions/README.md).
 
@@ -424,7 +424,7 @@ Further reading:
 - the [Rust SDK](crates/tiechui-plugin-sdk/README.md)
 - the [TypeScript SDK](sdk/typescript/README.md): dependency-free, Node 25, no npm step
 
-### Skills, context files and hooks
+### Skills, prompts, context files and hooks
 
 **Skills** are loaded from:
 
@@ -432,9 +432,14 @@ Further reading:
   and in trusted projects;
 - the profile's `skills/`.
 
-These roots are discovered by default, without a skills configuration section.
+These roots are discovered by default; `[skills] disabled` leaves named skills out.
 List skills with `chui skills list`, or select one with `/skills` in the TUI. `AGENTS.md` and the other context files are
 described in [modules/context-files](modules/context-files/README.md).
+
+**Prompts** are Markdown templates in the profile's `prompts/` and in trusted
+projects' `.agents/prompts` and `.claude/commands`. Each file is a command named
+after it; `/name text` sends the body with `$ARGUMENTS` replaced as a user message.
+See [modules/prompts](modules/prompts/README.md).
 
 **Hooks:** `chui hooks list` lists them and `chui hooks trust` approves command
 hooks.
@@ -528,7 +533,7 @@ the workspace version:
 | `crates/tiechui-exec`, `tiechui-tools` | Process execution, built-in tools |
 | `crates/tiechui-tui`, `tiechui-cli` | Terminal UI (protocol only), CLI |
 | `crates/tiechui-plugin-api`, `tiechui-plugin-sdk`, `sdk/typescript` | Module API, plugin SDKs |
-| `modules/` | editing, exec, permissions, ask, hooks, context-files, skills, mcp, plugins, context, rewind, btw, goal, loop, compaction, subagents, tool-search, ptc |
+| `modules/` | editing, exec, permissions, ask, hooks, context-files, skills, prompts, mcp, plugins, context, rewind, btw, goal, loop, compaction, subagents, tool-search, ptc |
 | `xtask/`, `scripts/`, `tests/` | Maintenance tasks, packaging, PTY tests |
 | `site/` | UI gallery rendered from the TUI snapshots |
 

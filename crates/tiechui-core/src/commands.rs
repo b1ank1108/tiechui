@@ -314,6 +314,19 @@ impl SessionActor {
                 self.save_draft(content.clone()).await?;
                 self.emit(EventKind::ComposerRefilled { content });
             }
+            SessionEffect::Submit { content } => {
+                self.submitted += 1;
+                self.follow_up.push_back(Submission {
+                    id: SubmissionId(format!("command-{}", self.submitted)),
+                    thread_id: self.thread.clone(),
+                    epoch: self.epoch,
+                    op: Op::UserInput {
+                        content,
+                        delivery: InputDelivery::FollowUp,
+                    },
+                });
+                self.publish_queue();
+            }
             SessionEffect::Quiesce => self.quiesce().await,
             SessionEffect::DetachImages => {
                 self.save_draft(vec![]).await?;

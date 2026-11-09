@@ -474,6 +474,18 @@ pub(crate) async fn prepare(
             .register(&mut registry, &loaded.config)
             .map_err(runtime_error)?;
     }
+    let prompts = if loaded.config.modules.get("prompts") != Some(&false) {
+        let (cwd, home) = (context_cwd.clone(), context_home.clone());
+        let prompts = tokio::task::spawn_blocking(move || {
+            tiechui_module_prompts::PromptsModule::load(&cwd, &home, trusted)
+        })
+        .await
+        .map_err(runtime_error)?;
+        warnings.extend(prompts.warnings.iter().map(|w| format!("prompts: {w}")));
+        Some(prompts)
+    } else {
+        None
+    };
     let store = if loaded.config.modules.get("context-files") != Some(&false) {
         let context_cancel = cancel.clone();
         let (store, context, diagnostics) = tokio::task::spawn_blocking(move || {
@@ -562,6 +574,7 @@ pub(crate) async fn prepare(
         "hooks",
         "permissions",
         "skills",
+        "prompts",
         "mcp",
         "subagents",
         "context-files",
@@ -587,6 +600,11 @@ pub(crate) async fn prepare(
         text: status.join("\n"),
         sources,
     }));
+    if let Some(prompts) = prompts {
+        prompts
+            .register(&mut registry, &loaded.config)
+            .map_err(runtime_error)?;
+    }
     let tui = loaded.config.tui.clone();
     let path = store.path().to_owned();
     let id = store.header().id.clone();

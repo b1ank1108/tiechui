@@ -905,3 +905,95 @@ async fn skills_are_listed_and_switched_off_for_open_sessions() {
     let config = std::fs::read_to_string(fixture.home.join("config.toml")).unwrap();
     assert!(!config.contains("review"), "{config}");
 }
+
+#[tokio::test]
+async fn prompts_are_saved_as_commands_that_send_their_expanded_text() {
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    let opened = snapshot(client.ok("session/open", json!({"cwd": cwd})).await);
+    let names = |list: &Value| -> Vec<(String, String)> {
+        list["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["name"].as_str().unwrap().into(),
+                    p["source"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let save = |scope: &str, name: &str, previous: Value| {
+        json!({"cwd": cwd, "scope": scope, "name": name, "description": "Edit a file",
+            "argument_hint": "<change>", "body": "Change $ARGUMENTS", "previous": previous})
+    };
+    client
+        .ok("prompts/save", save("user", "edit", Value::Null))
+        .await;
+    let error = client
+        .call("prompts/save", save("user", "edit", Value::Null))
+        .await
+        .unwrap_err();
+    assert_eq!(error["message"], "/edit already exists");
+    client
+        .until(|e| {
+            matches!(e, EventKind::CommandsUpdated { commands }
+                if commands.iter().any(|c| c.name == "edit" && c.argument_hint.as_deref() == Some("<change>")))
+        })
+        .await;
+    let list = client.ok("prompts/list", json!({"cwd": cwd})).await;
+    assert_eq!(
+        list["dir"],
+        fixture.home.join("prompts").display().to_string()
+    );
+    assert_eq!(names(&list), [("edit".into(), "user".into())]);
+    let user = list["prompts"][0]["path"].clone();
+    let file = std::fs::read_to_string(user.as_str().unwrap()).unwrap();
+    assert!(
+        file.starts_with("---\ndescription: \"Edit a file\"\n"),
+        "{file}"
+    );
+
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id": opened.thread_id, "op": {"kind": "run_command",
+                "name": "edit", "arguments": "hello.txt to after"}}),
+        )
+        .await;
+    client
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+
+    // Untrusted project prompts are reported, not listed.
+    client
+        .ok("prompts/save", save("project", "change", user.clone()))
+        .await;
+    assert!(!Path::new(user.as_str().unwrap()).exists());
+    let list = client.ok("prompts/list", json!({"cwd": cwd})).await;
+    assert_eq!(names(&list), []);
+    assert!(
+        list["warnings"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("skipping untrusted project prompts")
+    );
+    client.ok("trust", json!({"cwd": cwd, "allow": true})).await;
+    let list = client.ok("prompts/list", json!({"cwd": cwd})).await;
+    assert_eq!(names(&list), [("change".into(), "project".into())]);
+    let path = list["prompts"][0]["path"].clone();
+    let outside = fixture.cwd.join("hello.txt").display().to_string();
+    assert!(
+        client
+            .call("prompts/delete", json!({"cwd": cwd, "path": outside}))
+            .await
+            .is_err()
+    );
+    client
+        .ok("prompts/delete", json!({"cwd": cwd, "path": path}))
+        .await;
+    let list = client.ok("prompts/list", json!({"cwd": cwd})).await;
+    assert_eq!(names(&list), []);
+}

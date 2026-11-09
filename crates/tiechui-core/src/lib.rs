@@ -98,6 +98,8 @@ pub struct SessionActor {
     tool_items: BTreeMap<String, ItemId>,
     steering: VecDeque<Submission>,
     follow_up: VecDeque<Submission>,
+    /// Inputs queued by commands, numbering their submission ids.
+    submitted: u64,
     navigation: Option<Submission>,
     cancel: CancellationToken,
     shutdown: CancellationToken,
@@ -169,6 +171,7 @@ impl SessionActor {
             tool_items: BTreeMap::new(),
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
+            submitted: 0,
             navigation: None,
             cancel: CancellationToken::new(),
             shutdown: shutdown.clone(),

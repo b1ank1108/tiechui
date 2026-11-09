@@ -1,5 +1,5 @@
 [workspace]
-members = ["modules/ptc", "modules/tool-search", "modules/subagents", "modules/compaction", "modules/goal", "modules/loop", "modules/btw", "modules/rewind", "modules/context", "crates/tiechui-protocol", "crates/tiechui-model", "crates/tiechui-config", "crates/tiechui-providers", "crates/tiechui-session", "crates/tiechui-exec", "crates/tiechui-tools", "crates/tiechui-plugin-api", "crates/tiechui-plugin-sdk", "modules/exec", "modules/ask", "crates/tiechui-core", "crates/tiechui-cli", "crates/tiechui-tui", "crates/tiechui-workspace", "modules/editing", "modules/context-files", "modules/skills", "modules/mcp", "modules/permissions", "modules/hooks", "modules/plugins", "xtask"]
+members = ["modules/ptc", "modules/tool-search", "modules/subagents", "modules/compaction", "modules/goal", "modules/loop", "modules/btw", "modules/rewind", "modules/context", "crates/tiechui-protocol", "crates/tiechui-model", "crates/tiechui-config", "crates/tiechui-providers", "crates/tiechui-session", "crates/tiechui-exec", "crates/tiechui-tools", "crates/tiechui-plugin-api", "crates/tiechui-plugin-sdk", "modules/exec", "modules/ask", "crates/tiechui-core", "crates/tiechui-cli", "crates/tiechui-tui", "crates/tiechui-workspace", "modules/editing", "modules/context-files", "modules/skills", "modules/prompts", "modules/mcp", "modules/permissions", "modules/hooks", "modules/plugins", "xtask"]
 resolver = "3"
 
 [workspace.package]
@@ -64,6 +64,7 @@ tiechui-module-editing = { version = "0.1.0", path = "modules/editing" }
 tiechui-module-context = { version = "0.1.0", path = "modules/context" }
 tiechui-module-context-files = { version = "0.1.0", path = "modules/context-files" }
 tiechui-module-skills = { version = "0.1.0", path = "modules/skills" }
+tiechui-module-prompts = { version = "0.1.0", path = "modules/prompts" }
 tiechui-module-permissions = { version = "0.1.0", path = "modules/permissions" }
 tiechui-module-hooks = { version = "0.1.0", path = "modules/hooks" }
 tiechui-module-plugins = { version = "0.1.0", path = "modules/plugins" }
