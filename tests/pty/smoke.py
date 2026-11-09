@@ -1470,6 +1470,12 @@ def composer_resources(f):
     s.exit()
 
 
+def allow_tool(f, tool):
+    """Plugin tools ask by default; these scenarios exercise the plugin, not the approval."""
+    with f.config.open("a", encoding="utf-8") as config:
+        config.write('[permissions]\nrules = [{surface = "%s", pattern = "*", action = "allow"}]\n' % tool)
+
+
 def t2_plugins(f, marketplace=False):
     f.plugin_pids = f.root / "pids"
     package = f.root / "plugin"
@@ -1516,8 +1522,7 @@ def t2_plugins(f, marketplace=False):
     else:
         f.cli("plugin", "add", str(package))
     f.cli("trust", "allow")
-    with f.config.open("a", encoding="utf-8") as config:
-        config.write('[permissions]\nrules = [{surface = "plugin_fixture_echo", pattern = "*", action = "allow"}]\n')
+    allow_tool(f, "plugin_fixture_echo")
     s = Session(f)
     s.wait("Authorize plugin fixture")
     s.check(not (f.root / "pids").exists(), "Plugin started before capability approval")
@@ -1596,6 +1601,7 @@ def sdk_plugin(f, language):
     f.cli("plugin", "marketplace", "add", str(repository), "--ref", "fixture-v1")
     f.cli("plugin", "add", name + "@tiechui-plugins")
     f.cli("trust", "allow")
+    allow_tool(f, "plugin_%s_greet" % name)
     s = Session(f)
     s.wait("Authorize plugin " + name)
     s.send("\r")
