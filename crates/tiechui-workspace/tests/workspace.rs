@@ -34,6 +34,7 @@ fn repo() -> tempfile::TempDir {
         ("user.name", "Test"),
         ("user.email", "test@example.com"),
         ("commit.gpgsign", "false"),
+        ("core.autocrlf", "false"),
     ] {
         git(root, &["config", key, value]);
     }
