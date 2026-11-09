@@ -534,6 +534,9 @@ async fn multi_step_loop_persists_origin_and_publishes_cumulative_usage() {
     assert_eq!(h.tool.runs.load(Ordering::SeqCst), 2);
     assert_eq!(first.messages[0], second.messages[0]);
     assert_eq!(second.messages[0], third.messages[0]);
+    for request in [&first, &second, &third] {
+        assert_eq!(request.cache_key.as_ref(), Some(&h.thread.0));
+    }
     let usage: Vec<_> = h
         .seen
         .iter()
@@ -2331,6 +2334,7 @@ async fn interceptors_stream_one_off_requests_on_the_turn_model() {
             let invoker = ctx.invoker.clone().unwrap();
             let request = ModelRequest {
                 disable_cache: true,
+                cache_key: None,
                 model: invoker.model().unwrap(),
                 messages: vec![],
                 input_tokens: None,

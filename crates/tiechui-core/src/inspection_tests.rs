@@ -221,7 +221,7 @@ async fn inspection_is_read_only_frozen_and_keeps_request_bytes_identical() {
             assert!(first.provider_usage.is_none());
         }
         harness.input("first", InputDelivery::FollowUp).await;
-        let first = harness.request().await;
+        let mut first = harness.request().await;
         harness.end(TurnStatus::Completed).await;
         if inspect {
             let frozen = open(&mut harness, "messages").await;
@@ -234,7 +234,7 @@ async fn inspection_is_read_only_frozen_and_keeps_request_bytes_identical() {
             assert_eq!(frozen.cache.responses.len(), 1);
         }
         harness.input("second", InputDelivery::FollowUp).await;
-        let second = harness.request().await;
+        let mut second = harness.request().await;
         harness.end(TurnStatus::Completed).await;
         if inspect {
             let snapshot = open(&mut harness, "").await;
@@ -276,6 +276,10 @@ async fn inspection_is_read_only_frozen_and_keeps_request_bytes_identical() {
             let branch = open(&mut harness, "cache").await;
             assert_eq!(branch.cache.responses.len(), 1);
             assert_eq!(branch.messages.len(), 2);
+        }
+        // Each run is its own session, so only the session cache key differs.
+        for request in [&mut first, &mut second] {
+            assert_eq!(request.cache_key.take(), Some(harness.thread.0.clone()));
         }
         requests.push((
             serde_json::to_vec(&first).unwrap(),

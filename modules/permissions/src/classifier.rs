@@ -64,6 +64,7 @@ async fn request(call: &ToolCall, ctx: &ToolContext, cwd: &Path) -> Result<Strin
     };
     let request = ModelRequest {
         disable_cache: true,
+        cache_key: None,
         model,
         messages: vec![
             text(Role::System, system(cwd)),

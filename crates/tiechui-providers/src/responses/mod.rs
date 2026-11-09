@@ -70,13 +70,17 @@ impl ModelProvider for Responses {
         let model = self.transport.model(&request.model)?;
         let compat = self.compat.with(model.compat.as_ref());
         let body = request::encode(&request, model, &compat)?;
-        let outgoing = self
+        let mut outgoing = self
             .transport
             .client
             .post(self.transport.endpoint.clone())
             .header("authorization", self.transport.key.clone())
-            .header("accept", "text/event-stream")
-            .json(&body);
+            .header("accept", "text/event-stream");
+        // Sticky routing for the session's cache, as Codex sends it.
+        if let Some(key) = &request.cache_key {
+            outgoing = outgoing.header("session-id", key);
+        }
+        let outgoing = outgoing.json(&body);
         let (response, delay) = transport::send(outgoing, &cancel).await?;
         Ok(transport::stream(
             response,

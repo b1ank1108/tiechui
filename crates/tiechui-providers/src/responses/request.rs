@@ -183,6 +183,9 @@ pub(crate) fn encode(
     }
     let mut body =
         json!({"model":model.id, "input":input, "stream":true, "max_output_tokens":max_output});
+    if let Some(key) = &request.cache_key {
+        body["prompt_cache_key"] = json!(key);
+    }
     if compat.supports_store {
         body["store"] = json!(false);
     }

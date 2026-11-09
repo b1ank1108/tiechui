@@ -25,6 +25,7 @@ expression: body
   ],
   "max_output_tokens": 4096,
   "model": "fixture-model",
+  "prompt_cache_key": "session-1",
   "reasoning": {
     "effort": "high",
     "summary": "auto"

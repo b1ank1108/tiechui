@@ -26,6 +26,9 @@ pub struct ModelRequest {
     /// Disable explicit prompt-cache writes for one-off requests such as summaries.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_cache: bool,
+    /// Stable session key that providers may use to route prompt caching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     pub model: ModelId,
     pub messages: Vec<Message>,
     /// Session estimate of input tokens: latest successful assistant usage plus

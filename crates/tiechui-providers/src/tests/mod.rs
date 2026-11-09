@@ -87,6 +87,7 @@ fn call(id: &str, file: &str) -> Content {
 fn request() -> ModelRequest {
     ModelRequest {
         disable_cache: false,
+        cache_key: None,
         input_tokens: None,
         model: ModelId("fixture/fixture-model".into()),
         messages: vec![message(Role::User, vec![text("Hello")])],

@@ -1663,6 +1663,7 @@ impl SessionActor {
         )?);
         let request = ModelRequest {
             disable_cache: false,
+            cache_key: Some(self.thread.0.clone()),
             input_tokens: Some(input_tokens),
             model: self.model.model.clone(),
             messages,

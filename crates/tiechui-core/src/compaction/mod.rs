@@ -628,6 +628,7 @@ impl SessionActor {
     fn summary_request(&self, prompt: String) -> ModelRequest {
         ModelRequest {
             disable_cache: true,
+            cache_key: None,
             model: self.model.model.clone(),
             messages: vec![
                 Message {

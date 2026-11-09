@@ -42,6 +42,7 @@ async fn output_clamps_at_context_edge_and_refits_thinking() {
             };
             let request = ModelRequest {
                 disable_cache: false,
+                cache_key: None,
                 input_tokens: None,
                 model: ModelId("fixture/fixture-model".into()),
                 messages: vec![message(Role::User, vec![text("1234567")])],

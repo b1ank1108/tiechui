@@ -211,6 +211,7 @@ async fn first_turn_request_is_captured_with_api_root_and_auth() {
     Mock::given(method("POST"))
         .and(path("/gateway/v1/responses"))
         .and(header("authorization", "Bearer fixture-key"))
+        .and(header("session-id", "session-1"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(PLAIN, "text/event-stream"))
         .expect(1)
         .mount(&server)
@@ -221,6 +222,7 @@ async fn first_turn_request_is_captured_with_api_root_and_auth() {
         .insert(0, message(Role::System, vec![text("Be concise.")]));
     request.tools = vec![tool("read")];
     request.reasoning = Some(ReasoningLevel::High);
+    request.cache_key = Some("session-1".into());
     let events: Vec<_> = provider(&format!("{}/gateway", server.uri()))
         .stream(request, CancellationToken::new())
         .await
@@ -351,6 +353,7 @@ fn levels_compat_fields_and_roles_shape_the_request() {
     };
     let body = encode(&request, &config.models[0], &config.compat);
     assert_eq!(body["reasoning"], json!({"summary":"auto"}));
+    assert!(body.get("prompt_cache_key").is_none());
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["store"], false);
     assert_eq!(body["input"][0]["role"], "developer");
