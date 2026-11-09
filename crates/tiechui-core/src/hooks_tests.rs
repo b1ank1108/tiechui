@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "../../../tests/support/shell.rs"]
+mod shell_support;
 use serde_json::json;
 use tiechui_module_hooks::HooksModule;
 use tiechui_module_permissions::{HeadlessPolicy, PermissionsModule};
@@ -13,7 +16,7 @@ async fn permission_request_hooks_resolve_only_calls_requiring_approval() {
     std::fs::create_dir(&home).unwrap();
     let command = format!(
         "cat > {}; printf '%s' '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PermissionRequest\",\"decision\":{{\"behavior\":\"allow\"}}}}}}'",
-        quote(capture.to_str().unwrap())
+        quote(&shell_support::path(&capture))
     );
     std::fs::write(
         home.join("hooks.json"),

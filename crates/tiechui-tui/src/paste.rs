@@ -230,18 +230,25 @@ mod tests {
         assert!(clipboard_image("«data PNGfZZ»".as_bytes()).is_none());
         assert!(encoded_image(&vec![0; IMAGE_LIMIT as usize + 1]).is_none());
         let cancel = CancellationToken::new();
+        let (program, print_args, wait_args) = if cfg!(windows) {
+            (
+                "cmd.exe",
+                &["/D", "/C", "<nul set /p =fixture&exit /b 0"][..],
+                &["/D", "/C", "timeout /t 10"][..],
+            )
+        } else {
+            (
+                "/bin/sh",
+                &["-c", "printf fixture"][..],
+                &["-c", "sleep 10"][..],
+            )
+        };
         assert_eq!(
-            output("/bin/sh", &["-c", "printf fixture"], &cancel)
-                .await
-                .unwrap(),
+            output(program, print_args, &cancel).await.unwrap(),
             b"fixture"
         );
         cancel.cancel();
-        assert!(
-            output("/bin/sh", &["-c", "sleep 10"], &cancel)
-                .await
-                .is_none()
-        );
+        assert!(output(program, wait_args, &cancel).await.is_none());
     }
 
     #[test]

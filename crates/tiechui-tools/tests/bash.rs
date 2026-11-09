@@ -55,10 +55,17 @@ async fn result_text_for_empty_nonzero_signal_and_binary_output() {
             2,
         ),
         ("printf '\\377\\342\\202'", "��", 0),
+        #[cfg(unix)]
         (
             "kill -TERM $$",
             "(no output)\n\nCommand exited with code 143",
             143,
+        ),
+        #[cfg(windows)]
+        (
+            "kill -TERM $$",
+            "(no output)\n\nCommand exited with code 3840",
+            3840,
         ),
     ] {
         let result = BashTool::default()
@@ -301,10 +308,12 @@ async fn cwd_comes_from_context() {
     let directory = tempfile::tempdir().unwrap();
     let mut ctx = context();
     ctx.cwd = directory.path().canonicalize().unwrap();
-    let expected = format!("{}\n", ctx.cwd.display());
+    let expected = ctx.cwd.clone();
+    let command = if cfg!(windows) { "pwd -W" } else { "pwd" };
     let result = BashTool::default()
-        .run(call(json!({"command":"pwd"})), ctx)
+        .run(call(json!({"command":command})), ctx)
         .await
         .unwrap();
-    assert_eq!(text(&result), expected);
+    let actual = text(&result).strip_suffix('\n').unwrap();
+    assert_eq!(std::fs::canonicalize(actual).unwrap(), expected);
 }

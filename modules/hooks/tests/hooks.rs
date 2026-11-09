@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+#[path = "../../../tests/support/shell.rs"]
+mod shell_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,8 +51,8 @@ impl Fixture {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/command.sh");
         format!(
             "/bin/sh {} {} {} {} {code}",
-            quote(script.to_str().unwrap()),
-            quote(self.cwd.join(capture).to_str().unwrap()),
+            quote(&shell_support::path(&script)),
+            quote(&shell_support::path(&self.cwd.join(capture))),
             quote(stdout),
             quote(stderr)
         )

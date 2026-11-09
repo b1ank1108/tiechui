@@ -787,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn decoder_handles_utf8_crlf_and_final_record() {
-        let mut command = Command::new("/bin/sh");
+        let mut command = test_shell();
         command.args(["-c", "printf '中文😀\\r\\nlast'"]);
         let mut rows = Vec::new();
         scan_command(&mut command, &CancellationToken::new(), |line| {
@@ -827,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_records_fail_before_results_and_limit_stop_drains_them() {
-        let mut command = Command::new("/bin/sh");
+        let mut command = test_shell();
         command.args(["-c", "printf 'first\\n'; head -c 8388609 /dev/zero"]);
         let error = scan_command(&mut command, &CancellationToken::new(), |_| Ok(false))
             .await
@@ -837,11 +837,19 @@ mod tests {
             error.0.contains("record larger than 8 MiB")
                 && error.0.contains("no partial search result")
         );
-        let mut command = Command::new("/bin/sh");
+        let mut command = test_shell();
         command.args(["-c", "printf 'first\\n'; head -c 8388609 /dev/zero"]);
         let result = scan_command(&mut command, &CancellationToken::new(), |_| Ok(true))
             .await
             .unwrap();
         assert!(result.stopped);
+    }
+
+    fn test_shell() -> Command {
+        #[cfg(windows)]
+        let shell = exec::resolve_shell().unwrap();
+        #[cfg(not(windows))]
+        let shell = "/bin/sh";
+        Command::new(shell)
     }
 }
