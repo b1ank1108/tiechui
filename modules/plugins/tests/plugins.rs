@@ -27,7 +27,14 @@ fn fixture(layout: &str, destination: &Path) -> PathBuf {
             } else {
                 let text = fs::read_to_string(entry.path())
                     .unwrap()
-                    .replace("FIXTURE_SERVER", env!("CARGO_BIN_EXE_plugin-test-server"));
+                    .replace(
+                        "\"FIXTURE_SERVER\"",
+                        &json!(env!("CARGO_BIN_EXE_plugin-test-server")).to_string(),
+                    )
+                    .replace(
+                        "\"./server\"",
+                        &json!(format!("./server{}", std::env::consts::EXE_SUFFIX)).to_string(),
+                    );
                 fs::write(target, text).unwrap();
             }
         }
@@ -42,7 +49,7 @@ fn fixture(layout: &str, destination: &Path) -> PathBuf {
     if layout == "agent" {
         fs::copy(
             env!("CARGO_BIN_EXE_plugin-test-server"),
-            root.join("server"),
+            root.join(format!("server{}", std::env::consts::EXE_SUFFIX)),
         )
         .unwrap();
     }
@@ -186,6 +193,17 @@ async fn all_layouts_contribute_skills_live_mcp_and_approved_hooks() {
         assert!(registry.mcp_sources().is_empty());
         assert!(registry.hook_sources().is_empty());
         cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mcp
+                .statuses()
+                .iter()
+                .any(|s| s.state != ServerState::Stopped)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         remove(&name, &home, &CancellationToken::new()).unwrap();
         assert!(!home.join("plugins").join(name).exists());
     }
