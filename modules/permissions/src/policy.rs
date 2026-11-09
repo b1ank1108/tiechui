@@ -24,7 +24,7 @@ impl Rule {
 }
 
 /// Tools that only read or stay within the session; the rest ask unless rules allow them.
-const SAFE_TOOLS: [&str; 19] = [
+const SAFE_TOOLS: [&str; 22] = [
     "read",
     "grep",
     "find",
@@ -33,6 +33,9 @@ const SAFE_TOOLS: [&str; 19] = [
     "context",
     "tool_search",
     "request_user_input",
+    "context_status",
+    "compact_history",
+    "search_history",
     "read_history",
     "skills",
     "loop",
