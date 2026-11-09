@@ -236,9 +236,11 @@ impl Store {
     pub fn safe_path(&self, file: &str) -> Result<PathBuf> {
         let path = Path::new(file);
         if path.file_name().is_none()
-            || path
-                .components()
-                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+            || path.components().any(|part| match part {
+                Component::RootDir | Component::Normal(_) => false,
+                Component::Prefix(_) => !path.is_absolute(),
+                _ => true,
+            })
             || path.components().any(|part| {
                 matches!(
                     part.as_os_str().to_str(),

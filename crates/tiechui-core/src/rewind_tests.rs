@@ -236,13 +236,13 @@ async fn external_edits_checkpoint_only_after_permission_allows_them() {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited\n");
         let cancel = CancellationToken::new();
         let plan = store.plan(&["prompt".into()], &cancel).unwrap();
-        let key = std::fs::canonicalize(&file)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(plan.target.keys().collect::<Vec<_>>(), [&key]);
-        assert!(plan.target[&key].is_none());
+        assert_eq!(plan.target.len(), 1);
+        let (key, version) = plan.target.first_key_value().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(key).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
+        assert!(version.is_none());
         let _lock = store.restore(&plan, &cancel).unwrap();
         store.finish(&plan.target).unwrap();
         assert!(!file.exists());

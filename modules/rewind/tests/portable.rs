@@ -22,3 +22,25 @@ fn tracked_edit_can_be_restored_and_settled() {
     assert!(!store.pending().unwrap());
     assert_eq!(fs::read(work.join("a.txt")).unwrap(), b"before\r\n");
 }
+
+#[test]
+fn absolute_external_edit_can_be_restored() {
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path().join("work");
+    fs::create_dir(&work).unwrap();
+    let store = Store::new(&root.path().join("state"), &work, "session").unwrap();
+    let external = root.path().join("outside.txt");
+    fs::write(&external, "before").unwrap();
+    let file = store.file_key(&external, &work).unwrap();
+    let cancel = CancellationToken::new();
+    store.before("turn", &file, &cancel).unwrap();
+    fs::write(&external, "after").unwrap();
+    store.after(&file, &cancel).unwrap();
+    let plan = store.plan(&["turn".into()], &cancel).unwrap();
+    let _guard = store.restore(&plan, &cancel).unwrap();
+    store.finish(&plan.target).unwrap();
+    assert_eq!(fs::read(external).unwrap(), b"before");
+    assert!(store.safe_path("../outside.txt").is_err());
+    #[cfg(windows)]
+    assert!(store.safe_path("C:outside.txt").is_err());
+}
