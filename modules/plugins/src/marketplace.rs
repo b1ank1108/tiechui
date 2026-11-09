@@ -162,6 +162,35 @@ async fn git(cwd: &Path, args: &[String], cancel: &CancellationToken) -> Result<
     }
 }
 
+fn clone_source(source: &str) -> String {
+    #[cfg(windows)]
+    if let Some(path) = source.strip_prefix(r"\\?\UNC\") {
+        return format!("//{}", path.replace('\\', "/"));
+    } else if let Some(path) = source.strip_prefix(r"\\?\") {
+        return path.replace('\\', "/");
+    }
+    source.into()
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn clone_sources_preserve_urls_and_normalize_verbatim_paths() {
+    for (source, expected) in [
+        (r"\\?\E:\market place\repo", "E:/market place/repo"),
+        (r"\\?\UNC\server\share\repo", "//server/share/repo"),
+        (
+            "https://example.invalid/repo.git",
+            "https://example.invalid/repo.git",
+        ),
+        (
+            "git@example.invalid:repo.git",
+            "git@example.invalid:repo.git",
+        ),
+    ] {
+        assert_eq!(clone_source(source), expected);
+    }
+}
+
 async fn checkout(
     source: &str,
     reference: Option<&str>,
@@ -175,7 +204,7 @@ async fn checkout(
             "--no-checkout".into(),
             "--no-hardlinks".into(),
             "--".into(),
-            source.into(),
+            clone_source(source),
             "repo".into(),
         ],
         cancel,
