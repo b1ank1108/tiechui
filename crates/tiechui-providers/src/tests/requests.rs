@@ -1,3 +1,6 @@
+#[path = "../../../../tests/support/env.rs"]
+mod env_support;
+
 use tiechui_model::{OpaqueData, ToolResult};
 
 use super::*;
@@ -448,6 +451,7 @@ async fn factory_reads_only_the_named_environment_key() {
             "--nocapture",
         ])
         .env_clear()
+        .envs(env_support::windows_env())
         .env("TIECHUI_FACTORY_TEST_URL", server.uri())
         .env("TIECHUI_FACTORY_TEST_KEY", "fixture-key")
         .output()

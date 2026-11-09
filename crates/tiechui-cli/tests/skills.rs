@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+#[path = "../../../tests/support/env.rs"]
+mod env_support;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -7,6 +10,7 @@ use std::process::{Command, Output};
 fn command(user: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
+        .envs(env_support::windows_env())
         .env("TIECHUI_HOME", user.join(".tiechui"))
         .env("HOME", user)
         .args(args)
@@ -140,6 +144,7 @@ async fn exec_injects_catalog_rediscovers_on_resume_and_respects_trust_and_activ
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"));
         command
             .env_clear()
+            .envs(env_support::windows_env())
             .env("HOME", &user)
             .env("TIECHUI_HOME", user.join(".tiechui"))
             .args(["exec", "Hello", "--cwd"])

@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+#[path = "../../../tests/support/env.rs"]
+mod env_support;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -45,6 +48,7 @@ async fn oauth_login_and_logout_use_the_selected_profile() {
     .unwrap();
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
+        .envs(env_support::windows_env())
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())
         .current_dir(temp.path())
@@ -98,6 +102,7 @@ fn fixture_provider(home: &Path, base_url: &str) {
 fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
+        .envs(env_support::windows_env())
         .env("HOME", home)
         .env("TIECHUI_HOME", home)
         .args(args)
@@ -179,6 +184,7 @@ async fn exec_first_turn_finishes_while_server_is_still_starting() {
         Duration::from_secs(15),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
             .env_clear()
+            .envs(env_support::windows_env())
             .env("HOME", &home)
             .env("TIECHUI_HOME", &home)
             .env("TC_MCP_FAKE_KEY", "fixture-only")
@@ -247,6 +253,7 @@ async fn exec_first_request_includes_a_server_that_starts_promptly() {
     .unwrap();
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
+        .envs(env_support::windows_env())
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())
         .env("TC_MCP_FAKE_KEY", "fixture-only")
@@ -296,6 +303,7 @@ async fn list_http_tools_sends_static_headers_and_environment_bearer_token() {
     std::fs::write(temp.path().join("config.toml"), format!("[mcp_servers.http]\nurl = '{}'\nbearer_token_env_var = 'TC_MCP_FIXTURE_TOKEN'\nhttp_headers = {{ x-fixture = 'static-value' }}\n", server.uri())).unwrap();
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_chui"))
         .env_clear()
+        .envs(env_support::windows_env())
         .env("HOME", temp.path())
         .env("TIECHUI_HOME", temp.path())
         .env("TC_MCP_FIXTURE_TOKEN", "fixture-only")
