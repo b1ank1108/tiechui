@@ -931,10 +931,9 @@ fn discovery_excludes_user_config_at_the_home_git_root() {
     write(&root, ".tiechui/config.toml", "[modules]\nediting = false");
     for cwd in [&home, &home.join("child")] {
         let paths = ConfigPaths::discover_with_env(cwd, |key| {
-            (key == "HOME").then(|| home.join("child/..").into_os_string())
+            (key == "HOME").then(|| temp.path().join("home/child/..").into_os_string())
         })
         .unwrap();
-        #[cfg(unix)]
         assert_ne!(paths.user, user);
         assert_eq!(paths.user.canonicalize().unwrap(), user);
         assert!(paths.project.is_none());
@@ -956,10 +955,9 @@ fn discovery_skips_user_config_alias_and_keeps_walking() {
     let project = write(&root, ".agents/config.toml", "[modules]\nediting = false");
     let user = write(&root, "child/.agents/config.toml", USER);
     let paths = ConfigPaths::discover_with_env(&root.join("child"), |key| {
-        (key == "TIECHUI_HOME").then(|| root.join("child/alias/../.agents").into_os_string())
+        (key == "TIECHUI_HOME").then(|| temp.path().join("child/alias/../.agents").into_os_string())
     })
     .unwrap();
-    #[cfg(unix)]
     assert_ne!(paths.user, user);
     assert_eq!(paths.user.canonicalize().unwrap(), user);
     assert_eq!(paths.project, Some(project));
