@@ -10,5 +10,5 @@ mod sys;
 
 pub use execute::*;
 #[cfg(windows)]
-pub use sys::GIT_BASH_ENV;
+pub use sys::{GIT_BASH_ENV, signal as bash_signal};
 pub use sys::{Tree, resolve_shell};

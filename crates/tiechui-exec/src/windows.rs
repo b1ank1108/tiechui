@@ -97,8 +97,11 @@ pub(crate) async fn output_pipe() -> io::Result<(NamedPipeServer, File)> {
     Ok((server, writer))
 }
 
-pub(crate) fn signal(_: &ExitStatus) -> Option<i32> {
-    None
+/// Decode the signal status returned by Git for Windows Bash to native parents.
+pub fn signal(status: &ExitStatus) -> Option<i32> {
+    let code = status.code()? as u32;
+    let signal = ((code >> 8) & 0x7f) as i32;
+    (code != 0 && code & 0xff == 0 && (1..=64).contains(&signal)).then_some(signal)
 }
 
 fn job() -> io::Result<OwnedHandle> {
@@ -194,6 +197,25 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bash_signal_status_keeps_normal_windows_exit_codes() {
+        use std::os::windows::process::ExitStatusExt;
+        for (code, expected) in [
+            (0, None),
+            (3, None),
+            (255, None),
+            (3840, Some(15)),
+            (2304, Some(9)),
+            (512, Some(2)),
+            (64 << 8, Some(64)),
+            (65 << 8, None),
+            (0x101, None),
+            (0xc000013a, None),
+        ] {
+            assert_eq!(signal(&ExitStatus::from_raw(code)), expected);
+        }
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

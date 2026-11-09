@@ -104,6 +104,15 @@ async fn execute(
     };
     let (_, output) =
         tokio::try_join!(write, child.wait_with_output()).map_err(|e| ToolError(e.to_string()))?;
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::ExitStatusExt;
+        let mut output = output;
+        if let Some(signal) = exec::bash_signal(&output.status) {
+            output.status = std::process::ExitStatus::from_raw((128 + signal) as u32);
+        }
+        output
+    };
     tree.disarm();
     Ok(output)
 }

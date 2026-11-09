@@ -55,17 +55,10 @@ async fn result_text_for_empty_nonzero_signal_and_binary_output() {
             2,
         ),
         ("printf '\\377\\342\\202'", "��", 0),
-        #[cfg(unix)]
         (
             "kill -TERM $$",
             "(no output)\n\nCommand exited with code 143",
             143,
-        ),
-        #[cfg(windows)]
-        (
-            "kill -TERM $$",
-            "(no output)\n\nCommand exited with code 3840",
-            3840,
         ),
     ] {
         let result = BashTool::default()

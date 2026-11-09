@@ -130,9 +130,14 @@ pub async fn execute(
         }
     }
     tree.disarm();
+    let signal = sys::signal(&status);
     Ok(ProcessResult {
-        exit_code: status.code(),
-        signal: sys::signal(&status),
+        exit_code: if signal.is_some() {
+            None
+        } else {
+            status.code()
+        },
+        signal,
         reason,
     })
 }
