@@ -810,25 +810,28 @@ def theme(f):
     s.wait("alpha")
     s.command("theme history", "THEME_HISTORY")
     s.pump(0.2)
-    def model_style():
-        matches = re.findall(rb"\x1b\[([0-9;]+)m[^\x1b\r\n]*alpha", bytes(s.raw))
-        s.check(bool(matches), "Model status style missing")
+    # The status line keeps terminal palette colors; the picker's code sample follows the theme.
+    def sample_style():
+        matches = re.findall(rb"\x1b\[([0-9;]+)m[^\x1b\r\n]*greet", bytes(s.raw))
+        s.check(bool(matches), "Theme sample style missing")
         return matches[-1]
-    original = model_style()
     start = len(s.raw)
     s.command("/theme", "Select Syntax Theme")
-    s.send("\x1b[B")
     s.pump(0.3)
-    s.check(model_style() != original, "Theme preview did not update status colors")
+    original = sample_style()
+    s.send("\x1b[B\x1b[B\x1b[B")  # Past both Catppuccin themes, one of which is automatic.
+    s.pump(0.3)
+    s.check(sample_style() != original, "Theme preview did not update sample colors")
     s.send("\x1b[A\x1b[B")
     s.pump(0.3)
     s.send("\x1b")
     s.wait("alpha", absent="Select Syntax Theme")
     s.pump(0.3)
-    s.check(model_style() == original, "Cancel did not restore theme colors")
     s.check("theme =" not in f.config.read_text(), "Cancel saved the preview")
     s.check(b"\x1b[3J" not in s.raw[start:], "Theme preview or cancel erased scrollback")
     s.command("/theme", "Select Syntax Theme")
+    s.pump(0.3)
+    s.check(sample_style() == original, "Cancel did not restore theme colors")
     s.send("\x1b[B\r")
     s.wait("alpha", absent="Select Syntax Theme")
     s.pump(0.3)
@@ -839,8 +842,9 @@ def theme(f):
     else:
         s.check(s.screen.text().count("THEME_HISTORY") == 1, "Theme picker lost or duplicated visible history")
     s.command("/reload", "Reloaded")
-    s.pump(0.3)
-    s.check(model_style() != original, "Reload lost the saved theme")
+    s.command("/theme", "› Catppuccin Latte")
+    s.send("\x1b")
+    s.wait("alpha", absent="Select Syntax Theme")
     s.exit()
 
 

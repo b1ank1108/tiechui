@@ -54,8 +54,8 @@ same target. Inline mode uses Ctrl+O for details.
 beside the user config. Typing filters; arrows preview; Enter saves `tui.theme`;
 Esc or Ctrl+C restores the original theme. Automatic retains the existing
 Catppuccin Mocha/Latte defaults. Explicit themes share scope colors across code,
-diffs, table headers and the status line; `/reload` reads the saved preference
-and custom files again.
+diffs and table headers; the status line keeps terminal palette colors. `/reload`
+reads the saved preference and custom files again.
 
 Committed cells are laid out when appended or invalidated, and pager frames
 clone only visible rows. `/context` message lists index filtering once and
