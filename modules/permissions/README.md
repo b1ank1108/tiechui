@@ -26,8 +26,8 @@ action = "deny"
 ```
 
 Omission allows read-only and session tools (`read`, `grep`, `find`, `ls`,
-`goal`, `context`, `tool_search`, the shell task tools and similar) and MCP
-metadata calls; everything else asks. Explicit `rules = []` replaces these
+`context`, `tool_search`, the goal, range-compaction, cron and shell task tools
+and similar) and MCP metadata calls; everything else asks. Explicit `rules = []` replaces these
 defaults. Read-only shell commands (`cat`, `ls`, `grep`, `jq`, `diff`, …)
 without write redirects pass whenever the fallback would ask. Only deny accepts a reason.
 The last matching rule wins within a surface, including repeated patterns.
