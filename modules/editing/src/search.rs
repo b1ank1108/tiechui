@@ -81,8 +81,8 @@ async fn scan_command(
         .ok_or_else(|| ToolError("Missing search stderr".into()))?;
     let mut record = Vec::new();
     let mut errors = Vec::new();
-    let mut out_chunk = [0; 65536];
-    let mut err_chunk = [0; 8192];
+    let mut out_chunk = vec![0; 65536];
+    let mut err_chunk = vec![0; 8192];
     let (mut out_eof, mut err_eof) = (false, false);
     let mut stopped = false;
     let mut failure = None;

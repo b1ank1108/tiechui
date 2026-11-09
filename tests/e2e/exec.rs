@@ -25,6 +25,52 @@ struct Fixture {
 }
 
 #[tokio::test]
+async fn search_tools_run_in_headless_exec() {
+    let script = tempfile::tempdir().unwrap();
+    std::fs::write(
+        script.path().join("search.sse"),
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[
+                {"index":0,"id":"grep-call","type":"function","function":{"name":"grep","arguments":r#"{"pattern":"needle","path":"."}"#}},
+                {"index":1,"id":"find-call","type":"function","function":{"name":"find","arguments":r#"{"pattern":"*.txt","path":"."}"#}}
+            ]},"finish_reason":"tool_calls"}]}),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        script.path().join("answer.sse"),
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"found\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .unwrap();
+    let path = script.path().join("script.json");
+    std::fs::write(
+        &path,
+        r#"[{"path":"/v1/chat/completions","status":200,"body_file":"search.sse"},
+            {"path":"/v1/chat/completions","status":200,"body_file":"answer.sse"}]"#,
+    )
+    .unwrap();
+    let fixture = Fixture::new("openai-completions", path.to_str().unwrap()).await;
+    std::fs::write(fixture.cwd.join("match.txt"), "needle\n").unwrap();
+    let output = fixture.run("Search", &["--json", "--mode", "yolo"]).await;
+    assert!(output.status.success(), "{output:?}");
+    let messages = fixture.store().build_context();
+    for id in ["grep-call", "find-call"] {
+        let result = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|content| match content {
+                tiechui_model::Content::ToolResult(result) if result.call_id == id => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!result.is_error, "{result:?}");
+        assert!(serde_json::to_string(result).unwrap().contains("match.txt"));
+    }
+    fixture.server.verify().unwrap();
+}
+
+#[tokio::test]
 async fn text_answer_ends_before_usage_without_adding_a_blank_line() {
     for trailing_newline in [false, true] {
         let script = tempfile::tempdir().unwrap();
