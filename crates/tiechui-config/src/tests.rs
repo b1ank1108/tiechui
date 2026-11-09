@@ -934,6 +934,7 @@ fn discovery_excludes_user_config_at_the_home_git_root() {
             (key == "HOME").then(|| home.join("child/..").into_os_string())
         })
         .unwrap();
+        #[cfg(unix)]
         assert_ne!(paths.user, user);
         assert_eq!(paths.user.canonicalize().unwrap(), user);
         assert!(paths.project.is_none());
@@ -958,6 +959,7 @@ fn discovery_skips_user_config_alias_and_keeps_walking() {
         (key == "TIECHUI_HOME").then(|| root.join("child/alias/../.agents").into_os_string())
     })
     .unwrap();
+    #[cfg(unix)]
     assert_ne!(paths.user, user);
     assert_eq!(paths.user.canonicalize().unwrap(), user);
     assert_eq!(paths.project, Some(project));

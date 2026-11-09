@@ -94,7 +94,14 @@ async fn golden_discovery_and_rendering() {
         assert_eq!(
             render_fixture(&module, &cwd, &root)
                 .await
-                .replace(root.to_str().unwrap(), "{{ROOT}}"),
+                .replace(std::path::MAIN_SEPARATOR, "/")
+                .replace(
+                    &root
+                        .to_str()
+                        .unwrap()
+                        .replace(std::path::MAIN_SEPARATOR, "/"),
+                    "{{ROOT}}",
+                ),
             case["fragment"].as_str().unwrap(),
             "{}",
             case["name"]

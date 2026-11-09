@@ -560,7 +560,8 @@ async fn find_keeps_hidden_gitignore_and_nested_path_globs() {
     )
     .await
     .unwrap();
-    let mut rows: Vec<_> = text(&output).lines().collect();
+    let normalized = text(&output).replace(std::path::MAIN_SEPARATOR, "/");
+    let mut rows: Vec<_> = normalized.lines().collect();
     rows.sort();
     assert_eq!(rows, ["src/a.spec.ts"]);
     let output = run(
@@ -571,7 +572,10 @@ async fn find_keeps_hidden_gitignore_and_nested_path_globs() {
     )
     .await
     .unwrap();
-    assert_eq!(text(&output), "nested/src/a.spec.ts\nsrc/a.spec.ts");
+    assert_eq!(
+        text(&output).replace(std::path::MAIN_SEPARATOR, "/"),
+        "nested/src/a.spec.ts\nsrc/a.spec.ts"
+    );
     assert!(
         run(&registry, &ctx, "find", json!({"pattern":"["}))
             .await

@@ -76,19 +76,24 @@ fn catalog_and_validation_diagnostics_match_golden() {
     let fixture = Fixture::new();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let loaded = fixture.load(false, vec![path.clone()]);
-    let normalized = loaded
-        .catalog()
-        .replace(path.to_str().unwrap(), "/skills-fixtures");
-    assert_eq!(normalized, include_str!("catalog.golden"));
+    let normalize = |text: &str| {
+        text.replace(path.to_str().unwrap(), "/skills-fixtures")
+            .replace(std::path::MAIN_SEPARATOR, "/")
+            .replace("\r\n", "\n")
+    };
+    assert_eq!(
+        normalize(&loaded.catalog()),
+        include_str!("catalog.golden").replace("\r\n", "\n")
+    );
     let actual = serde_json::json!({
         "skills": loaded.skills.iter().map(|skill| serde_json::json!({
             "name": skill.name, "description": skill.description,
-            "path": skill.path.to_str().unwrap().replace(path.to_str().unwrap(), "/skills-fixtures"),
+            "path": normalize(skill.path.to_str().unwrap()),
             "disable_model_invocation": skill.disable_model_invocation,
         })).collect::<Vec<_>>(),
         "diagnostics": loaded.diagnostics.iter().map(|diag| serde_json::json!({
             "type": diag.kind, "message": diag.message,
-            "path": diag.path.to_str().unwrap().replace(path.to_str().unwrap(), "/skills-fixtures"),
+            "path": normalize(diag.path.to_str().unwrap()),
         })).collect::<Vec<_>>(),
     });
     assert_eq!(
@@ -498,7 +503,7 @@ async fn skills_disabled_in_config_are_left_out_of_the_session() {
 async fn explicit_skills_load_on_submission_with_exact_source_binding() {
     use tiechui_plugin_api::protocol::InputContent;
     let fixture = Fixture::new();
-    let path = fixture.home.join("skills/review/SKILL.md");
+    let path = fixture.home.join("skills").join("review").join("SKILL.md");
     write(
         &path,
         "---\nname: review\ndescription: Review changes\ndisable-model-invocation: true\n---\nMANUAL_BODY\n",

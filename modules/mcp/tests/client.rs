@@ -499,8 +499,10 @@ async fn file_and_parsed_sources_preserve_environment_cwd_and_trust() {
     };
     let environment: Value = tiechui_plugin_api::serde_json::from_str(text).unwrap();
     assert_eq!(
-        environment["cwd"],
-        json!(temp.path().canonicalize().unwrap())
+        std::path::Path::new(environment["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        temp.path().canonicalize().unwrap()
     );
     assert_eq!(environment["explicit"], "fixture");
     assert_eq!(environment["forwarded"], json!(std::env::var("CARGO").ok()));

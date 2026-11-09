@@ -735,9 +735,15 @@ fn regression_long_chinese_cwd_can_create_and_list_sessions() {
     fs::create_dir_all(&cwd).unwrap();
     let store = SessionStore::create(&fixture.home, &cwd, &fixture.cancel).unwrap();
     let directory = session_dir(&fixture.home, &cwd).unwrap();
-    assert_eq!(store.path().parent(), Some(directory.as_path()));
+    assert_eq!(
+        store.path().parent().unwrap(),
+        directory.canonicalize().unwrap()
+    );
     assert!(directory.file_name().unwrap().len() <= 137);
-    assert_eq!(store.header().cwd, cwd.canonicalize().unwrap());
+    assert_eq!(
+        store.header().cwd.canonicalize().unwrap(),
+        cwd.canonicalize().unwrap()
+    );
     let listed = list(&fixture.home, &cwd, &fixture.cancel).unwrap();
     assert_eq!(listed.sessions.len(), 1);
     assert!(listed.diagnostics.is_empty());
@@ -771,7 +777,7 @@ fn cwd_encoding_is_stable_and_distinguishes_similar_paths() {
             .unwrap()
             .to_str()
             .unwrap()
-            .contains("%2F")
+            .contains(&format!("%{:02X}", std::path::MAIN_SEPARATOR as u8))
     );
 }
 
