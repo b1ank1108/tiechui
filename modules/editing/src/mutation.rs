@@ -182,6 +182,9 @@ fn copy_metadata(
     let (mut child, mut tree) = exec::Tree::spawn_std(&mut command)?;
     loop {
         if let Some(status) = child.try_wait()? {
+            #[cfg(windows)]
+            tree.disarm()?;
+            #[cfg(not(windows))]
             tree.disarm();
             if !status.success() {
                 return Err(ToolError(format!(

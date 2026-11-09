@@ -10,7 +10,9 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::process::{Child, Command};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 
@@ -111,7 +113,27 @@ fn job() -> io::Result<OwnedHandle> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `raw` is a fresh, valid handle that nothing else owns.
-    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+    job_limits(&job, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
+    Ok(job)
+}
+
+fn job_limits(job: &OwnedHandle, flags: u32) -> io::Result<()> {
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = flags;
+    // SAFETY: the handle and the correctly sized limits structure remain valid for the call.
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The child starts suspended so no descendant can escape before it joins the job.
@@ -181,8 +203,10 @@ impl Tree {
     }
 
     /// Call once the root has been reaped and the job must outlive this handle.
-    pub fn disarm(&mut self) {
+    pub fn disarm(&mut self) -> io::Result<()> {
+        job_limits(&self.job, 0)?;
         self.armed = false;
+        Ok(())
     }
 }
 
@@ -197,6 +221,37 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn jobs_terminate_on_owner_exit_until_explicitly_disarmed() {
+        use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+
+        let mut tree = Tree {
+            job: job().unwrap(),
+            armed: true,
+        };
+        let flags = |tree: &Tree| {
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            // SAFETY: the owned handle and output buffer are valid for the query.
+            assert_ne!(
+                unsafe {
+                    QueryInformationJobObject(
+                        tree.job.as_raw_handle(),
+                        JobObjectExtendedLimitInformation,
+                        (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                        std::mem::size_of_val(&limits) as u32,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            limits.BasicLimitInformation.LimitFlags
+        };
+        assert_ne!(flags(&tree) & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+        tree.disarm().unwrap();
+        assert_eq!(flags(&tree) & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+    }
 
     #[test]
     fn bash_signal_status_keeps_normal_windows_exit_codes() {
