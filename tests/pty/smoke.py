@@ -1516,6 +1516,8 @@ def t2_plugins(f, marketplace=False):
     else:
         f.cli("plugin", "add", str(package))
     f.cli("trust", "allow")
+    with f.config.open("a", encoding="utf-8") as config:
+        config.write('[permissions]\nrules = [{surface = "plugin_fixture_echo", pattern = "*", action = "allow"}]\n')
     s = Session(f)
     s.wait("Authorize plugin fixture")
     s.check(not (f.root / "pids").exists(), "Plugin started before capability approval")
