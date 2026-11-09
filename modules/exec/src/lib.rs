@@ -5,7 +5,7 @@ mod shells;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use shells::{Progress, Shells, Start, elapsed, summary};
+use shells::{Progress, Read, Shells, Start, elapsed, summary};
 use tiechui_plugin_api::{
     model::{ToolCall, ToolSpec},
     protocol::{CommandInfo, SHELLS_EVENT, ShellMode, ShellTask},
@@ -21,6 +21,8 @@ const CONTINUATION: &str = "tiechui.exec.completed";
 const DEFAULT_READ: usize = 8 * 1024;
 const MAX_READ: usize = 50 * 1024;
 const MAX_WAIT_MS: u64 = 30_000;
+/// How long a background start waits for early output or an immediate exit.
+const STARTUP_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub struct ExecModule {
     /// Session-owned background tasks; children keep the plain foreground tool.
@@ -54,7 +56,7 @@ impl Module for ExecModule {
             (
                 Kind::Output,
                 "shell_output",
-                "Read a shell task's output and state. Without cursor, returns the last max_bytes; pass the returned cursor to read only newer output. wait_ms waits for new output or completion.",
+                "Read a shell task's output and state. Without cursor, returns the last max_bytes; pass the returned cursor to read only newer output. wait_ms waits for new output or completion. You are told when a background task finishes, so do not call this in a loop to wait for it; when you must wait, make one call with a long wait_ms.",
                 json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{
                     "task_id":{"type":"string"},
                     "cursor":{"type":"integer","minimum":0,"description":"Byte position returned by a previous read."},
@@ -85,7 +87,7 @@ impl Module for ExecModule {
 
 fn bash_spec() -> ToolSpec {
     let mut spec = BashTool::default().spec().clone();
-    spec.description += " Set background to true for servers, watchers and other long-running commands: it returns a task ID at once, and you are told when it finishes. Read its output with shell_output and stop it with shell_stop. The timeout still applies. Background tasks end with the session.";
+    spec.description += " Set background to true for servers, watchers and other long-running commands you do not need to wait for: it returns a task ID with the first moment of output, or the full result if the command ends at once. You are told when a background task finishes, so do not poll shell_output for it; to wait for a command, run it in the foreground. Read newer output with shell_output and stop it with shell_stop. The timeout still applies. Background tasks end with the session.";
     spec.input_schema["properties"]["background"] = json!({
         "type": "boolean",
         "description": "Run in the background and return a task ID (default false)",
@@ -113,6 +115,16 @@ fn task_json(task: &ShellTask) -> Value {
     })
 }
 
+/// What the interface shows for a shell result. Unlike structured content, details stay with
+/// the session, so a resumed transcript looks the same.
+fn details(task: &ShellTask, new_output: Option<bool>) -> Value {
+    let mut shell = task_json(task);
+    if let Some(new_output) = new_output {
+        shell["new_output"] = json!(new_output);
+    }
+    json!({ "shell": shell })
+}
+
 fn started(task: &ShellTask, text: String) -> ToolOutput {
     ToolOutput {
         structured_content: Some(json!({
@@ -122,6 +134,46 @@ fn started(task: &ShellTask, text: String) -> ToolOutput {
             "command": task.command,
         })),
         ..ToolOutput::text(text)
+    }
+}
+
+/// Output read from a task, then a bracketed line with its state, cursor and any gap.
+fn report(read: &Read, empty: &str, state: &str, hint: Option<&str>) -> ToolOutput {
+    let mut notes = vec![format!(
+        "{} · {state} · cursor {}",
+        read.task.id, read.cursor
+    )];
+    if read.gap > 0 {
+        notes.push(format!(
+            "{} bytes before this text are no longer in memory",
+            read.gap
+        ));
+    } else if read.earlier {
+        notes.push("earlier output omitted".into());
+    }
+    if (read.gap > 0 || read.earlier)
+        && let Some(path) = &read.log_path
+    {
+        notes.push(format!("log: {path}"));
+    }
+    notes.extend(hint.map(str::to_owned));
+    let mut value = task_json(&read.task);
+    value["output"] = json!(read.output);
+    value["cursor"] = json!(read.cursor);
+    value["gap_bytes"] = json!(read.gap);
+    value["log_path"] = json!(read.log_path);
+    ToolOutput {
+        details: Some(details(&read.task, Some(!read.output.is_empty()))),
+        structured_content: Some(value),
+        ..ToolOutput::text(format!(
+            "{}\n\n[{}]",
+            if read.output.is_empty() {
+                empty
+            } else {
+                &read.output
+            },
+            notes.join(" · ")
+        ))
     }
 }
 
@@ -170,23 +222,36 @@ impl Tool for Bash {
         // A dropped waiter must not leave its foreground process running.
         let _guard = Interrupt(&self.shells, &id);
         let mut interrupted = false;
-        let forever = tokio::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365);
+        let now = tokio::time::Instant::now();
+        let forever = now + std::time::Duration::from_secs(86_400 * 365);
+        let window = now + STARTUP_WINDOW;
         loop {
             match self.shells.progress(&id)? {
-                Progress::Done(result) => return result,
+                Progress::Done(result) => {
+                    // The model reads this result, so the completion needs no notification.
+                    self.shells.seen(&id);
+                    return result;
+                }
                 Progress::Background => {
                     let task = self.shells.task(&id)?;
-                    let text = if input.background {
-                        format!(
-                            "Started background shell {id}. You will be told when it finishes; read output with shell_output and stop it with shell_stop."
-                        )
-                    } else {
-                        format!(
-                            "The user moved this command to the background as {id}; it is still running. You will be told when it finishes; read output with shell_output and stop it with shell_stop."
-                        )
-                    };
                     if !matches!(task.state, protocol::ShellState::Starting) {
-                        return Ok(started(&task, text));
+                        if !input.background {
+                            return Ok(started(
+                                &task,
+                                format!(
+                                    "The user moved this command to the background as {id}; it is still running. You will be told when it finishes; read output with shell_output and stop it with shell_stop."
+                                ),
+                            ));
+                        }
+                        if interrupted || tokio::time::Instant::now() >= window {
+                            let read = self.shells.read(&id, Some(0), DEFAULT_READ)?;
+                            return Ok(report(
+                                &read,
+                                "(no output yet)",
+                                "started in the background",
+                                Some("you will be told when it finishes"),
+                            ));
+                        }
                     }
                 }
                 Progress::Starting | Progress::Running => {}
@@ -196,7 +261,12 @@ impl Tool for Bash {
             } else {
                 ctx.cancel.clone()
             };
-            if !Shells::wait(&mut changes, forever, &cancel).await && ctx.cancel.is_cancelled() {
+            let deadline = if input.background && tokio::time::Instant::now() < window {
+                window
+            } else {
+                forever
+            };
+            if !Shells::wait(&mut changes, deadline, &cancel).await && ctx.cancel.is_cancelled() {
                 interrupted = true;
                 self.shells.interrupt(&id);
             }
@@ -279,46 +349,12 @@ impl Tool for Manage {
                 if !read.task.state.active() {
                     self.shells.seen(id);
                 }
-                let mut notes = vec![format!(
-                    "{} · {} · cursor {}",
-                    read.task.id,
-                    if read.task.state.active() {
-                        read.task.state.label().to_owned()
-                    } else {
-                        summary(&read.task)
-                    },
-                    read.cursor
-                )];
-                if read.gap > 0 {
-                    notes.push(format!(
-                        "{} bytes before this text are no longer in memory",
-                        read.gap
-                    ));
-                } else if read.earlier {
-                    notes.push("earlier output omitted".into());
-                }
-                if (read.gap > 0 || read.earlier)
-                    && let Some(path) = &read.log_path
-                {
-                    notes.push(format!("log: {path}"));
-                }
-                let mut value = task_json(&read.task);
-                value["output"] = json!(read.output);
-                value["cursor"] = json!(read.cursor);
-                value["gap_bytes"] = json!(read.gap);
-                value["log_path"] = json!(read.log_path);
-                Ok(ToolOutput {
-                    structured_content: Some(value),
-                    ..ToolOutput::text(format!(
-                        "{}\n\n[{}]",
-                        if read.output.is_empty() {
-                            "(no new output)"
-                        } else {
-                            &read.output
-                        },
-                        notes.join(" · ")
-                    ))
-                })
+                let state = if read.task.state.active() {
+                    read.task.state.label().to_owned()
+                } else {
+                    summary(&read.task)
+                };
+                Ok(report(&read, "(no new output)", &state, None))
             }
             Kind::Stop => {
                 let mut changes = self.shells.subscribe();
@@ -332,6 +368,7 @@ impl Tool for Manage {
                     self.shells.seen(id);
                 }
                 Ok(ToolOutput {
+                    details: Some(details(&task, None)),
                     structured_content: Some(task_json(&task)),
                     ..ToolOutput::text(if task.state.active() {
                         format!("{id} is stopping.")

@@ -279,7 +279,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 ### 功能
 
 - **后台 shell。**
-  - 模型对服务器、监听器等命令给 `bash` 设置 `background: true`，立即拿到任务 ID，命令结束时会收到通知；`shell_output` 读取输出，`shell_stop` 停止。超时仍然生效。
+  - 模型对服务器、监听器等命令给 `bash` 设置 `background: true`，半秒后拿到任务 ID 和这段时间的输出（命令已结束则直接拿到完整结果），命令结束时会收到通知；`shell_output` 读取后续输出，`shell_stop` 停止。超时仍然生效。
   - `/shells` 列出运行中和最近的命令。面板里 `b` 把运行中的命令转入后台，`x` 停止，Enter 查看输出，Esc 关闭。
   - 后台任务随会话结束。子代理只能在前台运行命令。
 

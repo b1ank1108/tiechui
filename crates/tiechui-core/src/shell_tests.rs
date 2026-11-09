@@ -34,7 +34,7 @@ async fn background_completion_wakes_the_model_once_after_the_turn() {
     let mut harness = shells(vec![
         reply(vec![bash(
             "start",
-            json!({"command":"sleep 0.3; printf ok","background":true}),
+            json!({"command":"sleep 1; printf ok","background":true}),
         )]),
         answer("started"),
         answer("noted"),
@@ -44,7 +44,7 @@ async fn background_completion_wakes_the_model_once_after_the_turn() {
     harness.request().await;
     let second = harness.request().await;
     assert!(
-        matches!(&results(&second)[0].content[0], Content::Text { text, .. } if text.starts_with("Started background shell sh1"))
+        matches!(&results(&second)[0].content[0], Content::Text { text, .. } if text.starts_with("(no output yet)\n\n[sh1 · started in the background"))
     );
     harness.end(TurnStatus::Completed).await;
     let third = harness.request().await;

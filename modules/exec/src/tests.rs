@@ -163,7 +163,7 @@ async fn background_start_counts_and_notifies_the_model_once() {
     let output = h
         .run(
             &h.bash(),
-            json!({"command":"printf hi; sleep 0.3","background":true}),
+            json!({"command":"printf hi; sleep 1","background":true}),
         )
         .await
         .unwrap();
@@ -171,7 +171,14 @@ async fn background_start_counts_and_notifies_the_model_once() {
     assert_eq!(structured["task_id"], "sh1");
     assert_eq!(structured["state"], "running");
     assert_eq!(structured["background"], true);
-    assert!(text(&output).contains("Started background shell sh1"));
+    assert_eq!(structured["cursor"], 2);
+    assert_eq!(
+        text(&output),
+        "hi\n\n[sh1 · started in the background · cursor 2 · you will be told when it finishes]"
+    );
+    let shell = &output.details.as_ref().unwrap()["shell"];
+    assert_eq!(shell["command"], "printf hi; sleep 1");
+    assert_eq!(shell["new_output"], true);
     assert_eq!(h.view().background(), 1);
     assert!(h.shells.continuation().is_none());
     h.settled("sh1").await;
@@ -310,7 +317,7 @@ async fn output_reads_resume_from_the_cursor_and_wait_for_news() {
     let h = Harness::new();
     h.run(
         &h.bash(),
-        json!({"command":"printf abc; sleep 0.3; printf def","background":true}),
+        json!({"command":"printf abc; sleep 1; printf def","background":true}),
     )
     .await
     .unwrap();
@@ -342,6 +349,9 @@ async fn output_reads_resume_from_the_cursor_and_wait_for_news() {
         .await
         .unwrap();
     assert!(text(&empty).starts_with("(no new output)"));
+    let shell = &empty.details.as_ref().unwrap()["shell"];
+    assert_eq!(shell["state"], "completed");
+    assert_eq!(shell["new_output"], false);
     assert!(
         h.run(&output, json!({"task_id":"sh1","cursor":7}))
             .await
@@ -387,15 +397,41 @@ async fn user_commands_and_limits() {
 }
 
 #[tokio::test]
+async fn background_commands_that_end_at_once_return_their_whole_result() {
+    let h = Harness::new();
+    let output = h
+        .run(
+            &h.bash(),
+            json!({"command":"printf done","background":true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(text(&output), "done");
+    assert_eq!(h.shells.task("sh1").unwrap().state, ShellState::Completed);
+    assert!(
+        h.shells.continuation().is_none(),
+        "the model already has the result"
+    );
+    let output = h
+        .run(&h.bash(), json!({"command":"sleep 30","background":true}))
+        .await
+        .unwrap();
+    assert!(text(&output).starts_with("(no output yet)\n\n[sh2 · started"));
+    assert_eq!(output.details.unwrap()["shell"]["new_output"], false);
+    h.shells.quiesce().await;
+}
+
+#[tokio::test]
 async fn instant_failures_never_count_as_running() {
     let h = Harness::new();
     let output = h
         .run(&h.bash(), json!({"command":"exit 3","background":true}))
         .await
         .unwrap();
-    let state = output.structured_content.unwrap()["state"].clone();
-    assert!(state == "running" || state == "failed", "{state}");
-    h.settled("sh1").await;
+    assert!(output.is_error);
+    assert_eq!(output.structured_content.unwrap()["exit_code"], 3);
+    assert_eq!(h.shells.task("sh1").unwrap().state, ShellState::Failed);
+    assert!(h.shells.continuation().is_none());
     assert_eq!(h.shells.task("sh1").unwrap().exit_code, Some(3));
     let mut ctx = context(CancellationToken::new(), ToolOrigin::Model);
     ctx.cwd = std::env::temp_dir().join("tiechui-missing-shell-cwd");

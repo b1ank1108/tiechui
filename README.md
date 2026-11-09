@@ -303,7 +303,7 @@ Disabling a module removes its commands. Plugins and [prompt templates](#skills-
 ### Features
 
 - **Background shells.**
-  - The model sets `background: true` on `bash` for servers and watchers. It gets a task ID at once and is told when the command finishes; `shell_output` reads its output and `shell_stop` stops it. The timeout still applies.
+  - The model sets `background: true` on `bash` for servers and watchers. After half a second it gets a task ID with the output so far, or the whole result if the command already ended, and it is told when the command finishes; `shell_output` reads newer output and `shell_stop` stops it. The timeout still applies.
   - `/shells` lists running and recent commands. In the panel, `b` moves a running command to the background, `x` stops it, Enter shows its output and Esc closes.
   - Background tasks end with the session. Subagents run commands in the foreground only.
 
