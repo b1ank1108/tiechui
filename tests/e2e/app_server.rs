@@ -406,14 +406,17 @@ async fn workspace_services_through_app_server() {
     let echo = json!({"id": "t", "data": command});
     client.ok("terminal/write", echo).await;
     let mut output = String::new();
+    #[cfg(windows)]
+    let mut cursor_reported = false;
     while !output.contains("tiechui-42") {
         let notice = client.notice(|method, _| method == "terminal/output").await;
         output.push_str(notice["data"].as_str().unwrap());
         #[cfg(windows)]
-        if output.ends_with("\x1b[6n") {
+        if !cursor_reported && output.contains("\x1b[6n") {
             client
                 .ok("terminal/write", json!({"id": "t", "data": "\x1b[1;1R"}))
                 .await;
+            cursor_reported = true;
         }
     }
     let attached = client.ok("terminal/attach", json!({"id": "t"})).await;
