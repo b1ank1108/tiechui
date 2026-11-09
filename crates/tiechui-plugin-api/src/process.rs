@@ -98,39 +98,74 @@ impl ProcessGroup {
         env_vars: &[String],
         env: &BTreeMap<String, String>,
     ) -> Result<Self, ToolError> {
-        let mut process = Command::new(command);
-        process
-            .args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        // Only a small default environment plus explicitly requested variables pass through.
-        for key in [
-            "HOME",
-            "USER",
-            "LOGNAME",
-            "PATH",
-            "SHELL",
-            "TMPDIR",
-            "TEMP",
-            "TMP",
-            "SYSTEMROOT",
-            "WINDIR",
-        ]
-        .into_iter()
-        .chain(env_vars.iter().map(String::as_str))
-        {
-            if let Some(value) = std::env::var_os(key) {
-                process.env(key, value);
+        let spawn = |command: &Path| {
+            let mut process = Command::new(command);
+            process
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            // Only a small default environment plus explicitly requested variables pass through.
+            for key in [
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "PATH",
+                "SHELL",
+                "TMPDIR",
+                "TEMP",
+                "TMP",
+                "SYSTEMROOT",
+                "WINDIR",
+            ]
+            .into_iter()
+            .chain(env_vars.iter().map(String::as_str))
+            {
+                if let Some(value) = std::env::var_os(key) {
+                    process.env(key, value);
+                }
             }
-        }
-        process.envs(env);
-        let (child, tree) = tiechui_tools::exec::Tree::spawn(&mut process)?;
+            process.envs(env);
+            tiechui_tools::exec::Tree::spawn(&mut process)
+        };
+        let spawned = spawn(command);
+        #[cfg(windows)]
+        let spawned = match spawned {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match batch_command(command, env) {
+                    Some(command) => spawn(&command),
+                    None => Err(error),
+                }
+            }
+            result => result,
+        };
+        let (child, tree) = spawned?;
         Ok(Self { child, _tree: tree })
     }
+}
+
+#[cfg(windows)]
+fn batch_command(command: &Path, env: &BTreeMap<String, String>) -> Option<std::path::PathBuf> {
+    if command.components().count() != 1 || command.extension().is_some() {
+        return None;
+    }
+    let path = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))?;
+    for directory in std::env::split_paths(&path) {
+        for extension in ["cmd", "bat"] {
+            let candidate = directory.join(command).with_extension(extension);
+            if candidate.is_file() {
+                return std::path::absolute(candidate).ok();
+            }
+        }
+    }
+    None
 }
 
 pub fn seconds(value: Option<f64>, default: f64) -> Result<Duration, ToolError> {
@@ -158,6 +193,71 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bare_batch_commands_use_child_path_and_keep_std_argument_escaping() {
+        use tokio::io::AsyncReadExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("batch files");
+        std::fs::create_dir(&directory).unwrap();
+        let env = BTreeMap::from([("Path".into(), directory.display().to_string())]);
+        for extension in ["cmd", "bat"] {
+            let script = directory.join(format!("tiechui-fixture.{extension}"));
+            std::fs::write(
+                &script,
+                "@echo off\r\n@echo %1\r\n@if defined APPDATA echo leaked\r\n",
+            )
+            .unwrap();
+            let mut group = ProcessGroup::spawn(
+                Path::new("tiechui-fixture"),
+                &["hello & goodbye".into()],
+                temp.path(),
+                &[],
+                &env,
+            )
+            .unwrap();
+            drop(group.child.stdin.take());
+            let mut output = String::new();
+            group
+                .child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut output)
+                .await
+                .unwrap();
+            assert!(group.child.wait().await.unwrap().success());
+            assert_eq!(output, "\"hello & goodbye\"\r\n");
+            assert!(!temp.path().join("goodbye").exists());
+            std::fs::remove_file(script).unwrap();
+        }
+        assert!(batch_command(Path::new("./tiechui-fixture"), &env).is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn native_executables_take_precedence_over_batch_fallbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = temp.path().join("tiechui-fixture");
+        std::fs::copy(
+            Path::new(&std::env::var_os("SYSTEMROOT").unwrap()).join("System32/cmd.exe"),
+            command.with_extension("exe"),
+        )
+        .unwrap();
+        std::fs::write(command.with_extension("cmd"), "@exit /b 42\r\n").unwrap();
+        let env = BTreeMap::from([("PATH".into(), temp.path().display().to_string())]);
+        let mut group = ProcessGroup::spawn(
+            Path::new("tiechui-fixture"),
+            &["/D".into(), "/C".into(), "exit /b 23".into()],
+            temp.path(),
+            &[],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(group.child.wait().await.unwrap().code(), Some(23));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
