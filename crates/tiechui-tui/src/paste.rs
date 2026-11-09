@@ -234,7 +234,7 @@ mod tests {
             (
                 "cmd.exe",
                 &["/D", "/C", "<nul set /p =fixture&exit /b 0"][..],
-                &["/D", "/C", "timeout /t 10"][..],
+                &["/D", "/C", "ping -n 11 127.0.0.1 >nul"][..],
             )
         } else {
             (
