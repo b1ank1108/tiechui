@@ -1241,7 +1241,9 @@ def rewind(f):
     path = f.cwd / "rewind.txt"
     path.write_text("original\n")
     s = f.start()
-    s.command("change the tracked file", "REWIND_EDIT_DONE")
+    s.command("change the tracked file", "Yes, proceed")
+    s.send("1")
+    s.wait("REWIND_EDIT_DONE")
     s.wait("Ready")  # Streamed answer text can arrive before TurnCompleted.
     s.check(path.read_text() == "changed\n", "Mock edit did not change the file")
     requests = len(f.mock.requests)
