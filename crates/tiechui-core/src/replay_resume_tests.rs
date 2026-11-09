@@ -237,13 +237,20 @@ async fn encode(wire: Wire, messages: Vec<Message>) -> serde_json::Value {
     serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap()
 }
 
-fn load(name: &str) -> SessionStore {
-    SessionStore::open_read_only(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn load(name: &str) -> (tempfile::TempDir, SessionStore) {
+    let fixture = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/fixtures/replay/{name}.jsonl")),
-        &CancellationToken::new(),
     )
-    .unwrap()
+    .unwrap();
+    let (header, entries) = fixture.split_once('\n').unwrap();
+    let mut header: serde_json::Value = serde_json::from_str(header).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    header["cwd"] = json!(temp.path().canonicalize().unwrap());
+    let path = temp.path().join("session.jsonl");
+    std::fs::write(&path, format!("{header}\n{entries}")).unwrap();
+    let store = SessionStore::open_read_only(&path, &CancellationToken::new()).unwrap();
+    (temp, store)
 }
 
 #[tokio::test]
@@ -268,7 +275,7 @@ async fn interrupted_disk_sessions_encode_on_each_wire() {
                 vec![("b", "contents b"), ("a", "contents a")],
             ),
         ] {
-            let store = load(name);
+            let (_temp, store) = load(name);
             let messages = replay::prepare(
                 store.build_context_with_origins(&HashSet::new()),
                 &fixture_model(),
@@ -344,8 +351,9 @@ async fn interrupted_disk_sessions_encode_on_each_wire() {
 async fn error_images_follow_all_results_on_each_wire() {
     for wire in ENCODERS {
         let adapter = provider(wire, "http://127.0.0.1:1");
+        let (_temp, store) = load("error-images");
         let messages = replay::prepare(
-            load("error-images").build_context_with_origins(&HashSet::new()),
+            store.build_context_with_origins(&HashSet::new()),
             &fixture_model(),
             true,
             adapter.error_tool_images(),
@@ -1289,7 +1297,7 @@ async fn edit_and_write_details_survive_resume_but_never_enter_requests() {
         assert!(!body.to_string().contains("\"diff\""));
     }
     // Old messages with no presentation metadata still produce a usable transcript.
-    let legacy = load("esc-tool");
+    let (_temp, legacy) = load("esc-tool");
     assert!(legacy.entries().iter().all(|entry| !matches!(
         &entry.kind,
         EntryKind::Message {
