@@ -35,5 +35,8 @@ test-server = ["rmcp/server", "rmcp/transport-io"]
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
 [lints]
 workspace = true

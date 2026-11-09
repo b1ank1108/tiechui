@@ -1,6 +1,8 @@
 //! Profile-local OAuth authorization code flow for Streamable HTTP servers.
 use std::fs::{self, File, TryLockError};
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,8 +29,45 @@ fn now() -> u64 {
 
 fn random() -> Result<String, ToolError> {
     let mut bytes = [0; 32];
+    #[cfg(unix)]
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+        };
+        // SAFETY: the buffer is writable and the system RNG needs no algorithm handle.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err(error(format!("System RNG failed: {status:#x}")));
+        }
+    }
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_random_is_a_fresh_256_bit_url_safe_value() -> Result<(), ToolError> {
+        let first = random()?;
+        assert_ne!(first, random()?);
+        assert_eq!(URL_SAFE_NO_PAD.decode(&first).map_err(error)?.len(), 32);
+        assert!(
+            first
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+        );
+        Ok(())
+    }
 }
 
 fn web_url(value: &str) -> Result<Url, ToolError> {
