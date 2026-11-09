@@ -199,7 +199,8 @@ theme = "automatic"                    # follows the terminal background
 - Models can also set `cache_retention`, `prices` and, on Anthropic,
   `fallback_models`.
 - `[network]` sets a proxy, hosts that bypass it and an extra CA file for model
-  and MCP requests. It and `[sessions]` (`archive_after_days`) are read only from
+  and MCP requests. It, `[sessions]` (`archive_after_days`) and `[skills]`
+  (`disabled`, skill names that sessions leave out) are read only from
   `~/.tiechui/config.toml`.
 
 Each provider takes its key from `api_key` in `providers.toml` or from the

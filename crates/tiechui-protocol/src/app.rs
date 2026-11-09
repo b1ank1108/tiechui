@@ -348,6 +348,45 @@ pub struct McpAuthorize {
     pub url: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkillsListParams {
+    /// The project whose skills a session there adds; without one, the user's alone.
+    pub cwd: Option<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkillList {
+    /// `$TIECHUI_HOME/skills`.
+    pub dir: String,
+    pub skills: Vec<SkillEntry>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+    /// The skill's Markdown file.
+    pub path: String,
+    /// The skills directory it was found in.
+    pub root: String,
+    /// `user`, `project` or `plugin`.
+    pub source: String,
+    /// Loaded only through `$name`, never offered to the model.
+    pub manual: bool,
+    /// Not named in the user's `skills.disabled`.
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkillEnableParams {
+    pub name: String,
+    pub enabled: bool,
+}
+
 /// The `session/event` notification.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

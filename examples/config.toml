@@ -160,6 +160,10 @@ icons = []
 # chui app-server archives sessions without a message for this many days. User config only.
 # archive_after_days = 30
 
+[skills]
+# Names of discovered skills that sessions leave out. User config only.
+# disabled = ["release-notes"]
+
 [mcp_servers]
 # No MCP server is configured by default. A server uses either command (stdio)
 # or url (Streamable HTTP). Project servers require trust. Secrets stay in env.

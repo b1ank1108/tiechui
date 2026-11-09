@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
-use tiechui_config::{ConfigPaths, TrustStore};
+use tiechui_config::{ConfigPaths, LoadedConfig, TrustStore};
 use tiechui_module_skills::SkillsModule;
 use tiechui_plugin_api::{CancellationToken, Registry};
 
@@ -26,12 +26,12 @@ pub(crate) fn load(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn list(args: &ArgMatches) -> Result<(), String> {
-    let cwd = args
-        .get_one::<String>("cwd")
-        .map_or_else(std::env::current_dir, |path| Ok(PathBuf::from(path)))
-        .and_then(|path| path.canonicalize())
-        .map_err(|error| error.to_string())?;
+/// The configuration and skills a session in `cwd` loads; plugin warnings go to `warnings`.
+pub(crate) fn discover(
+    cwd: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<(LoadedConfig, SkillsModule), String> {
+    let cwd = cwd.canonicalize().map_err(|error| error.to_string())?;
     let paths = ConfigPaths::discover(&cwd).map_err(|error| error.to_string())?;
     let home = paths.user.parent().ok_or("missing config directory")?;
     let cancel = CancellationToken::new();
@@ -41,11 +41,31 @@ pub(crate) fn list(args: &ArgMatches) -> Result<(), String> {
         == Some(true);
     let loaded = tiechui_config::load(&paths, trusted, &toml::Table::new())
         .map_err(|error| error.to_string())?;
-    let registry = super::plugins::load(&cwd, home, trusted, &loaded.config, &cancel)?;
+    let registry =
+        super::plugins::registry(&cwd, home, trusted, &loaded.config, &cancel, warnings)?;
     let skills = load(&cwd, home, trusted, &registry, &cancel)?;
+    Ok((loaded, skills))
+}
+
+pub(crate) fn list(args: &ArgMatches) -> Result<(), String> {
+    let cwd = args
+        .get_one::<String>("cwd")
+        .map_or_else(std::env::current_dir, |path| Ok(PathBuf::from(path)))
+        .map_err(|error| error.to_string())?;
+    let mut warnings = Vec::new();
+    let discovered = discover(&cwd, &mut warnings);
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+    let (loaded, skills) = discovered?;
+    let disabled = &loaded.config.skills.disabled;
     let mut stdout = std::io::stdout().lock();
     if args.get_flag("json") {
         let mut output = skills.to_json();
+        for skill in output["skills"].as_array_mut().into_iter().flatten() {
+            let off = disabled.iter().any(|name| skill["name"] == name.as_str());
+            skill["disabled"] = off.into();
+        }
         output["config_diagnostics"] = serde_json::json!(loaded.diagnostics.iter().map(|diagnostic| {
             serde_json::json!({"path": diagnostic.file, "key": diagnostic.key, "reason": format!("{:?}", diagnostic.reason)})
         }).collect::<Vec<_>>());
@@ -55,7 +75,7 @@ pub(crate) fn list(args: &ArgMatches) -> Result<(), String> {
         for skill in &skills.skills {
             writeln!(
                 stdout,
-                "{}\t{}\n  path: {}\n  root: {} ({}){}",
+                "{}\t{}\n  path: {}\n  root: {} ({}){}{}",
                 skill.name,
                 skill.description,
                 skill.path.display(),
@@ -63,6 +83,11 @@ pub(crate) fn list(args: &ArgMatches) -> Result<(), String> {
                 skill.root.source,
                 if skill.disable_model_invocation {
                     "\n  disable-model-invocation: true"
+                } else {
+                    ""
+                },
+                if disabled.contains(&skill.name) {
+                    "\n  disabled: true"
                 } else {
                     ""
                 }

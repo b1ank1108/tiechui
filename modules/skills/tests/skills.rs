@@ -382,6 +382,38 @@ async fn context_registration_omits_disabled_skills_and_honors_cancellation() {
 }
 
 #[tokio::test]
+async fn skills_disabled_in_config_are_left_out_of_the_session() {
+    let fixture = Fixture::new();
+    skill(&fixture.home.join("skills/kept/SKILL.md"), "kept");
+    skill(&fixture.home.join("skills/unwanted/SKILL.md"), "unwanted");
+    let mut config = ModuleConfig::default();
+    config.skills.disabled = vec!["unwanted".into()];
+    let mut registry = Registry::default();
+    fixture
+        .load(true, vec![])
+        .register(&mut registry, &config)
+        .unwrap();
+    let names: Vec<_> = registry.resources().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, ["kept"]);
+    let input = TurnInput {
+        cwd: fixture.cwd.clone(),
+        content: vec![tiechui_plugin_api::protocol::InputContent::Text {
+            text: "$unwanted".into(),
+        }],
+    };
+    let fragments = registry.context_providers()[0]
+        .fragments(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(fragments.iter().all(|text| !text.contains("unwanted")));
+    let listing = registry.commands()[0]
+        .run("", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(listing.contains("kept") && !listing.contains("unwanted"));
+}
+
+#[tokio::test]
 async fn explicit_skills_load_on_submission_with_exact_source_binding() {
     use tiechui_plugin_api::protocol::InputContent;
     let fixture = Fixture::new();

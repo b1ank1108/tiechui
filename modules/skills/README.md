@@ -13,10 +13,12 @@ Roots, in precedence order:
    before activating them or accepting their root contributions.
 
 Discovery needs no configuration. Use `modules.skills` to disable catalog
-injection.
+injection. Skills named in the user config's `skills.disabled` stay out of the
+catalog, `$name` references, the resource picker and `/skills`.
 
 `chui skills list --cwd <directory> [--json]` shows resolved metadata, root paths,
-source scopes, disabled model invocation, and diagnostics. `modules.skills = false`
+source scopes, disabled model invocation, skills disabled in the config, and
+diagnostics. `modules.skills = false`
 disables catalog injection in `exec`; listing remains available for inspection.
 
 Within a root, a directory containing `SKILL.md` is a skill and ends recursion,

@@ -836,3 +836,72 @@ async fn mcp_servers_are_edited_started_and_signed_in_to() {
     client.ok("mcp/delete", json!({"name": "remote"})).await;
     assert_eq!(client.ok("mcp/list", json!({})).await, json!([renamed]));
 }
+
+#[tokio::test]
+async fn skills_are_listed_and_switched_off_for_open_sessions() {
+    let fixture = Fixture::new().await;
+    for (dir, name) in [
+        (fixture.home.join("skills/review"), "review"),
+        (fixture.cwd.join(".agents/skills/deploy"), "deploy"),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = format!("---\nname: {name}\ndescription: Fixture\n---\nBody\n");
+        std::fs::write(dir.join("SKILL.md"), text).unwrap();
+    }
+    let mut client = fixture.client().await;
+    let cwd = fixture.cwd.display().to_string();
+    client.ok("trust", json!({"cwd": cwd, "allow": true})).await;
+    client.ok("session/open", json!({"cwd": cwd})).await;
+    let states = |list: &Value| -> Vec<(String, String, bool)> {
+        list["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                let text = |key: &str| s[key].as_str().unwrap().to_owned();
+                (text("name"), text("source"), s["enabled"] == true)
+            })
+            .collect()
+    };
+    let skill = |name: &str, source: &str, enabled| (name.to_owned(), source.to_owned(), enabled);
+    let list = client.ok("skills/list", json!({"cwd": cwd})).await;
+    assert_eq!(
+        list["dir"],
+        fixture.home.join("skills").display().to_string()
+    );
+    assert_eq!(
+        states(&list),
+        [
+            skill("review", "user", true),
+            skill("deploy", "project", true)
+        ]
+    );
+    let user = client.ok("skills/list", json!({"cwd": null})).await;
+    assert_eq!(states(&user), [skill("review", "user", true)]);
+
+    client
+        .ok("skills/enable", json!({"name": "review", "enabled": false}))
+        .await;
+    client
+        .until(|e| {
+            matches!(e, EventKind::ResourcesUpdated { resources }
+                if resources.iter().any(|r| r.name == "deploy")
+                    && resources.iter().all(|r| r.name != "review"))
+        })
+        .await;
+    let config = std::fs::read_to_string(fixture.home.join("config.toml")).unwrap();
+    assert!(config.contains("disabled = [\"review\"]"), "{config}");
+    let list = client.ok("skills/list", json!({"cwd": cwd})).await;
+    assert_eq!(
+        states(&list),
+        [
+            skill("review", "user", false),
+            skill("deploy", "project", true)
+        ]
+    );
+    client
+        .ok("skills/enable", json!({"name": "review", "enabled": true}))
+        .await;
+    let config = std::fs::read_to_string(fixture.home.join("config.toml")).unwrap();
+    assert!(!config.contains("review"), "{config}");
+}

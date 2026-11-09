@@ -4,6 +4,7 @@
 mod mcp;
 mod projection;
 mod providers;
+mod skills;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
@@ -242,6 +243,13 @@ impl Server {
                 let notify = |authorize| self.notify("mcp/authorize", authorize);
                 let reply = mcp::handle(&self.home, method, params, notify).await;
                 if reply.is_ok() && mcp::edits(method) {
+                    self.refresh();
+                }
+                reply
+            }
+            _ if skills::handles(method) => {
+                let reply = skills::handle(&self.home, method, params).await;
+                if reply.is_ok() && method == "skills/enable" {
                     self.refresh();
                 }
                 reply

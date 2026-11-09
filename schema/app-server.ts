@@ -435,6 +435,42 @@ export type ShellsView = { revision: number, tasks: Array<ShellTask>, open: bool
 
 export type ShowParams = { root: string, rev: string, path: string, };
 
+export type SkillEnableParams = { name: string, enabled: boolean, };
+
+export type SkillEntry = { name: string, description: string, 
+/**
+ * The skill's Markdown file.
+ */
+path: string, 
+/**
+ * The skills directory it was found in.
+ */
+root: string, 
+/**
+ * `user`, `project` or `plugin`.
+ */
+source: string, 
+/**
+ * Loaded only through `$name`, never offered to the model.
+ */
+manual: boolean, 
+/**
+ * Not named in the user's `skills.disabled`.
+ */
+enabled: boolean, };
+
+export type SkillList = { 
+/**
+ * `$TIECHUI_HOME/skills`.
+ */
+dir: string, skills: Array<SkillEntry>, };
+
+export type SkillsListParams = { 
+/**
+ * The project whose skills a session there adds; without one, the user's alone.
+ */
+cwd: string | null, };
+
 export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, seq: number, events: Array<Event>, };
 
 export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };

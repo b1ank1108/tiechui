@@ -266,12 +266,12 @@ fn permission_mode_is_user_only() {
 }
 
 #[test]
-fn network_and_sessions_are_user_only_and_validated() {
+fn network_sessions_and_skills_are_user_only_and_validated() {
     let temp = temp_dir();
     let paths = paths(
         temp.path(),
-        "[network]\nproxy='http://127.0.0.1:8080'\nno_proxy='localhost'\n[ask]\nauto_continue_after_sec=300\n[sessions]\narchive_after_days=7\n",
-        "[network]\nproxy='http://project.invalid'\n[ask]\nauto_continue_after_sec=60\n[sessions]\narchive_after_days=1\n",
+        "[network]\nproxy='http://127.0.0.1:8080'\nno_proxy='localhost'\n[ask]\nauto_continue_after_sec=300\n[sessions]\narchive_after_days=7\n[skills]\ndisabled=['draft']\n",
+        "[network]\nproxy='http://project.invalid'\n[ask]\nauto_continue_after_sec=60\n[sessions]\narchive_after_days=1\n[skills]\ndisabled=[]\n",
     );
     let loaded = load(&paths, true, &toml::Table::new()).unwrap();
     assert_eq!(
@@ -280,13 +280,14 @@ fn network_and_sessions_are_user_only_and_validated() {
     );
     assert_eq!(loaded.config.sessions.archive_after_days, Some(7));
     assert_eq!(loaded.config.ask.auto_continue_after_sec, Some(60));
+    assert_eq!(loaded.config.skills.disabled, ["draft"]);
     let ignored: Vec<_> = loaded
         .diagnostics
         .iter()
         .filter(|d| d.reason == IgnoredReason::UserOnly)
         .map(|d| d.key.as_str())
         .collect();
-    assert_eq!(ignored, ["network", "sessions"]);
+    assert_eq!(ignored, ["network", "sessions", "skills"]);
 
     for (text, key) in [
         (
@@ -331,24 +332,17 @@ fn the_default_thinking_level_layers_like_the_model() {
 }
 
 #[test]
-fn skills_section_is_rejected_and_absent_from_schema() {
+fn skills_section_takes_only_disabled_names() {
     let temp = temp_dir();
-    let paths = paths(temp.path(), "", "");
-    let cli = toml::from_str("[skills]\n").unwrap();
-    assert_eq!(load(&paths, true, &cli).unwrap_err().key, "skills");
-    fs::write(&paths.user, "[skills]\n").unwrap();
-    assert_eq!(
-        load(&paths, false, &toml::Table::new()).unwrap_err().key,
-        "skills"
+    let paths = paths(temp.path(), "[skills]\npaths = []\n", "");
+    assert!(
+        load(&paths, false, &toml::Table::new())
+            .unwrap_err()
+            .key
+            .starts_with("skills")
     );
     let schema = serde_json::to_value(schema()).unwrap();
-    assert!(schema["properties"].get("skills").is_none());
-    assert!(
-        serde_json::to_value(Config::default())
-            .unwrap()
-            .get("skills")
-            .is_none()
-    );
+    assert!(schema["properties"]["skills"].is_object());
 }
 
 #[test]

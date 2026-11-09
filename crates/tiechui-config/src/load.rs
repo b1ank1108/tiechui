@@ -28,6 +28,7 @@ struct Layer {
     network: Option<crate::NetworkConfig>,
     ask: Option<crate::AskConfig>,
     sessions: Option<crate::SessionsConfig>,
+    skills: Option<crate::SkillsConfig>,
 }
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
@@ -135,6 +136,9 @@ pub fn load_with_mandatory_modules(
                 if project_layer.sessions.take().is_some() {
                     user_only.push("sessions");
                 }
+                if project_layer.skills.take().is_some() {
+                    user_only.push("skills");
+                }
                 diagnostics.extend(user_only.into_iter().map(|key| Diagnostic {
                     file: path.to_owned(),
                     key: key.into(),
@@ -188,6 +192,7 @@ pub fn load_with_mandatory_modules(
         network: merged.network.unwrap_or_default(),
         ask: merged.ask.unwrap_or_default(),
         sessions: merged.sessions.unwrap_or_default(),
+        skills: merged.skills.unwrap_or_default(),
         providers: load_providers(&paths.providers())?,
     };
     Ok(LoadedConfig {
@@ -407,6 +412,9 @@ fn merge(
     }
     if layer.sessions.is_some() {
         base.sessions = layer.sessions;
+    }
+    if layer.skills.is_some() {
+        base.skills = layer.skills;
     }
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);

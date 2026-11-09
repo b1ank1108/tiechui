@@ -91,6 +91,17 @@
         }
       ]
     },
+    "skills": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SkillsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "thinking": {
       "default": null,
       "anyOf": [
@@ -764,6 +775,20 @@
           "format": "uint64",
           "maximum": 9007199254740991.0,
           "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SkillsConfig": {
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Names of discovered skills that sessions leave out.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

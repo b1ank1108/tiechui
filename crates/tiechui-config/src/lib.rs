@@ -60,6 +60,8 @@ pub struct Config {
     pub ask: AskConfig,
     /// User configuration only.
     pub sessions: SessionsConfig,
+    /// User configuration only.
+    pub skills: SkillsConfig,
     #[serde(skip)]
     #[schemars(skip)]
     pub mcp_origins: BTreeMap<String, PathBuf>,
@@ -242,6 +244,13 @@ pub struct SessionsConfig {
     /// Days without activity after which `chui app-server` archives a session; unset keeps them.
     #[schemars(range(min = 1, max = 9007199254740991u64))]
     pub archive_after_days: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsConfig {
+    /// Names of discovered skills that sessions leave out.
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

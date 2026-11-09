@@ -156,8 +156,13 @@ impl Module for SkillsModule {
         "skills"
     }
 
-    fn register(&self, registry: &mut Registry, _: &ModuleConfig) -> Result<(), ToolError> {
-        let resources = self
+    fn register(&self, registry: &mut Registry, config: &ModuleConfig) -> Result<(), ToolError> {
+        let mut module = self.clone();
+        let disabled = &config.skills.disabled;
+        module
+            .skills
+            .retain(|skill| !disabled.contains(&skill.name));
+        let resources = module
             .skills
             .iter()
             .map(|skill| {
@@ -189,9 +194,9 @@ impl Module for SkillsModule {
             })
             .collect();
         registry.register_resources(Arc::new(Resources(resources)));
-        registry.register_context_provider(Arc::new(self.clone()));
-        registry.register_compactor(Arc::new(self.clone()));
-        registry.register_command(Arc::new(ListCommand(self.clone())));
+        registry.register_context_provider(Arc::new(module.clone()));
+        registry.register_compactor(Arc::new(module.clone()));
+        registry.register_command(Arc::new(ListCommand(module)));
         Ok(())
     }
 }
