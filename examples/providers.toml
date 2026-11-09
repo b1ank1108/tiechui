@@ -53,7 +53,8 @@
 # cache_write = 1.25
 
 # Optional map from Tiechui levels to wire values; false marks an unsupported level.
-# Without this table, the provider resolves its normal capabilities.
+# Without this table, the provider resolves its normal capabilities. On
+# openai-responses, off sends effort "none" unless mapped or marked false.
 # [example.models.thinking_levels]
 # off = false
 # minimal = "low"

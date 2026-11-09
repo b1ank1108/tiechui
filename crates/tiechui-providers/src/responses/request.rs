@@ -205,11 +205,17 @@ pub(crate) fn encode(
     }
     if model.reasoning {
         let mut reasoning = json!({"summary":"auto"});
+        let effort = match request.reasoning {
+            Some(level) => Some(mapped.unwrap_or(crate::thinking::effort(level))),
+            // Off is an explicit effort unless the model cannot turn reasoning off.
+            None => mapped.or_else(|| {
+                crate::thinking::offered(model)
+                    .contains(&None)
+                    .then_some("none")
+            }),
+        };
         if compat.supports_reasoning_effort
-            && let Some(effort) = request
-                .reasoning
-                .map(|level| mapped.unwrap_or(crate::thinking::effort(level)))
-                .or(mapped)
+            && let Some(effort) = effort
         {
             reasoning["effort"] = json!(effort);
         }

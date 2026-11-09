@@ -352,7 +352,7 @@ fn levels_compat_fields_and_roles_shape_the_request() {
         crate::responses::request::encode(request, model, compat).unwrap()
     };
     let body = encode(&request, &config.models[0], &config.compat);
-    assert_eq!(body["reasoning"], json!({"summary":"auto"}));
+    assert_eq!(body["reasoning"], json!({"summary":"auto","effort":"none"}));
     assert!(body.get("prompt_cache_key").is_none());
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["store"], false);
@@ -390,6 +390,9 @@ fn levels_compat_fields_and_roles_shape_the_request() {
         ErrorKind::InvalidRequest
     );
     request.reasoning = None;
+    config.models[0].thinking_levels = Some([(L::Off, V::Unsupported(UnsupportedLevel))].into());
+    let body = encode(&request, &config.models[0], &config.compat);
+    assert_eq!(body["reasoning"], json!({"summary":"auto"}));
     config.models[0].reasoning = false;
     let body = encode(&request, &config.models[0], &config.compat);
     assert!(body.get("reasoning").is_none() && body.get("include").is_none());

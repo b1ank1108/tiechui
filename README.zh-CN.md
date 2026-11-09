@@ -183,7 +183,8 @@ theme = "automatic"                    # 跟随终端背景
   `/api/paas/v4`）原样使用。
 - `compat` 表让请求适配 DeepSeek 风格推理网关等服务。模型自己的 `compat` 表可以
   覆盖单个字段，适用于混合多个模型家族的网关。
-- 思考级别会被限制在模型 `thinking_levels` 声明的范围内。
+- 思考级别会被限制在模型 `thinking_levels` 声明的范围内。`openai-responses` 关闭思考时发送
+  effort `none`；不支持它的模型可把 `off` 映射为 `"minimal"` 或标记为 `false`。
 - 模型还可以设置 `cache_retention`、`prices`，Anthropic 上还有 `fallback_models`。
 
 每个 provider 的密钥来自 `providers.toml` 里的 `api_key`，或 `api_key_env` 指定的

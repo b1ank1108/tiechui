@@ -196,6 +196,8 @@ theme = "automatic"                    # follows the terminal background
   reasoning gateways. A model's own `compat` table overrides single members, for
   gateways that mix model families.
 - Thinking levels are clamped to what the model declares in `thinking_levels`.
+  On `openai-responses`, off sends effort `none`; for a model without it, map
+  `off` to `"minimal"` or mark it `false`.
 - Models can also set `cache_retention`, `prices` and, on Anthropic,
   `fallback_models`.
 - `[network]` sets a proxy, hosts that bypass it and an extra CA file for model

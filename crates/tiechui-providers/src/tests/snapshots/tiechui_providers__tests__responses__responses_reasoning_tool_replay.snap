@@ -71,6 +71,7 @@ expression: body
   "max_output_tokens": 4096,
   "model": "fixture-model",
   "reasoning": {
+    "effort": "none",
     "summary": "auto"
   },
   "store": false,
