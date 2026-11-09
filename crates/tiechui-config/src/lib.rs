@@ -385,6 +385,7 @@ impl StatusLineItem {
 pub enum Wire {
     AnthropicMessages,
     OpenaiCompletions,
+    OpenaiResponses,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -456,7 +456,7 @@ export type ProtocolMessage = Submission | Event | JsonRpcMessage;
 
 export type ProviderEntry = { name: string, 
 /**
- * `anthropic-messages` or `openai-completions`.
+ * `anthropic-messages`, `openai-completions` or `openai-responses`.
  */
 wire: string, base_url: string | null, 
 /**

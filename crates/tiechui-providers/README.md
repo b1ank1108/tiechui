@@ -1,18 +1,19 @@
 # tiechui-providers
 
 Neutral model requests and cancellable provider streams. The crate implements
-the `anthropic-messages` and `openai-completions` wire formats using reqwest,
+the `anthropic-messages`, `openai-completions` and `openai-responses` wire formats using reqwest,
 rustls, and eventsource-stream.
 
 `from_config(name, entry)` resolves the key from `entry.api_key` or `entry.api_key_env`. Requests use qualified
 model IDs (`name/model-id`); the wire request uses the configured model ID. Token
 limits and capabilities come from the entry's model list. `base_url` is the API
 root: Anthropic defaults to `https://api.anthropic.com` and appends `/messages`;
-OpenAI defaults to `https://api.openai.com` and appends `/chat/completions`.
+OpenAI defaults to `https://api.openai.com` and appends `/chat/completions`, or
+`/responses` for Responses.
 A root without a version segment (`v` and a digit, such as `v1`, `v4` or
 `v1beta`) gets `/v1` first, so `https://gateway.example` and
 `https://gateway.example/v1` reach the same endpoint while `/api/paas/v4` keeps
-its own version. Both preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
+its own version. All preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
 uses native trust roots plus the `[network]` `ca_cert` file; `[network]` `proxy`
 replaces the `*_PROXY` environment variables. A 300-second read timeout bounds silent connections.
 
@@ -49,7 +50,7 @@ non-reasoning models reject a reasoning level.
 
 The optional model `thinking_levels` table maps `off`, `minimal`, `low`, `medium`,
 `high`, `xhigh`, and `max` to wire strings or `false` (unsupported). Missing keys
-retain built-in mappings. Both wires reject explicitly unsupported requested
+retain built-in mappings. All wires reject explicitly unsupported requested
 levels as `InvalidRequest` instead of clamping them. Adaptive
 Anthropic efforts use mapped strings before the default mapping; budget token
 counts retain their defaults. For always-thinking models, `off = false` means
@@ -80,7 +81,7 @@ message (optional `400 ·`/`400:` prefix and final period). The structured envel
 is limited to 16 KiB. Named parameters, malformed bodies and text-only matches
 are excluded; the actor owns the single recovery attempt and shared retry budget.
 
-Both wires clamp output to the context window minus estimated input and a
+All wires clamp output to the context window minus estimated input and a
 4096-token safety reserve, with a one-token minimum. The actor supplies
 `ModelRequest.input_tokens`: the latest successful assistant's non-zero usage
 (input + output + cache read + cache write, the same counters shown by the context
@@ -97,11 +98,11 @@ distinct other models configured under the same provider. This sends a
 `fallbacks` payload and the `server-side-fallback-2026-07-01` beta. A returned model is
 reported before usage; the actor records it on the assistant and each usage entry,
 including failed/interrupted streams, without changing the selected session model.
-Configured prices follow the returned model. OpenAI completions rejects fallback configuration.
+Configured prices follow the returned model. The OpenAI wires reject fallback configuration.
 
 Model `cache_retention = "none" | "short" | "long"` controls Anthropic breakpoints;
 the default is `short`, and `long` sends a one-hour TTL. Set `long` only on an
-endpoint that accepts it. Completions sends no cache controls or cache keys, so
+endpoint that accepts it. The OpenAI wires send no cache controls or cache keys, so
 this setting leaves its payload unchanged and cannot disable server-managed caching.
 
 Optional model `prices = { input = 2.0, output = 10.0, cache_read = 0.2,
@@ -115,7 +116,7 @@ snapshot; resume retains those estimates without repricing old entries. The TUI'
 optional `estimated-thread-cost` item shows the sum of available estimates.
 
 Session message entries retain the requested reasoning level through reload;
-absence means off or legacy metadata unavailable. Both configured wires change
+absence means off or legacy metadata unavailable. All configured wires change
 request-level effort on a switch. Historical metadata does not alter wire
 payloads.
 
@@ -182,11 +183,39 @@ tokens with saturation. Completion tokens already include reasoning tokens.
 HTTP 200 JSON error bodies and non-null SSE error envelopes use the shared classifier;
 HTTP error bodies are bounded at 64 KiB, and exposed messages at 2048 characters.
 
+## OpenAI Responses
+
+`openai-responses` posts to `/responses` with `stream: true` and `max_output_tokens`.
+Of the compat fields it reads `supports_store` (send `store: false`),
+`supports_developer_role` and `supports_reasoning_effort`; tools always carry
+`strict: false`, since Responses tools are otherwise strict. System messages fold
+into one leading `developer` (reasoning models) or `system` message. User content
+is `input_text`/`input_image`; assistant text replays as a string message, tool
+calls as `function_call` items and results as `function_call_output`, whose output
+is the text or, with images, `input_text` and `input_image` parts. Reasoning models
+always send `reasoning.summary: auto` and include `reasoning.encrypted_content`;
+the effort follows the completions OpenAI format.
+
+The stream keeps no server state. A reasoning item with encrypted content is
+stored, without its `id` and `status`, as the thinking block's opaque data and
+replayed verbatim; reasoning without it is not replayed. No item ids are sent, so
+tool calls are identified by `call_id` alone. Summary parts read as paragraphs,
+and raw `reasoning_text` deltas are accepted too. Neutral indices follow the
+first arrival of message, reasoning and function-call items; other item types
+are skipped. `response.output_item.done` is authoritative and also starts an item
+never announced. `response.completed` ends the stream (tool use when any call
+arrived), `response.incomplete` with `max_output_tokens` is a length stop and
+with `content_filter` an `InvalidRequest`; `response.failed` and `error` events
+use the shared classifier. Usage reads input, cached and gateway cache-write
+input tokens, output and reasoning tokens. EOF before a terminal event is a
+stream error.
+
 ## Limitations
 
 - Authentication uses configured API keys only; there is no OAuth or
   federated/managed-provider authentication.
-- Only the two HTTP wire formats above are supported; OpenAI Responses is not.
+- Only the three HTTP wire formats above are supported; there is no Responses
+  WebSocket mode, `previous_response_id` chaining or built-in tools.
 - Adapters never retry. The session actor owns retries, backoff and
   overflow/length recovery through compaction.
 - Incomplete tool arguments are not repaired; invalid arguments never become
@@ -205,7 +234,8 @@ HTTP error bodies are bounded at 64 KiB, and exposed messages at 2048 characters
 
 ## Verification
 
-All fixtures in `tests/fixtures/anthropic` and `tests/fixtures/openai-completions`
+All fixtures in `tests/fixtures/anthropic`, `tests/fixtures/openai-completions` and
+`tests/fixtures/openai-responses`
 are handwritten and sanitized.
 Tests serve them through loopback wiremock servers and assert exact event
 sequences. Four insta snapshots cover first-turn, tool-result, signed thinking,
@@ -216,7 +246,10 @@ short read timeout before headers and during the body, and termination without E
 Three OpenAI request snapshots cover first turn, tool-result images, and streamed
 reasoning replay on a later tool turn. Exact event tests cover text, reasoning,
 interleaved tools, errors, truncation, usage variants and missing `[DONE]`.
-A shared suite sends identical neutral conversations through both wires and
+Two Responses request snapshots cover the first turn and encrypted reasoning,
+tool-result image and assistant replay; event tests cover summaries, calls
+completed without deltas, incomplete, failed and error events and truncation.
+A shared suite sends identical neutral conversations through all three wires and
 asserts identical content/final usage, cancellation, read-timeout and error-body
 behavior; partial usage timing follows each wire.
 Factory tests use a

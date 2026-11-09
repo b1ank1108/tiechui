@@ -352,7 +352,11 @@ async fn thousand_mcp_tools_have_stable_requests_through_search_and_calls_until_
 async fn assert_http_bodies(requests: &[ModelRequest]) {
     use tiechui_config::{ModelConfig, ProviderConfig, Wire};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
-    for wire in [Wire::AnthropicMessages, Wire::OpenaiCompletions] {
+    for wire in [
+        Wire::AnthropicMessages,
+        Wire::OpenaiCompletions,
+        Wire::OpenaiResponses,
+    ] {
         let server = MockServer::start().await;
         let response = match wire {
             Wire::AnthropicMessages => {
@@ -360,6 +364,9 @@ async fn assert_http_bodies(requests: &[ModelRequest]) {
             }
             Wire::OpenaiCompletions => include_str!(
                 "../../tiechui-providers/tests/fixtures/openai-completions/plain_text.sse"
+            ),
+            Wire::OpenaiResponses => include_str!(
+                "../../tiechui-providers/tests/fixtures/openai-responses/plain_text.sse"
             ),
         };
         Mock::given(method("POST"))

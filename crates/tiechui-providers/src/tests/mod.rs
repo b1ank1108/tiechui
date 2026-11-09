@@ -5,6 +5,7 @@ mod errors;
 mod openai;
 mod recovery;
 mod requests;
+mod responses;
 mod streams;
 mod usage_caching;
 

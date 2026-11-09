@@ -1,0 +1,54 @@
+---
+source: crates/tiechui-providers/src/tests/responses.rs
+expression: body
+---
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": "Be concise.",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "max_output_tokens": 4096,
+  "model": "fixture-model",
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "store": false,
+  "stream": true,
+  "tools": [
+    {
+      "description": "read a file",
+      "name": "read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ]
+}

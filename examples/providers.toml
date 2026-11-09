@@ -11,13 +11,14 @@
 # and model limits.
 # [example]
 # wire = "openai-completions"
-# The other supported wire is "anthropic-messages".
+# The other supported wires are "openai-responses" and "anthropic-messages".
 # Omit base_url for the wire's standard endpoint; .invalid is a placeholder here.
 # /v1 is added unless the URL already has a version segment such as /v1 or /v4.
 # base_url = "https://gateway.example.invalid"
 # api_key_env = "EXAMPLE_API_KEY"
 
-# OpenAI-completions compatibility defaults for this provider. Change only for a
+# OpenAI compatibility defaults for this provider; openai-responses reads only
+# supports_store, supports_developer_role and supports_reasoning_effort. Change only for a
 # gateway that requires it; max_tokens_field also accepts "max_tokens", and
 # thinking_format also accepts "deepseek".
 # [example.compat]

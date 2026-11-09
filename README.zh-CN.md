@@ -148,7 +148,7 @@ profile 目录是 `$TIECHUI_HOME`，默认 `~/.tiechui`：
 
 ```toml
 [gateway]
-wire = "openai-completions"            # 或 "anthropic-messages"
+wire = "openai-completions"            # 或 "openai-responses"、"anthropic-messages"
 base_url = "https://gateway.example"   # 没有版本段时自动补 /v1
 api_key_env = "GATEWAY_API_KEY"        # 或 api_key = "..." 直接写入密钥
 

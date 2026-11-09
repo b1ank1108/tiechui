@@ -45,3 +45,15 @@ pub(crate) fn mapped(
         _ => Ok(None),
     }
 }
+
+/// The OpenAI effort for a level without a mapped string.
+pub(crate) fn effort(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::Xhigh => "xhigh",
+        ReasoningLevel::Max => "max",
+    }
+}

@@ -180,6 +180,12 @@ pub fn provider(
             "fixture-key",
             client,
         )?)),
+        tiechui_config::Wire::OpenaiResponses => Ok(Box::new(crate::responses::Responses::new(
+            name,
+            config,
+            "fixture-key",
+            client,
+        )?)),
     }
 }
 
@@ -195,6 +201,9 @@ pub fn tool_definitions(
             }),
             tiechui_config::Wire::OpenaiCompletions => serde_json::json!({
                 "name": tool["function"]["name"], "description": tool["function"]["description"], "input_schema": tool["function"]["parameters"]
+            }),
+            tiechui_config::Wire::OpenaiResponses => serde_json::json!({
+                "name": tool["name"], "description": tool["description"], "input_schema": tool["parameters"]
             }),
         };
         serde_json::from_value(value)

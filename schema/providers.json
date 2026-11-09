@@ -349,7 +349,8 @@
       "type": "string",
       "enum": [
         "anthropic-messages",
-        "openai-completions"
+        "openai-completions",
+        "openai-responses"
       ]
     }
   }

@@ -475,6 +475,7 @@ async fn models_are_listed_from_the_versioned_root() {
         async move { crate::list_models(&config, &Default::default(), &CancellationToken::new()).await }
     };
     assert_eq!(list(Wire::OpenaiCompletions, "").await.unwrap(), ["a", "b"]);
+    assert_eq!(list(Wire::OpenaiResponses, "").await.unwrap(), ["a", "b"]);
     assert_eq!(list(Wire::AnthropicMessages, "/v1").await.unwrap(), ["c"]);
     let error = list(Wire::OpenaiCompletions, "/denied").await.unwrap_err();
     assert_eq!(error.kind, ErrorKind::Auth);

@@ -198,7 +198,7 @@ pub struct RewindResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderEntry {
     pub name: String,
-    /// `anthropic-messages` or `openai-completions`.
+    /// `anthropic-messages`, `openai-completions` or `openai-responses`.
     pub wire: String,
     pub base_url: Option<String>,
     /// Whether a key is written in the file.

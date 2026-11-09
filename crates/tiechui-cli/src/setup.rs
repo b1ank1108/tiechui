@@ -13,9 +13,10 @@ use tiechui_model::{Content, Message, ModelId, ModelRequest, ReasoningLevel, Rol
 use tiechui_tui::consent::{Answer, Input, Question, ask};
 use tokio_util::sync::CancellationToken;
 
-const FORMATS: [(&str, Wire); 2] = [
+const FORMATS: [(&str, Wire); 3] = [
     ("Anthropic Messages", Wire::AnthropicMessages),
     ("OpenAI Chat Completions", Wire::OpenaiCompletions),
+    ("OpenAI Responses", Wire::OpenaiResponses),
 ];
 
 /// `chui setup`.

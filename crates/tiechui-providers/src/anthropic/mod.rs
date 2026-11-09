@@ -59,16 +59,7 @@ impl ModelProvider for Anthropic {
     }
 
     fn normalize_tool_call_id(&self, id: &str) -> String {
-        id.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .take(64)
-            .collect()
+        normalize_id(id)
     }
 
     async fn stream(
@@ -107,4 +98,18 @@ impl ModelProvider for Anthropic {
             cancel,
         ))
     }
+}
+
+/// At most 64 ASCII letters, digits, `_` and `-`, other characters becoming `_`.
+pub(crate) fn normalize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect()
 }

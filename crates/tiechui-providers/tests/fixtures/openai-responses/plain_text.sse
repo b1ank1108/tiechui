@@ -1,0 +1,23 @@
+: sanitized fixture, with gateway cache-write accounting
+
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","status":"in_progress","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_fixture","type":"message","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":2,"output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":3,"output_index":0,"content_index":0,"delta":"Hello"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":4,"output_index":0,"content_index":0,"delta":"!"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"msg_fixture","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello!","annotations":[]}]}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_fixture","status":"completed","usage":{"input_tokens":23,"input_tokens_details":{"cached_tokens":11,"cache_write_tokens":5},"output_tokens":2}}}
+

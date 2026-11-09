@@ -11,8 +11,17 @@ fn adapter(config: &ProviderConfig) -> Box<dyn ModelProvider> {
         Wire::OpenaiCompletions => {
             Box::new(crate::openai::Openai::new("fixture", config, "fixture-key", client).unwrap())
         }
+        Wire::OpenaiResponses => Box::new(
+            crate::responses::Responses::new("fixture", config, "fixture-key", client).unwrap(),
+        ),
     }
 }
+
+const WIRES: [Wire; 3] = [
+    Wire::AnthropicMessages,
+    Wire::OpenaiCompletions,
+    Wire::OpenaiResponses,
+];
 
 #[test]
 fn cache_retention_requests_preserve_default_and_completions_payloads() {
@@ -108,12 +117,14 @@ fn effort_switch_replays_history_with_the_current_request_effort_on_both_wires()
 
 #[tokio::test]
 async fn usage_details_tolerate_unknown_fields_and_preserve_partial_updates() {
-    for wire in [Wire::AnthropicMessages, Wire::OpenaiCompletions] {
+    for wire in WIRES {
         let fixture = match wire {
             Wire::AnthropicMessages => PLAIN
                 .replace("\"cache_creation_input_tokens\":5", "\"cache_creation_input_tokens\":5,\"cache_creation\":{\"ephemeral_1h_input_tokens\":3,\"future\":true},\"output_tokens_details\":{\"thinking_tokens\":1,\"future\":true}"),
             Wire::OpenaiCompletions => super::openai::PLAIN
                 .replace("\"completion_tokens\":2", "\"completion_tokens\":2,\"completion_tokens_details\":{\"reasoning_tokens\":1,\"future\":true}"),
+            Wire::OpenaiResponses => super::responses::PLAIN
+                .replace("\"output_tokens\":2", "\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":1,\"future\":true}"),
         };
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -152,7 +163,7 @@ async fn usage_details_tolerate_unknown_fields_and_preserve_partial_updates() {
 
 #[test]
 fn cost_uses_only_configured_returned_model_prices_and_counts_reasoning_once() {
-    for wire in [Wire::AnthropicMessages, Wire::OpenaiCompletions] {
+    for wire in WIRES {
         let mut config = config("http://fixture.invalid");
         config.wire = wire;
         let mut priced = config.models[0].clone();
@@ -192,7 +203,7 @@ fn cost_uses_only_configured_returned_model_prices_and_counts_reasoning_once() {
 
 #[tokio::test]
 async fn missing_required_usage_fields_are_partial_but_explicit_zero_is_complete() {
-    for wire in [Wire::AnthropicMessages, Wire::OpenaiCompletions] {
+    for wire in WIRES {
         for partial in [false, true] {
             let fixture = match wire {
                 Wire::AnthropicMessages => {
@@ -213,6 +224,16 @@ async fn missing_required_usage_fields_are_partial_but_explicit_zero_is_complete
                     };
                     format!(
                         "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}},\"finish_reason\":\"stop\"}}],\"usage\":{usage}}}\n\ndata: [DONE]\n\n"
+                    )
+                }
+                Wire::OpenaiResponses => {
+                    let usage = if partial {
+                        r#"{"input_tokens":0}"#
+                    } else {
+                        r#"{"input_tokens":0,"output_tokens":0}"#
+                    };
+                    format!(
+                        "data: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{usage}}}}}\n\n"
                     )
                 }
             };

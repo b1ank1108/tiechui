@@ -4,6 +4,7 @@ mod anthropic;
 mod error;
 pub mod estimate;
 mod openai;
+mod responses;
 mod thinking;
 mod transport;
 
@@ -78,6 +79,9 @@ pub fn from_config(
             name, config, &key, client,
         )?)),
         Wire::OpenaiCompletions => Ok(Box::new(openai::Openai::new(name, config, &key, client)?)),
+        Wire::OpenaiResponses => Ok(Box::new(responses::Responses::new(
+            name, config, &key, client,
+        )?)),
     }
 }
 
@@ -110,7 +114,7 @@ pub async fn list_models(
                 .header("anthropic-version", anthropic::VERSION)
                 .query(&[("limit", "1000")])
         }
-        Wire::OpenaiCompletions => {
+        Wire::OpenaiCompletions | Wire::OpenaiResponses => {
             let transport = transport::Transport::new(
                 "models",
                 config,

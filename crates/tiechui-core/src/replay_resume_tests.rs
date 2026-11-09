@@ -3,6 +3,12 @@ use tiechui_config::{ModelConfig, ProviderConfig, Thinking, Wire};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 const WIRES: [Wire; 2] = [Wire::AnthropicMessages, Wire::OpenaiCompletions];
+/// The wires whose replayed requests the encoding tests read.
+const ENCODERS: [Wire; 3] = [
+    Wire::AnthropicMessages,
+    Wire::OpenaiCompletions,
+    Wire::OpenaiResponses,
+];
 
 #[tokio::test]
 async fn context_inspection_preserves_http_request_bodies_on_both_wires() {
@@ -196,6 +202,9 @@ fn plain(wire: Wire) -> &'static str {
         Wire::OpenaiCompletions => {
             include_str!("../../tiechui-providers/tests/fixtures/openai-completions/plain_text.sse")
         }
+        Wire::OpenaiResponses => {
+            include_str!("../../tiechui-providers/tests/fixtures/openai-responses/plain_text.sse")
+        }
     }
 }
 
@@ -237,8 +246,8 @@ fn load(name: &str) -> SessionStore {
 }
 
 #[tokio::test]
-async fn interrupted_disk_sessions_encode_on_both_wires() {
-    for wire in WIRES {
+async fn interrupted_disk_sessions_encode_on_each_wire() {
+    for wire in ENCODERS {
         let adapter = provider(wire, "http://127.0.0.1:1");
         for (name, expected) in [
             ("esc-stream", vec![]),
@@ -280,7 +289,10 @@ async fn interrupted_disk_sessions_encode_on_both_wires() {
                 );
             }
             let body = encode(wire, messages).await;
-            let messages = body["messages"].as_array().unwrap();
+            let messages = body["messages"]
+                .as_array()
+                .or(body["input"].as_array())
+                .unwrap();
             let results: Vec<_> = match wire {
                 Wire::AnthropicMessages => messages
                     .iter()
@@ -303,6 +315,16 @@ async fn interrupted_disk_sessions_encode_on_both_wires() {
                         )
                     })
                     .collect(),
+                Wire::OpenaiResponses => messages
+                    .iter()
+                    .filter(|m| m["type"] == "function_call_output")
+                    .map(|m| {
+                        (
+                            m["call_id"].as_str().unwrap(),
+                            m["output"].as_str().unwrap(),
+                        )
+                    })
+                    .collect(),
             };
             assert_eq!(results, expected, "{name}: {body}");
             assert!(!body.to_string().contains("partial"));
@@ -318,8 +340,8 @@ async fn interrupted_disk_sessions_encode_on_both_wires() {
 }
 
 #[tokio::test]
-async fn error_images_follow_all_results_on_both_wires() {
-    for wire in WIRES {
+async fn error_images_follow_all_results_on_each_wire() {
+    for wire in ENCODERS {
         let adapter = provider(wire, "http://127.0.0.1:1");
         let messages = replay::prepare(
             load("error-images").build_context_with_origins(&HashSet::new()),
@@ -329,7 +351,10 @@ async fn error_images_follow_all_results_on_both_wires() {
             |id| adapter.normalize_tool_call_id(id),
         );
         let body = encode(wire, messages).await;
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .or(body["input"].as_array())
+            .unwrap();
         match wire {
             Wire::AnthropicMessages => {
                 assert_eq!(messages.len(), 3);
@@ -356,6 +381,19 @@ async fn error_images_follow_all_results_on_both_wires() {
                 assert_eq!(messages[4]["role"], "user");
                 assert_eq!(messages[4]["content"][1]["type"], "image_url");
                 assert_eq!(messages[4]["content"][2]["type"], "image_url");
+            }
+            // Function call outputs carry images, so they stay with the error result.
+            Wire::OpenaiResponses => {
+                assert_eq!(
+                    messages[3]["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|part| part["type"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["input_text", "input_image", "input_image"]
+                );
+                assert_eq!(messages[4]["output"], "contents b");
             }
         }
     }
@@ -849,8 +887,8 @@ impl Tool for CountTool {
 }
 
 #[tokio::test]
-async fn both_wires_recover_stream_after_completed_tool_batch() {
-    for wire in WIRES {
+async fn each_wire_recovers_stream_after_completed_tool_batch() {
+    for wire in ENCODERS {
         let server = MockServer::start().await;
         let tool_response = match wire {
             Wire::AnthropicMessages => {
@@ -858,6 +896,9 @@ async fn both_wires_recover_stream_after_completed_tool_batch() {
             }
             Wire::OpenaiCompletions => {
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"once\",\"function\":{\"name\":\"count\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+            }
+            Wire::OpenaiResponses => {
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"once\",\"name\":\"count\",\"arguments\":\"{}\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
             }
         };
         let failed = match wire {
@@ -868,6 +909,9 @@ async fn both_wires_recover_stream_after_completed_tool_batch() {
                 .to_owned(),
             Wire::OpenaiCompletions => {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n".into()
+            }
+            Wire::OpenaiResponses => {
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"partial\"}\n\n".into()
             }
         };
         responses(
@@ -970,6 +1014,9 @@ async fn both_wires_keep_partial_usage_on_cut_and_cancel_without_counting_finish
                 _ => match wire {
                     Wire::AnthropicMessages => fixture.split("event: message_stop").next().unwrap(),
                     Wire::OpenaiCompletions => fixture.split("data: [DONE]").next().unwrap(),
+                    Wire::OpenaiResponses => {
+                        unreachable!("Responses usage arrives only at completion")
+                    }
                 },
             }
             .to_owned();

@@ -5,7 +5,7 @@ use tiechui_config::{
     CompletionsCompat, MaxTokensField, ModelConfig, ThinkingFormat, ThinkingLevel,
     ThinkingLevelValue,
 };
-use tiechui_model::{Content, ModelRequest, ReasoningLevel, Role};
+use tiechui_model::{Content, ModelRequest, Role};
 
 use crate::{ErrorKind, ProviderError};
 
@@ -269,15 +269,7 @@ pub(crate) fn encode(
         }
         if compat.supports_reasoning_effort {
             if let Some(level) = request.reasoning {
-                let default = match level {
-                    ReasoningLevel::Minimal => "minimal",
-                    ReasoningLevel::Low => "low",
-                    ReasoningLevel::Medium => "medium",
-                    ReasoningLevel::High => "high",
-                    ReasoningLevel::Xhigh => "xhigh",
-                    ReasoningLevel::Max => "max",
-                };
-                body["reasoning_effort"] = json!(mapped.unwrap_or(default));
+                body["reasoning_effort"] = json!(mapped.unwrap_or(crate::thinking::effort(level)));
             } else if compat.thinking_format == ThinkingFormat::Openai
                 && let Some(mapped) = mapped
             {

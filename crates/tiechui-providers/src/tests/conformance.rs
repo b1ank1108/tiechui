@@ -4,7 +4,7 @@ use tiechui_model::ToolResult;
 
 use super::streams::StalledServer;
 use super::*;
-use crate::{ErrorKind, openai::Openai};
+use crate::{ErrorKind, openai::Openai, responses::Responses};
 
 fn adapter(wire: Wire, base: &str, client: reqwest::Client) -> Box<dyn ModelProvider> {
     let mut config = config(base);
@@ -16,15 +16,25 @@ fn adapter(wire: Wire, base: &str, client: reqwest::Client) -> Box<dyn ModelProv
         Wire::OpenaiCompletions => {
             Box::new(Openai::new("fixture", &config, "fixture-key", client).unwrap())
         }
+        Wire::OpenaiResponses => {
+            Box::new(Responses::new("fixture", &config, "fixture-key", client).unwrap())
+        }
     }
 }
 
-const WIRES: [Wire; 2] = [Wire::AnthropicMessages, Wire::OpenaiCompletions];
+const WIRES: [Wire; 3] = [
+    Wire::AnthropicMessages,
+    Wire::OpenaiCompletions,
+    Wire::OpenaiResponses,
+];
+
+const RESPONSES_PREFIX: &str = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Hello\"}\n\n";
 
 fn fixture(wire: Wire) -> &'static str {
     match wire {
         Wire::AnthropicMessages => PLAIN,
         Wire::OpenaiCompletions => super::openai::PLAIN,
+        Wire::OpenaiResponses => super::responses::PLAIN,
     }
 }
 
@@ -92,6 +102,7 @@ async fn both_wires_cancel_stalled_bodies_within_100_ms() {
             Wire::OpenaiCompletions => {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"
             }
+            Wire::OpenaiResponses => RESPONSES_PREFIX,
         };
         let server = StalledServer::start(Some(prefix)).await;
         let provider = adapter(
@@ -174,6 +185,7 @@ async fn both_wires_bound_silent_headers_and_body_reads() {
             Wire::OpenaiCompletions => {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"
             }
+            Wire::OpenaiResponses => RESPONSES_PREFIX,
         };
         for body in [None, Some(""), Some(prefix)] {
             let server = StalledServer::start(body).await;
@@ -318,6 +330,9 @@ async fn usage_in_a_refusal_event_is_delivered_before_the_error_on_each_wire() {
             }
             Wire::OpenaiCompletions => {
                 "data: {\"choices\":[{\"finish_reason\":\"content_filter\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n"
+            }
+            Wire::OpenaiResponses => {
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"content_filter\"},\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n\n"
             }
         };
         let server = MockServer::start().await;

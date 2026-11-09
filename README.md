@@ -159,7 +159,7 @@ minimal setup below for you: your own endpoint and model, then selects it.
 
 ```toml
 [gateway]
-wire = "openai-completions"            # or "anthropic-messages"
+wire = "openai-completions"            # or "openai-responses", "anthropic-messages"
 base_url = "https://gateway.example"   # /v1 is added unless the URL has a version
 api_key_env = "GATEWAY_API_KEY"        # or api_key = "..." to write the key inline
 
