@@ -25,16 +25,10 @@ fn fixture(layout: &str, destination: &Path) -> PathBuf {
             if entry.file_type().unwrap().is_dir() {
                 copy(&entry.path(), &target);
             } else {
-                let text = fs::read_to_string(entry.path())
-                    .unwrap()
-                    .replace(
-                        "\"FIXTURE_SERVER\"",
-                        &json!(env!("CARGO_BIN_EXE_plugin-test-server")).to_string(),
-                    )
-                    .replace(
-                        "\"./server\"",
-                        &json!(format!("./server{}", std::env::consts::EXE_SUFFIX)).to_string(),
-                    );
+                let text = fs::read_to_string(entry.path()).unwrap().replace(
+                    "\"FIXTURE_SERVER\"",
+                    &json!(env!("CARGO_BIN_EXE_plugin-test-server")).to_string(),
+                );
                 fs::write(target, text).unwrap();
             }
         }
@@ -197,7 +191,7 @@ async fn all_layouts_contribute_skills_live_mcp_and_approved_hooks() {
             while mcp
                 .statuses()
                 .iter()
-                .any(|s| s.state != ServerState::Stopped)
+                .any(|s| matches!(s.state, ServerState::Starting | ServerState::Ready))
             {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
