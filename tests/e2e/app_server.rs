@@ -398,7 +398,12 @@ async fn workspace_services_through_app_server() {
 
     let terminal = json!({"id": "t", "cwd": root, "cols": 80, "rows": 24});
     client.ok("terminal/create", terminal).await;
-    let echo = json!({"id": "t", "data": "echo tiechui-$((40 + 2))\n"});
+    let command = if cfg!(windows) {
+        "set /a tc=40+2\r\necho tiechui-%tc%\r\n"
+    } else {
+        "echo tiechui-$((40 + 2))\n"
+    };
+    let echo = json!({"id": "t", "data": command});
     client.ok("terminal/write", echo).await;
     let mut output = String::new();
     while !output.contains("tiechui-42") {
@@ -428,6 +433,7 @@ async fn git_unstage_and_discard_keep_stdout_valid_json_rpc() {
         assert!(output.status.success(), "{output:?}");
     };
     git(&["init", "-q"]);
+    git(&["config", "core.autocrlf", "false"]);
     let mut client = fixture.client().await;
     let root = fixture.cwd.display().to_string();
     let op = |kind| json!({"root":root, "op":{"kind":kind,"paths":["hello.txt"]}});
@@ -1281,7 +1287,7 @@ async fn agent_definitions_are_listed_saved_moved_and_deleted() {
     assert_eq!(names, expected);
     assert!(list["agents"][0]["path"].is_null());
 
-    let user = fixture.home.join("agents/custom.md");
+    let user = fixture.home.join("agents").join("custom.md");
     std::fs::create_dir_all(user.parent().unwrap()).unwrap();
     std::fs::write(
         &user,
