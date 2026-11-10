@@ -262,6 +262,39 @@ fn rejects_escapes_symlinks_invalid_schemas_duplicates_and_cancelled_operations(
     assert!(remove("paths", &home, &cancel).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn removal_takes_the_whole_package_or_leaves_it_intact() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = temp();
+    let source = fixture("codex", temp.path());
+    let home = temp.path().join("home");
+    let cancel = CancellationToken::new();
+    let name = add(&source, &home, &cancel).unwrap();
+    let plugins = home.join("plugins");
+    let installed = plugins.join(&name);
+    fs::create_dir_all(installed.join("nested")).unwrap();
+    fs::write(installed.join("nested/file"), "keep").unwrap();
+    // A directory that cannot move stands in for one that another session holds open on Windows.
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o555)).unwrap();
+    let error = remove(&name, &home, &cancel).unwrap_err();
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(error.0.contains("close other sessions"), "{}", error.0);
+    assert!(installed.join("nested/file").exists());
+    assert!(plugins.join(format!(".records/{name}.json")).exists());
+    fs::create_dir_all(plugins.join(".remove-stale/held")).unwrap();
+    remove(&name, &home, &cancel).unwrap();
+    assert!(!installed.exists());
+    assert!(!plugins.join(format!(".records/{name}.json")).exists());
+    assert!(fs::read_dir(&plugins).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".remove-")
+    }));
+}
+
 #[test]
 fn legacy_manifest_uses_directory_name_and_ignores_unrelated_root_manifest() {
     let temp = temp();

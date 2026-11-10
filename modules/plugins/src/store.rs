@@ -260,15 +260,45 @@ pub fn remove(name: &str, home: &Path, cancel: &CancellationToken) -> Result<(),
         return Err(ToolError("invalid or reserved plugin name".into()));
     }
     let _lock = lock(home, cancel)?;
-    let path = home.join("plugins").join(name);
+    let directory = home.join("plugins");
+    let path = directory.join(name);
     if !fs::symlink_metadata(&path)?.file_type().is_dir() {
         return Err(ToolError("installed plugin must be a directory".into()));
     }
     check(cancel)?;
-    fs::remove_dir_all(path)?;
+    sweep(&directory);
+    // One rename takes the whole package out, so a file that another session holds
+    // open (Windows locks running executables) leaves it intact rather than half deleted.
+    let trash = tempfile::Builder::new()
+        .prefix(".remove-")
+        .tempdir_in(&directory)?;
+    let moved = trash.path().join(name);
+    fs::rename(&path, &moved).map_err(|error| {
+        ToolError(format!(
+            "cannot remove plugin {name} at {}: {error}; close other sessions that use it and retry",
+            path.display()
+        ))
+    })?;
     match fs::remove_file(record_path(home, name)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            fs::rename(&moved, &path)?;
+            return Err(e.into());
+        }
         _ => {}
     }
+    // Dropping the trash deletes it; whatever is still held open waits for the next sweep.
+    drop(trash);
     Ok(())
+}
+
+/// Deletes what earlier removals could not, such as files that were still running.
+fn sweep(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".remove-") {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
 }
