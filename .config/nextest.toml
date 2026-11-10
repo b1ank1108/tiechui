@@ -1,0 +1,6 @@
+# Only the Windows CI job selects this profile; local runs and the Unix jobs keep nextest's defaults.
+[profile.ci]
+# A retried pass is still reported as flaky, so one runner stall does not hide or fail the run.
+retries = 1
+slow-timeout = { period = "30s", terminate-after = 2 }
+fail-fast = false
