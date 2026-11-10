@@ -279,7 +279,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 
 | Command | Purpose |
 | --- | --- |
-| `/model [provider/id]`, `/thinking [level]` | Switch model or thinking level |
+| `/model [provider/id]`, `/thinking [level]` | Switch model or thinking level and save it as the default for new sessions |
 | `/new`, `/resume`, `/retry` | New session, saved session, retry the failed request |
 | `/reload` | Reload config, context files, skills, prompts, MCP, plugins and hooks |
 | `/compact [instructions]` | Summarize older context now |
@@ -290,7 +290,7 @@ a goal or scheduled tasks. `/statusline` chooses the items. See
 | `/loop [interval] <prompt>`, `/cron-list`, `/cron-delete <id>` | Run a prompt now and on an interval; list or cancel scheduled tasks |
 | `/subagents` | Child tasks and their output |
 | `/shells [output\|background\|stop <id>]` | Shell tasks: view output, move a running command to the background, stop it |
-| `/permissions [rules\|auto\|yolo\|show]` | Pick the mode for this session, or show rules, grants and recent decisions |
+| `/permissions [rules\|auto\|yolo\|show]` | Switch the mode and save it as the default, or show rules, grants and recent decisions |
 | `/status` | Module state, config paths, diagnostics |
 | `/trust [allow\|deny]` | Project trust |
 | `/skills` | Insert a skill into the draft; use `chui skills list` outside the TUI |
@@ -378,7 +378,9 @@ The **mode** decides what happens to a call the rules would ask about:
 | `yolo` | Approved |
 
 Set the mode with `permissions.mode` in the user config (project config cannot
-set it), `--mode` for one run, or `/permissions <mode>` for the current session.
+set it), or `--mode` for one run. `/permissions <mode>` switches the current
+session and saves the mode to `permissions.mode`, so a saved `yolo` applies to
+every later session until you switch back.
 In every mode, explicit denies apply, and writes to **protected paths** ask unless
 a user rule allows them: `.git`, `.agents`, `.claude`, `.tiechui`, `.vscode`,
 `.idea`, shell profiles, `.gitconfig`, `.mcp.json` and `.env` files. Invalid

@@ -90,6 +90,8 @@ pub struct App {
     theme_picker: Option<crate::theme_picker::ThemePicker>,
     save_theme: Option<String>,
     save_model: Option<String>,
+    save_thinking: Option<String>,
+    save_permission_mode: Option<String>,
     width: usize,
     height: usize,
     thread: Option<(ThreadId, SessionEpoch)>,
@@ -283,6 +285,8 @@ impl App {
             theme_picker: None,
             save_theme: None,
             save_model: None,
+            save_thinking: None,
+            save_permission_mode: None,
             width: width.max(1),
             height: 24,
             thread: None,
@@ -443,6 +447,16 @@ impl App {
     /// A model picked with `/model`, as `<provider>/<model>`.
     pub fn take_model_save(&mut self) -> Option<String> {
         self.save_model.take()
+    }
+
+    /// A thinking level picked with `/thinking` or the model picker, as the config spells it.
+    pub fn take_thinking_save(&mut self) -> Option<String> {
+        self.save_thinking.take()
+    }
+
+    /// A mode chosen with `/permissions`: `rules`, `auto` or `yolo`.
+    pub fn take_permission_mode_save(&mut self) -> Option<String> {
+        self.save_permission_mode.take()
     }
 
     pub fn reload_theme(&mut self, name: Option<String>) {
@@ -1309,9 +1323,7 @@ impl App {
                     "",
                 );
             }
-            Action::Module => {
-                self.send(Op::RunCommand { name, arguments });
-            }
+            Action::Module => self.pick(Op::RunCommand { name, arguments }),
         }
     }
 
@@ -1343,10 +1355,21 @@ impl App {
         }
     }
 
-    /// A picked model also becomes the default for new sessions.
+    /// A picked model, thinking level or permission mode also becomes the default for new
+    /// sessions, whether picked from a list or typed as an argument.
     fn pick(&mut self, op: Op) {
-        if let Op::SetModel { model, .. } = &op {
-            self.save_model = Some(model.clone());
+        match &op {
+            Op::SetModel { model, .. } => self.save_model = Some(model.clone()),
+            Op::SetThinking { level } => {
+                self.save_thinking = Some(status::thinking_name(*level).into());
+            }
+            // The permissions module switches on exactly these arguments.
+            Op::RunCommand { name, arguments } if name == "permissions" => {
+                if let mode @ ("rules" | "auto" | "yolo") = arguments.trim() {
+                    self.save_permission_mode = Some(mode.into());
+                }
+            }
+            _ => {}
         }
         self.send(op);
     }

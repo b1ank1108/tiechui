@@ -255,7 +255,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
 | 命令 | 用途 |
 | --- | --- |
-| `/model [provider/id]`、`/thinking [level]` | 切换模型或思考级别 |
+| `/model [provider/id]`、`/thinking [level]` | 切换模型或思考级别，并保存为新会话的默认值 |
 | `/new`、`/resume`、`/retry` | 新会话、已保存的会话、重试失败的请求 |
 | `/reload` | 重新加载配置、上下文文件、技能、MCP、插件和 hooks |
 | `/compact [instructions]` | 立即总结较早的上下文 |
@@ -266,7 +266,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `/loop [interval] <prompt>`、`/cron-list`、`/cron-delete <id>` | 立即并按间隔运行提示；列出或取消定时任务 |
 | `/subagents` | 子任务及其输出 |
 | `/shells [output\|background\|stop <id>]` | shell 任务：查看输出、把运行中的命令转入后台、停止 |
-| `/permissions [rules\|auto\|yolo\|show]` | 选择本会话的模式，或查看规则、授权和最近的决定 |
+| `/permissions [rules\|auto\|yolo\|show]` | 切换模式并保存为默认值，或查看规则、授权和最近的决定 |
 | `/status` | 模块状态、配置路径、诊断 |
 | `/trust [allow\|deny]` | 项目信任 |
 | `/skills` | 把技能插入草稿；界面外用 `chui skills list` |
@@ -345,8 +345,9 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `auto` | 工作区内的编辑直接放行。其余调用由会话模型的一次性请求审查：通过的调用运行，被拦的调用把原因返回给模型。连续拦截 3 次或本会话累计 20 次，或没有模型可用时，改为询问你。宽泛的 `bash` 放行（`*`、解释器、`npm run` 等）会被忽略，这些命令同样要审查 |
 | `yolo` | 直接批准 |
 
-模式可以在用户配置的 `permissions.mode` 中设置（项目配置不能设置），用 `--mode`
-指定单次运行，或用 `/permissions <mode>` 切换当前会话。任何模式下显式 deny 都生效，
+模式可以在用户配置的 `permissions.mode` 中设置（项目配置不能设置），或用 `--mode`
+指定单次运行。`/permissions <mode>` 切换当前会话，并把模式保存到 `permissions.mode`，
+所以保存的 `yolo` 会对之后的每个会话生效，直到再切换回来。任何模式下显式 deny 都生效，
 对**受保护路径**的写入总会询问，除非有用户规则放行：`.git`、`.agents`、`.claude`、
 `.tiechui`、`.vscode`、`.idea`、shell 配置文件、`.gitconfig`、`.mcp.json` 和 `.env`
 文件。无效的项目规则绝不会绕过你。

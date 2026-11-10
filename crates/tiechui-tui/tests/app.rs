@@ -1221,6 +1221,7 @@ fn model_and_thinking_pickers_switch_through_the_session() {
             level: ThinkingLevel::High
         }]
     );
+    assert_eq!(app.take_thinking_save().as_deref(), Some("high"));
     typed(&mut app, "/thinking");
     app.key(key(KeyCode::Enter));
     typed(&mut app, "hi");
@@ -1235,6 +1236,7 @@ fn model_and_thinking_pickers_switch_through_the_session() {
     assert!(ops(&mut app).is_empty());
     assert!(!text(&app.live().0).iter().any(|r| r.contains("Thinking")));
     assert!(app.take_model_save().is_none());
+    assert!(app.take_thinking_save().is_none());
 }
 
 #[test]
@@ -1263,6 +1265,7 @@ fn permissions_offers_the_modes_and_picks_by_digit() {
             arguments: "auto".into(),
         }]
     );
+    assert_eq!(app.take_permission_mode_save().as_deref(), Some("auto"));
     typed(&mut app, "/permissions yolo");
     app.key(key(KeyCode::Enter));
     assert_eq!(
@@ -1272,6 +1275,19 @@ fn permissions_offers_the_modes_and_picks_by_digit() {
             arguments: "yolo".into(),
         }]
     );
+    assert_eq!(app.take_permission_mode_save().as_deref(), Some("yolo"));
+    for arguments in ["show", "everything"] {
+        typed(&mut app, &format!("/permissions {arguments}"));
+        app.key(key(KeyCode::Enter));
+        assert_eq!(
+            ops(&mut app),
+            [Op::RunCommand {
+                name: "permissions".into(),
+                arguments: arguments.into(),
+            }]
+        );
+        assert!(app.take_permission_mode_save().is_none());
+    }
 }
 
 fn asked(id: &str, request: ApprovalRequest) -> Event {

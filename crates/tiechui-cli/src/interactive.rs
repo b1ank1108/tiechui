@@ -306,6 +306,16 @@ impl tiechui_tui::Services for Services {
             .map_err(|error| error.to_string())
     }
 
+    fn save_thinking(&self, level: &str) -> Result<(), String> {
+        tiechui_config::save_preference(&self.config, "thinking", level.into())
+            .map_err(|error| error.to_string())
+    }
+
+    fn save_permission_mode(&self, mode: &str) -> Result<(), String> {
+        tiechui_config::save_preference(&self.config, "permissions.mode", mode.into())
+            .map_err(|error| error.to_string())
+    }
+
     fn trust(&self, cwd: &Path, arguments: &str) -> String {
         trust(&self.home, cwd, arguments)
     }

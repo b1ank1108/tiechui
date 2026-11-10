@@ -907,8 +907,18 @@ def model(f):
     s.wait("alpha", absent="enter select")
     s.command("use alpha", "ALPHA_DONE")
     s.check(f.mock.requests[-1]["model"] == "alpha", "Model did not switch back")
+    s.draft("/thinking off")
+    s.send("\r")
+    s.command("/permissions auto", "Permission mode: auto")
+    s.wait("⏵⏵ auto")
     s.exit()
-    s.check('model = "fixture/alpha"' in f.config.read_text(), "Picked model was not saved")
+    config = f.config.read_text()
+    s.check('model = "fixture/alpha"' in config, "Picked model was not saved")
+    s.check('thinking = "off"' in config, "Picked thinking level was not saved")
+    s.check('mode = "auto"' in config, "Picked permission mode was not saved")
+    s = f.start()
+    s.wait("⏵⏵ auto")
+    s.exit()
 
 
 def approval(f):
