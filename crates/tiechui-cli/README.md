@@ -13,5 +13,4 @@ default initial stack commit size.
 
 This provides headroom for polling nested session futures on the main thread;
 large search buffers remain heap-allocated. The CLI regression test reads the PE
-headers of both binaries to verify their stack reserve. Validation evidence and
-open Windows issues are in [Windows validation](../../docs/windows-validation.md).
+headers of both binaries to verify their stack reserve.
