@@ -167,15 +167,21 @@ impl Peer {
         cancel: CancellationToken,
         progress: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Result<Value, ToolError> {
-        let result = process::request(
+        let request = process::request(
             &self.peer,
             rmcp::model::ClientRequest::CustomRequest(CustomRequest::new(method, Some(params))),
             timeout,
             cancel,
             self.session.clone(),
             progress.map(|callback| (self.progress.subscribe(), callback)),
-        )
-        .await?;
+        );
+        // After EOF rmcp drains outgoing responses for up to 5 seconds before failing
+        // pending requests; a plugin that has exited will not answer.
+        let result = tokio::select! {
+            biased;
+            result = request => result?,
+            _ = self.stopped.cancelled() => return Err(ToolError("Plugin stopped".into())),
+        };
         result
             .get("tiechuiResult")
             .cloned()

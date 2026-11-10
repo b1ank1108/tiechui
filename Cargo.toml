@@ -41,7 +41,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 regex = "1.12"
-rmcp = { version = "=3.5.0", default-features = false, features = ["client", "elicitation", "transport-async-rw", "transport-streamable-http-client"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "elicitation", "transport-async-rw", "transport-streamable-http-client"] }
 sse-stream = "0.2.6"
 axum = "0.8"
 saphyr = { version = "0.3.3", default-features = false }
