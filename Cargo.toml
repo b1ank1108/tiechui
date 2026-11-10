@@ -94,3 +94,9 @@ url = "2.5"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 print_stdout = "deny"
+
+[profile.dev]
+# Line tables keep backtraces readable while debug binaries stay small; tests copy and hash
+# plugin binaries, which full DWARF makes several times larger on Linux.
+# Use CARGO_PROFILE_DEV_DEBUG=full when a debugger needs locals.
+debug = "line-tables-only"
