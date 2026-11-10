@@ -154,6 +154,9 @@ fn process_fixture() {
             std::thread::sleep(Duration::from_secs(1));
         }
     }
+    // Print before spawning so this line always precedes the child's.
+    println!("{role}:{}", std::process::id());
+    std::io::stdout().flush().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "process_fixture", "--nocapture"])
         .env(
@@ -166,8 +169,6 @@ fn process_fixture() {
         )
         .spawn()
         .unwrap();
-    println!("{role}:{}", std::process::id());
-    std::io::stdout().flush().unwrap();
     if mode == "detached" {
         let ready = std::env::var_os("TIECHUI_PROCESS_READY").unwrap();
         while !Path::new(&ready).exists() {
