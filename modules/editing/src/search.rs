@@ -28,7 +28,9 @@ async fn ripgrep(cancel: &CancellationToken) -> Result<PathBuf, ToolError> {
                 .unwrap_or_default()
                 .join(".tiechui")
         });
-    let local = home.join("bin/rg");
+    let local = home
+        .join("bin")
+        .join(format!("rg{}", std::env::consts::EXE_SUFFIX));
     find_binary(&local, "rg", cancel).await
 }
 
