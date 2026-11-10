@@ -1,5 +1,7 @@
 //! Prompts the session waits on, one at a time: permission approvals and MCP elicitations.
 
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::style::Modifier;
 use ratatui_core::text::{Line, Span};
@@ -28,7 +30,8 @@ pub enum Prompt {
 }
 
 impl Prompt {
-    pub fn new(request: ApprovalRequest) -> Self {
+    /// `cwd` and `home` shorten paths in permission requests.
+    pub fn new(request: ApprovalRequest, cwd: &Path, home: Option<&Path>) -> Self {
         match request {
             ApprovalRequest::Plugin { plugin, prompt } => crate::plugin::prompt(plugin, prompt),
             ApprovalRequest::Information { title, text } => {
@@ -56,6 +59,8 @@ impl Prompt {
                 values,
                 matched_pattern,
                 session_patterns,
+                cwd,
+                home,
             )),
             ApprovalRequest::Elicitation { server, request } => {
                 Self::Elicitation(Elicitation::new(&server, &request))
@@ -99,7 +104,7 @@ impl Prompt {
             Self::Information(prompt) => (prompt.render(width, height, theme), None),
             Self::Editor(prompt) => prompt.render(width, height, theme),
             Self::Rewind(prompt) => (prompt.render(width, height.saturating_sub(2), theme), None),
-            Self::Ask(prompt) => prompt.render(width, height.saturating_sub(3), theme),
+            Self::Ask(prompt) => prompt.render(width, height.saturating_sub(2), theme),
             Self::Permission(prompt) => prompt.render(width, height, theme),
             Self::Elicitation(prompt) => prompt.render(width, height, theme),
         }

@@ -1,43 +1,117 @@
-//! `/model`, `/thinking` and `/permissions`: pick one entry from a list, selector rows on
-//! the input surface.
+//! `/model`, `/thinking` and `/permissions`: pick one entry from a list. Models with
+//! several thinking levels take one inline with ←→.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui_core::style::{Modifier, Style};
+use ratatui_core::style::Modifier;
 use ratatui_core::text::{Line, Span};
 use tiechui_protocol::{ModelInfo, Op, ThinkingLevel};
 
+use crate::sheet::{self, List, Row};
 use crate::status::{PermissionMode, compact_tokens, thinking_name};
-use crate::status_picker::surface;
 use crate::theme::Theme;
 use crate::wrap;
 
 const ROWS: usize = 10;
 
-pub struct Choice {
-    pub label: String,
-    pub detail: String,
-    pub current: bool,
-    pub op: Op,
+/// The levels a model offers, the one it would start at, and the one chosen.
+pub struct Thinking {
+    levels: Vec<ThinkingLevel>,
+    start: usize,
+    index: usize,
 }
 
-pub fn models(models: &[ModelInfo], current: Option<&ModelInfo>) -> Vec<Choice> {
+pub struct Choice {
+    /// What an exact query picks, and what search matches with the rest.
+    pub name: String,
+    label: String,
+    /// Dim aligned columns: the first goes on narrow terminals, the last aligns right.
+    columns: Vec<String>,
+    detail: String,
+    current: bool,
+    /// Shown in the warning tone.
+    caution: bool,
+    /// A blank row before it.
+    gap: bool,
+    pub op: Op,
+    pub thinking: Option<Thinking>,
+}
+
+impl Choice {
+    fn new(label: impl Into<String>, detail: impl Into<String>, op: Op) -> Self {
+        let label = label.into();
+        Self {
+            name: label.clone(),
+            label,
+            columns: Vec::new(),
+            detail: detail.into(),
+            current: false,
+            caution: false,
+            gap: false,
+            op,
+            thinking: None,
+        }
+    }
+
+    fn ops(&self) -> Vec<Op> {
+        let mut ops = vec![self.op.clone()];
+        if let Some(thinking) = self.thinking.as_ref().filter(|t| t.index != t.start) {
+            ops.push(Op::SetThinking {
+                level: thinking.levels[thinking.index],
+            });
+        }
+        ops
+    }
+}
+
+/// The nearest supported level at or above `level`, else the nearest below, as the core does.
+fn clamp(level: ThinkingLevel, levels: &[ThinkingLevel]) -> usize {
+    let above = (0..levels.len())
+        .filter(|i| levels[*i] >= level)
+        .min_by_key(|i| levels[*i]);
+    let below = (0..levels.len())
+        .filter(|i| levels[*i] < level)
+        .max_by_key(|i| levels[*i]);
+    above.or(below).unwrap_or(0)
+}
+
+pub fn models(
+    models: &[ModelInfo],
+    current: Option<&ModelInfo>,
+    thinking: Option<ThinkingLevel>,
+) -> Vec<Choice> {
+    let thinking = thinking.unwrap_or(ThinkingLevel::Off);
     models
         .iter()
         .map(|model| {
             let name = format!("{}/{}", model.provider, model.id);
-            Choice {
-                label: name.clone(),
-                detail: if model.context_window > 0 {
-                    format!("{} window", compact_tokens(model.context_window))
+            let mut choice = Choice::new(
+                model.id.clone(),
+                "",
+                Op::SetModel {
+                    provider: model.provider.clone(),
+                    model: name.clone(),
+                },
+            );
+            choice.name = name;
+            choice.columns = vec![
+                model.provider.clone(),
+                if model.context_window > 0 {
+                    compact_tokens(model.context_window)
                 } else {
                     String::new()
                 },
-                current: current.is_some_and(|c| c.provider == model.provider && c.id == model.id),
-                op: Op::SetModel {
-                    provider: model.provider.clone(),
-                    model: name,
-                },
+            ];
+            choice.current =
+                current.is_some_and(|c| c.provider == model.provider && c.id == model.id);
+            if model.thinking_levels.len() > 1 {
+                let start = clamp(thinking, &model.thinking_levels);
+                choice.thinking = Some(Thinking {
+                    levels: model.thinking_levels.clone(),
+                    start,
+                    index: start,
+                });
             }
+            choice
         })
         .collect()
 }
@@ -45,20 +119,23 @@ pub fn models(models: &[ModelInfo], current: Option<&ModelInfo>) -> Vec<Choice> 
 pub fn thinking(levels: &[ThinkingLevel], current: Option<ThinkingLevel>) -> Vec<Choice> {
     levels
         .iter()
-        .map(|level| Choice {
-            label: thinking_name(*level).into(),
-            detail: match level {
+        .map(|level| {
+            let detail = match level {
                 ThinkingLevel::Off => "No reasoning",
-                ThinkingLevel::Minimal => "Very brief reasoning (~1k tokens)",
-                ThinkingLevel::Low => "Light reasoning (~2k tokens)",
-                ThinkingLevel::Medium => "Moderate reasoning (~8k tokens)",
-                ThinkingLevel::High => "Deep reasoning (~16k tokens)",
-                ThinkingLevel::Xhigh => "Extra-high reasoning (~32k tokens)",
+                ThinkingLevel::Minimal => "~1k tokens",
+                ThinkingLevel::Low => "~2k tokens",
+                ThinkingLevel::Medium => "~8k tokens",
+                ThinkingLevel::High => "~16k tokens",
+                ThinkingLevel::Xhigh => "~32k tokens",
                 ThinkingLevel::Max => "Maximum reasoning",
-            }
-            .into(),
-            current: current == Some(*level),
-            op: Op::SetThinking { level: *level },
+            };
+            let mut choice = Choice::new(
+                thinking_name(*level),
+                detail,
+                Op::SetThinking { level: *level },
+            );
+            choice.current = current == Some(*level);
+            choice
         })
         .collect()
 }
@@ -69,7 +146,7 @@ pub fn permissions(current: PermissionMode) -> Vec<Choice> {
         name: "permissions".into(),
         arguments: arguments.into(),
     };
-    [
+    let mut choices: Vec<Choice> = [
         (
             PermissionMode::Rules,
             "rules",
@@ -87,42 +164,51 @@ pub fn permissions(current: PermissionMode) -> Vec<Choice> {
         ),
     ]
     .into_iter()
-    .map(|(mode, label, detail)| Choice {
-        label: label.into(),
-        detail: detail.into(),
-        current: mode == current,
-        op: command(label),
+    .map(|(mode, label, detail)| {
+        let mut choice = Choice::new(label, detail, command(label));
+        choice.current = mode == current;
+        choice.caution = mode == PermissionMode::Yolo;
+        choice
     })
-    .chain([Choice {
-        label: "show".into(),
-        detail: "Effective rules, session grants and recent decisions".into(),
-        current: false,
-        op: command("show"),
-    }])
-    .collect()
+    .collect();
+    let mut show = Choice::new(
+        "show",
+        "Effective rules, session grants and recent decisions",
+        command("show"),
+    );
+    show.gap = true;
+    choices.push(show);
+    choices
 }
 
 pub enum Outcome {
     Open,
     Cancel,
-    Pick(Op),
+    Pick(Vec<Op>),
 }
 
 pub struct Select {
     title: &'static str,
+    meta: String,
     choices: Vec<Choice>,
     search: String,
     selected: usize,
 }
 
 impl Select {
-    /// An exact label in `query` picks at once; anything else opens the list searching it.
-    pub fn open(title: &'static str, choices: Vec<Choice>, query: &str) -> Result<Op, Self> {
-        if let Some(choice) = choices.iter().find(|choice| choice.label == query) {
-            return Ok(choice.op.clone());
+    /// An exact name in `query` picks at once; anything else opens the list searching it.
+    pub fn open(
+        title: &'static str,
+        meta: String,
+        choices: Vec<Choice>,
+        query: &str,
+    ) -> Result<Vec<Op>, Self> {
+        if let Some(choice) = choices.iter().find(|choice| choice.name == query) {
+            return Ok(vec![choice.op.clone()]);
         }
         let mut select = Self {
             title,
+            meta,
             choices,
             search: query.to_owned(),
             selected: 0,
@@ -138,7 +224,13 @@ impl Select {
         (0..self.choices.len())
             .filter(|index| {
                 let choice = &self.choices[*index];
-                let text = format!("{} {}", choice.label, choice.detail).to_lowercase();
+                let text = format!(
+                    "{} {} {}",
+                    choice.name,
+                    choice.columns.join(" "),
+                    choice.detail
+                )
+                .to_lowercase();
                 let mut rest = text.chars();
                 query.chars().all(|c| rest.any(|n| n == c))
             })
@@ -154,6 +246,13 @@ impl Select {
         !self.numbered() || !self.search.is_empty()
     }
 
+    fn adjustable(&self) -> Option<usize> {
+        self.filtered()
+            .get(self.selected)
+            .copied()
+            .filter(|index| self.choices[*index].thinking.is_some())
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
         let filtered = self.filtered();
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -162,12 +261,23 @@ impl Select {
             KeyCode::Char('c') if control => return Outcome::Cancel,
             KeyCode::Enter => {
                 return filtered.get(self.selected).map_or(Outcome::Open, |index| {
-                    Outcome::Pick(self.choices[*index].op.clone())
+                    Outcome::Pick(self.choices[*index].ops())
                 });
             }
             KeyCode::Char(c @ '1'..='9') if self.numbered() && !control => {
                 if let Some(index) = filtered.get(c as usize - '1' as usize) {
-                    return Outcome::Pick(self.choices[*index].op.clone());
+                    return Outcome::Pick(self.choices[*index].ops());
+                }
+            }
+            KeyCode::Left | KeyCode::Right => {
+                if let Some(index) = self.adjustable()
+                    && let Some(thinking) = &mut self.choices[index].thinking
+                {
+                    thinking.index = if key.code == KeyCode::Left {
+                        thinking.index.saturating_sub(1)
+                    } else {
+                        (thinking.index + 1).min(thinking.levels.len() - 1)
+                    };
                 }
             }
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -188,6 +298,48 @@ impl Select {
         Outcome::Open
     }
 
+    fn row(&self, choice: &Choice, selected: bool, widths: &[usize], theme: &Theme) -> Row {
+        let mut row = Row::new(choice.label.clone(), choice.detail.clone(), theme);
+        row.current = choice.current;
+        if choice.caution {
+            row.label[0].style = theme.warning;
+        }
+        let last = widths.len().saturating_sub(1);
+        let mut cells: Vec<String> = choice
+            .columns
+            .iter()
+            .zip(widths)
+            .enumerate()
+            .filter(|(_, (_, width))| **width > 0)
+            .map(|(index, (text, width))| {
+                if index == last {
+                    format!("{text:>width$}")
+                } else {
+                    format!("{text:<width$}")
+                }
+            })
+            .collect();
+        if let Some(thinking) = &choice.thinking {
+            cells.push(String::new());
+            row.detail.push(Span::styled(cells.join("   "), theme.dim));
+            if selected {
+                row.detail.extend([
+                    Span::styled("‹ ", theme.dim),
+                    Span::styled(
+                        thinking_name(thinking.levels[thinking.index]),
+                        theme.accent.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" ›", theme.dim),
+                ]);
+            } else {
+                row.detail.push(Span::styled("thinking", theme.dim));
+            }
+        } else if !cells.is_empty() {
+            row.detail.push(Span::styled(cells.join("   "), theme.dim));
+        }
+        row
+    }
+
     /// At most `height` rows; the cursor sits in the search field while it is shown.
     pub fn render(
         &self,
@@ -196,89 +348,108 @@ impl Select {
         theme: &Theme,
     ) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
         let filtered = self.filtered();
-        let numbered = self.numbered();
-        let indent = || Span::raw("  ");
-        let mut lines = vec![Line::from(vec![
-            indent(),
-            Span::styled(self.title, Style::default().add_modifier(Modifier::BOLD)),
-        ])];
+        let mut body = Vec::new();
         let mut cursor = None;
         if self.searching() {
-            lines.push(Line::from(vec![
-                indent(),
+            body.push(Line::from(vec![
+                Span::raw("  "),
                 Span::styled("Search  ", theme.dim),
                 Span::raw(self.search.clone()),
             ]));
+            body.push(Line::default());
             cursor = Some((
                 1,
                 (2 + wrap::width("Search  ") + wrap::width(&self.search))
                     .min(width.saturating_sub(1)),
             ));
         }
-        lines.push(Line::default());
-        let count = height.saturating_sub(lines.len() + 3).clamp(1, ROWS);
+        let gaps = filtered
+            .iter()
+            .filter(|index| self.choices[**index].gap)
+            .count();
+        let count = height.saturating_sub(body.len() + 3 + gaps).clamp(1, ROWS);
         let first = self
             .selected
             .saturating_sub(count / 2)
             .min(filtered.len().saturating_sub(count));
-        let shown = || filtered.iter().enumerate().skip(first).take(count);
-        let label =
-            |choice: &Choice| wrap::width(&choice.label) + if choice.current { 2 } else { 0 };
-        let column = shown()
-            .map(|(_, index)| label(&self.choices[*index]))
+        // The provider column goes when narrow unless labels repeat; empty columns take no room.
+        let columns = self
+            .choices
+            .iter()
+            .map(|c| c.columns.len())
             .max()
-            .unwrap_or(0)
-            .min(width / 2);
-        let accent = theme.accent.add_modifier(Modifier::BOLD);
-        for (position, index) in shown() {
-            let choice = &self.choices[*index];
-            let chosen = position == self.selected;
-            let mut spans = vec![Span::styled(if chosen { "› " } else { "  " }, accent)];
-            if numbered {
-                spans.push(Span::styled(
-                    format!("{}. ", position + 1),
-                    if chosen { accent } else { theme.dim },
-                ));
+            .unwrap_or(0);
+        let labels: std::collections::HashSet<&str> =
+            self.choices.iter().map(|c| c.label.as_str()).collect();
+        let narrow = width < 64 && labels.len() == self.choices.len();
+        let widths: Vec<usize> = (0..columns)
+            .map(|column| {
+                if column == 0 && columns > 1 && narrow {
+                    return 0;
+                }
+                self.choices
+                    .iter()
+                    .filter_map(|c| c.columns.get(column))
+                    .map(|text| wrap::width(text))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let shown: Vec<(usize, usize)> = filtered
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(first)
+            .take(count)
+            .collect();
+        let rows: Vec<Row> = shown
+            .iter()
+            .map(|(position, index)| {
+                self.row(
+                    &self.choices[*index],
+                    *position == self.selected,
+                    &widths,
+                    theme,
+                )
+            })
+            .collect();
+        let list = List::new(&rows, self.choices.len(), width, false);
+        for ((position, index), row) in shown.iter().zip(&rows) {
+            if self.choices[*index].gap && self.search.is_empty() {
+                body.push(Line::default());
             }
-            spans.push(Span::styled(
-                choice.label.clone(),
-                if chosen { accent } else { Style::default() },
-            ));
-            if choice.current {
-                spans.push(Span::styled(" ✓", theme.accent));
-            }
-            spans.push(Span::raw(
-                " ".repeat(column.saturating_sub(label(choice)) + 3),
-            ));
-            spans.push(Span::styled(choice.detail.clone(), theme.dim));
-            lines.push(Line::from(spans));
+            body.extend(list.row(*position, row, *position == self.selected, width, theme));
         }
         if filtered.is_empty() {
-            lines.push(Line::from(vec![
-                indent(),
+            body.push(Line::from(vec![
+                Span::raw("  "),
                 Span::styled("No matches", theme.dim),
             ]));
-        } else if filtered.len() > count {
-            lines.push(Line::from(Span::styled(
-                format!("  {}/{}", self.selected + 1, filtered.len()),
-                theme.dim,
-            )));
         }
-        lines.push(Line::default());
-        let mut screen: Vec<Line<'static>> = lines
-            .into_iter()
-            .map(|line| surface(line, width, theme))
-            .collect();
-        let keys = if numbered {
-            format!(
-                "  ↑/↓ move · 1-{} pick · enter select · esc cancel",
-                filtered.len().max(1)
-            )
+        let range = format!("1-{}", filtered.len().max(1));
+        let mut pairs = vec![("enter", "select")];
+        if self.adjustable().is_some() {
+            pairs.push(("←→", "thinking"));
+        }
+        if self.numbered() {
+            pairs.push((&range, "pick"));
+        }
+        pairs.extend([("a-z", "search"), ("esc", "cancel")]);
+        let position =
+            (filtered.len() > count).then(|| format!("{} / {}", self.selected + 1, filtered.len()));
+        let meta = if self.meta.is_empty() {
+            Vec::new()
         } else {
-            "  ↑/↓ move · type to search · enter select · esc cancel".into()
+            vec![vec![Span::styled(self.meta.clone(), theme.dim)]]
         };
-        screen.push(wrap::fit(vec![Span::styled(keys, theme.dim)], width, true));
-        screen.truncate(height.max(1));
-        (screen, cursor)
+        let mut lines = sheet::frame(
+            theme.accent,
+            sheet::rule(theme.accent, &[sheet::title(self.title)], &meta, width),
+            body,
+            sheet::hints(theme, &pairs, position.as_deref(), width),
+            width,
+        );
+        lines.truncate(height.max(1));
+        (lines, cursor.map(|(row, column)| (row + 1, column)))
     }
 }

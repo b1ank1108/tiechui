@@ -1,6 +1,6 @@
 //! Slash commands: the TUI's built-ins and those modules contribute, with the `/` menu.
 
-use ratatui_core::text::Line;
+use ratatui_core::text::{Line, Span};
 use tiechui_protocol::CommandInfo;
 
 use crate::completion::{self, Row};
@@ -197,16 +197,15 @@ pub fn popup(
         })
         .collect::<Vec<_>>();
     let status = if rows.is_empty() {
-        "No matching commands"
+        "No matching commands".into()
     } else {
-        "Tab completes the command; Enter runs it"
+        format!("{} matches", rows.len())
     };
     completion::popup(
-        "Commands",
+        vec![Span::styled("Commands", theme.dim)],
         &rows,
         selected,
-        status,
-        "↑↓ · Tab complete · Enter run · Esc",
+        &status,
         width,
         height,
         theme,

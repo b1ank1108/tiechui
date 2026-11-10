@@ -1,16 +1,21 @@
-//! The permission prompt: the request, its rule and session scope, then the choices, with a
-//! reason editor for denials and Ctrl+O for the whole request.
+//! The permission prompt: the request under a warning rule naming its rule, then the choices
+//! with the session scope in them, a reason editor for denials and Ctrl+O for the whole request.
+
+use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui_core::style::{Modifier, Style};
+use ratatui_core::style::Modifier;
 use ratatui_core::text::{Line, Span};
 use serde_json::Value;
 use tiechui_protocol::ApprovalDecision;
 
-use crate::prompt::{Input, Outcome, choice};
-use crate::status_picker::surface;
+use crate::prompt::{Input, Outcome};
+use crate::sheet::{self, List, Row};
 use crate::theme::Theme;
-use crate::{syntax, wrap};
+use crate::{diff, wrap};
+
+/// Request rows shown before ctrl+o, on roomy and on small terminals.
+const SUMMARY: [usize; 2] = [8, 3];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Choice {
@@ -26,10 +31,14 @@ pub struct Permission {
     tool: String,
     arguments: Value,
     surface: String,
-    values: Vec<String>,
     pattern: Option<String>,
+    /// The session scope, paths relative to the working directory.
     scope: Vec<String>,
-    choices: Vec<(&'static str, &'static str, Choice)>,
+    /// `read` or `write` for path surfaces.
+    direction: Option<&'static str>,
+    /// The matched value, paths relative to the working directory.
+    shown: String,
+    choices: Vec<Choice>,
     selected: usize,
     expanded: bool,
     scroll: usize,
@@ -43,6 +52,7 @@ fn cancelled() -> ApprovalDecision {
 }
 
 impl Permission {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         actor: Option<String>,
         tool: String,
@@ -51,43 +61,49 @@ impl Permission {
         values: Vec<String>,
         pattern: Option<String>,
         scope: Vec<String>,
+        cwd: &Path,
+        home: Option<&Path>,
     ) -> Self {
-        let directional = ["path_", "external_directory_"].iter().any(|family| {
-            surface
-                .strip_prefix(family)
-                .is_some_and(|direction| matches!(direction, "read" | "write"))
+        let direction = ["path_", "external_directory_"].iter().find_map(|family| {
+            match surface.strip_prefix(family)? {
+                "read" => Some("read"),
+                "write" => Some("write"),
+                _ => None,
+            }
         });
-        let mut choices = vec![("Yes, proceed", "Yes, proceed", Choice::Once)];
+        let place = |value: &str| {
+            let path = Path::new(value);
+            match path.strip_prefix(cwd) {
+                Ok(child) if !child.as_os_str().is_empty() => child.display().to_string(),
+                _ => crate::status::compact_path(path, home),
+            }
+        };
+        let paths = direction.is_some() || matches!(tool.as_str(), "write" | "edit");
+        let shown = values.first().map_or_else(String::new, |value| {
+            if paths { place(value) } else { value.clone() }
+        });
+        let scope: Vec<String> = if paths {
+            scope.iter().map(|pattern| place(pattern)).collect()
+        } else {
+            scope
+        };
+        let mut choices = vec![Choice::Once];
         if !scope.is_empty() {
-            choices.push((
-                "Yes, allow this scope for this session",
-                "Yes, for this session",
-                Choice::Session,
-            ));
-            if directional {
-                choices.push((
-                    "Yes, allow reads and writes to this scope for this session",
-                    "Yes, session read + write",
-                    Choice::BothDirections,
-                ));
+            choices.push(Choice::Session);
+            if direction.is_some() {
+                choices.push(Choice::BothDirections);
             }
         }
-        choices.extend([
-            ("No, continue without running it", "No, skip", Choice::Deny),
-            (
-                "No, and tell the agent what to do differently",
-                "No, provide reason",
-                Choice::Reason,
-            ),
-        ]);
+        choices.extend([Choice::Deny, Choice::Reason]);
         Self {
             actor,
             tool,
             arguments,
             surface,
-            values,
             pattern,
             scope,
+            direction,
+            shown,
             choices,
             selected: 0,
             expanded: false,
@@ -147,7 +163,7 @@ impl Permission {
     }
 
     fn submit(&mut self) -> Outcome {
-        Outcome::Answer(match self.choices[self.selected].2 {
+        Outcome::Answer(match self.choices[self.selected] {
             Choice::Once => ApprovalDecision::AllowOnce,
             Choice::Session => ApprovalDecision::AllowSession {
                 both_directions: false,
@@ -165,47 +181,55 @@ impl Permission {
 
     fn title(&self) -> &'static str {
         if self.surface == "bash" {
-            "Would you like to run the following command?"
+            "Run this command?"
         } else if matches!(self.tool.as_str(), "write" | "edit") {
-            "Would you like to make the following edits?"
+            "Apply these edits?"
         } else {
-            "Would you like to allow this operation?"
+            "Allow this operation?"
         }
     }
 
-    /// The request, then any proposed file contents, as unwrapped rows.
-    fn evidence(&self, theme: &Theme) -> Vec<Vec<Span<'static>>> {
-        let mut rows = Vec::new();
-        // The matched value alone; the others are its other spellings.
-        let value = self.values.first().map_or("", String::as_str);
+    fn label(&self, choice: Choice, theme: &Theme) -> Vec<Span<'static>> {
+        let grant = |verb: String| {
+            let whom = self.actor.as_ref().map_or_else(
+                || " for this session".into(),
+                |a| format!(" for {a} in this session"),
+            );
+            vec![
+                Span::raw(format!("Yes, and allow {verb}")),
+                Span::styled(self.scope.join(", "), theme.accent),
+                Span::raw(whom),
+            ]
+        };
+        match choice {
+            Choice::Once => vec![Span::raw("Yes")],
+            Choice::Session => grant(match self.direction {
+                Some("read") => "reads from ".into(),
+                Some(_) => "writes to ".into(),
+                None => String::new(),
+            }),
+            Choice::BothDirections => grant("reads and writes to ".into()),
+            Choice::Deny => vec![Span::raw("No, continue without it")],
+            Choice::Reason => vec![Span::raw("No, and tell the agent what to do instead")],
+        }
+    }
+
+    /// The request, then any proposed file contents as a tinted diff.
+    fn evidence(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let indent = [Span::raw("  ")];
+        let wrapped = |spans: Vec<Span<'static>>| wrap::wrap(&spans, width, &indent, &indent);
         if self.surface == "bash" {
-            let command = value;
-            let highlighted = syntax::highlight(command, "bash", theme).unwrap_or_else(|| {
-                command
-                    .split('\n')
-                    .map(|line| vec![Span::raw(line.to_owned())])
-                    .collect()
-            });
-            for (index, row) in highlighted.into_iter().enumerate() {
-                let mut spans = vec![Span::raw(if index == 0 { "$ " } else { "  " })];
-                spans.extend(row);
-                rows.push(spans);
-            }
-        } else if value == "*" {
-            rows.push(vec![Span::raw(format!("{} {}", self.tool, self.arguments))]);
-        } else {
-            rows.push(vec![Span::raw(value.to_owned())]);
+            return sheet::command(&self.shown, width, theme);
+        }
+        if self.shown == "*" {
+            return wrapped(vec![Span::raw(format!("{} {}", self.tool, self.arguments))]);
         }
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
-        let mut proposed = Vec::new();
+        let mut proposed: Vec<(bool, String)> = Vec::new();
         match self.tool.as_str() {
             "write" if self.arguments["content"].is_string() => {
-                proposed.push("Proposed content:".to_owned());
-                proposed.extend(
-                    text(&self.arguments["content"])
-                        .split('\n')
-                        .map(str::to_owned),
-                );
+                let content = text(&self.arguments["content"]);
+                proposed.extend(content.split('\n').map(|l| (true, l.to_owned())));
             }
             "edit" => {
                 let edits = match &self.arguments["edits"] {
@@ -213,26 +237,38 @@ impl Permission {
                     Value::Object(_) => vec![self.arguments["edits"].clone()],
                     _ => vec![self.arguments.clone()],
                 };
-                proposed.push("Proposed replacements:".to_owned());
                 for edit in edits {
-                    for (sign, key) in [("- ", "oldText"), ("+ ", "newText")] {
-                        proposed.extend(text(&edit[key]).split('\n').map(|l| format!("{sign}{l}")));
+                    for (added, key) in [(false, "oldText"), (true, "newText")] {
+                        let lines = text(&edit[key]);
+                        proposed.extend(lines.split('\n').map(|l| (added, l.to_owned())));
                     }
                 }
             }
             _ => {}
         }
-        rows.extend(proposed.into_iter().map(|line| {
-            let style = if line.starts_with("+ ") {
-                theme.success
-            } else if line.starts_with("- ") {
-                theme.error
-            } else {
-                Style::default()
-            };
-            vec![Span::styled(line, style)]
-        }));
-        rows
+        let mut header = vec![Span::raw(self.shown.clone())];
+        if proposed.is_empty() {
+            return wrapped(header);
+        }
+        let added = proposed.iter().filter(|(added, _)| *added).count();
+        header.extend([
+            Span::raw("  "),
+            Span::styled(format!("+{added}"), theme.success),
+            Span::raw(" "),
+            Span::styled(format!("−{}", proposed.len() - added), theme.error),
+        ]);
+        let rows: Vec<(bool, &str)> = proposed.iter().map(|(a, l)| (*a, l.as_str())).collect();
+        let mut lines = wrapped(header);
+        lines.extend(
+            diff::signed(&rows, Some(&self.shown), width.saturating_sub(1), theme)
+                .into_iter()
+                .map(|line| {
+                    let mut spans = vec![Span::raw(" ")];
+                    spans.extend(line.spans);
+                    Line::from(spans)
+                }),
+        );
+        lines
     }
 
     pub fn render(
@@ -241,153 +277,122 @@ impl Permission {
         height: usize,
         theme: &Theme,
     ) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
-        let height = height.saturating_sub(2).max(4);
-        let compact = width < 50 || height < 24;
-        let body = width.saturating_sub(2).max(1);
-        let indent = [Span::raw("  ")];
-        let wrapped = |spans: Vec<Span<'static>>| wrap::wrap(&spans, body, &indent, &indent);
-        let fitted = |spans: Vec<Span<'static>>| {
-            let mut line = vec![Span::raw("  ")];
-            line.extend(spans);
-            wrap::fit(line, body, true)
-        };
-        let bold = Style::default().add_modifier(Modifier::BOLD);
-        let rule = format!(
-            "{} · {}",
-            self.surface,
-            self.pattern.as_deref().unwrap_or("default: ask")
-        );
-        let scope = (!self.scope.is_empty()).then(|| {
-            let grants: Vec<String> = self
-                .scope
-                .iter()
-                .map(|pattern| format!("{}: {pattern}", self.surface))
-                .collect();
-            format!(
-                "Session scope{}: {}",
-                if self.actor.is_some() {
-                    " (this child only)"
-                } else {
-                    ""
-                },
-                grants.join("; ")
-            )
-        });
-        let mut header = vec![Line::default()];
-        header.extend(wrapped(vec![Span::styled(self.title(), bold)]));
-        header.push(Line::default());
-        header.extend(wrapped(vec![
-            Span::raw("Thread: "),
-            Span::styled(self.actor.clone().unwrap_or_else(|| "Main".into()), bold),
-        ]));
-        header.extend(wrapped(vec![
-            Span::raw("Permission rule: "),
-            Span::styled(rule.clone(), theme.accent),
-        ]));
-        if let Some(scope) = &scope {
-            header.extend(wrapped(vec![Span::styled(scope.clone(), theme.dim)]));
-        }
-        header.push(Line::default());
-        let evidence = self.evidence(theme);
-        let mut full = header.clone();
-        for row in &evidence {
-            full.extend(wrapped(row.clone()));
-        }
-        full.extend(
-            self.scope.iter().flat_map(|pattern| {
-                wrapped(vec![Span::raw(format!("{}: {pattern}", self.surface))])
-            }),
-        );
-        let summary = if compact {
-            let mut summary = vec![
-                fitted(vec![Span::styled(self.title(), bold)]),
-                fitted(vec![Span::raw(format!(
-                    "Thread: {}",
-                    self.actor.as_deref().unwrap_or("Main")
-                ))]),
-                fitted(vec![Span::raw(format!(
-                    "Rule: {} · {}",
-                    self.surface,
-                    self.pattern.as_deref().unwrap_or("ask")
-                ))]),
-            ];
-            if let Some(scope) = scope {
-                summary.push(fitted(vec![Span::raw(scope)]));
-            }
-            summary.extend(evidence.iter().take(3).map(|row| fitted(row.clone())));
-            summary
-        } else {
-            let mut summary = header.clone();
-            summary.extend(full.iter().skip(header.len()).take(5).cloned());
-            summary
-        };
-
+        let height = height.saturating_sub(2).max(6);
+        let compact = width < 50 || height < 22;
         let mut cursor = None;
         let mut options = Vec::new();
         if let Some(reason) = &self.reason {
             options.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled("Tell the agent what to do differently:", theme.dim),
+                Span::styled("Tell the agent what to do instead", theme.dim),
             ]));
-            let (lines, (row, column)) = reason.render("", body, theme);
+            let (lines, (row, column)) = reason.render("", width, theme);
             // The last four rows, where the cursor is.
             let skip = lines.len().saturating_sub(4);
             cursor = Some((options.len() + row - skip, column));
             options.extend(lines.into_iter().skip(skip));
         } else {
-            for (index, (label, short, _)) in self.choices.iter().enumerate() {
+            let rows: Vec<Row> = self
+                .choices
+                .iter()
+                .map(|choice| Row {
+                    label: self.label(*choice, theme),
+                    detail: Vec::new(),
+                    current: false,
+                })
+                .collect();
+            let list = List::new(&rows, rows.len(), width, false);
+            for (index, row) in rows.iter().enumerate() {
                 let selected = index == self.selected;
                 if compact {
-                    let mut line = choice(index, short, None, selected, usize::MAX, theme);
-                    options.push(wrap::fit(line.remove(0).spans, body, true));
+                    let mut line = list.row(index, row, selected, usize::MAX, theme);
+                    options.push(wrap::fit(line.remove(0).spans, width, true));
                 } else {
-                    options.extend(choice(index, label, None, selected, body, theme));
+                    options.extend(list.row(index, row, selected, width, theme));
                 }
             }
+            if options.len() + 5 > height {
+                let label: String = rows[self.selected]
+                    .label
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                options = vec![wrap::fit(
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("› {}/{} · {label}", self.selected + 1, self.choices.len()),
+                            theme.accent.add_modifier(Modifier::BOLD),
+                        ),
+                    ],
+                    width,
+                    true,
+                )];
+            }
         }
-        let tip = if self.reason.is_some() {
-            "enter to send · esc to go back · ctrl+c to interrupt"
-        } else if compact {
-            "↑/↓ · enter · esc · ctrl+o details"
-        } else {
-            "Press enter to confirm or esc to interrupt · ↑/↓ · ctrl+o details"
-        };
-        let footer: Vec<Line<'static>> = wrapped(vec![Span::styled(tip, theme.dim)])
-            .into_iter()
-            .take(2)
-            .collect();
-        if options.len() + footer.len() + 3 > height && self.reason.is_none() {
-            let (label, _, _) = self.choices[self.selected];
-            options = vec![fitted(vec![Span::styled(
-                format!("{}/{} · {label}", self.selected + 1, self.choices.len()),
-                theme.accent.add_modifier(Modifier::BOLD),
-            )])];
-        }
-        let budget = height
-            .saturating_sub(options.len() + footer.len() + 1)
-            .max(1);
-        self.scroll = self.scroll.min(full.len().saturating_sub(budget));
-        let metadata: Vec<Line<'static>> = if self.expanded {
-            full.into_iter().skip(self.scroll).take(budget).collect()
-        } else if summary.len() > budget {
-            let mut lines: Vec<_> = summary.into_iter().take(budget - 1).collect();
-            lines.push(fitted(vec![Span::styled(
-                "… ctrl+o for full request",
-                theme.dim,
-            )]));
+        let evidence = self.evidence(width, theme);
+        let budget = height.saturating_sub(options.len() + 4).max(1);
+        self.scroll = self.scroll.min(evidence.len().saturating_sub(budget));
+        let limit = budget.min(SUMMARY[usize::from(compact)]);
+        let cut = !self.expanded && evidence.len() > limit;
+        let shown: Vec<Line<'static>> = if self.expanded {
+            evidence
+                .into_iter()
+                .skip(self.scroll)
+                .take(budget)
+                .collect()
+        } else if cut {
+            let hidden = evidence.len() + 1 - limit;
+            let mut lines: Vec<_> = evidence.into_iter().take(limit - 1).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!("  … {hidden} more lines · "), theme.dim),
+                Span::styled("ctrl+o", theme.secondary),
+            ]));
             lines
         } else {
-            summary
+            evidence
         };
-        let top = metadata.len() + 1;
-        let mut rows = metadata;
-        rows.push(Line::default());
-        rows.extend(options);
-        rows.extend(footer);
-        let rows = rows
-            .into_iter()
-            .map(|line| surface(line, width, theme))
-            .collect();
+        let top = shown.len() + 2;
+        let mut body = shown;
+        body.push(Line::default());
+        body.extend(options);
+        let range = format!("1-{}", self.choices.len());
+        let pairs: Vec<(&str, &str)> = if self.reason.is_some() {
+            vec![("enter", "send"), ("esc", "back"), ("ctrl+c", "interrupt")]
+        } else {
+            let mut pairs = vec![("enter", "confirm"), (range.as_str(), "pick")];
+            if self.expanded {
+                pairs.extend([("pgup/pgdn", "scroll"), ("ctrl+o", "less")]);
+            } else if cut {
+                pairs.push(("ctrl+o", "full request"));
+            }
+            pairs.push(("esc", "interrupt"));
+            pairs
+        };
+        let rule = format!(
+            "{} · {}",
+            self.surface,
+            self.pattern.as_deref().unwrap_or("default: ask")
+        );
+        let mut metas = Vec::new();
+        if let Some(actor) = &self.actor {
+            let actor = Span::styled(actor.clone(), theme.accent2);
+            metas.push(vec![
+                actor.clone(),
+                Span::styled(" · ", theme.dim),
+                Span::styled(rule.clone(), theme.dim),
+            ]);
+            metas.push(vec![actor]);
+        } else {
+            metas.push(vec![Span::styled(rule, theme.dim)]);
+        }
+        let rows = sheet::frame(
+            theme.warning,
+            sheet::rule(theme.warning, &[sheet::title(self.title())], &metas, width),
+            body,
+            sheet::hints(theme, &pairs, None, width),
+            width,
+        );
         (rows, cursor.map(|(row, column)| (top + row, column)))
     }
 }

@@ -1,6 +1,5 @@
 ---
 source: crates/tiechui-tui/tests/cells.rs
-assertion_line: 146
 expression: "render(&Theme::fixture(ColorLevel::Ansi16, false), 80)"
 ---
 [-]                                                                                
@@ -11,9 +10,9 @@ expression: "render(&Theme::fixture(ColorLevel::Ansi16, false), 80)"
 [d]• [d,i]The tokenizer drops [d,i,fg@6]\r[d,i].
 
 [d]• [b]Explored
-[d]  └ [fgCyan]Read[-] [-]lib.rs[d], [-]app.rs
-[d]    [fgCyan]Search[-] [-]fn main[d] in [-]src
-[d]    [fgCyan]List[-] [-].
+[d]  └ [fg@6]Read[-] [-]lib.rs[d], [-]app.rs
+[d]    [fg@6]Search[-] [-]fn main[d] in [-]src
+[d]    [fg@6]List[-] [-].
 
 [b,fg@2]• [b]Ran[-] cargo test …[d] · 1s
 [d]  └ line 3
@@ -33,7 +32,7 @@ expression: "render(&Theme::fixture(ColorLevel::Ansi16, false), 80)"
 [-]    [d]2 [fgGreen]+ [fgGreen]    println!("new");
 [-]    [d]3 [-]  [-]}
 
-[b,fg@2]• [b]Called[-] [fgCyan]exa__web_search[d] · 1s
+[b,fg@2]• [b]Called[-] [fg@6]exa__web_search[d] · 1s
 [-]    [d]{"query":"rust"}
 [d]  └ [d](no output)
 

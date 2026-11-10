@@ -8,8 +8,11 @@ use ratatui_core::{
 use serde_json::{Value, json};
 use tiechui_protocol::{ApprovalDecision, Question};
 
-use crate::{composer::Composer, prompt::Outcome, status_picker::surface, theme::Theme, wrap};
+use crate::sheet::{self, List, Row};
+use crate::tools::plain;
+use crate::{composer::Composer, prompt::Outcome, theme::Theme, wrap};
 
+/// What a custom answer is sent as; the list shows it as `Other`.
 const OTHER: &str = "None of the above";
 
 #[derive(Default)]
@@ -305,40 +308,37 @@ impl Ask {
         }
     }
 
-    fn tips(&self) -> Vec<(&'static str, bool)> {
+    fn hints(&self) -> Vec<(&'static str, &'static str)> {
         let draft = &self.drafts[self.current];
-        let has_options = self.questions[self.current].options.is_some();
-        let mut tips = Vec::new();
-        if has_options && draft.selected.is_some() {
-            tips.push(if draft.notes {
-                ("tab or esc to clear notes", false)
+        let options = self.questions[self.current].options.is_some();
+        let many = self.questions.len() > 1;
+        let last = self.current + 1 == self.questions.len();
+        let mut pairs = vec![("enter", if last && many { "submit all" } else { "answer" })];
+        if options && draft.notes {
+            pairs.push(("tab/esc", "clear note"));
+        } else if options && draft.selected.is_some() {
+            pairs.push(("tab", "add note"));
+        }
+        if many {
+            pairs.push(if self.text_focus {
+                ("ctrl+p/n", "question")
             } else {
-                ("tab to add notes", true)
+                ("←→", "question")
             });
         }
-        let last = self.current + 1 == self.questions.len();
-        tips.push((
-            if last && self.questions.len() > 1 {
-                "enter to submit all"
-            } else {
-                "enter to submit answer"
-            },
-            last,
-        ));
-        if self.questions.len() > 1 {
-            tips.push((
-                if self.text_focus {
-                    "ctrl + p / ctrl + n change question"
-                } else {
-                    "←/→ to navigate questions"
-                },
-                false,
-            ));
+        if !(options && draft.notes) {
+            pairs.push(("esc", "interrupt"));
         }
-        if !(has_options && draft.notes) {
-            tips.push(("esc to interrupt", false));
+        pairs
+    }
+
+    fn header(&self, index: usize) -> String {
+        let header = plain(self.questions[index].header.trim());
+        if header.is_empty() {
+            format!("Question {}", index + 1)
+        } else {
+            header
         }
-        tips
     }
 
     pub fn render(
@@ -350,289 +350,220 @@ impl Ask {
         if self.questions.is_empty() || width == 0 {
             return (vec![], None);
         }
-        let height = height.max(1);
-        let inner = width.saturating_sub(4).max(1);
-        let cyan = Style::default().fg(ratatui_core::style::Color::Cyan);
-        let unanswered = self.unanswered();
-        let question = &self.questions[self.current];
-        let draft = &self.drafts[self.current];
-        let mut cursor = None;
-        let mut lines = vec![Line::default()];
+        let room = height.saturating_sub(3).max(1);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let accent = theme.accent.add_modifier(Modifier::BOLD);
+        let indent = [Span::raw("  ")];
         if let Some(selected) = self.confirmation {
-            let footer = footer(
-                &[("Press enter to confirm or esc to go back", false)],
-                inner,
-                theme,
-            );
-            lines.push(Line::from(Span::styled(
-                "Submit with unanswered questions?",
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{unanswered} unanswered question{}",
-                    if unanswered == 1 { "" } else { "s" }
-                ),
-                theme.dim,
-            )));
-            lines.push(Line::default());
-            let choices = option_rows(
+            let missing: Vec<String> = (0..self.questions.len())
+                .filter(|&i| !self.answered(i))
+                .map(|i| self.header(i))
+                .collect();
+            let verb = if missing.len() == 1 { "has" } else { "have" };
+            let mut body = wrap::wrap(
                 &[
-                    (
-                        "Proceed".into(),
-                        format!(
-                            "Submit with {unanswered} unanswered question{}.",
-                            if unanswered == 1 { "" } else { "s" }
-                        ),
-                    ),
-                    (
-                        "Go back".into(),
-                        "Return to the first unanswered question.".into(),
-                    ),
-                ],
-                Some(selected),
-                inner,
-                theme,
-            );
-            let budget = height.saturating_sub(6 + footer.len()).max(1);
-            if choices.iter().map(Vec::len).sum::<usize>() <= budget {
-                lines.extend(choices.into_iter().flatten());
-            } else {
-                lines.extend(choices[selected].iter().take(budget).cloned());
-            }
-            lines.push(Line::default());
-            lines.extend(footer);
-        } else {
-            let tips = self.tips();
-            let mut footer = footer(&tips, inner, theme);
-            let prompt_style = if self.answered(self.current) {
-                Style::default()
-            } else {
-                cyan
-            };
-            let mut prompt = question
-                .question
-                .split('\n')
-                .flat_map(|line| {
-                    wrap::wrap(
-                        &[Span::styled(crate::tools::plain(line), prompt_style)],
-                        inner,
-                        &[],
-                        &[],
-                    )
-                })
-                .collect::<Vec<_>>();
-            let choices = question
-                .options
-                .as_ref()
-                .map(|options| {
-                    let choices = options
-                        .iter()
-                        .map(|option| (option.label.clone(), option.description.clone()))
-                        .chain([(OTHER.into(), "Select to type your own answer.".into())])
-                        .collect::<Vec<_>>();
-                    option_rows(&choices, draft.selected, inner, theme)
-                })
-                .unwrap_or_default();
-            let fixed = 6 + if draft.notes { 2 } else { 0 };
-            if !choices.is_empty()
-                && fixed + prompt.len() + choices.iter().map(Vec::len).sum::<usize>() + footer.len()
-                    > height
-            {
-                let progress = format!(
-                    "option {}/{}",
-                    draft.selected.unwrap_or(0) + 1,
-                    choices.len()
-                );
-                let mut scrolling_tips = vec![(progress.as_str(), false)];
-                scrolling_tips.extend(tips);
-                footer = self::footer(&scrolling_tips, inner, theme);
-            }
-            limit_lines(
-                &mut prompt,
-                height
-                    .saturating_sub(fixed + footer.len() + usize::from(!choices.is_empty()))
-                    .max(1),
-                inner,
-            );
-            let pending = if unanswered > 0 {
-                format!(" ({unanswered} unanswered)")
-            } else {
-                String::new()
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "Question {}/{}{pending}",
-                    self.current + 1,
-                    self.questions.len()
-                ),
-                theme.dim,
-            )));
-            lines.extend(prompt);
-            lines.push(Line::default());
-            if !choices.is_empty() {
-                let budget = height
-                    .saturating_sub(lines.len() + footer.len() + if draft.notes { 4 } else { 2 })
-                    .max(1);
-                let selected = draft.selected.unwrap_or(0).min(choices.len() - 1);
-                self.option_offset = self.option_offset.min(selected);
-                while self.option_offset < selected
-                    && choices[self.option_offset..=selected]
-                        .iter()
-                        .map(Vec::len)
-                        .sum::<usize>()
-                        > budget
-                {
-                    self.option_offset += 1;
-                }
-                let mut remaining = budget;
-                for choice in &choices[self.option_offset..] {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let mut visible = choice.clone();
-                    limit_lines(&mut visible, remaining, inner);
-                    remaining = remaining.saturating_sub(visible.len());
-                    lines.extend(visible);
-                }
-            }
-            if draft.notes {
-                lines.push(Line::default());
-                let placeholder = if question.options.is_none()
-                    || draft.selected == question.options.as_ref().map(Vec::len)
-                {
-                    "Type your answer (optional)"
-                } else if draft.selected.is_none() {
-                    "Select an option to add notes"
-                } else {
-                    "Add notes"
-                };
-                let editor = &mut self.drafts[self.current].editor;
-                let mut rendered = editor.render(
-                    inner,
-                    height
-                        .saturating_sub(lines.len() + footer.len() + 2)
-                        .clamp(1, 6),
-                    Span::styled("› ", Style::default().add_modifier(Modifier::BOLD)),
-                    theme.dim,
-                );
-                if editor.is_empty() {
-                    rendered.lines[0]
-                        .spans
-                        .push(Span::styled(placeholder, theme.dim));
-                }
-                if self.text_focus {
-                    cursor = Some((lines.len() + rendered.cursor.0, 2 + rendered.cursor.1));
-                }
-                lines.extend(rendered.lines);
-            }
-            lines.push(Line::default());
-            lines.extend(footer);
-        }
-        lines.push(Line::default());
-        // Remove spacing before sacrificing content in a short terminal.
-        while lines.len() > height {
-            let at = lines
-                .iter()
-                .position(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
-                .unwrap_or(0);
-            lines.remove(at);
-            cursor = cursor.and_then(|(row, column)| {
-                if row == at {
-                    None
-                } else {
-                    Some((row - usize::from(row > at), column))
-                }
-            });
-        }
-        (
-            lines
-                .into_iter()
-                .map(|line| {
-                    let mut spans = vec![Span::raw("  ")];
-                    spans.extend(line.spans);
-                    surface(wrap::fit(spans, width, false), width, theme)
-                })
-                .collect(),
-            cursor,
-        )
-    }
-}
-
-fn footer(tips: &[(&str, bool)], width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::default()];
-    for (tip, highlight) in tips {
-        let style = if *highlight {
-            Style::default()
-                .fg(ratatui_core::style::Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            theme.dim
-        };
-        let label = wrap::fit(vec![Span::styled((*tip).to_owned(), style)], width, true);
-        let last = lines.len() - 1;
-        let used = wrap::line_width(&lines[last]);
-        if used > 0 && used + 3 + wrap::line_width(&label) > width {
-            lines.push(label);
-        } else {
-            if used > 0 {
-                lines[last].spans.push(Span::styled(" | ", theme.dim));
-            }
-            lines[last].spans.extend(label.spans);
-        }
-    }
-    lines
-}
-
-fn option_rows(
-    choices: &[(String, String)],
-    selected: Option<usize>,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Vec<Line<'static>>> {
-    let labels = choices
-        .iter()
-        .map(|(label, _)| crate::tools::plain(label))
-        .collect::<Vec<_>>();
-    let widest = labels
-        .iter()
-        .map(|label| wrap::width(label))
-        .max()
-        .unwrap_or(0);
-    let aligned = width >= 56 && widest + 10 < width;
-    choices
-        .iter()
-        .zip(labels)
-        .enumerate()
-        .map(|(index, ((_, description), label))| {
-            let chosen = selected == Some(index);
-            let style = if chosen {
-                theme.accent.add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let gap = if aligned {
-                widest - wrap::width(&label) + 2
-            } else {
-                2
-            };
-            wrap::wrap(
-                &[
-                    Span::styled(label, style),
-                    Span::styled(
-                        format!("{}{}", " ".repeat(gap), crate::tools::plain(description)),
-                        if chosen { style } else { theme.dim },
-                    ),
+                    Span::styled(missing.join(", "), bold),
+                    Span::styled(format!(" {verb} no answer yet."), theme.dim),
                 ],
                 width,
-                &[Span::styled(
-                    format!("{} {}. ", if chosen { "›" } else { " " }, index + 1),
-                    style,
-                )],
-                &[Span::styled("     ", style)],
+                &indent,
+                &indent,
+            );
+            body.push(Line::default());
+            let back = missing
+                .first()
+                .map_or_else(String::new, |h| format!(" to {h}"));
+            let rows = [
+                Row::new("Submit anyway", "", theme),
+                Row::new(format!("Go back{back}"), "", theme),
+            ];
+            body.extend(sheet::options(&rows, selected, width, false, theme));
+            body.drain(..body.len().saturating_sub(room));
+            let meta = [vec![Span::styled(
+                format!("{} unanswered", missing.len()),
+                theme.dim,
+            )]];
+            let pairs = [("enter", "confirm"), ("1-2", "pick"), ("esc", "back")];
+            return (
+                sheet::frame(
+                    theme.accent,
+                    sheet::rule(
+                        theme.accent,
+                        &[sheet::title("Submit anyway?")],
+                        &meta,
+                        width,
+                    ),
+                    body,
+                    sheet::hints(theme, &pairs, None, width),
+                    width,
+                ),
+                None,
+            );
+        }
+        let count = self.questions.len();
+        let current = self.current;
+        let mut titles = Vec::new();
+        let mut metas = Vec::new();
+        if count > 1 {
+            let mut tabs = Vec::new();
+            for index in 0..count {
+                if index > 0 {
+                    tabs.push(Span::raw("  "));
+                }
+                let header = self.header(index);
+                if index == current {
+                    tabs.push(Span::styled(header, accent));
+                } else if self.answered(index) {
+                    tabs.push(Span::styled(header, theme.dim));
+                    tabs.push(Span::styled(" ✓", theme.success));
+                } else {
+                    tabs.push(Span::styled(header, theme.secondary));
+                }
+            }
+            titles.push(tabs);
+            metas.push(vec![Span::styled(
+                format!("{} of {count}", current + 1),
+                theme.dim,
+            )]);
+        }
+        titles.push(vec![Span::styled(self.header(current), accent)]);
+        let question = &self.questions[current];
+        let mut prompt: Vec<Line<'static>> = question
+            .question
+            .split('\n')
+            .flat_map(|line| {
+                wrap::wrap(&[Span::styled(plain(line), bold)], width, &indent, &indent)
+            })
+            .collect();
+        let rows: Vec<Row> = question
+            .options
+            .iter()
+            .flatten()
+            .map(|option| Row::new(plain(&option.label), plain(&option.description), theme))
+            .chain(
+                question
+                    .options
+                    .as_ref()
+                    .map(|_| Row::new("Other", "Type your own answer", theme)),
             )
-        })
-        .collect()
+            .collect();
+        let list = List::new(&rows, rows.len(), width, true);
+        let draft = &self.drafts[current];
+        let selected = draft
+            .selected
+            .unwrap_or(0)
+            .min(rows.len().saturating_sub(1));
+        let mut choices: Vec<Vec<Line<'static>>> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| list.row(index, row, draft.selected == Some(index), width, theme))
+            .collect();
+        // Notes and custom answers sit under their option; text questions take them directly.
+        let mut note = None;
+        if draft.notes {
+            let options = question.options.is_some();
+            let lead = if !options {
+                2
+            } else if rows.len() <= 9 {
+                7
+            } else {
+                4
+            };
+            let placeholder = if !options || draft.selected == Some(rows.len() - 1) {
+                "Type your answer"
+            } else {
+                "Add a note"
+            };
+            let marker = if options {
+                Span::styled("↳ ", theme.dim)
+            } else {
+                Span::styled("› ", bold)
+            };
+            let editor = &mut self.drafts[current].editor;
+            let mut rendered = editor.render(
+                width.saturating_sub(lead),
+                room.saturating_sub(prompt.len() + 2).clamp(1, 6),
+                marker,
+                theme.dim,
+            );
+            if editor.is_empty() {
+                rendered.lines[0]
+                    .spans
+                    .push(Span::styled(placeholder, theme.dim));
+            }
+            let lines: Vec<Line<'static>> = rendered
+                .lines
+                .into_iter()
+                .map(|line| {
+                    let mut spans = vec![Span::raw(" ".repeat(lead))];
+                    spans.extend(line.spans);
+                    Line::from(spans)
+                })
+                .collect();
+            let (row, column) = rendered.cursor;
+            if options {
+                note = Some((choices[selected].len() + row, lead + column));
+                choices[selected].extend(lines);
+            } else {
+                note = Some((row, lead + column));
+                choices.push(lines);
+            }
+        }
+        let total: usize = choices.iter().map(Vec::len).sum();
+        let focus = if question.options.is_some() {
+            selected
+        } else {
+            0
+        };
+        let keep = choices.get(focus).map_or(0, Vec::len);
+        limit_lines(
+            &mut prompt,
+            room.saturating_sub(1 + total.min(room / 2).max(keep))
+                .max(1),
+            width,
+        );
+        let budget = room.saturating_sub(prompt.len() + 1).max(1);
+        self.option_offset = self.option_offset.min(focus);
+        while self.option_offset < focus
+            && choices[self.option_offset..=focus]
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                > budget
+        {
+            self.option_offset += 1;
+        }
+        let mut body = prompt;
+        body.push(Line::default());
+        let mut cursor = None;
+        let mut remaining = budget;
+        for (index, choice) in choices.iter().enumerate().skip(self.option_offset) {
+            if remaining == 0 {
+                break;
+            }
+            if index == focus
+                && let Some((row, column)) = note
+                && self.text_focus
+                && row < remaining
+            {
+                cursor = Some((1 + body.len() + row, column));
+            }
+            let mut visible = choice.clone();
+            limit_lines(&mut visible, remaining, width);
+            remaining -= visible.len();
+            body.extend(visible);
+        }
+        let position = (total > budget && !rows.is_empty())
+            .then(|| format!("{} / {}", selected + 1, rows.len()));
+        let lines = sheet::frame(
+            theme.accent,
+            sheet::rule(theme.accent, &titles, &metas, width),
+            body,
+            sheet::hints(theme, &self.hints(), position.as_deref(), width),
+            width,
+        );
+        (lines, cursor)
+    }
 }
 
 fn limit_lines(lines: &mut Vec<Line<'static>>, maximum: usize, width: usize) {
@@ -656,7 +587,6 @@ fn limit_lines(lines: &mut Vec<Line<'static>>, maximum: usize, width: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::ColorLevel;
 
     fn text(line: &Line<'_>) -> String {
         line.spans
@@ -666,72 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_keeps_tips_whole_and_highlights_only_important_tips() {
-        let theme = Theme::fixture(ColorLevel::TrueColor, false);
-        let lines = footer(
-            &[
-                ("tab to add notes", true),
-                ("enter to submit all", true),
-                ("←/→ to navigate questions", false),
-                ("esc to interrupt", false),
-            ],
-            36,
-            &theme,
-        );
-        assert_eq!(
-            lines.iter().map(text).collect::<Vec<_>>(),
-            [
-                "tab to add notes",
-                "enter to submit all",
-                "←/→ to navigate questions",
-                "esc to interrupt"
-            ]
-        );
-        assert_eq!(
-            lines[0].spans[0].style.fg,
-            Some(ratatui_core::style::Color::Cyan)
-        );
-        assert!(
-            lines[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert_eq!(lines[2].spans[0].style, theme.dim);
-        let lines = footer(
-            &[
-                ("tab to add notes", true),
-                ("enter to submit answer", false),
-            ],
-            76,
-            &theme,
-        );
-        assert_eq!(text(&lines[0]), "tab to add notes | enter to submit answer");
-    }
-
-    #[test]
-    fn options_align_descriptions_and_clip_with_a_visible_ellipsis() {
-        let theme = Theme::fixture(ColorLevel::TrueColor, false);
-        let choices = vec![
-            ("Short".into(), "First description".into()),
-            ("A longer choice".into(), "Second description".into()),
-        ];
-        let rows = option_rows(&choices, Some(1), 56, &theme);
-        let column = |line: &Line<'_>, word: &str| {
-            let text = text(line);
-            wrap::width(&text[..text.find(word).expect("description")])
-        };
-        assert_eq!(column(&rows[0][0], "First"), column(&rows[1][0], "Second"));
-        assert_eq!(
-            rows[0][0].spans.last().expect("description").style,
-            theme.dim
-        );
-        assert_eq!(
-            rows[1][0].spans.last().expect("description").style,
-            theme.accent.add_modifier(Modifier::BOLD)
-        );
-        let rows = option_rows(&choices, None, 24, &theme);
-        assert!(text(&rows[1][1]).starts_with("     "));
+    fn limited_lines_end_with_a_visible_ellipsis() {
         let mut rows = vec![Line::from("1234567890"), Line::from("continued")];
         limit_lines(&mut rows, 1, 10);
         assert_eq!(text(&rows[0]), "123456789…");

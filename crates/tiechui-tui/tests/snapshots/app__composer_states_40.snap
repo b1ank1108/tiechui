@@ -52,13 +52,11 @@ expression: states(40)
 [cursor Some((16, 2))]
 == menu open
 
-  Files · [Files] All
-> app.rs    src/
-  apply.rs  src/
-  File · 2 matches
-  ↑↓ · Tab/Enter · Esc · Shift+Tab filt…
+  Files  All                   2 matches
+  › app.rs     src/
+    apply.rs   src/
 ────────────────────────────────────────
 › @ap
 ────────────────────────────────────────
-  ? for shortcuts
-[cursor Some((7, 5))]
+  tab open/complete · esc close
+[cursor Some((5, 5))]

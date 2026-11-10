@@ -63,6 +63,21 @@ fn app() -> App {
 fn key(app: &mut App, key: KeyCode) {
     app.key(KeyEvent::new(key, KeyModifiers::NONE));
 }
+/// The bold half of the `Files  All` filter.
+fn filter(app: &mut App) -> Option<String> {
+    app.live()
+        .0
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .find(|s| {
+            matches!(s.content.as_ref(), "Files" | "All")
+                && s.style
+                    .add_modifier
+                    .contains(ratatui_core::style::Modifier::BOLD)
+        })
+        .map(|s| s.content.to_string())
+}
+
 fn screen(app: &mut App) -> String {
     app.live()
         .0
@@ -367,7 +382,7 @@ fn directory_tab_scopes_search_enter_inserts_and_left_moves_cursor() {
     app.paste("@");
     app.set_index(Index::from_paths(["中文 dir/".into()]));
     key(&mut app, KeyCode::Left);
-    assert!(!screen(&mut app).contains("[All]"));
+    assert_ne!(filter(&mut app).as_deref(), Some("All"));
     app.paste("before");
     assert!(screen(&mut app).contains("before@"));
 }
@@ -393,10 +408,10 @@ fn streamed_resources_preserve_selection_and_new_mentions_reset_filter() {
     );
     app.paste("@");
     app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert!(screen(&mut app).contains("[All]"));
+    assert_eq!(filter(&mut app).as_deref(), Some("All"));
     key(&mut app, KeyCode::Esc);
     app.paste(" @");
-    assert!(screen(&mut app).contains("[Files]"));
+    assert_eq!(filter(&mut app).as_deref(), Some("Files"));
 }
 
 #[test]
@@ -458,7 +473,7 @@ fn menus_stay_above_composer_and_keep_selection_and_cursor_on_short_screens() {
             .collect::<Vec<_>>();
         let selected = rows
             .iter()
-            .position(|l| l.starts_with("> $review"))
+            .position(|l| l.starts_with("  › $review"))
             .unwrap();
         let composer = rows
             .iter()

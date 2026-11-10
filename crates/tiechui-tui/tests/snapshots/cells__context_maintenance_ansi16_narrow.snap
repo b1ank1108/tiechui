@@ -4,32 +4,32 @@ expression: "maintenance(&Theme::fixture(ColorLevel::Ansi16, false), 40)"
 ---
 == maintained
 [d]◇ [b]Maintained context[d] · ≈ −7.9k tokens
-[d]  └ [fgCyan]Status[-] 72k / 128k · normal · 3 cand[-]…
-[-]    [fgCyan]Compact[-] b4 Parser investigation, b5
+[d]  └ [fg@6]Status[-] 72k / 128k · normal · 3 cand[-]…
+[-]    [fg@6]Compact[-] b4 Parser investigation, b5
 
 == deferred
 [d]◇ [b]Maintained context
-[d]  └ [fgCyan]Status[-] 96k / 128k · high · 3 candid[-]…
-[-]    [fgCyan]Compact[-] Parser investigation, c2[d] · [d]…
+[d]  └ [fg@6]Status[-] 96k / 128k · high · 3 candid[-]…
+[-]    [fg@6]Compact[-] Parser investigation, c2[d] · [d]…
 
 == failed
 [b,fg@1]◇ [b]Maintained context
-[d]  └ [fgCyan]Compact[-] Parser investigation, c2[d] · [d]…
+[d]  └ [fg@6]Compact[-] Parser investigation, c2[d] · [d]…
 
 == running
 [-]◇ [b]Maintaining context
-[d]  └ [fgCyan]Search[-] "parser timeout" · 3 hits
-[-]    [fgCyan]Read[-] b4[d] · running
+[d]  └ [fg@6]Search[-] "parser timeout" · 3 hits
+[-]    [fg@6]Read[-] b4[d] · running
 
 == maintained expanded
 [d]◇ [b]Maintained context[d] · ≈ −7.9k tokens
-[-]  [b]Called[-] [fgCyan]context_status[d] · 1s
+[-]  [b]Called[-] [fg@6]context_status[d] · 1s
 [d]  └ [d]{"budget":{"input_tokens_estimate":7
 [-]    [d]2000,"model_window_tokens":128000,"p
 [-]    [d]ressure":"normal"},"candidates":[{},
 [-]    [d]{},{}],"has_more":false,"maintenance
 [-]    [d]":{"state":"ready"},"ok":true}
-[-]  [b]Called[-] [fgCyan]compact_history[d] · 1s
+[-]  [b]Called[-] [fg@6]compact_history[d] · 1s
 [-]    [d]{"ranges":[{"candidate_id":"c1","sum
 [-]    [d]mary":"Goal: stop the parser timing
 [-]    [d]out on large CRLF

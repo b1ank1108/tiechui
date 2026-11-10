@@ -21,12 +21,12 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#8fa8c9]────────────────────────────────────────
+[fg#a99ccf]── [b]Side[-] [fg#a99ccf]──────────────────────────────[fg#a99ccf]──
 [-]› [fg#666c77]Ask a follow-up question
-[fg#8fa8c9]────────────────────────────────────────
+[fg#a99ccf]────────────────────────────────────────
 [-]  [fg#9aa0aa]side-model[fg#666c77] (high)[-]     [fg#9aa0aa]99% left[fg#666c77] / 10k
-[-]  [b,fg#a99ccf]Side[fg#a99ccf] · main needs input · ctrl+/ to
-[-]  [fg#a99ccf]switch · ctrl+c to close
+[-]  [fg#d6b07a]main needs input
+[-]  [fg#9aa0aa]ctrl+/[fg#666c77] switch · [fg#9aa0aa]ctrl+c[fg#666c77] close
 
 80 columns / dark
 
@@ -47,12 +47,12 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+
+[fg#a99ccf]── [b]Side[-] [fg#a99ccf]──────────────────────────────────────────────────────────────────────[fg#a99ccf]──
 [-]› [fg#666c77]Ask a follow-up question
-[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[fg#a99ccf]────────────────────────────────────────────────────────────────────────────────
 [-]  [fg#9aa0aa]side-model[fg#666c77] (high) · [fg#9aa0aa]/project[-]                                  [fg#9aa0aa]99% left[fg#666c77] / 10k
-[-]  [b,fg#a99ccf]Side[fg#a99ccf] from main thread · main needs input · ctrl+/ to switch · ctrl+c to
-[-]  [fg#a99ccf]close
+[-]  [fg#d6b07a]main needs input[fg#666c77] · [fg#9aa0aa]ctrl+/[fg#666c77] switch · [fg#9aa0aa]ctrl+c[fg#666c77] close
 
 40 columns / light
 
@@ -73,12 +73,12 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#4f6f9a]────────────────────────────────────────
+[fg#7a68a8]── [b]Side[-] [fg#7a68a8]──────────────────────────────[fg#7a68a8]──
 [-]› [fg#9aa1ac]Ask a follow-up question
-[fg#4f6f9a]────────────────────────────────────────
+[fg#7a68a8]────────────────────────────────────────
 [-]  [fg#5f6672]side-model[fg#9aa1ac] (high)[-]     [fg#5f6672]99% left[fg#9aa1ac] / 10k
-[-]  [b,fg#7a68a8]Side[fg#7a68a8] · main needs input · ctrl+/ to
-[-]  [fg#7a68a8]switch · ctrl+c to close
+[-]  [fg#a87a2f]main needs input
+[-]  [fg#5f6672]ctrl+/[fg#9aa1ac] switch · [fg#5f6672]ctrl+c[fg#9aa1ac] close
 
 80 columns / light
 
@@ -99,9 +99,9 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+
+[fg#7a68a8]── [b]Side[-] [fg#7a68a8]──────────────────────────────────────────────────────────────────────[fg#7a68a8]──
 [-]› [fg#9aa1ac]Ask a follow-up question
-[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[fg#7a68a8]────────────────────────────────────────────────────────────────────────────────
 [-]  [fg#5f6672]side-model[fg#9aa1ac] (high) · [fg#5f6672]/project[-]                                  [fg#5f6672]99% left[fg#9aa1ac] / 10k
-[-]  [b,fg#7a68a8]Side[fg#7a68a8] from main thread · main needs input · ctrl+/ to switch · ctrl+c to
-[-]  [fg#7a68a8]close
+[-]  [fg#a87a2f]main needs input[fg#9aa1ac] · [fg#5f6672]ctrl+/[fg#9aa1ac] switch · [fg#5f6672]ctrl+c[fg#9aa1ac] close

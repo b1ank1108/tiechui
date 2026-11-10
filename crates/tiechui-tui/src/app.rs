@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use tiechui_protocol::{
     ApprovalId, Event, EventKind, InputContent, InputDelivery, Item, KnownItem, ModelInfo, Op,
@@ -25,6 +25,7 @@ use crate::paste;
 use crate::prompt::{self, Prompt};
 use crate::resume::{self, Loaded, Resume};
 use crate::select::{self, Select};
+use crate::sheet;
 use crate::status::{self, Git, GitFields, Phase, Snapshot, StatusLineConfig};
 use crate::status_picker::{Outcome, StatusPicker};
 use crate::theme::Theme;
@@ -315,7 +316,7 @@ impl App {
             outbox: Vec::new(),
             next_id: 0,
             startup: options.startup,
-            cwd: options.cwd,
+            cwd: options.cwd.clone(),
             queue_hint: options.queue_hint.unwrap_or("alt+up"),
             composer: Composer::default(),
             focused: true,
@@ -368,7 +369,7 @@ impl App {
             quit: false,
             resume: options
                 .pick
-                .then(|| Resume::new(1, true, options.home.clone(), now_ms())),
+                .then(|| Resume::new(1, true, options.cwd.clone(), options.home.clone(), now_ms())),
             generation: 1,
             switch: None,
             fresh: false,
@@ -907,7 +908,8 @@ impl App {
                     return;
                 }
                 self.close_prompt(now);
-                self.prompt = Some((approval_id, Prompt::new(request)));
+                let prompt = Prompt::new(request, &self.cwd, self.home.as_deref());
+                self.prompt = Some((approval_id, prompt));
                 self.paused.get_or_insert(now);
             }
             EventKind::ApprovalResolved { approval_id }
@@ -1038,6 +1040,14 @@ impl App {
                     if open && !self.context_open() && self.prompt.is_none() {
                         self.shells_visible = true;
                     }
+                    if self.shells_visible
+                        && let Some(data) = self.shells.as_mut().and_then(|panel| panel.follow())
+                    {
+                        self.send(Op::CommandInput {
+                            name: "shells".into(),
+                            data,
+                        });
+                    }
                 }
             }
             EventKind::Extension { name, data }
@@ -1069,15 +1079,17 @@ impl App {
                             }
                         }
                         tiechui_protocol::BtwEvent::Models { models, current } => {
-                            let mut choices = select::models(&models, current.as_ref());
+                            let mut choices = select::models(&models, current.as_ref(), None);
                             for choice in &mut choices {
                                 choice.op = Op::RunCommand {
                                     name: "btw".into(),
-                                    arguments: format!("model {}", choice.label),
+                                    arguments: format!("model {}", choice.name),
                                 };
+                                choice.thinking = None;
                             }
+                            let meta = format!("{} models", choices.len());
                             if let Err(select) =
-                                Select::open("Side conversation model", choices, "")
+                                Select::open("Side conversation model", meta, choices, "")
                             {
                                 self.select = Some(select);
                             }
@@ -1222,8 +1234,13 @@ impl App {
                 }
             }
             Action::Builtin(Builtin::Model) => {
-                let choices = select::models(&self.models, self.session.model.as_ref());
-                self.choose("Model", choices, &arguments);
+                let choices = select::models(
+                    &self.models,
+                    self.session.model.as_ref(),
+                    self.session.thinking,
+                );
+                let meta = format!("{} models", choices.len());
+                self.choose("Model", meta, choices, &arguments);
             }
             Action::Builtin(Builtin::Thinking) => {
                 let levels = self
@@ -1232,7 +1249,12 @@ impl App {
                     .as_ref()
                     .map_or_else(|| vec![ThinkingLevel::Off], |m| m.thinking_levels.clone());
                 let choices = select::thinking(&levels, self.session.thinking);
-                self.choose("Thinking", choices, &arguments);
+                let meta = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map_or_else(String::new, |m| m.id.clone());
+                self.choose("Thinking", meta, choices, &arguments);
             }
             Action::Builtin(Builtin::Statusline) => {
                 self.picker = Some(StatusPicker::new(&self.status_line));
@@ -1252,6 +1274,7 @@ impl App {
                 self.resume = Some(Resume::new(
                     self.generation,
                     false,
+                    self.cwd.clone(),
                     self.home.clone(),
                     now_ms(),
                 ));
@@ -1279,7 +1302,12 @@ impl App {
                 self.transcript.info("Commands".into(), text.join("\n"));
             }
             Action::Module if name == "permissions" && arguments.is_empty() => {
-                self.choose("Permissions", select::permissions(self.permission), "");
+                self.choose(
+                    "Permissions",
+                    String::new(),
+                    select::permissions(self.permission),
+                    "",
+                );
             }
             Action::Module => {
                 self.send(Op::RunCommand { name, arguments });
@@ -1302,9 +1330,15 @@ impl App {
         }
     }
 
-    fn choose(&mut self, title: &'static str, choices: Vec<select::Choice>, query: &str) {
-        match Select::open(title, choices, query) {
-            Ok(op) => self.pick(op),
+    fn choose(
+        &mut self,
+        title: &'static str,
+        meta: String,
+        choices: Vec<select::Choice>,
+        query: &str,
+    ) {
+        match Select::open(title, meta, choices, query) {
+            Ok(ops) => ops.into_iter().for_each(|op| self.pick(op)),
             Err(select) => self.select = Some(select),
         }
     }
@@ -1993,7 +2027,13 @@ impl App {
         {
             match panel.key(key) {
                 crate::shells::Outcome::Open => {}
-                crate::shells::Outcome::Close => self.shells_visible = false,
+                crate::shells::Outcome::Close => {
+                    self.shells_visible = false;
+                    self.send(Op::CommandInput {
+                        name: "shells".into(),
+                        data: serde_json::json!({ "close": true }),
+                    });
+                }
                 crate::shells::Outcome::Send(data) => {
                     self.send(Op::CommandInput {
                         name: "shells".into(),
@@ -2079,9 +2119,9 @@ impl App {
             match select.key(key) {
                 select::Outcome::Open => {}
                 select::Outcome::Cancel => self.select = None,
-                select::Outcome::Pick(op) => {
+                select::Outcome::Pick(ops) => {
                     self.select = None;
-                    self.pick(op);
+                    ops.into_iter().for_each(|op| self.pick(op));
                 }
             }
             return Exit::Running;
@@ -2859,7 +2899,7 @@ impl App {
         } else {
             Span::styled(MARKER, Style::default().add_modifier(Modifier::BOLD))
         };
-        let element = Style::default().fg(Color::Cyan);
+        let element = self.theme.accent;
         let rows = self.composer_rows();
         let mut rendered = self.composer.render(self.width, rows, marker, element);
         // A leading `!` becomes the marker itself.
@@ -3010,12 +3050,24 @@ impl App {
                 true,
             ));
         }
-        lines.push(status::line(
-            &self.status_line,
-            &self.snapshot(),
-            self.width,
-            &self.theme,
-        ));
+        // An open menu takes the status line's row for its keys.
+        let keys: Option<&[(&str, &str)]> = match (&self.menu, &self.mention) {
+            (Some(_), _) => Some(&[("tab", "complete"), ("enter", "run"), ("esc", "close")]),
+            (_, Some(mention)) if mention.skills => {
+                Some(&[("tab/enter", "insert"), ("esc", "close")])
+            }
+            (_, Some(_)) => Some(&[
+                ("tab", "open/complete"),
+                ("enter", "insert"),
+                ("shift+tab", "filter"),
+                ("esc", "close"),
+            ]),
+            _ => None,
+        };
+        lines.push(match keys {
+            Some(pairs) => sheet::hints(&self.theme, pairs, None, self.width),
+            None => status::line(&self.status_line, &self.snapshot(), self.width, &self.theme),
+        });
         lines.extend(self.activity());
         if self.stash.is_some() {
             lines.push(wrap::fit(

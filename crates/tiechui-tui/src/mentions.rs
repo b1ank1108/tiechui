@@ -13,7 +13,8 @@ use nucleo::{
     Config, Injector, Matcher, Nucleo,
     pattern::{CaseMatching, Normalization},
 };
-use ratatui_core::text::Line;
+use ratatui_core::style::{Modifier, Style};
+use ratatui_core::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::completion::{self, Row};
@@ -417,17 +418,21 @@ pub fn popup(
             }
         })
         .collect::<Vec<_>>();
-    let title = if skills { "Skills" } else { mode.label() };
-    let hint = if skills {
-        "↑↓ select · Tab/Enter insert · Esc close"
+    let title = if skills {
+        vec![Span::styled("Skills", theme.dim)]
     } else {
-        if width < 60 {
-            "↑↓ · Tab/Enter · Esc · Shift+Tab filter"
+        let (files, all) = if mode == Mode::All {
+            (theme.dim, Style::default().add_modifier(Modifier::BOLD))
         } else {
-            "↑↓ · Tab open/complete · Enter insert · Esc · Shift+Tab filter"
-        }
+            (Style::default().add_modifier(Modifier::BOLD), theme.dim)
+        };
+        vec![
+            Span::styled("Files", files),
+            Span::raw("  "),
+            Span::styled("All", all),
+        ]
     };
-    completion::popup(title, &rows, selected, status, hint, width, height, theme)
+    completion::popup(title, &rows, selected, status, width, height, theme)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -441,12 +446,6 @@ impl Mode {
         match self {
             Self::All => Self::Filesystem,
             Self::Filesystem => Self::All,
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "Files · Files [All]",
-            Self::Filesystem => "Files · [Files] All",
         }
     }
 }

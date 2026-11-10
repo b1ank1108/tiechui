@@ -1,28 +1,27 @@
 ---
 source: crates/tiechui-tui/tests/app.rs
-assertion_line: 1500
 expression: "shots.join(\"\\n\\n\")"
 ---
 40 light=false submitted
 [fg#666c77]• [b]Questions[fg#666c77] 2/3 answered
 [-]  • [-]Which implementation should we use?
-[-]    [fg#666c77]answer: [fgCyan]Small change (Recommended)
-[-]    [fg#666c77]note: [fgCyan]Preserve the existing
-[-]          [fgCyan]interface and its
-[-]          [fgCyan]documentation.
+[-]    [fg#666c77]answer: [-]Small change (Recommended)
+[-]    [fg#666c77]note: [-]Preserve the existing
+[-]          [-]interface and its
+[-]          [-]documentation.
 [-]  • [-]Anything else?
-[-]    [fg#666c77]answer: [fgCyan]A free-text answer
+[-]    [fg#666c77]answer: [-]A free-text answer
 [-]  • [-]Should this stay unanswered?
 [-]    [fg#666c77](unanswered)
 
 40 light=false cancelled
-[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered[fgCyan] (interrupted)
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered (interrupted)
 [-]  • [-]Which implementation should we use?
 [-]    [fg#666c77](unanswered)
 [-]  • [-]Anything else?[fg#666c77] (unanswered)
 [-]  • [-]Should this stay unanswered?
 [-]    [fg#666c77](unanswered)
-[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+[fg#666c77]  ↳ [fg#666c77]Operation aborted
 
 40 light=false error
 [fg#666c77]• [b]Questions[fg#666c77] 0/3 answered
@@ -37,18 +36,18 @@ expression: "shots.join(\"\\n\\n\")"
 80 light=false submitted
 [fg#666c77]• [b]Questions[fg#666c77] 2/3 answered
 [-]  • [-]Which implementation should we use?
-[-]    [fg#666c77]answer: [fgCyan]Small change (Recommended)
-[-]    [fg#666c77]note: [fgCyan]Preserve the existing interface and its documentation.
+[-]    [fg#666c77]answer: [-]Small change (Recommended)
+[-]    [fg#666c77]note: [-]Preserve the existing interface and its documentation.
 [-]  • [-]Anything else?
-[-]    [fg#666c77]answer: [fgCyan]A free-text answer
+[-]    [fg#666c77]answer: [-]A free-text answer
 [-]  • [-]Should this stay unanswered?[fg#666c77] (unanswered)
 
 80 light=false cancelled
-[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered[fgCyan] (interrupted)
+[fg#666c77]• [b]Questions[fg#666c77] 0/3 answered (interrupted)
 [-]  • [-]Which implementation should we use?[fg#666c77] (unanswered)
 [-]  • [-]Anything else?[fg#666c77] (unanswered)
 [-]  • [-]Should this stay unanswered?[fg#666c77] (unanswered)
-[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+[fg#666c77]  ↳ [fg#666c77]Operation aborted
 
 80 light=false error
 [fg#666c77]• [b]Questions[fg#666c77] 0/3 answered
@@ -60,23 +59,23 @@ expression: "shots.join(\"\\n\\n\")"
 40 light=true submitted
 [fg#9aa1ac]• [b]Questions[fg#9aa1ac] 2/3 answered
 [-]  • [-]Which implementation should we use?
-[-]    [fg#9aa1ac]answer: [fgCyan]Small change (Recommended)
-[-]    [fg#9aa1ac]note: [fgCyan]Preserve the existing
-[-]          [fgCyan]interface and its
-[-]          [fgCyan]documentation.
+[-]    [fg#9aa1ac]answer: [-]Small change (Recommended)
+[-]    [fg#9aa1ac]note: [-]Preserve the existing
+[-]          [-]interface and its
+[-]          [-]documentation.
 [-]  • [-]Anything else?
-[-]    [fg#9aa1ac]answer: [fgCyan]A free-text answer
+[-]    [fg#9aa1ac]answer: [-]A free-text answer
 [-]  • [-]Should this stay unanswered?
 [-]    [fg#9aa1ac](unanswered)
 
 40 light=true cancelled
-[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered[fgCyan] (interrupted)
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered (interrupted)
 [-]  • [-]Which implementation should we use?
 [-]    [fg#9aa1ac](unanswered)
 [-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
 [-]  • [-]Should this stay unanswered?
 [-]    [fg#9aa1ac](unanswered)
-[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+[fg#9aa1ac]  ↳ [fg#9aa1ac]Operation aborted
 
 40 light=true error
 [fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered
@@ -91,18 +90,18 @@ expression: "shots.join(\"\\n\\n\")"
 80 light=true submitted
 [fg#9aa1ac]• [b]Questions[fg#9aa1ac] 2/3 answered
 [-]  • [-]Which implementation should we use?
-[-]    [fg#9aa1ac]answer: [fgCyan]Small change (Recommended)
-[-]    [fg#9aa1ac]note: [fgCyan]Preserve the existing interface and its documentation.
+[-]    [fg#9aa1ac]answer: [-]Small change (Recommended)
+[-]    [fg#9aa1ac]note: [-]Preserve the existing interface and its documentation.
 [-]  • [-]Anything else?
-[-]    [fg#9aa1ac]answer: [fgCyan]A free-text answer
+[-]    [fg#9aa1ac]answer: [-]A free-text answer
 [-]  • [-]Should this stay unanswered?[fg#9aa1ac] (unanswered)
 
 80 light=true cancelled
-[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered[fgCyan] (interrupted)
+[fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered (interrupted)
 [-]  • [-]Which implementation should we use?[fg#9aa1ac] (unanswered)
 [-]  • [-]Anything else?[fg#9aa1ac] (unanswered)
 [-]  • [-]Should this stay unanswered?[fg#9aa1ac] (unanswered)
-[d,fgCyan]  ↳ [d,fgCyan]Operation aborted
+[fg#9aa1ac]  ↳ [fg#9aa1ac]Operation aborted
 
 80 light=true error
 [fg#9aa1ac]• [b]Questions[fg#9aa1ac] 0/3 answered

@@ -4,30 +4,30 @@ expression: "maintenance(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 ---
 == maintained
 [fg#666c77]◇ [b]Maintained context[fg#666c77] · ≈ −7.9k tokens
-[fg#666c77]  └ [fgCyan]Status[-] 72k / 128k · normal · 3 candidates
-[-]    [fgCyan]Compact[-] b4 Parser investigation, b5
+[fg#666c77]  └ [fg#8fa8c9]Status[-] 72k / 128k · normal · 3 candidates
+[-]    [fg#8fa8c9]Compact[-] b4 Parser investigation, b5
 
 == deferred
 [fg#666c77]◇ [b]Maintained context
-[fg#666c77]  └ [fgCyan]Status[-] 96k / 128k · high · 3 candidates · cooldown
-[-]    [fgCyan]Compact[-] Parser investigation, c2[fg#666c77] · deferred · cooldown
+[fg#666c77]  └ [fg#8fa8c9]Status[-] 96k / 128k · high · 3 candidates · cooldown
+[-]    [fg#8fa8c9]Compact[-] Parser investigation, c2[fg#666c77] · deferred · cooldown
 
 == failed
 [b,fg#d48a8a]◇ [b]Maintained context
-[fg#666c77]  └ [fgCyan]Compact[-] Parser investigation, c2[fg#666c77] · [fg#d48a8a]CANDIDATE_CHANGED[fg#666c77] · 1 of 2 candidates ch[fg#666c77]…
+[fg#666c77]  └ [fg#8fa8c9]Compact[-] Parser investigation, c2[fg#666c77] · [fg#d48a8a]CANDIDATE_CHANGED[fg#666c77] · 1 of 2 candidates ch[fg#666c77]…
 
 == running
 [b,fg#d0d0d0]◇[-] [b]Maintaining context
-[fg#666c77]  └ [fgCyan]Search[-] "parser timeout" · 3 hits
-[-]    [fgCyan]Read[-] b4[fg#666c77] · running
+[fg#666c77]  └ [fg#8fa8c9]Search[-] "parser timeout" · 3 hits
+[-]    [fg#8fa8c9]Read[-] b4[fg#666c77] · running
 
 == maintained expanded
 [fg#666c77]◇ [b]Maintained context[fg#666c77] · ≈ −7.9k tokens
-[-]  [b]Called[-] [fgCyan]context_status[fg#666c77] · 1s
+[-]  [b]Called[-] [fg#8fa8c9]context_status[fg#666c77] · 1s
 [fg#666c77]  └ [fg#666c77]{"budget":{"input_tokens_estimate":72000,"model_window_tokens":128000,"press
 [-]    [fg#666c77]ure":"normal"},"candidates":[{},{},{}],"has_more":false,"maintenance":{"stat
 [-]    [fg#666c77]e":"ready"},"ok":true}
-[-]  [b]Called[-] [fgCyan]compact_history[fg#666c77] · 1s
+[-]  [b]Called[-] [fg#8fa8c9]compact_history[fg#666c77] · 1s
 [-]    [fg#666c77]{"ranges":[{"candidate_id":"c1","summary":"Goal: stop the parser timing out
 [-]    [fg#666c77]on large CRLF inputs.","title":"Parser
 [-]    [fg#666c77]investigation"},{"candidate_id":"c2","summary":"Removed duplicated CRLF

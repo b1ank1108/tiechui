@@ -227,6 +227,25 @@ pub fn lines(text: &str, path: Option<&str>, width: usize, theme: &Theme) -> Vec
     out
 }
 
+/// Proposed changes without line numbers: removed rows, then added rows, as `(added, text)`.
+pub fn signed(
+    rows: &[(bool, &str)],
+    path: Option<&str>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let rows: Vec<(Sign, &str, &str)> = rows
+        .iter()
+        .map(|(added, text)| {
+            let sign = if *added { Sign::Insert } else { Sign::Delete };
+            (sign, "", *text)
+        })
+        .collect();
+    let mut out = Vec::new();
+    block(&rows, path, 0, width, theme, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

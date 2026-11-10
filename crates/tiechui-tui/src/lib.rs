@@ -33,6 +33,7 @@ pub mod resume;
 pub mod rewind;
 mod select;
 pub mod selection;
+mod sheet;
 pub mod shells;
 pub mod status;
 mod status_picker;

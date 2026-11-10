@@ -87,6 +87,9 @@ fn modal_keys_draft_busy_and_close_are_isolated() {
         Outcome::Switch
     ));
     key(&mut panel, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let full = render(&mut panel, 40, 10, false);
+    assert_eq!(full.len(), 10);
+    assert!(plain(&full).contains("Side transcript") && plain(&full).contains("q close"));
     assert!(matches!(
         key(&mut panel, KeyCode::Char('/'), KeyModifiers::CONTROL),
         Outcome::Open

@@ -88,7 +88,7 @@ fn checking_conflicts_short_windows_and_repeated_confirmation_keys() {
         if width == 80 {
             let text = support::dump(&rows);
             assert!(text.contains("Never mind"));
-            assert!(text.contains("confirms"));
+            assert!(text.contains(" back"));
         }
     }
 }

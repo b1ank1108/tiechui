@@ -1,87 +1,76 @@
 ---
 source: crates/tiechui-tui/tests/rewind.rs
-assertion_line: 58
 expression: output
 ---
 
 40 columns, light=false
-[fg#33363d]────────────────────────────────────────
-[b] Rewind
-[-] Restore to the point before you sent
-[-] this message:
-[-] Fix login and preserve the image 🦀
-[-] [fg#666c77]2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#666c77] (1 uncounted)
-[fg#666c77] checkpoint → current
-[fg#666c77]   image.png  line counts unavailable
-[fg#666c77]   src/login.rs  [fg#8fb996]+24[-] [fg#d48a8a]−6
+[fg#8fa8c9]── [b]Restore?[-] [fg#8fa8c9]────────[-] [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#8fa8c9] ──
+[-]  [fg#33363d]│ [fg#9aa0aa]Fix login and preserve the image 🦀
 
-[b,bg#292929] › 1. Restore code and conversation
-[-]   2. Restore conversation
-[-]   3. Restore code
-[-]   4. Never mind
+[-]    image.png     [fg#666c77]line counts unavailab…
+[-]    src/login.rs  [fg#8fb996]+24[-] [fg#d48a8a]−6
 
-[-] [fg#666c77]Restore tracked files and return this
-[-] [fg#666c77]prompt to the editor.
-[-] [fg#666c77]Bash, manual and other-session edits
-[-] [fg#666c77]are not guaranteed to rewind.
-[fg#666c77] Enter / number to confirm · Esc to go …
+[-]  [b,fg#8fa8c9]› 1. Restore code and conversation
+[-]    [fg#666c77]2. [-]Restore conversation
+[-]    [fg#666c77]3. [-]Restore code
+[-]    [fg#666c77]4. [-]Never mind
+
+[-]  [fg#666c77]Restore tracked files and return this
+[-]  [fg#666c77]prompt to the editor.
+[-]  [fg#666c77]Bash, manual and other-session edits
+[-]  [fg#666c77]are not guaranteed to rewind.
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] confirm · [fg#9aa0aa]1-4[fg#666c77] pick · [fg#9aa0aa]esc[fg#666c77] back
 
 80 columns, light=false
-[fg#33363d]────────────────────────────────────────────────────────────────────────────────
-[b] Rewind
-[-] Restore to the point before you sent this message:
-[-] Fix login and preserve the image 🦀
-[-] [fg#666c77]2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#666c77] (1 uncounted)
-[fg#666c77] checkpoint → current
-[fg#666c77]   image.png  line counts unavailable
-[fg#666c77]   src/login.rs  [fg#8fb996]+24[-] [fg#d48a8a]−6
+[fg#8fa8c9]── [b]Restore to before this prompt?[-] [fg#8fa8c9]──────────────────────────[-] [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#8fa8c9] ──
+[-]  [fg#33363d]│ [fg#9aa0aa]Fix login and preserve the image 🦀
 
-[b,bg#292929] › 1. Restore code and conversation
-[-]   2. Restore conversation
-[-]   3. Restore code
-[-]   4. Never mind
+[-]    image.png     [fg#666c77]line counts unavailable
+[-]    src/login.rs  [fg#8fb996]+24[-] [fg#d48a8a]−6
 
-[-] [fg#666c77]Restore tracked files and return this prompt to the editor.
-[-] [fg#666c77]Bash, manual and other-session edits are not guaranteed to rewind.
-[fg#666c77] Enter / number to confirm · Esc to go back
+[-]  [b,fg#8fa8c9]› 1. Restore code and conversation
+[-]    [fg#666c77]2. [-]Restore conversation
+[-]    [fg#666c77]3. [-]Restore code
+[-]    [fg#666c77]4. [-]Never mind
+
+[-]  [fg#666c77]Restore tracked files and return this prompt to the editor.
+[-]  [fg#666c77]Bash, manual and other-session edits are not guaranteed to rewind.
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] confirm · [fg#9aa0aa]1-4[fg#666c77] pick · [fg#9aa0aa]esc[fg#666c77] back
 
 40 columns, light=true
-[fg#dde0e5]────────────────────────────────────────
-[b] Rewind
-[-] Restore to the point before you sent
-[-] this message:
-[-] Fix login and preserve the image 🦀
-[-] [fg#9aa1ac]2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#9aa1ac] (1 uncounted)
-[fg#9aa1ac] checkpoint → current
-[fg#9aa1ac]   image.png  line counts unavailable
-[fg#9aa1ac]   src/login.rs  [fg#4f8a5b]+24[-] [fg#b05656]−6
+[fg#4f6f9a]── [b]Restore?[-] [fg#4f6f9a]────────[-] [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#4f6f9a] ──
+[-]  [fg#dde0e5]│ [fg#5f6672]Fix login and preserve the image 🦀
 
-[b,bg#f0f0f0] › 1. Restore code and conversation
-[-]   2. Restore conversation
-[-]   3. Restore code
-[-]   4. Never mind
+[-]    image.png     [fg#9aa1ac]line counts unavailab…
+[-]    src/login.rs  [fg#4f8a5b]+24[-] [fg#b05656]−6
 
-[-] [fg#9aa1ac]Restore tracked files and return this
-[-] [fg#9aa1ac]prompt to the editor.
-[-] [fg#9aa1ac]Bash, manual and other-session edits
-[-] [fg#9aa1ac]are not guaranteed to rewind.
-[fg#9aa1ac] Enter / number to confirm · Esc to go …
+[-]  [b,fg#4f6f9a]› 1. Restore code and conversation
+[-]    [fg#9aa1ac]2. [-]Restore conversation
+[-]    [fg#9aa1ac]3. [-]Restore code
+[-]    [fg#9aa1ac]4. [-]Never mind
+
+[-]  [fg#9aa1ac]Restore tracked files and return this
+[-]  [fg#9aa1ac]prompt to the editor.
+[-]  [fg#9aa1ac]Bash, manual and other-session edits
+[-]  [fg#9aa1ac]are not guaranteed to rewind.
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] confirm · [fg#5f6672]1-4[fg#9aa1ac] pick · [fg#5f6672]esc[fg#9aa1ac] back
 
 80 columns, light=true
-[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
-[b] Rewind
-[-] Restore to the point before you sent this message:
-[-] Fix login and preserve the image 🦀
-[-] [fg#9aa1ac]2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#9aa1ac] (1 uncounted)
-[fg#9aa1ac] checkpoint → current
-[fg#9aa1ac]   image.png  line counts unavailable
-[fg#9aa1ac]   src/login.rs  [fg#4f8a5b]+24[-] [fg#b05656]−6
+[fg#4f6f9a]── [b]Restore to before this prompt?[-] [fg#4f6f9a]──────────────────────────[-] [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#4f6f9a] ──
+[-]  [fg#dde0e5]│ [fg#5f6672]Fix login and preserve the image 🦀
 
-[b,bg#f0f0f0] › 1. Restore code and conversation
-[-]   2. Restore conversation
-[-]   3. Restore code
-[-]   4. Never mind
+[-]    image.png     [fg#9aa1ac]line counts unavailable
+[-]    src/login.rs  [fg#4f8a5b]+24[-] [fg#b05656]−6
 
-[-] [fg#9aa1ac]Restore tracked files and return this prompt to the editor.
-[-] [fg#9aa1ac]Bash, manual and other-session edits are not guaranteed to rewind.
-[fg#9aa1ac] Enter / number to confirm · Esc to go back
+[-]  [b,fg#4f6f9a]› 1. Restore code and conversation
+[-]    [fg#9aa1ac]2. [-]Restore conversation
+[-]    [fg#9aa1ac]3. [-]Restore code
+[-]    [fg#9aa1ac]4. [-]Never mind
+
+[-]  [fg#9aa1ac]Restore tracked files and return this prompt to the editor.
+[-]  [fg#9aa1ac]Bash, manual and other-session edits are not guaranteed to rewind.
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] confirm · [fg#5f6672]1-4[fg#9aa1ac] pick · [fg#5f6672]esc[fg#9aa1ac] back

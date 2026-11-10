@@ -197,7 +197,10 @@ fn pages_keep_bounds_and_exit_hints_on_resize_and_ignore_key_releases() {
                 assert_eq!(screen.len(), rows, "{view:?} {width}x{rows}");
                 assert!(screen.iter().all(|line| wrap::line_width(line) <= width));
                 let footer = text(&screen[rows - 1..]);
-                assert!(footer.contains("Esc") || footer.contains('⎋'));
+                assert!(
+                    width < 16 || footer.contains("esc"),
+                    "{view:?} {width}x{rows}"
+                );
             }
         }
     }

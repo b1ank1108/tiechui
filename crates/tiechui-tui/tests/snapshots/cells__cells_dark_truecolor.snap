@@ -1,6 +1,5 @@
 ---
 source: crates/tiechui-tui/tests/cells.rs
-assertion_line: 131
 expression: "render(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 ---
 [bg#292929]                                                                                
@@ -11,9 +10,9 @@ expression: "render(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 [fg#666c77]• [i,fg#666c77]The tokenizer drops [i,fg#8fa8c9]\r[i,fg#666c77].
 
 [fg#666c77]• [b]Explored
-[fg#666c77]  └ [fgCyan]Read[-] [-]lib.rs[fg#666c77], [-]app.rs
-[fg#666c77]    [fgCyan]Search[-] [-]fn main[fg#666c77] in [-]src
-[fg#666c77]    [fgCyan]List[-] [-].
+[fg#666c77]  └ [fg#8fa8c9]Read[-] [-]lib.rs[fg#666c77], [-]app.rs
+[fg#666c77]    [fg#8fa8c9]Search[-] [-]fn main[fg#666c77] in [-]src
+[fg#666c77]    [fg#8fa8c9]List[-] [-].
 
 [b,fg#8fb996]• [b]Ran[-] cargo test …[fg#666c77] · 1s
 [fg#666c77]  └ line 3
@@ -33,7 +32,7 @@ expression: "render(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 [-]    [d]2 [fgGreen,bg#213a2b]+ [fg#cdd6f4,bg#213a2b]    [i,fg#89b4fa,bg#213a2b]println![fg#9399b2,bg#213a2b]([fg#a6e3a1,bg#213a2b]"new"[fg#9399b2,bg#213a2b]);[bg#213a2b]                                                    
 [-]    [d]3 [-]  [fg#9399b2]}
 
-[b,fg#8fb996]• [b]Called[-] [fgCyan]exa__web_search[fg#666c77] · 1s
+[b,fg#8fb996]• [b]Called[-] [fg#8fa8c9]exa__web_search[fg#666c77] · 1s
 [-]    [fg#666c77]{"query":"rust"}
 [fg#666c77]  └ [fg#666c77](no output)
 

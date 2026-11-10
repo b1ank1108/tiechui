@@ -1,9 +1,9 @@
-//! The resume picker on the alternate screen: search, Cwd/All and Updated/Created,
-//! comfortable or dense rows, details with the conversation's tail, and the read-only full
+//! The resume picker on the alternate screen: search, This folder/All and Updated/Created,
+//! one row per session over the selected one's recent conversation, and the read-only full
 //! conversation. Its reads run in the host loop and are tagged with the picker's generation,
 //! so a closed or replaced picker never sees late results.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,10 +12,15 @@ use ratatui_core::text::{Line, Span};
 use tokio_util::sync::CancellationToken;
 
 use crate::prompt::Input;
+use crate::sheet;
 use crate::status::compact_path;
 use crate::theme::Theme;
 use crate::tools::plain;
 use crate::{markdown, wrap};
+
+/// Conversation rows under the list, and the rows its details add.
+const TAIL: usize = 8;
+const DETAILS: usize = 5;
 
 pub enum Outcome {
     Open,
@@ -96,17 +101,17 @@ pub struct Resume {
     cancel: CancellationToken,
     /// Opened at startup: leaving starts a new session.
     fresh: bool,
+    cwd: PathBuf,
     home: Option<PathBuf>,
     reference: u64,
     query: Input,
     all: bool,
     created: bool,
     sort_focused: bool,
-    dense: bool,
+    details: bool,
     lists: [Option<Vec<Summary>>; 2],
     loading: [bool; 2],
     previews: HashMap<PathBuf, Preview>,
-    expanded: HashSet<PathBuf>,
     /// Indices into the current list, in display order.
     filtered: Vec<usize>,
     selected: usize,
@@ -129,22 +134,28 @@ impl Drop for Resume {
 
 impl Resume {
     /// `reference` is the current time in Unix milliseconds, for relative dates.
-    pub fn new(generation: u64, fresh: bool, home: Option<PathBuf>, reference: u64) -> Self {
+    pub fn new(
+        generation: u64,
+        fresh: bool,
+        cwd: PathBuf,
+        home: Option<PathBuf>,
+        reference: u64,
+    ) -> Self {
         Self {
             generation,
             cancel: CancellationToken::new(),
             fresh,
+            cwd,
             home,
             reference,
             query: Input::default(),
             all: false,
             created: false,
             sort_focused: false,
-            dense: false,
+            details: false,
             lists: [None, None],
             loading: [true, false],
             previews: HashMap::new(),
-            expanded: HashSet::new(),
             filtered: Vec::new(),
             selected: 0,
             touched: false,
@@ -176,6 +187,7 @@ impl Resume {
                         self.lists[usize::from(all)] = Some(sessions);
                         if all == self.all {
                             self.reconcile(true);
+                            self.follow();
                         }
                     }
                     Err(error) if all == self.all => {
@@ -254,6 +266,15 @@ impl Resume {
         }
     }
 
+    /// Asks once for the selected session's conversation, shown under the list.
+    fn follow(&mut self) {
+        if let Some(path) = self.current().map(|s| s.path.clone())
+            && !self.previews.contains_key(&path)
+        {
+            self.request(&path);
+        }
+    }
+
     fn toggle_option(&mut self) {
         self.touched = true;
         let path = self.current().map(|s| s.path.clone());
@@ -276,6 +297,7 @@ impl Resume {
         if self.full.is_none() {
             self.query.paste(text);
             self.reconcile(false);
+            self.follow();
         }
     }
 
@@ -286,16 +308,14 @@ impl Resume {
         }
         self.error = None;
         if key.code == KeyCode::Esc {
-            if let Some(full) = self.full.take() {
-                if !full.ready && !self.expanded.contains(&full.path) {
-                    self.previews.remove(&full.path);
+            if self.full.take().is_none() {
+                if self.query.0.is_empty() {
+                    return Outcome::Cancel;
                 }
-            } else if !self.query.0.is_empty() {
                 self.touched = true;
                 self.query.0.clear();
                 self.reconcile(true);
-            } else {
-                return Outcome::Cancel;
+                self.follow();
             }
             return Outcome::Open;
         }
@@ -316,7 +336,7 @@ impl Resume {
             }
             return Outcome::Open;
         }
-        let step = (self.height / if self.dense { 1 } else { 3 }).max(1);
+        let step = self.height.max(1);
         let last = self.filtered.len().saturating_sub(1);
         match key.code {
             KeyCode::Enter => {
@@ -326,10 +346,6 @@ impl Resume {
             }
             KeyCode::Tab | KeyCode::BackTab => self.sort_focused = !self.sort_focused,
             KeyCode::Left | KeyCode::Right => self.toggle_option(),
-            KeyCode::Char('o') if control => {
-                self.dense = !self.dense;
-                self.top = 0;
-            }
             KeyCode::Char('t') if control => {
                 self.touched = true;
                 if let Some(session) = self.current() {
@@ -344,19 +360,7 @@ impl Resume {
                     self.scroll = 0;
                 }
             }
-            KeyCode::Char('e') if control => {
-                self.touched = true;
-                if let Some(path) = self.current().map(|s| s.path.clone()) {
-                    if self.expanded.remove(&path) {
-                        if matches!(self.previews.get(&path), Some(Preview::Loading)) {
-                            self.previews.remove(&path);
-                        }
-                    } else {
-                        self.request(&path);
-                        self.expanded.insert(path);
-                    }
-                }
-            }
+            KeyCode::Char('e') if control => self.details = !self.details,
             KeyCode::Up => self.select(self.selected.saturating_sub(1)),
             KeyCode::Down => self.select(self.selected + 1),
             KeyCode::PageUp => self.select(self.selected.saturating_sub(step)),
@@ -371,7 +375,8 @@ impl Resume {
                 }
             }
         }
-        self.selected = self.selected.min(last);
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.follow();
         Outcome::Open
     }
 
@@ -383,90 +388,51 @@ impl Resume {
     /// Exactly `rows` lines, or fewer on the smallest terminals.
     pub fn render(&mut self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let width = width.max(1);
-        let rows = rows.max(1);
-        let styles = Styles::new(theme);
-        let esc = Line::from(Span::styled(
-            if width >= 3 { "esc" } else { "⎋" },
-            theme.dim,
-        ));
-        let heading = |text: &str| {
-            wrap::fit(
-                vec![Span::styled(text.to_owned(), styles.title)],
-                width,
-                true,
-            )
-        };
-        if rows <= 2 {
-            let mut lines = Vec::new();
-            if rows == 2 {
-                lines.push(heading("Resume a previous session"));
-            }
-            lines.push(esc);
-            return lines;
+        let title = self.rule(width, theme);
+        if rows < 4 {
+            return [title, self.hints(width, theme)][2usize.saturating_sub(rows)..].to_vec();
         }
-        if rows == 3 {
-            return vec![
-                heading("Resume a previous session"),
-                self.search(width, theme),
-                esc,
-            ];
-        }
-        let mut header = vec![match &self.full {
-            Some(full) => heading(&format!("Conversation · {}", full.title)),
-            None => heading("Resume a previous session"),
-        }];
+        let room = rows - 3;
+        let mut body = Vec::new();
         if let Some(error) = &self.error
-            && rows >= 7
+            && room >= 4
         {
-            header.push(wrap::fit(
-                vec![Span::styled(error.clone(), theme.error)],
+            body.push(wrap::fit(
+                vec![Span::raw("  "), Span::styled(error.clone(), theme.error)],
                 width,
                 true,
             ));
         }
-        if let Some(full) = &self.full {
-            if rows >= 8 {
-                header.push(wrap::fit(
-                    vec![Span::styled(full.id.clone(), theme.dim)],
-                    width,
-                    true,
-                ));
-                header.push(Line::default());
-            }
-        } else {
+        if self.full.is_none() {
             let toolbar = self.toolbar(theme);
-            let toolbar_width = wrap::line_width(&toolbar);
-            if width >= toolbar_width + 18 && rows >= 7 {
-                let mut line = self.search(width - toolbar_width - 3, theme);
-                let gap = (width - toolbar_width)
-                    .saturating_sub(wrap::line_width(&line))
-                    .max(3);
-                line.spans.push(Span::raw(" ".repeat(gap)));
-                line.spans.extend(toolbar.spans);
-                header.push(line);
+            let toolbar_width: usize = toolbar.iter().map(|span| wrap::width(&span.content)).sum();
+            if width >= toolbar_width + 24 {
+                let search = self.search(width - toolbar_width - 2, theme);
+                body.push(sheet::split(search, toolbar, width));
             } else {
-                header.push(self.search(width, theme));
-                if rows >= 10 {
-                    header.push(wrap::fit(toolbar.spans, width, true));
+                body.push(Line::from(self.search(width, theme)));
+                if room >= 8 {
+                    let mut line = vec![Span::raw("  ")];
+                    line.extend(toolbar);
+                    body.push(wrap::fit(line, width, true));
                 }
             }
-            if rows >= 8 {
-                header.push(Line::default());
+            if room >= 6 {
+                body.push(Line::default());
             }
         }
-        let footer_rows = self.footer(width, rows, theme).len();
-        self.height = rows.saturating_sub(header.len() + footer_rows).max(1);
-        let body = match &self.full {
-            Some(full) if !full.ready => loading(width, self.height, theme),
+        let height = room.saturating_sub(body.len()).max(1);
+        self.height = height;
+        let rest = match &self.full {
+            Some(full) if !full.ready => vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Loading conversation…", theme.dim),
+            ])],
             Some(full) => {
                 let lines = self.conversation(&full.path.clone(), width, theme);
                 self.lines = lines.len();
-                self.scroll = self.scroll.min(lines.len().saturating_sub(self.height));
-                lines
-                    .into_iter()
-                    .skip(self.scroll)
-                    .take(self.height)
-                    .collect()
+                self.scroll = self.scroll.min(lines.len().saturating_sub(height));
+                lines.into_iter().skip(self.scroll).take(height).collect()
             }
             None if self.filtered.is_empty() => {
                 let text = if self.loading[usize::from(self.all)] {
@@ -476,329 +442,297 @@ impl Resume {
                 } else {
                     "No sessions yet"
                 };
-                vec![Line::from(Span::styled(text, theme.dim))]
+                vec![Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(text, theme.dim),
+                ])]
             }
-            None => self.rows(width, theme, &styles),
+            None => self.sessions(height, width, theme),
         };
-        let footer = self.footer(width, rows, theme);
-        let blank = self.height.saturating_sub(body.len());
-        header
-            .into_iter()
-            .chain(body)
-            .chain(std::iter::repeat_n(Line::default(), blank))
-            .chain(footer)
-            .map(|line| wrap::fit(line.spans, width, false))
-            .take(rows)
-            .collect()
+        body.extend(rest);
+        body.resize(room, Line::default());
+        let hints = self.hints(width, theme);
+        sheet::frame(theme.accent, title, body, hints, width)
     }
 
-    /// The query with a block cursor, or the placeholder; the tail stays visible.
-    fn search(&self, width: usize, theme: &Theme) -> Line<'static> {
-        let cursor = Style::default().add_modifier(Modifier::REVERSED);
-        if self.query.0.is_empty() {
-            return wrap::fit(
-                vec![
-                    Span::styled("T", cursor.patch(theme.dim)),
-                    Span::styled("ype to search", theme.dim),
+    fn rule(&self, width: usize, theme: &Theme) -> Line<'static> {
+        if let Some(full) = &self.full {
+            let mut title = sheet::title("Transcript");
+            title.extend([
+                Span::styled(" · ", theme.dim),
+                Span::raw(full.title.clone()),
+            ]);
+            let meta = vec![Span::styled(full.id.clone(), theme.dim)];
+            return sheet::rule(theme.accent, &[title], &[meta], width);
+        }
+        let folder = if self.all {
+            "all folders".to_owned()
+        } else {
+            compact_path(&self.cwd, self.home.as_deref())
+        };
+        let count = self.lists[usize::from(self.all)]
+            .is_some()
+            .then(|| self.filtered.len().to_string());
+        let meta = [Some(folder).filter(|f| !f.is_empty()), count]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        sheet::rule(
+            theme.accent,
+            &[sheet::title("Resume")],
+            &[vec![Span::styled(meta, theme.dim)]],
+            width,
+        )
+    }
+
+    fn hints(&self, width: usize, theme: &Theme) -> Line<'static> {
+        if self.full.is_some() {
+            let position = format!("{} / {}", self.scroll + 1, self.lines.max(1));
+            return sheet::hints(
+                theme,
+                &[
+                    ("↑↓", "scroll"),
+                    ("pgup/pgdn", "page"),
+                    ("home/end", "jump"),
+                    ("esc", "back"),
                 ],
+                Some(&position),
                 width,
-                true,
             );
         }
-        let room = width.saturating_sub(1);
+        let back = if self.fresh { "start new" } else { "back" };
+        let position = (!self.filtered.is_empty())
+            .then(|| format!("{} / {}", self.selected + 1, self.filtered.len()));
+        sheet::hints(
+            theme,
+            &[
+                ("enter", "resume"),
+                ("tab", "filter/sort"),
+                ("←→", "change"),
+                ("ctrl+t", "transcript"),
+                ("ctrl+e", "details"),
+                ("esc", back),
+            ],
+            position.as_deref(),
+            width,
+        )
+    }
+
+    /// `Search` and the query with a block cursor; the query's tail stays visible.
+    fn search(&self, width: usize, theme: &Theme) -> Vec<Span<'static>> {
+        let room = width.saturating_sub(11);
         let mut text = self.query.0.clone();
         while wrap::width(&text) > room {
             text.remove(0);
         }
-        Line::from(vec![Span::raw(text), Span::styled(" ", cursor)])
+        vec![
+            Span::raw("  "),
+            Span::styled("Search  ", theme.dim),
+            Span::raw(text),
+            Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+        ]
     }
 
-    fn toolbar(&self, theme: &Theme) -> Line<'static> {
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+    /// The current value bold, in the accent where focused; the others dim.
+    fn toolbar(&self, theme: &Theme) -> Vec<Span<'static>> {
         let value = |name: &'static str, active: bool, focused: bool| match (active, focused) {
             (true, true) => Span::styled(name, theme.accent.add_modifier(Modifier::BOLD)),
-            (true, false) => Span::styled(name, bold),
+            (true, false) => Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
             (false, _) => Span::styled(name, theme.dim),
         };
-        Line::from(vec![
-            Span::styled("Filter: ", theme.dim),
-            value("Cwd", !self.all, !self.sort_focused),
+        vec![
+            value("This folder", !self.all, !self.sort_focused),
             Span::raw("  "),
             value("All", self.all, !self.sort_focused),
             Span::raw("    "),
-            Span::styled("Sort: ", theme.dim),
             value("Updated", !self.created, self.sort_focused),
             Span::raw("  "),
             value("Created", self.created, self.sort_focused),
-        ])
+        ]
     }
 
-    /// Key hints, the widest that fit, with the position on the right; the list's view keys
-    /// get a row of their own when they do not fit beside the rest.
-    fn footer(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let back = if self.fresh { "start new" } else { "back" };
-        let view = if self.dense { "comfortable" } else { "dense" };
-        let views = format!("ctrl+e details · ctrl+o {view} · ctrl+t transcript");
-        let hints = if self.full.is_some() {
-            vec![
-                "↑/↓ scroll · PgUp/PgDn · Home/End · esc back · ctrl+c quit".to_owned(),
-                "↑↓ scroll · esc back".into(),
-                "esc".into(),
-                "⎋".into(),
-            ]
+    /// One row per session around the selection, then the selected one's conversation when
+    /// there is room or its details are asked for.
+    fn sessions(&mut self, height: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let cap = TAIL + if self.details { DETAILS } else { 0 };
+        let pane = height >= 9 || self.details && height >= 5;
+        let reserve = if pane {
+            (height / 3).clamp(3, cap) + 1
         } else {
-            vec![
-                format!("enter resume · esc {back} · tab filter/sort · ←/→ change · {views}"),
-                format!("enter resume · esc {back} · tab filter/sort · ←/→ change"),
-                format!("enter resume · esc {back}"),
-                "esc".into(),
-                "⎋".into(),
-            ]
+            0
         };
-        let count = if self.full.is_some() {
-            format!("{} / {}", self.scroll + 1, self.lines.max(1))
-        } else {
-            let position = if self.filtered.is_empty() {
-                0
-            } else {
-                self.selected + 1
-            };
-            format!("{position} / {}", self.filtered.len())
-        };
-        let fits = |hint: &String| wrap::width(hint) + wrap::width(&count) + 3 <= width;
-        let (hint, count) = match hints.iter().position(fits) {
-            Some(index) if rows >= 8 => (index, Some(count)),
-            _ => (
-                hints
-                    .iter()
-                    .position(|hint| wrap::width(hint) <= width)
-                    .unwrap_or(hints.len() - 1),
-                None,
-            ),
-        };
-        let mut line = hint_line(&hints[hint], width, theme);
-        if let Some(count) = count {
-            let gap = width.saturating_sub(wrap::line_width(&line) + wrap::width(&count));
-            line.spans.push(Span::raw(" ".repeat(gap)));
-            line.spans.push(Span::styled(count, theme.dim));
+        let shown = self
+            .filtered
+            .len()
+            .min(height.saturating_sub(reserve))
+            .max(1);
+        self.height = shown;
+        if self.selected < self.top {
+            self.top = self.selected;
+        } else if self.selected >= self.top + shown {
+            self.top = self.selected + 1 - shown;
         }
-        let mut lines = vec![line];
-        if self.full.is_none() && hint == 1 && rows >= 12 {
-            lines.push(hint_line(&views, width, theme));
+        self.top = self.top.min(self.filtered.len().saturating_sub(shown));
+        let list = self.list();
+        let visible: Vec<&Summary> = self.filtered[self.top..self.top + shown]
+            .iter()
+            .map(|index| &list[*index])
+            .collect();
+        let home = self.home.as_deref();
+        let folders: Vec<String> = visible
+            .iter()
+            .filter(|_| self.all)
+            .map(|session| match session.cwd.file_name() {
+                Some(name) if width < 80 => name.to_string_lossy().into_owned(),
+                _ => compact_path(&session.cwd, home),
+            })
+            .collect();
+        let folder_width = folders
+            .iter()
+            .map(|folder| wrap::width(folder))
+            .max()
+            .unwrap_or(0)
+            .min(28);
+        let dates: Vec<String> = visible
+            .iter()
+            .map(|session| {
+                let time = if self.created {
+                    session.created_at
+                } else {
+                    session.modified
+                };
+                relative(time, self.reference)
+            })
+            .collect();
+        let date_width = dates.iter().map(|date| date.len()).max().unwrap_or(0);
+        let accent = theme.accent.add_modifier(Modifier::BOLD);
+        let mut lines = Vec::new();
+        for (offset, session) in visible.iter().enumerate() {
+            let selected = self.top + offset == self.selected;
+            let left = vec![
+                Span::raw("  "),
+                if selected {
+                    Span::styled("› ", accent)
+                } else {
+                    Span::raw("  ")
+                },
+                Span::styled(
+                    title(session),
+                    if selected { accent } else { Style::default() },
+                ),
+            ];
+            let mut right = Vec::new();
+            if let Some(folder) = folders.get(offset) {
+                let cell = wrap::fit(
+                    vec![Span::styled(folder.clone(), theme.dim)],
+                    folder_width,
+                    true,
+                );
+                let used = wrap::line_width(&cell);
+                right.extend(cell.spans);
+                right.push(Span::raw(" ".repeat(folder_width - used + 2)));
+            }
+            right.push(Span::styled(
+                format!("{:>date_width$}", dates[offset]),
+                theme.dim,
+            ));
+            lines.push(sheet::split(left, right, width));
         }
-        if rows >= 8 {
-            lines.insert(0, Line::default());
+        if pane {
+            lines.push(Line::default());
+            let rows = height.saturating_sub(shown + 1).min(cap);
+            lines.extend(self.preview(rows, width, theme));
         }
         lines
     }
 
-    /// The visible rows. Heights are known without laying out collapsed rows, so only the
-    /// expanded ones are rendered to measure.
-    fn rows(&mut self, width: usize, theme: &Theme, styles: &Styles) -> Vec<Line<'static>> {
-        let comfortable = !self.dense && width >= 24;
-        let gap = usize::from(!self.dense);
-        let count = self.filtered.len();
-        let mut rendered: HashMap<usize, Vec<Line<'static>>> = HashMap::new();
-        let mut positions = Vec::with_capacity(count);
-        let mut heights = Vec::with_capacity(count);
-        let mut total = 0;
-        for (index, item) in self.filtered.iter().enumerate() {
-            positions.push(total);
-            let height = if self.expanded.contains(&self.list()[*item].path) {
-                let row = self.row(index, width, theme, styles);
-                let height = row.len();
-                rendered.insert(index, row);
-                height
-            } else if comfortable {
-                2
-            } else {
-                1
-            };
-            heights.push(height);
-            total += height + if index + 1 < count { gap } else { 0 };
-        }
-        let position = positions.get(self.selected).copied().unwrap_or(0);
-        if position < self.top || position >= self.top + self.height {
-            self.top = position;
-        }
-        self.top = self.top.min(total.saturating_sub(self.height));
-        let mut body = Vec::new();
-        for (index, (start, height)) in positions.into_iter().zip(heights).enumerate() {
-            if start > self.top + self.height {
-                break;
-            }
-            if start + height < self.top {
-                continue;
-            }
-            let mut row = rendered
-                .remove(&index)
-                .unwrap_or_else(|| self.row(index, width, theme, styles));
-            if gap == 1 && index + 1 < count {
-                row.push(Line::default());
-            }
-            for (offset, line) in row.into_iter().enumerate() {
-                if start + offset >= self.top && body.len() < self.height {
-                    body.push(line);
-                }
-            }
-        }
-        body
-    }
-
-    fn row(
-        &self,
-        index: usize,
-        width: usize,
-        theme: &Theme,
-        styles: &Styles,
-    ) -> Vec<Line<'static>> {
-        let session = &self.list()[self.filtered[index]];
-        let active = index == self.selected;
-        let expanded = self.expanded.contains(&session.path);
-        let cursor = if active {
-            Span::styled(
-                if expanded { "⌄ " } else { "› " },
-                styles.selected.add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::raw("  ")
+    /// The selected session's details when asked for, then its conversation's last rows.
+    fn preview(&self, rows: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let Some(session) = self.current() else {
+            return Vec::new();
         };
-        let name = title(session);
-        let name_style = if active {
-            styles.selected
-        } else {
-            Style::default()
+        let quote = |spans: Vec<Span<'static>>| {
+            let mut line = vec![Span::raw("  "), Span::styled("│ ", theme.separator)];
+            line.extend(spans);
+            wrap::fit(line, width, true)
         };
-        let time = if self.created {
-            session.created_at
-        } else {
-            session.modified
-        };
-        let date = relative(time, self.reference);
-        let mut spans = vec![cursor];
-        if self.dense && width >= 24 {
-            let date_style = if active { styles.selected } else { theme.dim };
-            spans.push(Span::styled(format!("{date:<12}"), date_style));
-            spans.extend(
-                wrap::fit(
-                    vec![Span::styled(name, name_style)],
-                    width.saturating_sub(14).max(1),
-                    true,
-                )
-                .spans,
-            );
-        } else {
-            spans.extend(
-                wrap::fit(
-                    vec![Span::styled(name, name_style)],
-                    width.saturating_sub(2).max(1),
-                    true,
-                )
-                .spans,
-            );
-        }
-        let mut lines = vec![wrap::fit(spans, width, true)];
-        let directory = compact_path(&session.cwd, self.home.as_deref());
-        if expanded {
+        let mut lines = Vec::new();
+        if self.details {
             let metadata = [
                 ("Session", session.id.clone()),
                 ("Created", date_time(session.created_at, self.reference)),
                 ("Updated", date_time(session.modified, self.reference)),
-                ("Directory", directory),
+                (
+                    "Directory",
+                    compact_path(&session.cwd, self.home.as_deref()),
+                ),
             ];
             for (key, value) in metadata {
-                lines.extend(wrap::wrap(
-                    &[
-                        Span::styled(format!("  │ {:<12}", format!("{key}:")), theme.dim),
-                        Span::raw(single_line(&value)),
-                    ],
-                    width,
-                    &[],
-                    &[],
-                ));
+                lines.push(quote(vec![
+                    Span::styled(format!("{:<12}", format!("{key}:")), theme.dim),
+                    Span::raw(single_line(&value)),
+                ]));
             }
-            lines.push(Line::from(Span::styled("  │", theme.dim)));
-            lines.push(Line::from(Span::styled("  │ Conversation:", theme.dim)));
-            let tail = self.tail(&session.path, width.saturating_sub(4).max(1), theme, styles);
-            let recent = &tail[tail.len().saturating_sub(6)..];
-            for (position, (line, color)) in recent.iter().enumerate() {
-                let prefix = if position + 1 == recent.len() {
-                    "  └ "
-                } else {
-                    "  │ "
-                };
-                let mut spans = vec![Span::styled(prefix, Style::default().fg(*color))];
-                spans.extend(line.spans.clone());
-                lines.push(Line::from(spans));
-            }
-            if tail.len() > recent.len() {
-                lines.push(Line::from(Span::styled(
-                    "    ctrl+t to view the full conversation",
-                    theme.dim,
-                )));
-            }
-        } else if !self.dense && width >= 24 {
-            let mut text = format!("  {date}");
-            if self.all {
-                text.push_str(&format!(" · {}", single_line(&directory)));
-            }
-            lines.push(wrap::fit(vec![Span::styled(text, theme.dim)], width, true));
+            lines.push(quote(Vec::new()));
         }
+        let room = rows.saturating_sub(lines.len());
+        let tail = self.tail(&session.path, room, width.saturating_sub(4).max(1), theme);
+        lines.extend(tail.into_iter().map(|line| quote(line.spans)));
+        lines.truncate(rows);
         lines
     }
 
-    /// The conversation's last seven rows, each with the color its prefix takes.
-    fn tail(
-        &self,
-        path: &Path,
-        width: usize,
-        theme: &Theme,
-        styles: &Styles,
-    ) -> Vec<(Line<'static>, Color)> {
-        let quiet = styles.quiet;
+    /// The conversation's last `rows` rows: the user's words in the secondary tone, the rest
+    /// dim.
+    fn tail(&self, path: &Path, rows: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let notice = |text: String, style: Style| vec![Line::from(Span::styled(text, style))];
         let parts = match self.previews.get(path) {
             None | Some(Preview::Loading) => {
-                return vec![(
-                    Line::from(Span::styled("Loading conversation…", theme.dim)),
-                    quiet,
-                )];
+                return notice("Loading conversation…".into(), theme.dim);
             }
             Some(Preview::Failed(error)) => {
-                let text = format!("Unable to read conversation: {error}");
-                return vec![(Line::from(Span::styled(text, theme.error)), quiet)];
+                return notice(format!("Unable to read conversation: {error}"), theme.error);
             }
             Some(Preview::Ready(parts)) => parts,
         };
-        let mut lines: Vec<(Line<'static>, Color)> = Vec::new();
+        let inner = width.saturating_sub(2).max(1);
+        let mut lines = Vec::new();
         for part in parts.iter().rev() {
-            let user = part.kind == PartKind::User;
-            let color = if user { styles.user } else { quiet };
-            let mut style = Style::default().fg(color);
-            if user {
-                style = style.add_modifier(Modifier::ITALIC);
-            }
-            let rows: Vec<_> = layout(part, width, theme)
-                .into_iter()
-                .map(|line| {
-                    let mut line = wrap::fit(line.spans, width, true);
-                    for span in &mut line.spans {
-                        span.style = span.style.patch(style);
-                    }
-                    (line, color)
-                })
-                .collect();
-            let keep = rows.len().saturating_sub(7);
-            lines.splice(0..0, rows.into_iter().skip(keep));
-            if lines.len() >= 7 {
+            if lines.len() >= rows {
                 break;
             }
+            let (marker, style) = if part.kind == PartKind::User {
+                (
+                    Span::styled("› ", theme.secondary),
+                    theme.secondary.add_modifier(Modifier::ITALIC),
+                )
+            } else {
+                (Span::styled("• ", theme.dim), theme.dim)
+            };
+            let rows: Vec<Line<'static>> = layout(part, inner, theme)
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let mut spans = vec![if index == 0 {
+                        marker.clone()
+                    } else {
+                        Span::raw("  ")
+                    }];
+                    spans.extend(
+                        line.spans
+                            .into_iter()
+                            .map(|span| Span::styled(span.content, span.style.patch(style))),
+                    );
+                    Line::from(spans)
+                })
+                .collect();
+            lines.splice(0..0, rows);
         }
         if lines.is_empty() {
-            let text = "No conversation messages yet.";
-            lines.push((Line::from(Span::styled(text, theme.dim)), quiet));
+            return notice("No conversation messages yet.".into(), theme.dim);
         }
-        let skip = lines.len().saturating_sub(7);
-        lines.split_off(skip)
+        lines.split_off(lines.len().saturating_sub(rows))
     }
 
     fn conversation(&self, path: &Path, width: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -851,26 +785,6 @@ impl Resume {
     }
 }
 
-struct Styles {
-    title: Style,
-    selected: Style,
-    /// The tail's color for everything but the user's words.
-    quiet: Color,
-    user: Color,
-}
-
-impl Styles {
-    fn new(theme: &Theme) -> Self {
-        let light = theme.palette.light();
-        Self {
-            title: Style::default().add_modifier(Modifier::BOLD),
-            selected: theme.accent,
-            quiet: Color::Indexed(if light { 7 } else { 8 }),
-            user: Color::Indexed(if light { 8 } else { 7 }),
-        }
-    }
-}
-
 fn pad(mut line: Line<'static>, width: usize, base: Style) -> Line<'static> {
     let used = wrap::line_width(&line);
     line.spans
@@ -894,35 +808,6 @@ fn layout(part: &Part, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     text.split('\n')
         .flat_map(|line| wrap::wrap(&[Span::raw(line.to_owned())], width, &[], &[]))
         .collect()
-}
-
-/// The centered "Loading conversation…" card.
-fn loading(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let bg = theme.palette.surface(0.14, 0.08).or_else(|| {
-        theme
-            .palette
-            .background
-            .is_none()
-            .then_some(Color::Indexed(8))
-    });
-    let frame = width.min(32);
-    let left = " ".repeat((width - frame) / 2);
-    let message = "Loading conversation…";
-    let padding = frame.saturating_sub(wrap::width(message)) / 2;
-    let surface = bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
-    let card = |spans: Vec<Span<'static>>| {
-        let mut line = pad(wrap::fit(spans, frame, true), frame, surface);
-        line.spans.insert(0, Span::raw(left.clone()));
-        line
-    };
-    let mut lines = vec![Line::default(); height.saturating_sub(3) / 2];
-    lines.push(card(vec![]));
-    lines.push(card(vec![
-        Span::raw(" ".repeat(padding)),
-        Span::styled(message, Style::default().add_modifier(Modifier::BOLD)),
-    ]));
-    lines.push(card(vec![]));
-    lines
 }
 
 /// Every word of the query in the session's text; most recent first, then by path.

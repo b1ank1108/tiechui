@@ -1,6 +1,8 @@
-//! Shell task list and output detail; the session owns the processes and their logs.
-use crate::{pager::Pager, theme::Theme, tools::plain, wrap};
+//! Shell task list over the selected task's latest output, and that output in full; the
+//! session owns the processes and their logs, and sends the output of the task it watches.
+use crate::{pager::Pager, sheet, theme::Theme, tools::plain, wrap};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use serde_json::{Value, json};
 use tiechui_protocol::{ShellDetail, ShellMode, ShellState, ShellTask, ShellsView};
@@ -14,8 +16,11 @@ pub enum Outcome {
 pub struct Panel {
     tasks: Vec<ShellTask>,
     selected: usize,
-    /// The task whose output is shown, and its latest tail.
-    viewing: Option<(String, Option<ShellDetail>)>,
+    /// The task whose output the session sends, and its latest tail.
+    watched: Option<String>,
+    detail: Option<ShellDetail>,
+    /// The selected task's output fills the panel.
+    viewing: bool,
     pager: Pager,
 }
 
@@ -41,6 +46,22 @@ fn status(task: &ShellTask) -> String {
     }
 }
 
+/// The state's mark, its color and the status label's color.
+fn look(state: ShellState, theme: &Theme) -> (&'static str, Style, Style) {
+    match state {
+        ShellState::Completed => ("✓", theme.success, theme.success),
+        ShellState::Failed | ShellState::TimedOut => ("✗", theme.error, theme.error),
+        ShellState::Cancelled => ("✗", theme.dim, theme.dim),
+        _ => ("●", theme.accent, theme.secondary),
+    }
+}
+
+/// Holding up the turn, so it can go to the background.
+fn blocking(task: &ShellTask) -> bool {
+    task.mode == ShellMode::Foreground
+        && matches!(task.state, ShellState::Starting | ShellState::Running)
+}
+
 /// Active tasks first, each group in start order.
 fn ordered(mut tasks: Vec<ShellTask>) -> Vec<ShellTask> {
     tasks.sort_by_key(|task| !task.state.active());
@@ -52,7 +73,9 @@ impl Panel {
         Self {
             tasks: ordered(view.tasks),
             selected: 0,
-            viewing: None,
+            watched: None,
+            detail: None,
+            viewing: false,
             pager: Pager::default(),
         }
     }
@@ -64,10 +87,10 @@ impl Panel {
             .and_then(|id| self.tasks.iter().position(|task| task.id == id))
             .unwrap_or(self.selected)
             .min(self.tasks.len().saturating_sub(1));
-        if let (Some((id, shown)), Some(detail)) = (&mut self.viewing, view.detail)
-            && *id == detail.id
+        if let Some(detail) = view.detail
+            && self.watched.as_ref() == Some(&detail.id)
         {
-            *shown = Some(detail);
+            self.detail = Some(detail);
         }
     }
 
@@ -75,160 +98,280 @@ impl Panel {
         self.tasks.is_empty()
     }
 
-    fn current(&self) -> Option<&ShellTask> {
-        match &self.viewing {
-            Some((id, _)) => self.tasks.iter().find(|task| &task.id == id),
-            None => self.tasks.get(self.selected),
+    /// Asks for the selected task's output unless it is the one already sent.
+    pub fn follow(&mut self) -> Option<Value> {
+        let id = self.tasks.get(self.selected)?.id.clone();
+        if self.watched.as_ref() == Some(&id) {
+            return None;
         }
+        self.watched = Some(id.clone());
+        self.detail = None;
+        Some(json!({ "detail": id }))
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
         if key.kind == KeyEventKind::Release {
             return Outcome::Open;
         }
-        let current = self
-            .current()
-            .map(|task| (task.id.clone(), task.mode, task.state));
-        match (key.code, current) {
-            (KeyCode::Char('x'), Some((id, _, state))) if state.active() => {
-                return Outcome::Send(json!({ "stop": id }));
+        if let Some(task) = self.tasks.get(self.selected) {
+            match key.code {
+                KeyCode::Char('x') if task.state.active() => {
+                    return Outcome::Send(json!({ "stop": task.id }));
+                }
+                KeyCode::Char('b') if blocking(task) => {
+                    return Outcome::Send(json!({ "background": task.id }));
+                }
+                _ => {}
             }
-            (
-                KeyCode::Char('b'),
-                Some((id, ShellMode::Foreground, ShellState::Starting | ShellState::Running)),
-            ) => {
-                return Outcome::Send(json!({ "background": id }));
-            }
-            _ => {}
         }
-        if self.viewing.is_some() {
+        if self.viewing {
             if key.code == KeyCode::Enter || !self.pager.key(key) {
-                self.viewing = None;
-                return Outcome::Send(json!({ "close": true }));
+                self.viewing = false;
             }
             return Outcome::Open;
         }
         let count = self.tasks.len().max(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.watched = None;
+                self.detail = None;
+                return Outcome::Close;
+            }
             KeyCode::Up | KeyCode::Char('k') => self.selected = (self.selected + count - 1) % count,
             KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1) % count,
-            KeyCode::Enter => {
-                if let Some(task) = self.tasks.get(self.selected) {
-                    let id = task.id.clone();
-                    self.viewing = Some((id.clone(), None));
-                    self.pager = Pager::default();
-                    return Outcome::Send(json!({ "detail": id }));
-                }
+            KeyCode::Enter if !self.tasks.is_empty() => {
+                self.viewing = true;
+                self.pager = Pager::default();
             }
             _ => {}
         }
-        Outcome::Open
+        self.follow().map_or(Outcome::Open, Outcome::Send)
     }
 
+    /// The watched task's latest output as plain lines, or why there is none.
+    fn output(&self, id: &str) -> Result<Vec<String>, &'static str> {
+        match &self.detail {
+            Some(detail) if detail.id == id && detail.output.is_empty() => Err("(no output)"),
+            Some(detail) if detail.id == id => Ok(plain(&detail.output)
+                .trim_end()
+                .split('\n')
+                .map(str::to_owned)
+                .collect()),
+            _ => Err("Loading…"),
+        }
+    }
+
+    /// Exactly `rows` lines, or fewer on the smallest terminals.
     pub fn render(&mut self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let now = now();
-        let color = |state: ShellState| match state {
-            ShellState::Failed | ShellState::TimedOut => theme.error,
-            ShellState::Completed => theme.success,
-            ShellState::Cancelled => theme.dim,
-            _ => theme.secondary,
-        };
-        let fit = |spans: Vec<Span<'static>>| wrap::fit(spans, width, false);
-        let height = rows.saturating_sub(3);
-        let mut lines = Vec::new();
-        let hints = if let Some((id, detail)) = &self.viewing {
-            let task = self.tasks.iter().find(|task| &task.id == id);
-            lines.push(fit(vec![
-                Span::styled(format!("Shell {id}"), theme.accent),
-                Span::styled(
-                    task.map_or_else(String::new, |task| {
-                        format!(
-                            " · {} · {} · {}",
-                            task.mode.label(),
-                            status(task),
-                            task.elapsed(now)
-                        )
-                    }),
-                    task.map_or(theme.dim, |task| color(task.state)),
-                ),
-            ]));
-            let mut body = Vec::new();
-            if let Some(task) = task {
-                body.extend(wrap::wrap(
-                    &[Span::styled(
-                        format!("cwd: {}", plain(&task.cwd)),
-                        theme.dim,
-                    )],
-                    width,
-                    &[],
-                    &[],
-                ));
-                for line in plain(&task.command).split('\n') {
-                    body.extend(wrap::wrap(
-                        &[Span::styled(format!("$ {line}"), theme.secondary)],
-                        width,
-                        &[],
-                        &[],
-                    ));
-                }
-                body.push(Line::default());
-            }
-            match detail {
-                Some(detail) if detail.output.is_empty() => {
-                    body.push(Line::from(Span::styled("(no output)", theme.dim)));
-                }
-                Some(detail) => {
-                    for line in plain(&detail.output).trim_end().split('\n') {
-                        body.extend(wrap::wrap(&[Span::raw(line.to_owned())], width, &[], &[]));
-                    }
-                    if let Some(path) = &detail.log_path {
-                        body.extend(wrap::wrap(
-                            &[Span::styled(format!("Log: {}", plain(path)), theme.dim)],
-                            width,
-                            &[],
-                            &[],
-                        ));
-                    }
-                }
-                None => body.push(Line::from(Span::styled("Loading…", theme.dim))),
-            }
-            lines.extend(self.pager.viewport(&body, height));
-            match task {
-                Some(task) if task.mode == ShellMode::Foreground && task.state.active() => {
-                    "b background · x stop · Esc back"
-                }
-                Some(task) if task.state.active() => "x stop · Esc back",
-                _ => "Esc back",
-            }
+        let width = width.max(1);
+        let room = rows.saturating_sub(3).max(1);
+        self.viewing &= !self.tasks.is_empty();
+        let (title, mut body, hints) = if self.viewing {
+            self.page(room, width, theme)
         } else {
-            lines.push(fit(vec![Span::styled("Shells", theme.accent)]));
-            if self.tasks.is_empty() {
-                lines.push(fit(vec![Span::styled(
-                    "No shell tasks in this session.",
-                    theme.dim,
-                )]));
-            }
-            let start = self.selected.saturating_sub(height.saturating_sub(1));
-            for (index, task) in self.tasks.iter().enumerate().skip(start).take(height) {
-                let chosen = index == self.selected;
-                let command = plain(task.command.lines().next().unwrap_or_default());
-                lines.push(fit(vec![
-                    Span::styled(
-                        format!("{} {:<5}", if chosen { "›" } else { " " }, task.id),
-                        if chosen { theme.accent } else { theme.dim },
-                    ),
-                    Span::styled(format!(" {:<11}", task.mode.label()), theme.dim),
-                    Span::styled(format!("{:<10}", status(task)), color(task.state)),
-                    Span::styled(format!("{:>8}  ", task.elapsed(now)), theme.dim),
-                    Span::raw(command),
-                ]));
-            }
-            "Enter view · b background · x stop · Esc close"
+            self.list(room, width, theme)
         };
-        lines.resize(rows.saturating_sub(1), Line::default());
-        lines.push(fit(vec![Span::styled(hints, theme.dim)]));
-        lines.truncate(rows);
-        lines
+        if rows < 4 {
+            return [title, hints][2usize.saturating_sub(rows)..].to_vec();
+        }
+        body.resize(room, Line::default());
+        sheet::frame(theme.accent, title, body, hints, width)
+    }
+
+    fn list(
+        &self,
+        room: usize,
+        width: usize,
+        theme: &Theme,
+    ) -> (Line<'static>, Vec<Line<'static>>, Line<'static>) {
+        let active = self.tasks.iter().filter(|task| task.state.active()).count();
+        let mut meta = format!("{} total", self.tasks.len());
+        if active > 0 {
+            meta = format!("{active} running · {meta}");
+        }
+        let title = sheet::rule(
+            theme.accent,
+            &[sheet::title("Shells")],
+            &[vec![Span::styled(meta, theme.dim)]],
+            width,
+        );
+        let mut pairs = vec![("enter", "open")];
+        if let Some(task) = self.tasks.get(self.selected) {
+            if blocking(task) {
+                pairs.push(("b", "background"));
+            }
+            if task.state.active() {
+                pairs.push(("x", "stop"));
+            }
+        }
+        pairs.push(("esc", "close"));
+        let position = (!self.tasks.is_empty())
+            .then(|| format!("{} / {}", self.selected + 1, self.tasks.len()));
+        let hints = sheet::hints(theme, &pairs, position.as_deref(), width);
+        if self.tasks.is_empty() {
+            let empty = Line::from(vec![
+                Span::raw("  "),
+                Span::styled("No shell tasks in this session.", theme.dim),
+            ]);
+            return (title, vec![empty], hints);
+        }
+        let now = now();
+        let pane = room >= 8;
+        let shown = self
+            .tasks
+            .len()
+            .min(if pane { room / 2 } else { room })
+            .max(1);
+        let start = self
+            .selected
+            .saturating_sub(shown - 1)
+            .min(self.tasks.len() - shown);
+        let widest = |text: &dyn Fn(&ShellTask) -> String| {
+            self.tasks
+                .iter()
+                .map(|task| wrap::width(&text(task)))
+                .max()
+                .unwrap_or(0)
+        };
+        let id_width = widest(&|task| task.id.clone());
+        let status_width = widest(&status);
+        let elapsed_width = widest(&|task| task.elapsed(now));
+        let accent = theme.accent.add_modifier(Modifier::BOLD);
+        let mut body = Vec::new();
+        for (index, task) in self.tasks.iter().enumerate().skip(start).take(shown) {
+            let selected = index == self.selected;
+            let (mark, mark_style, status_style) = look(task.state, theme);
+            let left = vec![
+                Span::raw("  "),
+                if selected {
+                    Span::styled("› ", accent)
+                } else {
+                    Span::raw("  ")
+                },
+                Span::styled(
+                    format!("{:<id_width$}  ", task.id),
+                    if selected { theme.accent } else { theme.dim },
+                ),
+                Span::styled(format!("{mark} "), mark_style),
+                Span::styled(format!("{:<status_width$}", status(task)), status_style),
+                Span::styled(
+                    format!("  {:>elapsed_width$}  ", task.elapsed(now)),
+                    theme.dim,
+                ),
+                Span::styled(
+                    plain(task.command.lines().next().unwrap_or_default()),
+                    if selected { accent } else { Style::default() },
+                ),
+            ];
+            let right = if blocking(task) {
+                vec![Span::styled("foreground", theme.warning)]
+            } else {
+                Vec::new()
+            };
+            body.push(sheet::split(left, right, width));
+        }
+        if pane {
+            let task = &self.tasks[self.selected];
+            body.push(Line::default());
+            body.push(wrap::fit(
+                vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} · {} · {}", task.id, task.mode.label(), plain(&task.cwd)),
+                        theme.dim,
+                    ),
+                ],
+                width,
+                true,
+            ));
+            let rows = room.saturating_sub(body.len());
+            let quote = |spans: Vec<Span<'static>>| {
+                let mut line = vec![Span::raw("  "), Span::styled("│ ", theme.separator)];
+                line.extend(spans);
+                wrap::fit(line, width, true)
+            };
+            match self.output(&task.id) {
+                Ok(lines) => body.extend(
+                    lines[lines.len().saturating_sub(rows)..]
+                        .iter()
+                        .map(|line| quote(vec![Span::styled(line.clone(), theme.secondary)])),
+                ),
+                Err(note) => body.push(quote(vec![Span::styled(note, theme.dim)])),
+            }
+        }
+        (title, body, hints)
+    }
+
+    fn page(
+        &mut self,
+        room: usize,
+        width: usize,
+        theme: &Theme,
+    ) -> (Line<'static>, Vec<Line<'static>>, Line<'static>) {
+        let task = &self.tasks[self.selected];
+        let (mark, mark_style, _) = look(task.state, theme);
+        let meta = vec![
+            Span::styled(format!("{mark} "), mark_style),
+            Span::styled(
+                format!("{} · {}", status(task), task.elapsed(now())),
+                theme.dim,
+            ),
+        ];
+        let title = sheet::rule(
+            theme.accent,
+            &[sheet::title(format!("Shell {}", task.id))],
+            &[meta],
+            width,
+        );
+        let indent = [Span::raw("  ")];
+        let mut body = sheet::command(&plain(&task.command), width, theme);
+        body.extend(wrap::wrap(
+            &[Span::styled(
+                format!("{} · {}", plain(&task.cwd), task.mode.label()),
+                theme.dim,
+            )],
+            width,
+            &indent,
+            &indent,
+        ));
+        body.push(Line::default());
+        match self.output(&task.id) {
+            Ok(lines) => {
+                for line in lines {
+                    body.extend(wrap::wrap(&[Span::raw(line)], width, &indent, &indent));
+                }
+            }
+            Err(note) => body.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(note, theme.dim),
+            ])),
+        }
+        if let Some(path) = self
+            .detail
+            .as_ref()
+            .filter(|detail| detail.id == task.id)
+            .and_then(|detail| detail.log_path.as_ref())
+        {
+            body.push(Line::default());
+            body.extend(wrap::wrap(
+                &[Span::styled(format!("Log {}", plain(path)), theme.dim)],
+                width,
+                &indent,
+                &indent,
+            ));
+        }
+        let mut pairs = Vec::new();
+        if blocking(task) {
+            pairs.push(("b", "background"));
+        }
+        if task.state.active() {
+            pairs.push(("x", "stop"));
+        }
+        pairs.extend([("pgup/pgdn", "scroll"), ("esc", "back")]);
+        let shown = self.pager.viewport(&body, room);
+        let (_, last, count) = self.pager.position();
+        let position = (count > room).then(|| format!("{last} / {count}"));
+        let hints = sheet::hints(theme, &pairs, position.as_deref(), width);
+        (title, shown, hints)
     }
 }

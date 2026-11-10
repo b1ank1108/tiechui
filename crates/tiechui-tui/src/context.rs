@@ -12,6 +12,7 @@ use tiechui_protocol::{ContextItem, ContextSnapshot, ContextView, cache_lines, o
 
 use crate::{
     pager::Pager,
+    sheet,
     status::{category_style, compact_tokens as n},
     syntax,
     theme::Theme,
@@ -55,6 +56,8 @@ pub struct ContextPanel {
     last_click: Option<(usize, Instant)>,
     needs_input: bool,
     message_cache: Option<(String, Option<usize>, Vec<usize>, u64)>,
+    /// Where the list or text stands, when it does not fit.
+    position: Option<String>,
 }
 
 impl ContextPanel {
@@ -163,6 +166,7 @@ impl ContextPanel {
             last_click: None,
             needs_input: false,
             message_cache: None,
+            position: None,
         }
     }
 
@@ -361,50 +365,74 @@ impl ContextPanel {
         true
     }
 
-    fn hint(&self, width: usize) -> String {
-        if self.searching {
-            return format!("Search › {}", self.query);
+    fn rule(&self, width: usize, theme: &Theme) -> Line<'static> {
+        let accent = theme.accent.add_modifier(Modifier::BOLD);
+        let mut current = format!("{:?}", self.view);
+        if self.information && self.view != ContextView::Cache {
+            current.push_str(" · Details");
         }
-        let choices: &[&str] = if self.dashboard() {
-            if self.can_zoom {
-                &[
-                    "←/→ tabs · ↑↓ select · Enter open · z zoom · c cache · i details · Esc close",
-                    "←→ tabs · ↑↓ · Enter · z · c · i · Esc",
-                    "↑↓ · Enter · i · Esc",
-                    "Esc",
-                    "⎋",
-                ]
-            } else {
-                &[
-                    "←/→ tabs · ↑↓ select · Enter open · c cache · i details · Esc close",
-                    "←→ tabs · ↑↓ · Enter · c · i · Esc",
-                    "↑↓ · Enter · i · Esc",
-                    "Esc",
-                    "⎋",
-                ]
+        let mut alt = sheet::title("Context");
+        alt.extend([
+            Span::styled(" · ", theme.dim),
+            Span::styled(current, accent),
+        ]);
+        let mut titles = Vec::new();
+        if !self.information && TABS.contains(&self.view) {
+            let mut tabs = sheet::title("Context");
+            for tab in TABS {
+                tabs.push(Span::raw(if tab == TABS[0] { "   " } else { "  " }));
+                tabs.push(Span::styled(
+                    format!("{tab:?}"),
+                    if tab == self.view { accent } else { theme.dim },
+                ));
             }
-        } else if self.detail.is_some() || self.information {
-            &[
-                "↑↓ / PgUp PgDn scroll · ←/→ tabs · Esc back",
-                "↑↓ scroll · Esc back",
-                "Esc back",
-                "Esc",
-                "⎋",
-            ]
+            titles.push(tabs);
+        }
+        titles.push(alt);
+        let window = self.snapshot.window;
+        let mut meta = format!("~{}", n(self.snapshot.total));
+        if window > 0 {
+            meta.push_str(&format!(" / {}", n(window)));
+        }
+        sheet::rule(
+            theme.accent,
+            &titles,
+            &[vec![Span::styled(meta, theme.dim)]],
+            width,
+        )
+    }
+
+    fn hints(&self, width: usize, theme: &Theme) -> Line<'static> {
+        if self.searching {
+            let left = vec![
+                Span::raw("  "),
+                Span::styled("Search  ", theme.dim),
+                Span::raw(self.query.clone()),
+                Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+            ];
+            let right = vec![
+                Span::styled("enter", theme.secondary),
+                Span::styled(" done · ", theme.dim),
+                Span::styled("esc", theme.secondary),
+                Span::styled(" clear", theme.dim),
+            ];
+            return sheet::split(left, right, width);
+        }
+        let mut pairs = Vec::new();
+        if self.dashboard() {
+            pairs.extend([("enter", "open"), ("←→", "tab")]);
+            if self.can_zoom {
+                pairs.push(("z", "zoom"));
+            }
+            pairs.extend([("c", "cache"), ("i", "details")]);
+        } else if self.text_view() {
+            pairs.extend([("↑↓", "scroll"), ("pgup/pgdn", "page"), ("←→", "tab")]);
         } else {
-            &[
-                "←/→ tabs · ↑↓ select · Enter preview · / search · Esc close",
-                "←→ tabs · ↑↓ · Enter · / · Esc",
-                "↑↓ · Enter · / · Esc",
-                "Esc",
-                "⎋",
-            ]
-        };
-        choices
-            .iter()
-            .find(|text| wrap::width(text) <= width)
-            .unwrap_or(&"")
-            .to_string()
+            pairs.extend([("enter", "preview"), ("←→", "tab"), ("/", "search")]);
+        }
+        let back = self.category.is_some() || self.text_view();
+        pairs.push(("esc", if back { "back" } else { "close" }));
+        sheet::hints(theme, &pairs, self.position.as_deref(), width)
     }
 
     pub fn render(&mut self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -412,72 +440,40 @@ impl ContextPanel {
         if rows == 0 || width == 0 {
             return vec![];
         }
-        let title = format!(
-            "Context · {:?}{}",
-            self.view,
-            if self.information && self.view != ContextView::Cache {
-                " · Details"
-            } else {
-                ""
-            }
-        );
+        self.position = None;
+        let title = self.rule(width, theme);
         if rows < 3 {
-            let mut screen = if rows == 2 {
-                vec![Line::styled(title, theme.accent)]
+            let hints = self.hints(width, theme);
+            return if rows == 2 {
+                vec![title, hints]
             } else {
-                vec![]
+                vec![hints]
             };
-            screen.push(Line::styled(self.hint(width), theme.dim));
-            return fit(screen, width);
         }
+        let room = rows - 3;
         let dashboard = self.dashboard();
-        let framed = !dashboard && rows >= 12 && width >= 16;
-        let mut header = if framed {
-            vec![
-                Line::styled("─".repeat(width), theme.separator),
-                Line::default(),
-            ]
-        } else {
-            vec![]
-        };
-        header.push(Line::styled(
-            title,
-            theme.accent.add_modifier(Modifier::BOLD),
-        ));
-        if self.needs_input && rows >= 4 {
+        let mut header = vec![];
+        if self.needs_input && room >= 2 {
             header.push(Line::styled(
-                "Main needs input · close context to respond",
+                "  Main needs input · close context to respond",
                 theme.warning,
             ));
         }
-        if width >= 65 && rows >= if dashboard { 12 } else { 16 } {
-            header.push(Line::from(
-                TABS.iter()
-                    .map(|tab| {
-                        Span::styled(
-                            format!("{tab:?}  "),
-                            if *tab == self.view {
-                                theme.accent
-                            } else {
-                                theme.dim
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            ));
-        }
         if let Some(detail) = &self.detail {
-            if rows >= 9 {
+            if room >= 6 {
                 header.push(Line::styled(
-                    format!("{} · ~{} tokens", detail.label, n(detail.tokens)),
+                    format!("  {} · ~{} tokens", detail.label, n(detail.tokens)),
                     Style::default().add_modifier(Modifier::BOLD),
                 ));
             }
         } else if let Some(index) = self.category {
-            header.push(Line::styled(self.categories[index].name.clone(), theme.dim));
+            header.push(Line::styled(
+                format!("  {}", self.categories[index].name),
+                theme.dim,
+            ));
         }
-        if !self.query.is_empty() && !self.searching && rows >= 9 {
-            header.push(Line::styled(format!("Search: {}", self.query), theme.dim));
+        if !self.query.is_empty() && !self.searching && room >= 6 {
+            header.push(Line::styled(format!("  Search: {}", self.query), theme.dim));
         }
         let pinned = self
             .detail
@@ -488,7 +484,7 @@ impl ContextPanel {
         if let Some(lines) = &pinned {
             header.extend(lines.clone());
         }
-        if rows >= 8 {
+        if room >= 5 && !header.is_empty() {
             header.push(Line::default());
         }
         let description = if !dashboard && self.detail.is_none() && !self.information && rows >= 18
@@ -515,9 +511,8 @@ impl ContextPanel {
         } else {
             vec![]
         };
-        let footer_size =
-            if framed { 3 } else { 1 } + description.len() + usize::from(!description.is_empty());
-        self.height = rows.saturating_sub(header.len() + footer_size).max(1);
+        let footer_size = description.len() + usize::from(!description.is_empty());
+        self.height = room.saturating_sub(header.len() + footer_size).max(1);
         let body = if dashboard {
             self.dashboard_lines(width, self.height, theme)
         } else if self.detail.is_some() || self.information {
@@ -565,37 +560,28 @@ impl ContextPanel {
                 .as_ref()
                 .map(|(_, _, _, lines)| lines.as_slice())
                 .unwrap_or_default();
-            let overflow = lines.len() > self.height && self.height > 1;
-            let mut body = self
-                .pager
-                .viewport(lines, self.height - usize::from(overflow));
+            let overflow = lines.len() > self.height;
+            let body = self.pager.viewport(lines, self.height);
             if overflow {
-                body.resize(self.height - 1, Line::default());
                 let (start, end, count) = self.pager.position();
-                body.push(Line::styled(
-                    format!("  Lines {start}–{end} of {count}"),
-                    theme.dim,
-                ));
+                self.position = Some(format!("{start}–{end} / {count}"));
             }
             body
         } else {
             self.list_lines(width, self.height, theme)
         };
         for (_, y, _, _) in &mut self.targets {
-            *y += header.len();
+            *y += 1 + header.len();
         }
         header.extend(body);
-        header.resize(rows.saturating_sub(footer_size), Line::default());
+        header.resize(room.saturating_sub(footer_size), Line::default());
         if !description.is_empty() {
             header.push(Line::default());
             header.extend(description);
         }
-        if framed {
-            header.push(Line::default());
-            header.push(Line::styled("─".repeat(width), theme.separator));
-        }
-        header.push(Line::styled(self.hint(width), theme.dim));
-        fit(header, width)
+        header.resize(room, Line::default());
+        let hints = self.hints(width, theme);
+        sheet::frame(theme.accent, title, fit(header, width), hints, width)
     }
 
     fn list_lines(&mut self, width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -668,7 +654,7 @@ impl ContextPanel {
                 let prefix = format!(
                     "{}{}",
                     if *index == self.selected {
-                        "→ "
+                        "› "
                     } else {
                         "  "
                     },
@@ -687,7 +673,7 @@ impl ContextPanel {
                     value_width,
                     width.min(76),
                     if *index == self.selected {
-                        theme.accent
+                        theme.accent.add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     },
@@ -706,8 +692,10 @@ impl ContextPanel {
             ));
         }
         let count = entries.len();
-        let overflow = lines.len() > height && height > 1;
-        let available = height - usize::from(overflow);
+        let available = height;
+        if lines.len() > height {
+            self.position = Some(format!("{} / {count}", self.selected + 1));
+        }
         if selected_line < self.list_offset {
             self.list_offset = selected_line.saturating_sub(1);
         } else if selected_line >= self.list_offset + available {
@@ -723,18 +711,11 @@ impl ContextPanel {
                 .filter(|(row, _)| *row >= self.list_offset && *row < self.list_offset + available)
                 .map(|(row, index)| (0, row - self.list_offset, width, index)),
         );
-        let mut result: Vec<_> = lines
+        lines
             .into_iter()
             .skip(self.list_offset)
             .take(available)
-            .collect();
-        if overflow {
-            result.push(Line::styled(
-                format!("  ({}/{count})", self.selected + 1),
-                theme.dim,
-            ));
-        }
-        result
+            .collect()
     }
 
     fn message_lines(&mut self, width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -754,8 +735,10 @@ impl ContextPanel {
             )];
         }
         let rows = count + 3;
-        let overflow = rows > height && height > 1;
-        let available = height - usize::from(overflow);
+        let available = height;
+        if rows > height {
+            self.position = Some(format!("{} / {count}", self.selected + 1));
+        }
         let selected_row = self.selected + 1;
         if selected_row < self.list_offset {
             self.list_offset = selected_row.saturating_sub(1);
@@ -784,7 +767,7 @@ impl ContextPanel {
                 self.targets.push((0, row - self.list_offset, width, index));
                 let prefix = format!(
                     "{}{}",
-                    if index == self.selected { "→ " } else { "  " },
+                    if index == self.selected { "› " } else { "  " },
                     if width < 16 {
                         ""
                     } else if index + 1 == count {
@@ -800,7 +783,7 @@ impl ContextPanel {
                     value_width,
                     width.min(76),
                     if index == self.selected {
-                        theme.accent
+                        theme.accent.add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     },
@@ -819,12 +802,6 @@ impl ContextPanel {
             };
             lines.push(line);
         }
-        if overflow {
-            lines.push(Line::styled(
-                format!("  ({}/{count})", self.selected + 1),
-                theme.dim,
-            ));
-        }
         lines
     }
 
@@ -839,36 +816,22 @@ impl ContextPanel {
             .min(10_000.max((self.snapshot.total as f64 * 1.15 / 1000.0).ceil() as u64 * 1000));
         let mut lines = vec![];
         if height >= 2 {
-            lines.push(Line::from(format!(
-                "Category estimate: ~{} / {}",
-                n(self.snapshot.total),
-                if window > 0 {
-                    n(window)
-                } else {
-                    "unknown".into()
-                }
-            )));
-        }
-        if height >= 5 {
-            lines.push(Line::styled(
-                format!(
-                    "Session context estimate: {} · i details",
-                    n(self.snapshot.input_tokens)
-                ),
-                theme.dim,
-            ));
-        }
-        if height >= 12 {
-            lines.push(Line::styled(
-                cache_lines(&self.snapshot.cache)[0].replace("Provider cache hit rate", "Cache")
-                    + " · c diagnostics",
-                theme.dim,
-            ));
+            let hit = cache_lines(&self.snapshot.cache).swap_remove(0);
+            let hit = hit
+                .strip_prefix("Provider cache hit rate: ")
+                .unwrap_or(&hit)
+                .to_owned();
+            lines.push(Line::from(vec![
+                Span::styled("  Session estimate ", theme.dim),
+                Span::styled(n(self.snapshot.input_tokens), theme.secondary),
+                Span::styled(" · cache hit ", theme.dim),
+                Span::styled(hit, theme.secondary),
+            ]));
         }
         if window > 0 && self.snapshot.total > window && height >= 4 {
             lines.push(Line::styled(
                 format!(
-                    "Category estimate exceeds window by {}",
+                    "  Category estimate exceeds window by {}",
                     n(self.snapshot.total - window)
                 ),
                 theme.warning,
@@ -882,7 +845,7 @@ impl ContextPanel {
         self.can_zoom = map && fitted < window;
         let scale = if self.zoom { fitted } else { window };
         let spacing = usize::from(width >= 72);
-        let map_width = if map { 2 + 16 + 15 * spacing + 3 } else { 0 };
+        let map_width = if map { 2 + 16 + 15 * spacing + 3 } else { 2 };
         let legend_width = width.saturating_sub(map_width);
         let available = remaining.saturating_sub(if map { 3 } else { 1 }).max(1);
         let count = available.min(self.categories.len());
@@ -893,12 +856,6 @@ impl ContextPanel {
             .min(self.categories.len().saturating_sub(count));
         let map_rows = if map { available.clamp(4, 16) } else { 0 };
         let cells = 16 * map_rows;
-        if remaining >= 3 {
-            lines.push(Line::styled(
-                format!("{}Categories", " ".repeat(map_width)),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-        }
         for row in 0..map_rows.max(count + usize::from(window > 0 && available > count)) {
             if lines.len() >= height.saturating_sub(if map { 2 } else { 0 }) {
                 break;
@@ -927,7 +884,7 @@ impl ContextPanel {
                     }
                 }
                 spans.push(Span::raw("   "));
-            } else if map {
+            } else {
                 spans.push(Span::raw(" ".repeat(map_width)));
             }
             if row < count {
@@ -952,9 +909,9 @@ impl ContextPanel {
                     format!("~{}", n(group.tokens))
                 };
                 let style = if index == self.overview_selected {
-                    theme.accent
+                    theme.accent.add_modifier(Modifier::BOLD)
                 } else {
-                    theme.dim
+                    Style::default()
                 };
                 let prefix = if index == self.overview_selected {
                     "› "

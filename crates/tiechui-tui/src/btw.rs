@@ -5,7 +5,7 @@ use crate::{
     cells::Cell,
     composer::{Composer, Draft},
     pager::Pager,
-    paste,
+    paste, sheet,
     status::{self, Phase, Snapshot, StatusLineConfig},
     status_picker::{Outcome as PickerOutcome, StatusPicker},
     theme::Theme,
@@ -16,7 +16,7 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui_core::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 use tiechui_protocol::{BtwAction, BtwView, InputContent};
@@ -77,6 +77,14 @@ impl Panel {
             started: std::time::Instant::now(),
             cursor: None,
             focused: true,
+        }
+    }
+    /// The side tone while the terminal has focus.
+    fn tone(&self, theme: &Theme) -> Style {
+        if self.focused && theme.accent2.fg.is_some() {
+            theme.accent2
+        } else {
+            theme.separator
         }
     }
     pub fn update(&mut self, view: BtwView) {
@@ -370,24 +378,19 @@ impl Panel {
                 body.extend(block);
             }
         }
+        let tone = self.tone(theme);
         if let Some(pager) = &mut self.full {
-            let footer = wrap::wrap(
-                &[Span::styled(
-                    "q / ctrl+c / ctrl+o close transcript · ↑↓ scroll · PgUp/PgDn page",
-                    theme.dim,
-                )],
+            let mut shown = pager.viewport(&body, rows.saturating_sub(3).max(1));
+            shown.resize(rows.saturating_sub(3), Line::default());
+            let hints = sheet::hints(
+                theme,
+                &[("↑↓", "scroll"), ("pgup/pgdn", "page"), ("q", "close")],
+                None,
                 width,
-                &[],
-                &[],
             );
-            let height = rows.saturating_sub(footer.len() + 1);
-            let mut lines = vec![Line::from(Span::styled("  Full transcript", theme.dim))];
-            if height > 0 {
-                lines.extend(pager.viewport(&body, height));
-            }
-            lines.resize(height + 1, Line::default());
-            lines.extend(footer);
-            lines.truncate(rows);
+            let title = sheet::rule(tone, &[sheet::title("Side transcript")], &[], width);
+            let mut lines = sheet::frame(tone, title, shown, hints, width);
+            lines.drain(..lines.len().saturating_sub(rows));
             return lines;
         }
         if let Some(error) = &self.error {
@@ -407,7 +410,6 @@ impl Panel {
                 theme.dim,
             )));
         }
-        let inner = width.saturating_sub(4).max(1);
         let mut footer = Vec::new();
         if self.help {
             for text in [
@@ -424,39 +426,33 @@ impl Panel {
             }
         }
         footer.push(status::line(config, &side, width, theme));
-        let label = if width >= 70 {
-            "Side from main thread"
-        } else {
-            "Side"
-        };
-        let parent = if main_status.is_empty() {
-            String::new()
-        } else {
-            format!(" · main {main_status}")
-        };
-        let label = format!("{label}{parent} · ctrl+/ to switch · ctrl+c to close");
-        let magenta = Style::default().fg(theme
-            .palette
-            .tone(crate::palette::Tone::Accent2)
-            .unwrap_or(Color::Magenta));
-        footer.extend(
-            wrap::wrap(
-                &[
-                    Span::styled("Side", magenta.add_modifier(Modifier::BOLD)),
-                    Span::styled(label[4..].to_owned(), magenta),
-                ],
-                inner,
-                &[],
-                &[],
-            )
-            .into_iter()
-            .take(2)
-            .map(|line| {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(line.spans);
-                Line::from(spans)
-            }),
-        );
+        let keys = [
+            Span::styled("ctrl+/", theme.secondary),
+            Span::styled(" switch · ", theme.dim),
+            Span::styled("ctrl+c", theme.secondary),
+            Span::styled(" close", theme.dim),
+        ];
+        let mut line = vec![Span::raw("  ")];
+        if !main_status.is_empty() {
+            let main = format!("main {main_status}");
+            let keys_width: usize = keys.iter().map(|span| wrap::width(&span.content)).sum();
+            let style = if main_status.starts_with("needs") {
+                theme.warning
+            } else {
+                theme.dim
+            };
+            if 2 + wrap::width(&main) + 3 + keys_width <= width {
+                line.extend([Span::styled(main, style), Span::styled(" · ", theme.dim)]);
+            } else {
+                footer.push(wrap::fit(
+                    vec![Span::raw("  "), Span::styled(main, style)],
+                    width,
+                    true,
+                ));
+            }
+        }
+        line.extend(keys);
+        footer.push(wrap::fit(line, width, true));
         footer.truncate(rows.saturating_sub(3));
         let working = self.view.busy
             && self
@@ -520,12 +516,12 @@ impl Panel {
                 false,
             ));
         }
-        let rule = Line::from(Span::styled("─".repeat(width), theme.rule(self.focused)));
-        lines.push(rule.clone());
+        let tone = self.tone(theme);
+        lines.push(sheet::rule(tone, &[sheet::title("Side")], &[], width));
         self.editor_rows = lines.len()..lines.len() + editor.lines.len();
         self.cursor = Some((lines.len() + editor.cursor.0, editor.cursor.1));
         lines.extend(editor.lines);
-        lines.push(rule);
+        lines.push(sheet::rule(tone, &[], &[], width));
         lines.extend(footer);
         lines.truncate(rows);
         lines.resize(rows, Line::default());

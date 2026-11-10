@@ -1,12 +1,11 @@
 ---
 source: crates/tiechui-tui/tests/cells.rs
-assertion_line: 196
 expression: "states(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 ---
 == running
 
 [b,fg#d0d0d0]•[-] [b]Exploring
-[fg#666c77]  └ [fgCyan]Read[-] [-]a.rs[fg#666c77], [-]b.rs
+[fg#666c77]  └ [fg#8fa8c9]Read[-] [-]a.rs[fg#666c77], [-]b.rs
 
 [b,fg#d0d0d0]• [b]Running[-] sleep 5
 
@@ -14,7 +13,7 @@ expression: "states(&Theme::fixture(ColorLevel::TrueColor, false), 80)"
 [fg#666c77]  └ Compiling a
 [-]    [fg#666c77]Compiling b
 
-[b,fg#d0d0d0]• [b]Calling[-] [fgCyan]exa__fetch[fg#666c77] · pending
+[b,fg#d0d0d0]• [b]Calling[-] [fg#8fa8c9]exa__fetch[fg#666c77] · pending
 
 == expanded
 

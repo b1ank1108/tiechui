@@ -3,44 +3,44 @@ source: crates/tiechui-tui/tests/app.rs
 expression: "shots.join(\"\\n\\n\")"
 ---
 100x16
-Resume a previous session
-Type to search                                            Filter: Cwd  All    Sort: Updated  Created
+── Resume ───────────────────────────────────────────────────────────────────────── /work/app · 2 ──
+  Search                                                        This folder  All    Updated  Created
 
-› fix the login form
-  5m ago
+  › fix the login form                                                                        5m ago
+    write release notes                                                                       2h ago
 
-  write release notes
-  2h ago
-
-
+  │ › fix the login form
+  │ • Done: the form now checks the email.
 
 
 
 
-enter resume · esc back · tab filter/sort · ←/→ change                                         1 / 2
-ctrl+e details · ctrl+o dense · ctrl+t transcript
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter resume · tab filter/sort · ←→ change · ctrl+t transcript · ctrl+e details · esc back   1 / 2
 
 100x12
-Resume a previous session
-Type to search                                            Filter: Cwd  All    Sort: Updated  Created
+── Resume ───────────────────────────────────────────────────────────────────────── /work/app · 2 ──
+  Search                                                        This folder  All    Updated  Created
 
-› 5m ago      fix the login form
-  2h ago      write release notes
+  › fix the login form                                                                        5m ago
+    write release notes                                                                       2h ago
 
-
-
-
-
-enter resume · esc back · tab filter/sort · ←/→ change                                         1 / 2
-ctrl+e details · ctrl+o comfortable · ctrl+t transcript
+  │ Session:    a1
+  │ Created:    3d ago
+  │ Updated:    5m ago
+  │ Directory:  /work/app
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter resume · tab filter/sort · ←→ change · ctrl+t transcript · ctrl+e details · esc back   1 / 2
 
 40x9
-Resume a previous session
-Type to search
+── Resume ───────────── /work/app · 2 ──
+  Search
 
-› fix the login form
-  5m ago
+  › fix the login form            5m ago
+    write release notes           2h ago
 
-  write release notes
 
-enter resume · esc back            1 / 2
+────────────────────────────────────────
+  enter resume · esc back          1 / 2

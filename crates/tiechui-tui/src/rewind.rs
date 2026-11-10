@@ -1,9 +1,10 @@
 //! Protocol-only rewind list and confirmation panel.
 
+use crate::sheet::{self, Row};
 use crate::{prompt::Outcome, theme::Theme, wrap};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_core::{
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
 };
 use tiechui_protocol::{ApprovalDecision, CheckpointStats, RewindPage, RewindPanel};
@@ -137,258 +138,225 @@ impl Rewind {
     }
     pub fn render(&self, width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
         let width = width.max(1);
-        let mut lines = vec![
-            Line::from(Span::styled("─".repeat(width), theme.separator)),
-            Line::from(Span::styled(
-                " Rewind",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-        ];
-        let short = height < 20;
-        let selected = |text: String| {
-            wrap::fit(
-                vec![Span::styled(
-                    text,
-                    theme.user().add_modifier(Modifier::BOLD),
-                )],
-                width,
-                false,
-            )
-        };
-        let wrapped = |text: &str, count: usize, style| {
+        let room = height.saturating_sub(3).max(1);
+        let dim = |text: &str, rows: usize| {
+            let indent = [Span::raw("  ")];
             wrap::wrap(
-                &[Span::styled(clean(text), style)],
+                &[Span::styled(clean(text), theme.dim)],
                 width,
-                &[Span::raw(" ")],
-                &[Span::raw(" ")],
+                &indent,
+                &indent,
             )
             .into_iter()
-            .take(count)
+            .take(rows)
             .collect::<Vec<_>>()
         };
-        match self.panel.page {
-            RewindPage::Messages => {
-                lines.extend(wrapped(
-                    "Select the point you want to restore to.",
-                    2,
-                    Style::default(),
-                ));
-                lines.push(Line::default());
-                let count = ((height.saturating_sub(10)) / 3).clamp(1, 8);
-                let start = self
-                    .panel
-                    .selected
-                    .saturating_sub(count / 2)
-                    .min(self.panel.rows.len().saturating_sub(count));
-                if start > 0 {
-                    lines.push(Line::from(Span::styled(
-                        format!("   ↑ {start} earlier prompts"),
-                        theme.dim,
-                    )));
-                }
-                for (index, row) in self.panel.rows.iter().enumerate().skip(start).take(count) {
-                    let text = if row.text.is_empty() {
-                        "(attachment)"
-                    } else {
-                        &row.text
-                    };
-                    for (line, text) in wrap::wrap(
-                        &[Span::raw(clean(text))],
-                        width.saturating_sub(4).max(1),
-                        &[],
-                        &[],
-                    )
-                    .into_iter()
-                    .take(2)
-                    .enumerate()
-                    {
-                        let text = text
-                            .spans
-                            .iter()
-                            .map(|span| span.content.as_ref())
-                            .collect::<String>();
-                        let marker = if index == self.panel.selected && line == 0 {
-                            "›"
-                        } else {
-                            " "
-                        };
-                        let label = format!(" {marker} {text}");
-                        lines.push(if index == self.panel.selected {
-                            selected(label)
-                        } else {
-                            wrap::fit(vec![Span::raw(label)], width, true)
-                        });
+        let mut position = None;
+        let range = format!("1-{}", self.actions().len());
+        let (title, alt, meta, body, pairs): (_, _, _, Vec<Line<'static>>, Vec<(&str, &str)>) =
+            match self.panel.page {
+                RewindPage::Messages => {
+                    let mut body = dim("Pick a prompt to go back to the point before it.", 2);
+                    body.push(Line::default());
+                    let rows = &self.panel.rows;
+                    let count = room.saturating_sub(body.len()).max(1);
+                    let start = self
+                        .panel
+                        .selected
+                        .saturating_sub(count / 2)
+                        .min(rows.len().saturating_sub(count));
+                    if rows.len() > count {
+                        position = Some(format!("{} / {}", self.panel.selected + 1, rows.len()));
                     }
-                    let mut spans = vec![Span::styled(
-                        format!(
-                            "   {}{} · ",
-                            time(row.timestamp),
-                            if index + 1 == self.panel.rows.len() {
-                                "  (latest)"
+                    let accent = theme.accent.add_modifier(Modifier::BOLD);
+                    for (index, row) in rows.iter().enumerate().skip(start).take(count) {
+                        let chosen = index == self.panel.selected;
+                        let text = if row.text.is_empty() {
+                            "(attachment)".into()
+                        } else {
+                            clean(&row.text)
+                        };
+                        let mut left = vec![
+                            Span::raw("  "),
+                            if chosen {
+                                Span::styled("› ", accent)
                             } else {
-                                ""
-                            }
-                        ),
-                        theme.dim,
-                    )];
-                    spans.extend(summary(row.stats.as_ref(), theme));
-                    lines.push(wrap::fit(spans, width, true));
-                }
-                if start + count < self.panel.rows.len() {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "   ↓ {} later prompts",
-                            self.panel.rows.len() - start - count
-                        ),
-                        theme.dim,
-                    )));
-                }
-                lines.push(Line::default());
-                lines.extend(wrapped(
-                    "↑↓ move · Home/End · Enter to continue · Esc to cancel",
-                    2,
-                    theme.dim,
-                ));
-            }
-            RewindPage::Checking | RewindPage::Actions => {
-                if !short {
-                    lines.extend(wrapped(
-                        "Restore to the point before you sent this message:",
-                        2,
-                        Style::default(),
-                    ));
-                }
-                let row = self.panel.rows.get(self.panel.selected);
-                let text = row
-                    .map(|row| row.text.as_str())
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or("(attachment)");
-                lines.extend(wrapped(
-                    text,
-                    if height < 28 { 1 } else { 3 },
-                    Style::default(),
-                ));
-                if self.panel.page == RewindPage::Checking {
-                    lines.push(Line::from(Span::styled(" Checking checkpoint…", theme.dim)));
-                    lines.push(Line::from(Span::styled(" Esc to go back", theme.dim)));
-                } else {
-                    let mut spans = vec![Span::raw(" ")];
-                    spans.extend(summary(self.panel.preview.as_ref(), theme));
-                    lines.push(wrap::fit(spans, width, true));
-                    if let Some(stats) = &self.panel.preview {
-                        if let Some(error) = &stats.error {
-                            lines.extend(wrapped(error, if short { 1 } else { 2 }, theme.warning));
+                                Span::raw("  ")
+                            },
+                            if chosen {
+                                Span::styled(text, accent)
+                            } else {
+                                Span::raw(text)
+                            },
+                        ];
+                        if index + 1 == rows.len() {
+                            left.push(Span::styled("  latest", theme.dim));
                         }
-                        if !short {
-                            lines
-                                .push(Line::from(Span::styled(" checkpoint → current", theme.dim)));
-                            let limit = if height >= 28 {
-                                3
-                            } else if height >= 24 {
-                                1
+                        let mut right = summary(row.stats.as_ref(), width > 90, theme);
+                        let at = time(row.timestamp);
+                        if !at.is_empty() {
+                            right.push(Span::styled(format!("   {at}"), theme.dim));
+                        }
+                        body.push(sheet::split(left, right, width));
+                    }
+                    let meta = format!(
+                        "{} prompt{}",
+                        rows.len(),
+                        if rows.len() == 1 { "" } else { "s" }
+                    );
+                    (
+                        "Rewind",
+                        None,
+                        vec![Span::styled(meta, theme.dim)],
+                        body,
+                        vec![("enter", "choose"), ("home/end", "jump"), ("esc", "cancel")],
+                    )
+                }
+                RewindPage::Checking | RewindPage::Actions => {
+                    let text = self
+                        .panel
+                        .rows
+                        .get(self.panel.selected)
+                        .map(|row| row.text.as_str())
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or("(attachment)");
+                    let quote = [Span::raw("  "), Span::styled("│ ", theme.separator)];
+                    let mut body = wrap::wrap(
+                        &[Span::styled(clean(text), theme.secondary)],
+                        width,
+                        &quote,
+                        &quote,
+                    );
+                    body.truncate(if height < 28 { 1 } else { 3 });
+                    body.push(Line::default());
+                    if self.panel.page == RewindPage::Checking {
+                        body.extend(dim("Checking checkpoint…", 1));
+                        (
+                            "Restore to before this prompt?",
+                            Some("Restore?"),
+                            vec![Span::styled("checking…", theme.dim)],
+                            body,
+                            vec![("esc", "back")],
+                        )
+                    } else {
+                        let actions = self.actions();
+                        let rows: Vec<Row> = actions
+                            .iter()
+                            .map(|(_, label, _)| Row::new(*label, "", theme))
+                            .collect();
+                        let options = sheet::options(&rows, self.action, width, false, theme);
+                        let mut notes = vec![Line::default()];
+                        notes.extend(dim(actions[self.action].2, 2));
+                        notes.extend(dim(
+                            "Bash, manual and other-session edits are not guaranteed to rewind.",
+                            2,
+                        ));
+                        let stats = self.panel.preview.as_ref();
+                        if let Some(error) = stats.and_then(|stats| stats.error.as_ref()) {
+                            let indent = [Span::raw("  ")];
+                            body.extend(
+                                wrap::wrap(
+                                    &[Span::styled(clean(error), theme.warning)],
+                                    width,
+                                    &indent,
+                                    &indent,
+                                )
+                                .into_iter()
+                                .take(2),
+                            );
+                            body.push(Line::default());
+                        }
+                        // The files fill what the actions and notes leave.
+                        let notes_fit = body.len() + options.len() + notes.len() + 2 <= room;
+                        let spare = room
+                            .saturating_sub(
+                                body.len()
+                                    + options.len()
+                                    + if notes_fit { notes.len() } else { 0 },
+                            )
+                            .saturating_sub(1);
+                        if let Some(stats) = stats.filter(|stats| stats.error.is_none()) {
+                            let names: Vec<String> = stats.files.keys().map(|f| clean(f)).collect();
+                            let column = names.iter().map(|n| wrap::width(n)).max().unwrap_or(0);
+                            let limit = if names.len() > spare {
+                                spare.saturating_sub(1)
                             } else {
-                                0
+                                names.len()
                             };
-                            for (file, counts) in stats.files.iter().take(limit) {
-                                let mut spans =
-                                    vec![Span::styled(format!("   {}  ", clean(file)), theme.dim)];
+                            for (name, counts) in names.iter().zip(stats.files.values()).take(limit)
+                            {
+                                let mut spans = vec![Span::raw(format!(
+                                    "    {name}{}  ",
+                                    " ".repeat(column - wrap::width(name))
+                                ))];
                                 spans.extend(counts_text(counts.as_ref(), theme));
-                                lines.push(wrap::fit(spans, width, true));
+                                body.push(wrap::fit(spans, width, true));
                             }
-                            if limit > 0 && stats.files.len() > limit {
-                                lines.push(Line::from(Span::styled(
-                                    format!("   … {} more files", stats.files.len() - limit),
+                            if limit < names.len() && spare > 0 {
+                                body.push(Line::from(Span::styled(
+                                    format!("    … {} more files", names.len() - limit),
                                     theme.dim,
                                 )));
                             }
+                            if limit > 0 || spare > 0 {
+                                body.push(Line::default());
+                            }
                         }
+                        body.extend(options);
+                        if notes_fit {
+                            body.extend(notes);
+                        }
+                        (
+                            "Restore to before this prompt?",
+                            Some("Restore?"),
+                            summary(self.panel.preview.as_ref(), false, theme),
+                            body,
+                            vec![
+                                ("enter", "confirm"),
+                                (range.as_str(), "pick"),
+                                ("esc", "back"),
+                            ],
+                        )
                     }
-                    self.render_actions(&mut lines, width, height, theme);
                 }
-            }
-            RewindPage::Recovery => {
-                lines.extend(wrapped(
-                    "Files are checked before recovery. The conversation position is not changed.",
-                    3,
-                    theme.dim,
-                ));
-                self.render_actions(&mut lines, width, height, theme);
-            }
-        }
-        lines
-            .into_iter()
-            .map(|line| wrap::fit(line.spans, width, true))
-            .take(height)
-            .collect()
-    }
-    fn render_actions(
-        &self,
-        lines: &mut Vec<Line<'static>>,
-        width: usize,
-        height: usize,
-        theme: &Theme,
-    ) {
-        let actions = self.actions();
-        if height >= 20 {
-            lines.push(Line::default());
-        }
-        for (index, (_, label, _)) in actions.iter().enumerate() {
-            let style = if index == self.action {
-                theme.user().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+                RewindPage::Recovery => {
+                    let actions = self.actions();
+                    let rows: Vec<Row> = actions
+                        .iter()
+                        .map(|(_, label, _)| Row::new(*label, "", theme))
+                        .collect();
+                    let mut body = dim(actions[0].2, 3);
+                    body.push(Line::default());
+                    body.extend(sheet::options(&rows, self.action, width, false, theme));
+                    (
+                        "Recovery",
+                        None,
+                        Vec::new(),
+                        body,
+                        vec![
+                            ("enter", "confirm"),
+                            (range.as_str(), "pick"),
+                            ("esc", "cancel"),
+                        ],
+                    )
+                }
             };
-            lines.push(wrap::fit(
-                vec![Span::styled(
-                    format!(
-                        " {} {}. {label}",
-                        if index == self.action { "›" } else { " " },
-                        index + 1
-                    ),
-                    style,
-                )],
-                width,
-                false,
-            ));
-        }
-        if height >= 20 {
-            lines.push(Line::default());
-            lines.extend(
-                wrap::wrap(
-                    &[Span::styled(actions[self.action].2, theme.dim)],
-                    width,
-                    &[Span::raw(" ")],
-                    &[Span::raw(" ")],
-                )
-                .into_iter()
-                .take(2),
-            );
-            lines.extend(
-                wrap::wrap(
-                    &[Span::styled(
-                        "Bash, manual and other-session edits are not guaranteed to rewind.",
-                        theme.dim,
-                    )],
-                    width,
-                    &[Span::raw(" ")],
-                    &[Span::raw(" ")],
-                )
-                .into_iter()
-                .take(2),
-            );
-        }
-        lines.push(wrap::fit(
-            vec![Span::styled(
-                if height < 20 {
-                    " Enter / number confirms · Esc back"
-                } else {
-                    " Enter / number to confirm · Esc to go back"
-                },
-                theme.dim,
-            )],
+        let mut body = body;
+        body.truncate(room);
+        let mut titles = vec![sheet::title(title)];
+        titles.extend(alt.map(sheet::title));
+        let metas: Vec<Vec<Span<'static>>> = if meta.is_empty() { vec![] } else { vec![meta] };
+        sheet::frame(
+            theme.accent,
+            sheet::rule(theme.accent, &titles, &metas, width),
+            body,
+            sheet::hints(theme, &pairs, position.as_deref(), width),
             width,
-            true,
-        ));
+        )
+        .into_iter()
+        .map(|line| wrap::fit(line.spans, width, true))
+        .take(height.max(1))
+        .collect()
     }
 }
 pub(crate) fn clean(text: &str) -> String {
@@ -428,49 +396,40 @@ fn counts_text(counts: Option<&tiechui_protocol::LineStats>, theme: &Theme) -> V
         None => vec![Span::styled("line counts unavailable", theme.dim)],
     }
 }
-fn summary(stats: Option<&CheckpointStats>, theme: &Theme) -> Vec<Span<'static>> {
+fn summary(stats: Option<&CheckpointStats>, more: bool, theme: &Theme) -> Vec<Span<'static>> {
     let Some(stats) = stats else {
-        return vec![Span::styled("Checking…", theme.dim)];
+        return vec![Span::styled("checking…", theme.dim)];
     };
     if stats.error.is_some() {
-        return vec![Span::styled(
-            "No code restore · checkpoint unavailable or conflicting",
-            theme.warning,
-        )];
+        return vec![Span::styled("code restore unavailable", theme.warning)];
     }
-    let mut spans = vec![Span::styled(
-        if stats.files.is_empty() {
-            "No code changes".into()
-        } else {
-            format!("{} files changed", stats.files.len())
+    let count = stats.files.len();
+    if count == 0 {
+        return vec![Span::styled("no code changes", theme.dim)];
+    }
+    let unavailable = stats
+        .files
+        .values()
+        .filter(|counts| counts.is_none())
+        .count();
+    let sum = stats.files.values().flatten().fold(
+        tiechui_protocol::LineStats::default(),
+        |mut sum, counts| {
+            sum.added += counts.added;
+            sum.removed += counts.removed;
+            sum
         },
+    );
+    let mut spans = vec![Span::styled(
+        format!("{count} file{} · ", if count == 1 { "" } else { "s" }),
         theme.dim,
     )];
-    if !stats.files.is_empty() {
-        let unavailable = stats
-            .files
-            .values()
-            .filter(|counts| counts.is_none())
-            .count();
-        let sum = stats.files.values().flatten().fold(
-            tiechui_protocol::LineStats::default(),
-            |mut sum, counts| {
-                sum.added += counts.added;
-                sum.removed += counts.removed;
-                sum
-            },
-        );
-        spans.push(Span::styled(" · ", theme.dim));
-        spans.extend(counts_text(
-            (unavailable != stats.files.len()).then_some(&sum),
-            theme,
+    spans.extend(counts_text((unavailable != count).then_some(&sum), theme));
+    if more && unavailable > 0 && unavailable < count {
+        spans.push(Span::styled(
+            format!(" · {unavailable} uncounted"),
+            theme.dim,
         ));
-        if unavailable > 0 && unavailable < stats.files.len() {
-            spans.push(Span::styled(
-                format!(" ({unavailable} uncounted)"),
-                theme.dim,
-            ));
-        }
     }
     spans
 }

@@ -697,7 +697,7 @@ fn recalled_slash_commands_keep_browsing_history() {
     assert!(
         !text(&app.live().0)
             .iter()
-            .any(|r| r.contains("Tab complete"))
+            .any(|r| r.contains("tab complete"))
     );
     app.key(key(KeyCode::Up));
     assert_eq!(draft(&mut app), ["› one"]);
@@ -706,7 +706,7 @@ fn recalled_slash_commands_keep_browsing_history() {
     assert!(
         text(&app.live().0)
             .iter()
-            .any(|r| r.contains("Tab complete"))
+            .any(|r| r.contains("tab complete"))
     );
 }
 
@@ -1039,7 +1039,7 @@ fn the_slash_menu_completes_with_tab_and_runs_with_enter() {
     typed(&mut app, "/st");
     let rows = text(&app.live().0);
     assert!(
-        rows.iter().any(|r| r.starts_with("> /statusline")),
+        rows.iter().any(|r| r.starts_with("  › /statusline")),
         "{rows:#?}"
     );
     app.key(key(KeyCode::Tab));
@@ -1047,21 +1047,21 @@ fn the_slash_menu_completes_with_tab_and_runs_with_enter() {
     assert!(
         !text(&app.live().0)
             .iter()
-            .any(|r| r.contains("Tab complete"))
+            .any(|r| r.contains("tab complete"))
     );
     app.key(with(KeyCode::Backspace, KeyModifiers::NONE));
     app.key(key(KeyCode::Esc));
     assert!(
         !text(&app.live().0)
             .iter()
-            .any(|r| r.contains("Tab complete"))
+            .any(|r| r.contains("tab complete"))
     );
     typed(&mut app, "x");
     app.key(with(KeyCode::Backspace, KeyModifiers::NONE));
     assert!(
         text(&app.live().0)
             .iter()
-            .any(|r| r.contains("Tab complete"))
+            .any(|r| r.contains("tab complete"))
     );
     app.key(key(KeyCode::Enter));
     assert!(
@@ -1179,10 +1179,30 @@ fn model_and_thinking_pickers_switch_through_the_session() {
     app.key(key(KeyCode::Enter));
     let rows = text(&app.live().0);
     assert!(
-        rows.iter()
-            .any(|r| r.starts_with("› 1. ds/flash ✓") && r.contains("400k window")),
+        rows.iter().any(|r| r.starts_with("  › 1. flash ✓")
+            && r.contains(" ds ")
+            && r.contains("400k")
+            && r.contains("‹ low ›")),
         "{rows:#?}"
     );
+    // ←→ picks the thinking level with the model; an unchanged level is not sent.
+    app.key(key(KeyCode::Right));
+    app.key(key(KeyCode::Right));
+    app.key(key(KeyCode::Enter));
+    assert_eq!(
+        ops(&mut app),
+        [
+            Op::SetModel {
+                provider: "ds".into(),
+                model: "ds/flash".into(),
+            },
+            Op::SetThinking {
+                level: ThinkingLevel::High
+            }
+        ]
+    );
+    typed(&mut app, "/model");
+    app.key(key(KeyCode::Enter));
     app.key(key(KeyCode::Down));
     app.key(key(KeyCode::Enter));
     assert_eq!(
@@ -1203,11 +1223,11 @@ fn model_and_thinking_pickers_switch_through_the_session() {
     );
     typed(&mut app, "/thinking");
     app.key(key(KeyCode::Enter));
-    typed(&mut app, "deep");
+    typed(&mut app, "hi");
     let rows = text(&app.live().0);
     assert!(
         rows.iter()
-            .any(|r| r.starts_with("› 1. high") && r.contains("Deep reasoning (~16k tokens)")),
+            .any(|r| r.starts_with("  › 1. high") && r.contains("~16k tokens")),
         "{rows:#?}"
     );
     assert!(!rows.iter().any(|r| r.contains("low ✓")));
@@ -1231,7 +1251,7 @@ fn permissions_offers_the_modes_and_picks_by_digit() {
     app.key(key(KeyCode::Enter));
     let rows = text(&app.live().0);
     assert!(
-        rows.iter().any(|r| r.starts_with("› 1. rules ✓")),
+        rows.iter().any(|r| r.starts_with("  › 1. rules ✓")),
         "{rows:#?}"
     );
     assert!(rows.iter().any(|r| r.contains("4. show")), "{rows:#?}");
@@ -1298,8 +1318,7 @@ fn permission_prompts_answer_once_for_the_session_or_with_a_reason() {
     app.event(asked("a1", bash("rm -rf build")));
     let rows = text(&app.live().0);
     assert!(
-        rows.iter()
-            .any(|r| r.trim() == "Would you like to run the following command?"),
+        rows.iter().any(|r| r.starts_with("── Run this command? ")),
         "{rows:#?}"
     );
     assert_eq!(
@@ -1309,7 +1328,7 @@ fn permission_prompts_answer_once_for_the_session_or_with_a_reason() {
     assert!(rows.iter().any(|r| r.trim() == "$ rm -rf build"));
     assert!(!rows.iter().any(|r| r.contains("Working")));
     assert!(
-        !rows.iter().any(|r| r.starts_with('─')),
+        !rows.iter().any(|r| r.trim_end() == "›"),
         "the composer gives way"
     );
     app.key(key(KeyCode::Char('2')));
@@ -1322,7 +1341,7 @@ fn permission_prompts_answer_once_for_the_session_or_with_a_reason() {
             }
         )]
     );
-    assert!(text(&app.live().0).iter().any(|r| r.starts_with('─')));
+    assert!(text(&app.live().0).iter().any(|r| r.trim_end() == "›"));
 
     app.event(asked("a2", bash("rm -rf dist")));
     app.key(key(KeyCode::Up));
@@ -1331,7 +1350,7 @@ fn permission_prompts_answer_once_for_the_session_or_with_a_reason() {
     let rows = text(&lines);
     let at = rows
         .iter()
-        .position(|r| r.trim() == "Tell the agent what to do differently:")
+        .position(|r| r.trim() == "Tell the agent what to do instead")
         .unwrap();
     assert_eq!(cursor, Some((at + 1, 4)));
     typed(&mut app, "use trash");
@@ -1505,7 +1524,7 @@ fn questions() -> ApprovalRequest {
 fn ask_keeps_drafts_edits_text_and_requires_explicit_submission() {
     let mut app = running(80);
     app.event(asked("q", questions()));
-    assert!(screen(&mut app).contains("2 unanswered"));
+    assert!(!screen(&mut app).contains("✓"));
     app.key(key(KeyCode::Tab));
     typed(&mut app, "abcd");
     app.key(key(KeyCode::Left));
@@ -1514,7 +1533,7 @@ fn ask_keeps_drafts_edits_text_and_requires_explicit_submission() {
     typed(&mut app, "free text");
     app.key(with(KeyCode::Char('p'), KeyModifiers::CONTROL));
     assert!(screen(&mut app).contains("abc!d"));
-    assert!(screen(&mut app).contains("2 unanswered"));
+    assert!(!screen(&mut app).contains("✓"));
     app.key(key(KeyCode::Enter));
     assert!(screen(&mut app).contains("free text"));
     app.key(key(KeyCode::Enter));
@@ -1540,7 +1559,7 @@ fn ask_uncommitted_choices_and_notes_are_empty_until_proceed() {
     typed(&mut app, "hjkl 123 ");
     app.key(with(KeyCode::Char('n'), KeyModifiers::CONTROL));
     app.key(key(KeyCode::Enter));
-    assert!(screen(&mut app).contains("Submit with unanswered questions?"));
+    assert!(screen(&mut app).contains("Submit anyway?"));
     app.key(key(KeyCode::Down));
     app.key(key(KeyCode::Enter));
     assert!(screen(&mut app).contains("hjkl 123"));
@@ -1566,11 +1585,11 @@ fn ask_escape_clears_notes_before_interrupting_and_paste_controls_are_not_naviga
     let mut app = running(80);
     app.event(asked("q", questions()));
     app.paste("hjkl 123 \x1b[A\x0e");
-    assert!(screen(&mut app).contains("Question 1/2"));
+    assert!(screen(&mut app).contains("1 of 2"));
     app.key(key(KeyCode::Esc));
     assert!(answered(&mut app).is_empty());
     assert!(!screen(&mut app).contains("hjkl 123"));
-    assert!(screen(&mut app).contains("tab to add notes"));
+    assert!(screen(&mut app).contains("tab add note"));
     app.key(key(KeyCode::Esc));
     assert_eq!(
         answered(&mut app),
@@ -1591,9 +1610,9 @@ fn ask_confirmation_escape_and_backspace_return_to_unanswered_but_ctrl_c_interru
         app.key(key(KeyCode::Right));
         typed(&mut app, "committed note");
         app.key(key(KeyCode::Enter));
-        assert!(screen(&mut app).contains("Submit with unanswered questions?"));
+        assert!(screen(&mut app).contains("Submit anyway?"));
         app.key(key(back));
-        assert!(screen(&mut app).contains("Question 1/2"));
+        assert!(screen(&mut app).contains("1 of 2"));
         assert!(answered(&mut app).is_empty());
         app.key(key(KeyCode::Right));
         app.key(key(KeyCode::Enter));
@@ -1624,13 +1643,13 @@ fn ask_escape_clears_visible_notes_even_when_options_have_focus() {
     app.key(key(KeyCode::Up));
     let display = screen(&mut app);
     assert!(display.contains("keep this note"));
-    assert!(display.contains("←/→ to navigate questions"));
-    assert!(display.contains("tab or esc to clear notes"));
-    assert!(!display.contains("esc to interrupt"));
+    assert!(display.contains("←→ question"));
+    assert!(display.contains("tab/esc clear note"));
+    assert!(!display.contains("esc interrupt"));
     app.key(key(KeyCode::Esc));
     assert!(answered(&mut app).is_empty());
     assert!(!screen(&mut app).contains("keep this note"));
-    assert!(screen(&mut app).contains("tab to add notes"));
+    assert!(screen(&mut app).contains("tab add note"));
 }
 
 #[test]
@@ -1812,7 +1831,7 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
     app.key(key(KeyCode::Enter));
     let (generation, asked) = reads(&mut app);
     assert_eq!(asked, [Read::List { all: false }]);
-    assert!(page(&mut app, 20).contains(&"Loading sessions…".to_owned()));
+    assert!(page(&mut app, 20).contains(&"  Loading sessions…".to_owned()));
     app.loaded(
         generation,
         Loaded::List {
@@ -1820,47 +1839,58 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
             sessions: Ok(listed),
         },
     );
+    let row = |rows: &[String], title: &str| {
+        rows.iter()
+            .find(|r| r.contains(title))
+            .cloned()
+            .unwrap_or_default()
+    };
     let rows = page(&mut app, 20);
-    assert_eq!(rows[0], "Resume a previous session");
+    assert!(rows[0].starts_with("── Resume ") && rows[0].ends_with(" 2 ──"));
     assert!(
-        rows[1].ends_with("Filter: Cwd  All    Sort: Updated  Created"),
+        rows[1].ends_with("This folder  All    Updated  Created"),
         "{rows:#?}"
     );
-    let titles: Vec<&String> = rows
-        .iter()
-        .filter(|r| r.starts_with("› ") || r.starts_with("  ") && !r.starts_with("   "))
-        .collect();
-    assert_eq!(titles[0], "› fix the login form");
-    assert!(rows.contains(&"  5m ago".to_owned()), "{rows:#?}");
+    let first = row(&rows, "fix the login form");
+    assert!(first.starts_with("  › fix the login form") && first.ends_with(" 5m ago"));
+    assert!(row(&rows, "write release notes").starts_with("    write"));
     assert!(rows.iter().any(|r| r.ends_with("1 / 2")));
 
     typed(&mut app, "release");
     let rows = page(&mut app, 20);
-    assert!(rows.contains(&"› write release notes".to_owned()));
+    assert!(row(&rows, "write release notes").starts_with("  › "));
     assert!(!rows.iter().any(|r| r.contains("login")));
     typed(&mut app, " missing");
-    assert!(page(&mut app, 20).contains(&"No matching sessions".to_owned()));
+    assert!(page(&mut app, 20).contains(&"  No matching sessions".to_owned()));
     app.key(key(KeyCode::Esc));
-    assert!(page(&mut app, 20).contains(&"› fix the login form".to_owned()));
+    assert!(row(&page(&mut app, 20), "fix the login form").starts_with("  › "));
 
     app.key(key(KeyCode::Tab));
     app.key(key(KeyCode::Right));
     let rows = page(&mut app, 20);
-    assert!(rows[1].ends_with("Sort: Updated  Created"));
-    let at = |title: &str| rows.iter().position(|r| r.ends_with(title));
+    assert!(rows[1].ends_with("Updated  Created"));
+    let at = |title: &str| rows.iter().position(|r| r.contains(title));
     assert!(
         at("write release notes") < at("fix the login form"),
         "newest created first"
     );
     assert!(
-        rows.contains(&"› fix the login form".to_owned()),
+        row(&rows, "fix the login form").starts_with("  › "),
         "the selection stays"
     );
     app.key(key(KeyCode::Down));
     app.key(key(KeyCode::Tab));
     app.key(key(KeyCode::Right));
     let (_, asked) = reads(&mut app);
-    assert_eq!(asked, [Read::List { all: true }]);
+    assert_eq!(
+        asked,
+        [
+            Read::Preview("/sessions/a1.jsonl".into()),
+            Read::Preview("/sessions/b2.jsonl".into()),
+            Read::List { all: true }
+        ],
+        "each selected session's conversation is asked for once"
+    );
     app.loaded(
         generation - 1,
         Loaded::List {
@@ -1876,11 +1906,11 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
         },
     );
     let rows = page(&mut app, 20);
+    let chosen = row(&rows, "tune the build");
     assert!(
-        rows.contains(&"  1m ago · /elsewhere".to_owned()),
+        chosen.starts_with("  › tune the build") && chosen.ends_with("/elsewhere  1m ago"),
         "{rows:#?}"
     );
-    assert!(rows.contains(&"› tune the build".to_owned()), "{rows:#?}");
 
     app.key(key(KeyCode::Enter));
     assert!(app.pager_frame(20).is_none());
@@ -1937,15 +1967,14 @@ fn startup_picker_previews_read_only_and_leaving_starts_a_new_session() {
             sessions: Ok(listed),
         },
     );
-    assert!(
-        page(&mut app, 20)
-            .iter()
-            .any(|r| r.contains("esc start new"))
-    );
-    app.key(with(KeyCode::Char('e'), KeyModifiers::CONTROL));
     let (_, asked) = reads(&mut app);
     assert_eq!(asked, [Read::Preview("/sessions/a1.jsonl".into())]);
-    assert!(page(&mut app, 30).contains(&"  └ Loading conversation…".to_owned()));
+    let rows = page(&mut app, 20);
+    assert!(rows.iter().any(|r| r.contains("esc start new")));
+    assert!(
+        rows.contains(&"  │ Loading conversation…".to_owned()),
+        "{rows:#?}"
+    );
     let part = |kind, text: &str| Part {
         kind,
         text: text.into(),
@@ -1961,24 +1990,35 @@ fn startup_picker_previews_read_only_and_leaving_starts_a_new_session() {
             ]),
         },
     );
+    let tail = [
+        "  │ › fix the login form",
+        "  │ • Done: validated the email.",
+        "  │ • ok",
+    ];
+    let rows = page(&mut app, 30);
+    for expected in tail {
+        assert!(rows.contains(&expected.to_owned()), "{expected}: {rows:#?}");
+    }
+    app.key(with(KeyCode::Char('e'), KeyModifiers::CONTROL));
     let rows = page(&mut app, 30);
     for expected in [
-        "⌄ fix the login form",
         "  │ Session:    a1",
         "  │ Created:    3d ago",
         "  │ Updated:    5m ago",
         "  │ Directory:  /work/app",
-        "  │ Conversation:",
-        "  │ fix the login form",
-        "  │ Done: validated the email.",
-        "  └ ok",
-    ] {
+    ]
+    .into_iter()
+    .chain(tail)
+    {
         assert!(rows.contains(&expected.to_owned()), "{expected}: {rows:#?}");
     }
     app.key(with(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(app.take_reads().is_none(), "the preview is reused");
     let rows = page(&mut app, 20);
-    assert_eq!(rows[0], "Conversation · fix the login form");
+    assert!(
+        rows[0].starts_with("── Transcript · fix the login form "),
+        "{rows:#?}"
+    );
     assert!(
         rows.contains(&"› fix the login form".to_owned()),
         "{rows:#?}"
@@ -2128,9 +2168,16 @@ fn session_header_heads_each_opened_session() {
 #[test]
 fn resume_layouts() {
     let mut shots = Vec::new();
-    for (width, rows, dense) in [(100, 16, false), (100, 12, true), (40, 9, false)] {
+    for (width, rows, details) in [(100, 16, false), (100, 12, true), (40, 9, false)] {
         let listed = sessions();
-        let mut app = ready(width);
+        let mut app = app_with(
+            width,
+            Options {
+                cwd: "/work/app".into(),
+                ..options()
+            },
+        );
+        app.event(event(started(vec![])));
         typed(&mut app, "/resume");
         app.key(key(KeyCode::Enter));
         let (generation, _) = reads(&mut app);
@@ -2141,8 +2188,24 @@ fn resume_layouts() {
                 sessions: Ok(listed),
             },
         );
-        if dense {
-            app.key(with(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        app.loaded(
+            generation,
+            Loaded::Preview {
+                path: "/sessions/a1.jsonl".into(),
+                parts: Ok(vec![
+                    Part {
+                        kind: PartKind::User,
+                        text: "fix the login form".into(),
+                    },
+                    Part {
+                        kind: PartKind::Assistant,
+                        text: "Done: the form now checks the email.".into(),
+                    },
+                ]),
+            },
+        );
+        if details {
+            app.key(with(KeyCode::Char('e'), KeyModifiers::CONTROL));
         }
         shots.push(format!(
             "{width}x{rows}\n{}",

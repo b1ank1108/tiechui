@@ -75,15 +75,26 @@ fn panel_lists_active_first_and_sends_actions_for_the_selection() {
     ));
     let screen = text(&panel.render(80, 8, &theme));
     let rows: Vec<_> = screen.lines().collect();
-    assert!(rows[1].starts_with("› sh2") && rows[2].contains("sh3") && rows[3].contains("sh1"));
+    assert!(rows[0].starts_with("── Shells ") && rows[0].ends_with(" 2 running · 3 total ──"));
     assert!(
-        rows[1].contains("foreground") && rows[1].contains("01:42") && rows[1].contains("run sh2")
+        rows[1].starts_with("  › sh2  ● running")
+            && rows[2].contains("sh3")
+            && rows[3].contains("sh1")
     );
+    assert!(
+        rows[1].ends_with("foreground") && rows[1].contains("01:42") && rows[1].contains("run sh2")
+    );
+    assert!(rows[3].contains("✗ exit 0") && !rows[3].contains("foreground"));
     assert!(!screen.contains("second line"));
+    assert_eq!(panel.follow(), Some(json!({"detail":"sh2"})));
+    assert_eq!(panel.follow(), None, "asked once");
     assert!(
         matches!(key(&mut panel, KeyCode::Char('b')), Outcome::Send(data) if data == json!({"background":"sh2"}))
     );
-    key(&mut panel, KeyCode::Down);
+    assert!(
+        matches!(key(&mut panel, KeyCode::Down), Outcome::Send(data) if data == json!({"detail":"sh3"})),
+        "the selection's output is asked for"
+    );
     assert!(
         matches!(key(&mut panel, KeyCode::Char('b')), Outcome::Open),
         "already background"
@@ -102,9 +113,6 @@ fn panel_lists_active_first_and_sends_actions_for_the_selection() {
     assert!(
         matches!(key(&mut panel, KeyCode::Char('x')), Outcome::Send(data) if data == json!({"stop":"sh3"}))
     );
-    assert!(
-        matches!(key(&mut panel, KeyCode::Enter), Outcome::Send(data) if data == json!({"detail":"sh3"}))
-    );
     let mut detail = view(vec![task("sh3", Background, Running)], false);
     detail.detail = Some(ShellDetail {
         id: "sh3".into(),
@@ -112,24 +120,34 @@ fn panel_lists_active_first_and_sends_actions_for_the_selection() {
         log_path: Some("/tmp/log".into()),
     });
     panel.update(detail);
-    let screen = text(&panel.render(40, 12, &theme));
+    let screen = text(&panel.render(60, 12, &theme));
+    for expected in ["  sh3 · background · /project", "  │ building", "  │ done"] {
+        assert!(screen.contains(expected), "{expected}\n{screen}");
+    }
+    assert!(matches!(key(&mut panel, KeyCode::Enter), Outcome::Open));
+    let screen = text(&panel.render(40, 14, &theme));
     for expected in [
-        "Shell sh3 · background · running",
-        "cwd: /project",
-        "$ run sh3",
-        "$ second line",
-        "building",
-        "done",
-        "Log: /tmp/log",
-        "x stop · Esc back",
+        "── Shell sh3 ",
+        "● running · ",
+        "  $ run sh3",
+        "    second line",
+        "  /project · background",
+        "  building",
+        "  done",
+        "  Log /tmp/log",
+        "  x stop · pgup/pgdn scroll · esc back",
     ] {
         assert!(screen.contains(expected), "{expected}\n{screen}");
     }
     assert!(!screen.contains('\u{1b}'));
-    assert!(
-        matches!(key(&mut panel, KeyCode::Esc), Outcome::Send(data) if data == json!({"close":true}))
-    );
+    assert!(matches!(key(&mut panel, KeyCode::Esc), Outcome::Open));
+    assert!(text(&panel.render(40, 14, &theme)).starts_with("── Shells "));
     assert!(matches!(key(&mut panel, KeyCode::Esc), Outcome::Close));
+    assert_eq!(
+        panel.follow(),
+        Some(json!({"detail":"sh3"})),
+        "reopening asks again"
+    );
 }
 
 #[test]
@@ -171,7 +189,11 @@ fn indicator_stays_while_ready_and_panel_controls_go_to_the_command() {
     ));
     assert!(!text(&app.live().0).contains("shell · /shells"));
     assert!(app.context_open());
-    app.take_submissions();
+    let ops: Vec<_> = app.take_submissions().into_iter().map(|s| s.op).collect();
+    assert!(
+        matches!(&ops[..], [Op::CommandInput { name, data }] if name == "shells" && data == &json!({"detail":"sh1"})),
+        "opening asks for the selection's output: {ops:?}"
+    );
     app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
     let ops: Vec<_> = app.take_submissions().into_iter().map(|s| s.op).collect();
     assert!(
@@ -180,4 +202,9 @@ fn indicator_stays_while_ready_and_panel_controls_go_to_the_command() {
     );
     app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.context_open());
+    let ops: Vec<_> = app.take_submissions().into_iter().map(|s| s.op).collect();
+    assert!(
+        matches!(&ops[..], [Op::CommandInput { data, .. }] if data == &json!({"close":true})),
+        "closing stops the output: {ops:?}"
+    );
 }

@@ -1,13 +1,9 @@
 ---
 source: crates/tiechui-tui/tests/context.rs
-assertion_line: 297
 expression: "snapshots.join(\"\\n\\n\")"
 ---
 40 columns / dark
-[fg#33363d]────────────────────────────────────────
-
-[b,fg#8fa8c9]Context · Cache
-
+[fg#8fa8c9]── [b]Context[fg#666c77] · [b,fg#8fa8c9]Cache[-] [fg#8fa8c9]────[-] [fg#666c77]~10.5k / 200k[fg#8fa8c9] ──
 [-]  Provider cache hit rate: 95.2%
 [-]  Reported input: 21000 · cache reads:
 [-]  20000
@@ -30,17 +26,16 @@ expression: "snapshots.join(\"\\n\\n\")"
 [-]  Model or system changes and
 [-]  unavailable usage reset the baseline.
 [-]  No extra model requests are made.
-[fg#666c77]  Lines 1–22 of 31
-
-[fg#33363d]────────────────────────────────────────
-[fg#666c77]↑↓ scroll · Esc back
+[-]  2 recorded compression event(s) ·
+[-]  ~12000 net context tokens reclaimed
+[-]  Compression attribution covers at most
+[-]  four cold responses after a fold;
+[-]  estimates are not causal proof or
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]↑↓[fg#666c77] scroll · [fg#9aa0aa]esc[fg#666c77] back[-]         [fg#666c77]1–27 / 31
 
 80 columns / dark
-[fg#33363d]────────────────────────────────────────────────────────────────────────────────
-
-[b,fg#8fa8c9]Context · Cache
-[fg#666c77]Overview  System  Tools  Injections  Messages  
-
+[fg#8fa8c9]── [b]Context[fg#666c77] · [b,fg#8fa8c9]Cache[-] [fg#8fa8c9]────────────────────────────────────────────[-] [fg#666c77]~10.5k / 200k[fg#8fa8c9] ──
 [-]  Provider cache hit rate: 95.2%
 [-]  Reported input: 21000 · cache reads: 20000
 [-]  Cache misses: 1000
@@ -64,14 +59,15 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#33363d]────────────────────────────────────────────────────────────────────────────────
-[fg#666c77]↑↓ / PgUp PgDn scroll · ←/→ tabs · Esc back
+
+
+
+
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]↑↓[fg#666c77] scroll · [fg#9aa0aa]pgup/pgdn[fg#666c77] page · [fg#9aa0aa]←→[fg#666c77] tab · [fg#9aa0aa]esc[fg#666c77] back
 
 40 columns / light
-[fg#dde0e5]────────────────────────────────────────
-
-[b,fg#4f6f9a]Context · Cache
-
+[fg#4f6f9a]── [b]Context[fg#9aa1ac] · [b,fg#4f6f9a]Cache[-] [fg#4f6f9a]────[-] [fg#9aa1ac]~10.5k / 200k[fg#4f6f9a] ──
 [-]  Provider cache hit rate: 95.2%
 [-]  Reported input: 21000 · cache reads:
 [-]  20000
@@ -94,17 +90,16 @@ expression: "snapshots.join(\"\\n\\n\")"
 [-]  Model or system changes and
 [-]  unavailable usage reset the baseline.
 [-]  No extra model requests are made.
-[fg#9aa1ac]  Lines 1–22 of 31
-
-[fg#dde0e5]────────────────────────────────────────
-[fg#9aa1ac]↑↓ scroll · Esc back
+[-]  2 recorded compression event(s) ·
+[-]  ~12000 net context tokens reclaimed
+[-]  Compression attribution covers at most
+[-]  four cold responses after a fold;
+[-]  estimates are not causal proof or
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]↑↓[fg#9aa1ac] scroll · [fg#5f6672]esc[fg#9aa1ac] back[-]         [fg#9aa1ac]1–27 / 31
 
 80 columns / light
-[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
-
-[b,fg#4f6f9a]Context · Cache
-[fg#9aa1ac]Overview  System  Tools  Injections  Messages  
-
+[fg#4f6f9a]── [b]Context[fg#9aa1ac] · [b,fg#4f6f9a]Cache[-] [fg#4f6f9a]────────────────────────────────────────────[-] [fg#9aa1ac]~10.5k / 200k[fg#4f6f9a] ──
 [-]  Provider cache hit rate: 95.2%
 [-]  Reported input: 21000 · cache reads: 20000
 [-]  Cache misses: 1000
@@ -128,5 +123,9 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
-[fg#9aa1ac]↑↓ / PgUp PgDn scroll · ←/→ tabs · Esc back
+
+
+
+
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]↑↓[fg#9aa1ac] scroll · [fg#5f6672]pgup/pgdn[fg#9aa1ac] page · [fg#5f6672]←→[fg#9aa1ac] tab · [fg#5f6672]esc[fg#9aa1ac] back

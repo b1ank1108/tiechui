@@ -1,57 +1,42 @@
 ---
 source: crates/tiechui-tui/tests/rewind.rs
-assertion_line: 58
 expression: output
 ---
 
 40 columns, light=false
-[fg#33363d]────────────────────────────────────────
-[b] Rewind
-[-] Select the point you want to restore
-[-] to.
+[fg#8fa8c9]── [b]Rewind[-] [fg#8fa8c9]─────────────────[-] [fg#666c77]2 prompts[fg#8fa8c9] ──
+[-]  [fg#666c77]Pick a prompt to go back to the point
+[-]  [fg#666c77]before it.
 
-[-]   实现登录页面
-[fg#666c77]    · 2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#666c77] (1 uncou…
-[b,bg#292929] › Fix login and preserve the image 🦀
-[fg#666c77]     (latest) · 2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−…
-
-[-] [fg#666c77]↑↓ move · Home/End · Enter to continue
-[-] [fg#666c77]· Esc to cancel
+[-]    实现登录页面        [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6
+[-]  [b,fg#8fa8c9]› Fix login and pre…[-]  [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] choose · [fg#9aa0aa]esc[fg#666c77] cancel
 
 80 columns, light=false
-[fg#33363d]────────────────────────────────────────────────────────────────────────────────
-[b] Rewind
-[-] Select the point you want to restore to.
+[fg#8fa8c9]── [b]Rewind[-] [fg#8fa8c9]─────────────────────────────────────────────────────────[-] [fg#666c77]2 prompts[fg#8fa8c9] ──
+[-]  [fg#666c77]Pick a prompt to go back to the point before it.
 
-[-]   实现登录页面
-[fg#666c77]    · 2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#666c77] (1 uncounted)
-[b,bg#292929] › Fix login and preserve the image 🦀
-[fg#666c77]     (latest) · 2 files changed · [fg#8fb996]+24[-] [fg#d48a8a]−6[fg#666c77] (1 uncounted)
-
-[-] [fg#666c77]↑↓ move · Home/End · Enter to continue · Esc to cancel
+[-]    实现登录页面                                                [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6
+[-]  [b,fg#8fa8c9]› Fix login and preserve the image 🦀[fg#666c77]  latest[-]                 [fg#666c77]2 files · [fg#8fb996]+24[-] [fg#d48a8a]−6
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] choose · [fg#9aa0aa]home/end[fg#666c77] jump · [fg#9aa0aa]esc[fg#666c77] cancel
 
 40 columns, light=true
-[fg#dde0e5]────────────────────────────────────────
-[b] Rewind
-[-] Select the point you want to restore
-[-] to.
+[fg#4f6f9a]── [b]Rewind[-] [fg#4f6f9a]─────────────────[-] [fg#9aa1ac]2 prompts[fg#4f6f9a] ──
+[-]  [fg#9aa1ac]Pick a prompt to go back to the point
+[-]  [fg#9aa1ac]before it.
 
-[-]   实现登录页面
-[fg#9aa1ac]    · 2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#9aa1ac] (1 uncou…
-[b,bg#f0f0f0] › Fix login and preserve the image 🦀
-[fg#9aa1ac]     (latest) · 2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−…
-
-[-] [fg#9aa1ac]↑↓ move · Home/End · Enter to continue
-[-] [fg#9aa1ac]· Esc to cancel
+[-]    实现登录页面        [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6
+[-]  [b,fg#4f6f9a]› Fix login and pre…[-]  [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] choose · [fg#5f6672]esc[fg#9aa1ac] cancel
 
 80 columns, light=true
-[fg#dde0e5]────────────────────────────────────────────────────────────────────────────────
-[b] Rewind
-[-] Select the point you want to restore to.
+[fg#4f6f9a]── [b]Rewind[-] [fg#4f6f9a]─────────────────────────────────────────────────────────[-] [fg#9aa1ac]2 prompts[fg#4f6f9a] ──
+[-]  [fg#9aa1ac]Pick a prompt to go back to the point before it.
 
-[-]   实现登录页面
-[fg#9aa1ac]    · 2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#9aa1ac] (1 uncounted)
-[b,bg#f0f0f0] › Fix login and preserve the image 🦀
-[fg#9aa1ac]     (latest) · 2 files changed · [fg#4f8a5b]+24[-] [fg#b05656]−6[fg#9aa1ac] (1 uncounted)
-
-[-] [fg#9aa1ac]↑↓ move · Home/End · Enter to continue · Esc to cancel
+[-]    实现登录页面                                                [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6
+[-]  [b,fg#4f6f9a]› Fix login and preserve the image 🦀[fg#9aa1ac]  latest[-]                 [fg#9aa1ac]2 files · [fg#4f8a5b]+24[-] [fg#b05656]−6
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] choose · [fg#5f6672]home/end[fg#9aa1ac] jump · [fg#5f6672]esc[fg#9aa1ac] cancel

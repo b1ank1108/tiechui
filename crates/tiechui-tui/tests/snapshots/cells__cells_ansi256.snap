@@ -1,6 +1,5 @@
 ---
 source: crates/tiechui-tui/tests/cells.rs
-assertion_line: 141
 expression: "render(&Theme::fixture(ColorLevel::Ansi256, false), 80)"
 ---
 [bg@235]                                                                                
@@ -11,9 +10,9 @@ expression: "render(&Theme::fixture(ColorLevel::Ansi256, false), 80)"
 [fg@242]• [i,fg@242]The tokenizer drops [i,fg@110]\r[i,fg@242].
 
 [fg@242]• [b]Explored
-[fg@242]  └ [fgCyan]Read[-] [-]lib.rs[fg@242], [-]app.rs
-[fg@242]    [fgCyan]Search[-] [-]fn main[fg@242] in [-]src
-[fg@242]    [fgCyan]List[-] [-].
+[fg@242]  └ [fg@110]Read[-] [-]lib.rs[fg@242], [-]app.rs
+[fg@242]    [fg@110]Search[-] [-]fn main[fg@242] in [-]src
+[fg@242]    [fg@110]List[-] [-].
 
 [b,fg@108]• [b]Ran[-] cargo test …[fg@242] · 1s
 [fg@242]  └ line 3
@@ -33,7 +32,7 @@ expression: "render(&Theme::fixture(ColorLevel::Ansi256, false), 80)"
 [-]    [d]2 [fgGreen,bg@22]+ [fg@189,bg@22]    [i,fg@111,bg@22]println![fg@103,bg@22]([fg@150,bg@22]"new"[fg@103,bg@22]);[bg@22]                                                    
 [-]    [d]3 [-]  [fg@103]}
 
-[b,fg@108]• [b]Called[-] [fgCyan]exa__web_search[fg@242] · 1s
+[b,fg@108]• [b]Called[-] [fg@110]exa__web_search[fg@242] · 1s
 [-]    [fg@242]{"query":"rust"}
 [fg@242]  └ [fg@242](no output)
 

@@ -1,262 +1,223 @@
 ---
 source: crates/tiechui-tui/tests/app.rs
-assertion_line: 1455
 expression: "shots.join(\"\\n\\n\")"
 ---
 80x30 light=false
 
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]                                                   
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]                                           
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]    1. Small change (Recommended)[fg#666c77,bg#292929]  Keep the current interface and fix the[bg#292929]       
-[bg#292929]       [fg#666c77,bg#292929]behavior.[bg#292929]                                                                
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign                    Replace the interface with a larger design.[bg#292929]  
-[bg#292929]    3. None of the above[fg#666c77,bg#292929]           Select to type your own answer.[bg#292929]              
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [b,fgCyan,bg#292929]tab to add notes[fg#666c77,bg#292929] | enter to submit answer | ←/→ to navigate questions[bg#292929]         
-[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                                                              
-[bg#292929]  [bg#292929]                                                                              
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────────────────────────────────────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [-]  [fg#666c77]1. [-]Small change (Recommended)[-]   [fg#666c77]Keep the current interface and fix the
+[-]                                    [fg#666c77]behavior.
+[-]  [b,fg#8fa8c9]› [b,fg#8fa8c9]2. [b,fg#8fa8c9]Redesign[-]                     [fg#666c77]Replace the interface with a larger design.
+[-]  [-]  [fg#666c77]3. [-]Other[-]                        [fg#666c77]Type your own answer
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]tab[fg#666c77] add note · [fg#9aa0aa]←→[fg#666c77] question · [fg#9aa0aa]esc[fg#666c77] interrupt
 
 notes
 
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]                                                   
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]                                           
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]    1. Small change (Recommended)[fg#666c77,bg#292929]  Keep the current interface and fix the[bg#292929]       
-[bg#292929]       [fg#666c77,bg#292929]behavior.[bg#292929]                                                                
-[bg#292929]    2. Redesign[fg#666c77,bg#292929]                    Replace the interface with a larger design.[bg#292929]  
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above           Select to type your own answer.[bg#292929]              
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                                                               
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes | enter to submit answer[bg#292929]                            
-[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]                                           
-[bg#292929]  [bg#292929]                                                                              
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────────────────────────────────────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [-]  [fg#666c77]1. [-]Small change (Recommended)[-]   [fg#666c77]Keep the current interface and fix the
+[-]                                    [fg#666c77]behavior.
+[-]  [-]  [fg#666c77]2. [-]Redesign[-]                     [fg#666c77]Replace the interface with a larger design.
+[-]  [b,fg#8fa8c9]› [b,fg#8fa8c9]3. [b,fg#8fa8c9]Other[-]                        [fg#666c77]Type your own answer
+[-]       [fg#666c77]↳ [-]Keep my draft
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]tab/esc[fg#666c77] clear note · [fg#9aa0aa]ctrl+p/n[fg#666c77] question
 
 confirmation
 
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]                                             
-[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                                                        
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2 unanswered questions.[bg#292929]                             
-[bg#292929]    2. Go back[fg#666c77,bg#292929]  Return to the first unanswered question.[bg#292929]                        
-[bg#292929]  [bg#292929]                                                                              
-[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go back[bg#292929]                                      
-[bg#292929]  [bg#292929]                                                                              
+[fg#8fa8c9]── [b]Submit anyway?[-] [fg#8fa8c9]──────────────────────────────────────────────[-] [fg#666c77]2 unanswered[fg#8fa8c9] ──
+[-]  [b]Plan, Details[fg#666c77] have no answer yet.
+
+[-]  [b,fg#8fa8c9]› [b,fg#8fa8c9]1. [b,fg#8fa8c9]Submit anyway
+[-]  [-]  [fg#666c77]2. [-]Go back to Plan
+[fg#8fa8c9]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] confirm · [fg#9aa0aa]1-2[fg#666c77] pick · [fg#9aa0aa]esc[fg#666c77] back
 
 40x30 light=false
 
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
-[bg#292929]  [bg#292929]                                      
-[bg#292929]    1. Small change (Recommended)[bg#292929]       
-[bg#292929]       [fg#666c77,bg#292929]Keep the current interface and[bg#292929]   
-[bg#292929]       [fg#666c77,bg#292929]fix the behavior.[bg#292929]                
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign  Replace the interface[bg#292929]  
-[bg#292929]  [b,fg#8fa8c9,bg#292929]     with a larger design.[bg#292929]            
-[bg#292929]    3. None of the above[fg#666c77,bg#292929]  Select to[bg#292929]     
-[bg#292929]       [fg#666c77,bg#292929]type your own answer.[bg#292929]            
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [b,fgCyan,bg#292929]tab to add notes[bg#292929]                      
-[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
-[bg#292929]  [fg#666c77,bg#292929]←/→ to navigate questions[bg#292929]             
-[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                      
-[bg#292929]  [bg#292929]                                      
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]    [fg#666c77]1. [-]Small change (Recommended)
+[-]       [fg#666c77]Keep the current interface and
+[-]       [fg#666c77]fix the behavior.
+[-]  [b,fg#8fa8c9]› 2. Redesign
+[-]       [fg#666c77]Replace the interface with a
+[-]       [fg#666c77]larger design.
+[-]    [fg#666c77]3. [-]Other
+[-]       [fg#666c77]Type your own answer
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]esc[fg#666c77] interrupt
 
 notes
 
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
-[bg#292929]  [bg#292929]                                      
-[bg#292929]    1. Small change (Recommended)[bg#292929]       
-[bg#292929]       [fg#666c77,bg#292929]Keep the current interface and[bg#292929]   
-[bg#292929]       [fg#666c77,bg#292929]fix the behavior.[bg#292929]                
-[bg#292929]    2. Redesign[fg#666c77,bg#292929]  Replace the interface[bg#292929]  
-[bg#292929]       [fg#666c77,bg#292929]with a larger design.[bg#292929]            
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above  Select to[bg#292929]     
-[bg#292929]  [b,fg#8fa8c9,bg#292929]     type your own answer.[bg#292929]            
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                       
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes[bg#292929]             
-[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
-[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]   
-[bg#292929]  [bg#292929]                                      
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]    [fg#666c77]1. [-]Small change (Recommended)
+[-]       [fg#666c77]Keep the current interface and
+[-]       [fg#666c77]fix the behavior.
+[-]    [fg#666c77]2. [-]Redesign
+[-]       [fg#666c77]Replace the interface with a
+[-]       [fg#666c77]larger design.
+[-]  [b,fg#8fa8c9]› 3. Other
+[-]       [fg#666c77]Type your own answer
+[-]       [fg#666c77]↳ [-]Keep my draft
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]ctrl+p/n[fg#666c77] question
 
 confirmation
 
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]     
-[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2[bg#292929]           
-[bg#292929]  [b,fg#8fa8c9,bg#292929]     unanswered questions.[bg#292929]            
-[bg#292929]    2. Go back[fg#666c77,bg#292929]  Return to the first[bg#292929]     
-[bg#292929]       [fg#666c77,bg#292929]unanswered question.[bg#292929]             
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go…[bg#292929]  
-[bg#292929]  [bg#292929]                                      
+[fg#8fa8c9]── [b]Submit anyway?[-] [fg#8fa8c9]──────[-] [fg#666c77]2 unanswered[fg#8fa8c9] ──
+[-]  [b]Plan, Details[fg#666c77] have no answer yet.
+
+[-]  [b,fg#8fa8c9]› [b,fg#8fa8c9]1. [b,fg#8fa8c9]Submit anyway
+[-]  [-]  [fg#666c77]2. [-]Go back to Plan
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] confirm · [fg#9aa0aa]1-2[fg#666c77] pick · [fg#9aa0aa]esc[fg#666c77] back
 
 40x10 light=false
 
-[bg#292929]  [fg#666c77,bg#292929]Question 1/2 (2 unanswered)[bg#292929]           
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 2. Redesign  Replace the interfac…[bg#292929]  
-[bg#292929]  [fg#666c77,bg#292929]option 2/3 | [b,fgCyan,bg#292929]tab to add notes[bg#292929]         
-[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
-[bg#292929]  [fg#666c77,bg#292929]←/→ to navigate questions[bg#292929]             
-[bg#292929]  [fg#666c77,bg#292929]esc to interrupt[bg#292929]                      
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [b,fg#8fa8c9]› 2. Redesign
+[-]       [fg#666c77]Replace the interface with a
+[-]       [fg#666c77]larger design.
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]esc[fg#666c77] interrupt[-]     [fg#666c77]2 / 3
 
 notes
 
-[bg#292929]  [fgCyan,bg#292929]Which implementation should we use?[bg#292929]   
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 3. None of the above  Select to…[bg#292929]    
-[bg#292929]  [b,bg#292929]› [bg#292929]Keep my draft[bg#292929]                       
-[bg#292929]  [fg#666c77,bg#292929]option 3/3[bg#292929]                            
-[bg#292929]  [fg#666c77,bg#292929]tab or esc to clear notes[bg#292929]             
-[bg#292929]  [fg#666c77,bg#292929]enter to submit answer[bg#292929]                
-[bg#292929]  [fg#666c77,bg#292929]ctrl + p / ctrl + n change question[bg#292929]   
+[fg#8fa8c9]── [b,fg#8fa8c9]Plan[-]  [fg#9aa0aa]Details[-] [fg#8fa8c9]─────────────[-] [fg#666c77]1 of 2[fg#8fa8c9] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [b,fg#8fa8c9]› 3. Other
+[-]       [fg#666c77]Type your own answer
+[-]       [fg#666c77]↳ [-]Keep my draft
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] answer · [fg#9aa0aa]ctrl+p/n[fg#666c77] question
 
 confirmation
 
-[bg#292929]  [b,bg#292929]Submit with unanswered questions?[bg#292929]     
-[bg#292929]  [fg#666c77,bg#292929]2 unanswered questions[bg#292929]                
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [b,fg#8fa8c9,bg#292929]› 1. Proceed  Submit with 2[bg#292929]           
-[bg#292929]  [bg#292929]                                      
-[bg#292929]  [fg#666c77,bg#292929]Press enter to confirm or esc to go…[bg#292929]  
-[bg#292929]  [bg#292929]                                      
+[fg#8fa8c9]── [b]Submit anyway?[-] [fg#8fa8c9]──────[-] [fg#666c77]2 unanswered[fg#8fa8c9] ──
+[-]  [b]Plan, Details[fg#666c77] have no answer yet.
+
+[-]  [b,fg#8fa8c9]› [b,fg#8fa8c9]1. [b,fg#8fa8c9]Submit anyway
+[-]  [-]  [fg#666c77]2. [-]Go back to Plan
+[fg#8fa8c9]────────────────────────────────────────
+[-]  [fg#9aa0aa]enter[fg#666c77] confirm · [fg#9aa0aa]1-2[fg#666c77] pick · [fg#9aa0aa]esc[fg#666c77] back
 
 80x30 light=true
 
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]                                                   
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]                                           
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]    1. Small change (Recommended)[fg#9aa1ac,bg#f0f0f0]  Keep the current interface and fix the[bg#f0f0f0]       
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]behavior.[bg#f0f0f0]                                                                
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign                    Replace the interface with a larger design.[bg#f0f0f0]  
-[bg#f0f0f0]    3. None of the above[fg#9aa1ac,bg#f0f0f0]           Select to type your own answer.[bg#f0f0f0]              
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [b,fgCyan,bg#f0f0f0]tab to add notes[fg#9aa1ac,bg#f0f0f0] | enter to submit answer | ←/→ to navigate questions[bg#f0f0f0]         
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                                                              
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────────────────────────────────────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [-]  [fg#9aa1ac]1. [-]Small change (Recommended)[-]   [fg#9aa1ac]Keep the current interface and fix the
+[-]                                    [fg#9aa1ac]behavior.
+[-]  [b,fg#4f6f9a]› [b,fg#4f6f9a]2. [b,fg#4f6f9a]Redesign[-]                     [fg#9aa1ac]Replace the interface with a larger design.
+[-]  [-]  [fg#9aa1ac]3. [-]Other[-]                        [fg#9aa1ac]Type your own answer
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]tab[fg#9aa1ac] add note · [fg#5f6672]←→[fg#9aa1ac] question · [fg#5f6672]esc[fg#9aa1ac] interrupt
 
 notes
 
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]                                                   
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]                                           
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]    1. Small change (Recommended)[fg#9aa1ac,bg#f0f0f0]  Keep the current interface and fix the[bg#f0f0f0]       
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]behavior.[bg#f0f0f0]                                                                
-[bg#f0f0f0]    2. Redesign[fg#9aa1ac,bg#f0f0f0]                    Replace the interface with a larger design.[bg#f0f0f0]  
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above           Select to type your own answer.[bg#f0f0f0]              
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                                                               
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes | enter to submit answer[bg#f0f0f0]                            
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]                                           
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────────────────────────────────────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [-]  [fg#9aa1ac]1. [-]Small change (Recommended)[-]   [fg#9aa1ac]Keep the current interface and fix the
+[-]                                    [fg#9aa1ac]behavior.
+[-]  [-]  [fg#9aa1ac]2. [-]Redesign[-]                     [fg#9aa1ac]Replace the interface with a larger design.
+[-]  [b,fg#4f6f9a]› [b,fg#4f6f9a]3. [b,fg#4f6f9a]Other[-]                        [fg#9aa1ac]Type your own answer
+[-]       [fg#9aa1ac]↳ [-]Keep my draft
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]tab/esc[fg#9aa1ac] clear note · [fg#5f6672]ctrl+p/n[fg#9aa1ac] question
 
 confirmation
 
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]                                             
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                                                        
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2 unanswered questions.[bg#f0f0f0]                             
-[bg#f0f0f0]    2. Go back[fg#9aa1ac,bg#f0f0f0]  Return to the first unanswered question.[bg#f0f0f0]                        
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go back[bg#f0f0f0]                                      
-[bg#f0f0f0]  [bg#f0f0f0]                                                                              
+[fg#4f6f9a]── [b]Submit anyway?[-] [fg#4f6f9a]──────────────────────────────────────────────[-] [fg#9aa1ac]2 unanswered[fg#4f6f9a] ──
+[-]  [b]Plan, Details[fg#9aa1ac] have no answer yet.
+
+[-]  [b,fg#4f6f9a]› [b,fg#4f6f9a]1. [b,fg#4f6f9a]Submit anyway
+[-]  [-]  [fg#9aa1ac]2. [-]Go back to Plan
+[fg#4f6f9a]────────────────────────────────────────────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] confirm · [fg#5f6672]1-2[fg#9aa1ac] pick · [fg#5f6672]esc[fg#9aa1ac] back
 
 40x30 light=true
 
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]    1. Small change (Recommended)[bg#f0f0f0]       
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]Keep the current interface and[bg#f0f0f0]   
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]fix the behavior.[bg#f0f0f0]                
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign  Replace the interface[bg#f0f0f0]  
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     with a larger design.[bg#f0f0f0]            
-[bg#f0f0f0]    3. None of the above[fg#9aa1ac,bg#f0f0f0]  Select to[bg#f0f0f0]     
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]type your own answer.[bg#f0f0f0]            
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [b,fgCyan,bg#f0f0f0]tab to add notes[bg#f0f0f0]                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]←/→ to navigate questions[bg#f0f0f0]             
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                      
-[bg#f0f0f0]  [bg#f0f0f0]                                      
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]    [fg#9aa1ac]1. [-]Small change (Recommended)
+[-]       [fg#9aa1ac]Keep the current interface and
+[-]       [fg#9aa1ac]fix the behavior.
+[-]  [b,fg#4f6f9a]› 2. Redesign
+[-]       [fg#9aa1ac]Replace the interface with a
+[-]       [fg#9aa1ac]larger design.
+[-]    [fg#9aa1ac]3. [-]Other
+[-]       [fg#9aa1ac]Type your own answer
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]esc[fg#9aa1ac] interrupt
 
 notes
 
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]    1. Small change (Recommended)[bg#f0f0f0]       
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]Keep the current interface and[bg#f0f0f0]   
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]fix the behavior.[bg#f0f0f0]                
-[bg#f0f0f0]    2. Redesign[fg#9aa1ac,bg#f0f0f0]  Replace the interface[bg#f0f0f0]  
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]with a larger design.[bg#f0f0f0]            
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above  Select to[bg#f0f0f0]     
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     type your own answer.[bg#f0f0f0]            
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                       
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes[bg#f0f0f0]             
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]   
-[bg#f0f0f0]  [bg#f0f0f0]                                      
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]    [fg#9aa1ac]1. [-]Small change (Recommended)
+[-]       [fg#9aa1ac]Keep the current interface and
+[-]       [fg#9aa1ac]fix the behavior.
+[-]    [fg#9aa1ac]2. [-]Redesign
+[-]       [fg#9aa1ac]Replace the interface with a
+[-]       [fg#9aa1ac]larger design.
+[-]  [b,fg#4f6f9a]› 3. Other
+[-]       [fg#9aa1ac]Type your own answer
+[-]       [fg#9aa1ac]↳ [-]Keep my draft
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]ctrl+p/n[fg#9aa1ac] question
 
 confirmation
 
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]     
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2[bg#f0f0f0]           
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]     unanswered questions.[bg#f0f0f0]            
-[bg#f0f0f0]    2. Go back[fg#9aa1ac,bg#f0f0f0]  Return to the first[bg#f0f0f0]     
-[bg#f0f0f0]       [fg#9aa1ac,bg#f0f0f0]unanswered question.[bg#f0f0f0]             
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go…[bg#f0f0f0]  
-[bg#f0f0f0]  [bg#f0f0f0]                                      
+[fg#4f6f9a]── [b]Submit anyway?[-] [fg#4f6f9a]──────[-] [fg#9aa1ac]2 unanswered[fg#4f6f9a] ──
+[-]  [b]Plan, Details[fg#9aa1ac] have no answer yet.
+
+[-]  [b,fg#4f6f9a]› [b,fg#4f6f9a]1. [b,fg#4f6f9a]Submit anyway
+[-]  [-]  [fg#9aa1ac]2. [-]Go back to Plan
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] confirm · [fg#5f6672]1-2[fg#9aa1ac] pick · [fg#5f6672]esc[fg#9aa1ac] back
 
 40x10 light=true
 
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Question 1/2 (2 unanswered)[bg#f0f0f0]           
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 2. Redesign  Replace the interfac…[bg#f0f0f0]  
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]option 2/3 | [b,fgCyan,bg#f0f0f0]tab to add notes[bg#f0f0f0]         
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]←/→ to navigate questions[bg#f0f0f0]             
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]esc to interrupt[bg#f0f0f0]                      
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [b,fg#4f6f9a]› 2. Redesign
+[-]       [fg#9aa1ac]Replace the interface with a
+[-]       [fg#9aa1ac]larger design.
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]esc[fg#9aa1ac] interrupt[-]     [fg#9aa1ac]2 / 3
 
 notes
 
-[bg#f0f0f0]  [fgCyan,bg#f0f0f0]Which implementation should we use?[bg#f0f0f0]   
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 3. None of the above  Select to…[bg#f0f0f0]    
-[bg#f0f0f0]  [b,bg#f0f0f0]› [bg#f0f0f0]Keep my draft[bg#f0f0f0]                       
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]option 3/3[bg#f0f0f0]                            
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]tab or esc to clear notes[bg#f0f0f0]             
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]enter to submit answer[bg#f0f0f0]                
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]ctrl + p / ctrl + n change question[bg#f0f0f0]   
+[fg#4f6f9a]── [b,fg#4f6f9a]Plan[-]  [fg#5f6672]Details[-] [fg#4f6f9a]─────────────[-] [fg#9aa1ac]1 of 2[fg#4f6f9a] ──
+[-]  [b]Which implementation should we use?
+
+[-]  [b,fg#4f6f9a]› 3. Other
+[-]       [fg#9aa1ac]Type your own answer
+[-]       [fg#9aa1ac]↳ [-]Keep my draft
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] answer · [fg#5f6672]ctrl+p/n[fg#9aa1ac] question
 
 confirmation
 
-[bg#f0f0f0]  [b,bg#f0f0f0]Submit with unanswered questions?[bg#f0f0f0]     
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]2 unanswered questions[bg#f0f0f0]                
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [b,fg#4f6f9a,bg#f0f0f0]› 1. Proceed  Submit with 2[bg#f0f0f0]           
-[bg#f0f0f0]  [bg#f0f0f0]                                      
-[bg#f0f0f0]  [fg#9aa1ac,bg#f0f0f0]Press enter to confirm or esc to go…[bg#f0f0f0]  
-[bg#f0f0f0]  [bg#f0f0f0]
+[fg#4f6f9a]── [b]Submit anyway?[-] [fg#4f6f9a]──────[-] [fg#9aa1ac]2 unanswered[fg#4f6f9a] ──
+[-]  [b]Plan, Details[fg#9aa1ac] have no answer yet.
+
+[-]  [b,fg#4f6f9a]› [b,fg#4f6f9a]1. [b,fg#4f6f9a]Submit anyway
+[-]  [-]  [fg#9aa1ac]2. [-]Go back to Plan
+[fg#4f6f9a]────────────────────────────────────────
+[-]  [fg#5f6672]enter[fg#9aa1ac] confirm · [fg#5f6672]1-2[fg#9aa1ac] pick · [fg#5f6672]esc[fg#9aa1ac] back

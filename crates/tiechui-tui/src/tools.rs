@@ -4,7 +4,7 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use serde_json::Value;
 
@@ -400,7 +400,7 @@ fn explored(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Line
             width,
             &[
                 Span::styled(lead, theme.dim),
-                Span::styled(label, Style::default().fg(Color::Cyan)),
+                Span::styled(label, theme.accent),
                 Span::raw(" "),
             ],
             &[Span::raw(" ".repeat(wrap::width(lead) + label.len() + 1))],
@@ -587,10 +587,7 @@ fn maintained(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Li
     for (index, (tool, result)) in tools.iter().zip(&results).enumerate() {
         let mut spans = vec![
             tree(index, theme),
-            Span::styled(
-                maintenance(tool).unwrap_or_default(),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(maintenance(tool).unwrap_or_default(), theme.accent),
         ];
         let step = maintenance_step(tool, result.as_ref());
         let mut parts = Vec::new();
@@ -704,7 +701,7 @@ fn single(
             }
             Span::raw(first)
         }
-        Action::Called => Span::styled(subject(tool), Style::default().fg(Color::Cyan)),
+        Action::Called => Span::styled(subject(tool), theme.accent),
         _ => Span::raw(subject(tool)),
     };
     let suffix = Span::styled(suffix, theme.dim);
@@ -1084,16 +1081,15 @@ fn questions(tool: &Tool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                     .iter()
                     .any(|word| message.contains(word))
             }));
-    let cyan = Style::default().fg(Color::Cyan);
     let mut header = vec![
         Span::styled("• ", theme.dim),
         Span::styled("Questions", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {count}/{} answered", questions.len()), theme.dim),
     ];
     if cancelled {
-        header.push(Span::styled(" (interrupted)", cyan));
+        header.push(Span::styled(" (interrupted)", theme.dim));
     } else if details["status"] == "timed_out" {
-        header.push(Span::styled(" (timed out)", cyan));
+        header.push(Span::styled(" (timed out)", theme.warning));
     }
     let mut rows = wrap(&header, width, &[], &[]);
     for question in questions {
@@ -1118,7 +1114,7 @@ fn questions(tool: &Tool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                 "answer: "
             };
             rows.extend(wrap(
-                &[Span::styled(plain(note.unwrap_or(answer)), cyan)],
+                &[Span::raw(plain(note.unwrap_or(answer)))],
                 width,
                 &[Span::raw("    "), Span::styled(label, theme.dim)],
                 &[Span::raw(format!("    {}", " ".repeat(label.len())))],
@@ -1126,11 +1122,7 @@ fn questions(tool: &Tool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         }
     }
     if let Some(message) = message {
-        let style = if cancelled {
-            cyan.add_modifier(Modifier::DIM)
-        } else {
-            theme.error
-        };
+        let style = if cancelled { theme.dim } else { theme.error };
         rows.extend(wrap(
             &[Span::styled(plain(&message), style)],
             width,
