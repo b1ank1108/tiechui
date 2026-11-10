@@ -35,6 +35,7 @@ class Packaging(unittest.TestCase):
     def install(self, artifact=None, checkpoint=lambda _: None):
         release.install(artifact or self.artifact, self.prefix, checkpoint)
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_ownership_move_repair_and_restore(self):
         self.prefix.mkdir()
         (self.prefix / "config").write_bytes(b"untouched")
@@ -54,6 +55,7 @@ class Packaging(unittest.TestCase):
         self.assertEqual((moved / "config").read_bytes(), b"untouched")
         self.assertFalse((moved / release.STATE / "ownership.json").exists())
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_foreign_files_and_external_edits_refused(self):
         (self.prefix / "bin").mkdir(parents=True)
         foreign = self.prefix / "bin/tiechui"
@@ -70,6 +72,7 @@ class Packaging(unittest.TestCase):
                 operation()
         self.assertEqual(foreign.read_bytes(), b"external edit")
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_existing_bin_and_other_commands_survive(self):
         (self.prefix / "bin").mkdir(parents=True)
         other = self.prefix / "bin/other"
@@ -78,6 +81,7 @@ class Packaging(unittest.TestCase):
         release.uninstall(self.prefix)
         self.assertEqual(list((self.prefix / "bin").iterdir()), [other])
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_interrupt_at_each_boundary_rolls_back_then_retries(self):
         second = self.artifact_for("second")
         self.install()
@@ -97,6 +101,7 @@ class Packaging(unittest.TestCase):
         self.install(second)
         self.assertEqual((self.prefix / "bin/chui").read_bytes(), b"chuisecond")
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_interrupted_initial_install_and_uninstall(self):
         def interrupt(stage):
             if stage == "chui":
@@ -109,6 +114,7 @@ class Packaging(unittest.TestCase):
         release.uninstall(self.prefix)
         self.assertFalse((self.prefix / "bin").exists())
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_recovery_refuses_external_changes(self):
         self.install()
         def interrupt(stage):
@@ -121,13 +127,15 @@ class Packaging(unittest.TestCase):
             self.install()
         self.assertEqual((self.prefix / "bin/chui").read_bytes(), b"external")
 
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
     def test_prefix_lock_excludes_other_installers(self):
         with release.locked(self.prefix):
             with self.assertRaisesRegex(RuntimeError, "another install"):
                 self.install()
         self.install()
 
-    def test_symlink_and_archive_traversal_refused(self):
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
+    def test_symlink_prefix_refused(self):
         self.prefix.mkdir()
         destination = self.root / "destination"
         destination.mkdir()
@@ -135,6 +143,8 @@ class Packaging(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-directory"):
             self.install()
         self.assertEqual(list(destination.iterdir()), [])
+
+    def test_archive_traversal_refused(self):
         malicious = self.root / "malicious.tar.gz"
         with tarfile.open(malicious, "w:gz") as archive:
             entry = tarfile.TarInfo("../escaped")
@@ -163,12 +173,15 @@ class Packaging(unittest.TestCase):
         self.assertIn(self.artifact.as_uri(), formula)
         self.assertIn('(libexec/"tiechui").install "rg"', formula)
 
-    def test_bundled_rg_is_verified_but_not_installed(self):
+    @unittest.skipIf(os.name == "nt", "managed-prefix installation is Unix-only")
+    def test_bundled_rg_is_not_installed(self):
+        self.install()
+        self.assertEqual(sorted(path.name for path in (self.prefix / "bin").iterdir()), ["chui", "tiechui"])
+
+    def test_bundled_rg_is_verified(self):
         manifest, contents, _ = release.unpack(self.artifact)
         self.assertEqual(manifest["bundled"]["rg"]["version"], release.RIPGREP)
         self.assertEqual(contents["rg"], b"rgfirst")
-        self.install()
-        self.assertEqual(sorted(path.name for path in (self.prefix / "bin").iterdir()), ["chui", "tiechui"])
         output = self.root / "first"
         tampered = self.root / "tampered.tar.gz"
         older = self.root / "older.tar.gz"
