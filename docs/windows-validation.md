@@ -2,12 +2,14 @@
 
 ## 范围与结论
 
-- 分支：`fix/windows`。Phase A 基线为 `3e8d7d4`；本次 A2 / B 代码验证至
-  `073b6ab`，之后的文档提交不改变产品行为。
+- 分支：`fix/windows`。Phase A 基线为 `3e8d7d4`；A2 / B checkpoint 验证至
+  `073b6ab`。B-02 主线程栈后续从 `2aae3c0` 继续，结果见下文。
 - 环境：真实 Windows 11、PowerShell、MSVC、Rust 1.95.0、nextest 0.9.151、
   Python 3.14.4、Node 24.18.0、Git for Windows。
 - A2 完成后：820 项测试通过；B 阶段修复并增加回归测试后：**824 项通过，
   0 失败、0 跳过**。fmt、完整 clippy、doctests 均通过；当前没有可运行的 doctest。
+- B-02 主线程栈后续增加 PE 回归后：**825 项通过，0 失败、0 跳过**；
+  fmt、完整 clippy、doctests 通过。
 - 每个提交前均执行 `cargo fmt --all --check` 和
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`。
 - 每个独立场景使用新的临时 `TIECHUI_HOME`、临时工作目录和本地流式
@@ -20,6 +22,50 @@
 详细原始命令、JSON-RPC、SSE 请求及前后对照保存在本地忽略目录
 `.local/` 中，未随文档提交。下文同时记录关键输出、源码位置和验证方式，
 以便在没有这些本机日志的情况下继续调查。
+
+## B-02 后续：主线程栈余量
+
+- **严重度 / 状态：major / 已修复主线程栈配置。**
+- `91bf9c7` 将搜索缓冲区移到堆上，消除了当时的溢出，但 CLI 的
+  `new_current_thread()` / `block_on` 仍在主线程上执行会话。原来两个 MSVC
+  二进制的 PE `SizeOfStackReserve` 均为 1,048,576 字节。
+- 这里区分 future 的存储和执行栈：当前 Tokio 1.54.1 的 `Runtime::block_on`
+  可以自动装箱较大的入口 future，但 poll 调用链与临时 future 的构造 / 移动
+  仍消耗执行线程的栈；不能只靠某一次缓冲区堆化保证后续余量。
+- 选择方案一：`crates/tiechui-cli/build.rs` 读取 Cargo 的目标 OS / env，
+  仅对 Windows MSVC 的 CLI bin 发出
+  `cargo::rustc-link-arg-bins=/STACK:8388608`，使 `chui` 和 `tiechui` 都预留
+  8 MiB。保持原 current-thread runtime，不移动入口线程、不改 Unix 逻辑，
+  不向库或 integration-test 可执行文件传递该参数。
+- 只指定 reserve，实测初始 commit 仍为 4,096 字节。
+  目标判断不用宿主机 `cfg!`，以保持交叉编译选择正确。
+  参见 [Cargo build-script 目标与 bin 参数](https://doc.rust-lang.org/cargo/reference/build-scripts.html#rustc-link-arg-bins)
+  和 [MSVC /STACK](https://learn.microsoft.com/en-us/cpp/build/reference/stack-stack-allocations?view=msvc-170)。
+
+### 前后对照
+
+临时把 `search::scan_command` 的两个堆缓冲区替换为 256 KiB 和 32 KiB
+的栈上数组，合计 288 KiB。两个 CLI 分别通过本地流式 mock 调用 grep，
+各用独立临时 home / cwd，搜索同样的 CRLF 小文件：
+
+| 构建 / 缓冲区 | chui | tiechui | PE stack reserve / commit |
+| --- | --- | --- | --- |
+| 原默认栈 / 临时 288 KiB 数组 | `0xC00000FD`，main stack overflow | 同样溢出 | 1,048,576 / 4,096 |
+| 加 `/STACK:8388608` / 同样数组 | 退出 0，grep 结果及最终回复正确 | 同样通过 | 8,388,608 / 4,096 |
+| 恢复原堆缓冲区后的最终代码 | 退出 0，grep 结果及最终回复正确 | 同样通过 | 8,388,608 / 4,096 |
+
+- 大数组仅用于前后对照，最终未保留；`modules/editing/src/search.rs` 相对
+  `2aae3c0` 无修改。现有真实 CLI 搜索回归继续覆盖实际工具执行。
+- 新增 Windows MSVC 专用测试直接读取两个产物的 PE32 / PE32+ header，
+  断言 reserve 为 8 MiB；测试在修复前因读到 1 MiB 失败，修复后通过。
+- 单独执行 build script 的 7 组目标配置分派检查通过：Windows MSVC 的
+  x86 / x64 / ARM64 发出参数，Windows GNU、Linux、macOS、wasm 不发出参数。
+  这是目标选择检查，不声称在本机实际完成这些平台的交叉编译。
+- 恢复原堆缓冲区后，全量 nextest **825/825** 通过，fmt / 完整 clippy /
+  doctests 通过。原始输出保存在本地 `.local/stack-margin/`。
+- B-05、B-07、A-05 / A-19 / A-20、B-01 / B-06 / B-08 / B-09 的 open 状态
+  及下列处理选项不变。CI workflow 也未修改；等待 GitHub Windows runner
+  实际跑绿后，再应用 nextest / timeout / 移除 continue-on-error 的提案。
 
 ## 待处理问题
 
@@ -256,7 +302,8 @@ CI **尚未应用修改**；已准备并检查可应用的本地提案：
 2. 每个测试使用上述两段 30 秒超时，job 设置 30 分钟超时。
 3. 保留 `.gitattributes` 的 LF checkout 策略，在 autocrlf=true 下检查工作树；
    不重新添加测试侧 CRLF 归一化。
-4. 完整验证变绿后移除 `continue-on-error`；保留 fmt / clippy 检查。
+4. 以 GitHub Windows runner 实际跑绿为应用门槛，再移除 `continue-on-error`；
+   保留 fmt / clippy 检查，本机全绿不替代该门槛。
 5. 保留临时 home 隔离，不改变 Unix jobs，不移植 POSIX PTY suite。
 
 本机验证成功不是 GitHub-hosted Windows CI 已运行成功的声明。
