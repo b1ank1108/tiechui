@@ -65,11 +65,11 @@ function Find-GitBash {
     $wsl = '\\(system32|windowsapps)\\'
     $dirs = @($env:Path -split ';' | ForEach-Object { $_.Trim('"') } | Where-Object { $_ })
     foreach ($d in $dirs) {
-        $bash = Join-Path $d 'bash.exe'
+        $bash = try { Join-Path $d 'bash.exe' } catch { continue }
         if ($bash -notmatch $wsl -and (Test-Path -LiteralPath $bash -PathType Leaf)) { return $true }
     }
     foreach ($d in $dirs) {
-        $git = Join-Path $d 'git.exe'
+        $git = try { Join-Path $d 'git.exe' } catch { continue }
         if ($git -notmatch $wsl -and (Test-Path -LiteralPath $git -PathType Leaf)) {
             $root = Split-Path -Parent (Split-Path -Parent $git)
             foreach ($bash in (Join-Path $root 'bin\bash.exe'), (Join-Path $root 'usr\bin\bash.exe')) {
