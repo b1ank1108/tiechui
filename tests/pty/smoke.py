@@ -1538,6 +1538,8 @@ def t2_plugins(f, marketplace=False):
     s.check("Plugin tool result" in s.raw.decode("utf-8", "replace"), "Missing plugin tool result")
     s.command("try the denied action", "T2_DENY_DONE")
     s.check("Denied by test plugin" in s.raw.decode("utf-8", "replace"), "Missing interceptor denial")
+    # Plugin UI commands are refused until the turn that printed the reply has ended.
+    s.wait("T2_DENY_DONE", absent="esc to interrupt")
     s.command("/plugin_fixture_ui panel", "Test plugin panel")
     s.wait("Build: 1/2")
     s.check("Markdown node" in s.screen.text(), "Missing declarative markdown")
@@ -1616,6 +1618,7 @@ def sdk_plugin(f, language):
     s.check("Hello, world!" in s.raw.decode("utf-8", "replace"), "Missing SDK tool result")
     s.command("greet the blocked name", "SDK_DENY_DONE")
     s.check("The example blocks this name" in s.raw.decode("utf-8", "replace"), "Missing SDK interceptor denial")
+    s.wait("SDK_DENY_DONE", absent="esc to interrupt")
     s.command("/plugin_" + name + "_panel", "SDK example panel")
     s.wait("Hello from the plugin SDK")
     s.send(ESC)
