@@ -27,7 +27,7 @@ class Packaging(unittest.TestCase):
     def artifact_for(self, tag):
         output = self.root / tag
         output.mkdir()
-        for name in release.NAMES:
+        for name in (*release.NAMES, "rg"):
             (output / name).write_bytes((name + tag).encode())
             (output / name).chmod(0o755)
         return release.package(output, "0.1.0", "aarch64-apple-darwin", {"commit": tag}, True)
@@ -146,7 +146,7 @@ class Packaging(unittest.TestCase):
     def test_checksum_and_schema_fail_before_mutation(self):
         output = self.root / "first"
         with tarfile.open(self.artifact, "w:gz") as archive:
-            for name in (*release.NAMES, "manifest.json"):
+            for name in (*release.NAMES, "rg", "manifest.json"):
                 data = b"corrupted" if name == "chui" else (output / name).read_bytes()
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
@@ -159,12 +159,68 @@ class Packaging(unittest.TestCase):
         initial = self.artifact.read_bytes()
         release.package(self.root / "first", "0.1.0", "aarch64-apple-darwin", {"commit": "first"}, True)
         self.assertEqual(self.artifact.read_bytes(), initial)
-        self.assertIn(self.artifact.as_uri(), (self.root / "first/tiechui.rb").read_text())
+        formula = (self.root / "first/tiechui.rb").read_text()
+        self.assertIn(self.artifact.as_uri(), formula)
+        self.assertIn('(libexec/"tiechui").install "rg"', formula)
+
+    def test_bundled_rg_is_verified_but_not_installed(self):
+        manifest, contents, _ = release.unpack(self.artifact)
+        self.assertEqual(manifest["bundled"]["rg"]["version"], release.RIPGREP)
+        self.assertEqual(contents["rg"], b"rgfirst")
+        self.install()
+        self.assertEqual(sorted(path.name for path in (self.prefix / "bin").iterdir()), ["chui", "tiechui"])
+        output = self.root / "first"
+        tampered = self.root / "tampered.tar.gz"
+        older = self.root / "older.tar.gz"
+        manifest.pop("bundled")
+        for artifact, names, listed in ((tampered, (*release.NAMES, "rg"), {**manifest, "bundled": {
+                "rg": {"sha256": release.digest(b"other"), "mode": 0o755}}}), (older, release.NAMES, manifest)):
+            with tarfile.open(artifact, "w:gz") as archive:
+                for name in (*names, "manifest.json"):
+                    data = json.dumps(listed).encode() if name == "manifest.json" else (output / name).read_bytes()
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(data)
+                    archive.addfile(entry, io.BytesIO(data))
+        with self.assertRaisesRegex(RuntimeError, "checksum mismatch: rg"):
+            release.unpack(tampered)
+        self.assertEqual(set(release.unpack(older)[1]), set(release.NAMES))
+
+    def test_ripgrep_comes_from_a_verified_cache_or_download(self):
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+            entry = tarfile.TarInfo(f"ripgrep-{release.RIPGREP}-aarch64-apple-darwin/rg")
+            entry.size = 2
+            archive.addfile(entry, io.BytesIO(b"rg"))
+        data = payload.getvalue()
+        assets = {"aarch64-apple-darwin": ("aarch64-apple-darwin", len(data), release.digest(data))}
+        cache = self.root / ".local/ripgrep" / f"ripgrep-{release.RIPGREP}-aarch64-apple-darwin.tar.gz"
+        responses = []
+
+        def download(url, timeout):
+            self.assertTrue(url.endswith(cache.name))
+            return io.BytesIO(responses.pop(0))
+
+        with patch.object(release, "ROOT", self.root), patch.dict(release.RIPGREP_ASSETS, assets, clear=True), \
+                patch.object(release.urllib.request, "urlopen", side_effect=download):
+            responses.append(b"tampered")
+            with self.assertRaisesRegex(RuntimeError, "pinned checksum"):
+                release.ripgrep("aarch64-apple-darwin", self.root / "out")
+            self.assertFalse(cache.exists())
+            responses.append(data)
+            rg = release.ripgrep("aarch64-apple-darwin", self.root / "out")
+            self.assertEqual((rg.read_bytes(), cache.read_bytes()), (b"rg", data))
+            release.ripgrep("aarch64-apple-darwin", self.root / "again")
+            cache.write_bytes(b"stale")
+            responses.append(data)
+            release.ripgrep("aarch64-apple-darwin", self.root / "again")
+            self.assertEqual((responses, cache.read_bytes()), ([], data))
+            with self.assertRaisesRegex(RuntimeError, "no bundled ripgrep"):
+                release.ripgrep("x86_64-unknown-linux-gnu", self.root / "out")
 
     def test_windows_zip(self):
         output = self.root / "windows"
         output.mkdir()
-        for name in ("chui.exe", "tiechui.exe"):
+        for name in ("chui.exe", "tiechui.exe", "rg.exe"):
             (output / name).write_bytes(b"MZ" + name.encode())
         artifact = release.package(output, "0.1.0", "x86_64-pc-windows-msvc", {"commit": "windows"}, True)
         first = artifact.read_bytes()
@@ -172,7 +228,7 @@ class Packaging(unittest.TestCase):
         self.assertEqual(artifact.read_bytes(), first)
         self.assertEqual(artifact.name, "tiechui-0.1.0-x86_64-pc-windows-msvc.zip")
         with zipfile.ZipFile(artifact) as archive:
-            self.assertEqual(archive.namelist(), ["chui.exe", "tiechui.exe", "manifest.json"])
+            self.assertEqual(archive.namelist(), ["chui.exe", "tiechui.exe", "rg.exe", "manifest.json"])
         self.assertFalse((output / "tiechui.rb").exists())
 
     def test_npm_packages_launch_the_platform_build(self):
@@ -185,7 +241,7 @@ class Packaging(unittest.TestCase):
         for host, platform in release.NPM.items():
             output = self.root / host
             output.mkdir()
-            for name in release.binaries(host):
+            for name in (*release.binaries(host), release.rg_name(host)):
                 script = name == "chui" and platform == here
                 (output / name).write_bytes(b'#!/bin/sh\necho "$TIECHUI_INSTALL $*"\nexit 3\n'
                                             if script else (name + host).encode())
@@ -202,8 +258,10 @@ class Packaging(unittest.TestCase):
                          "npm:@tiechui/cli@0.1.0-win32-x64")
         windows = json.loads((npm / "win32-x64/package.json").read_bytes())
         self.assertEqual((windows["name"], windows["version"], windows["os"], windows["cpu"], windows["files"]),
-                         ("@tiechui/cli", "0.1.0-win32-x64", ["win32"], ["x64"], ["chui.exe"]))
+                         ("@tiechui/cli", "0.1.0-win32-x64", ["win32"], ["x64"], ["chui.exe", "rg.exe"]))
         self.assertEqual((npm / "win32-x64/chui.exe").read_bytes(), b"chui.exex86_64-pc-windows-msvc")
+        self.assertEqual((npm / "win32-x64/rg.exe").read_bytes(), b"rg.exex86_64-pc-windows-msvc")
+        self.assertEqual((npm / "linux-x64/rg").read_bytes(), b"rgx86_64-unknown-linux-gnu")
         self.assertEqual(json.loads((npm / "linux-x64/package.json").read_bytes())["libc"], ["glibc"])
         launcher = (main / "bin/chui.js").read_text()
         self.assertIn(json.dumps(list(release.NPM.values())).replace('","', '", "'), launcher)

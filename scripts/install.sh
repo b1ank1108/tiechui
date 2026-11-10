@@ -1,11 +1,13 @@
 #!/bin/sh
-# Installs chui and tiechui from a GitHub release.
+# Installs chui and tiechui, plus the bundled rg, from a GitHub release.
 # Usage: curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 # Environment: TIECHUI_VERSION (default: latest), TIECHUI_INSTALL_DIR (default: ~/.local/bin).
 set -eu
 
 repo="https://github.com/b1ank1108/tiechui"
 dir="${TIECHUI_INSTALL_DIR:-$HOME/.local/bin}"
+# chui looks for its bundled rg here, so the user's own rg on PATH is never replaced.
+libexec="$(dirname "$dir")/libexec/tiechui"
 
 fail() {
     echo "install.sh: $*" >&2
@@ -69,6 +71,13 @@ fi
 [ -n "$expected" ] && [ "$expected" = "$actual" ] || fail "checksum mismatch for $asset"
 
 tar -xzf "$temp/$asset" -C "$temp" chui tiechui
+# Older releases do not bundle rg.
+if tar -tzf "$temp/$asset" | grep -qx rg; then
+    tar -xzf "$temp/$asset" -C "$temp" rg
+    mkdir -p "$libexec"
+    mv -f "$temp/rg" "$libexec/rg"
+    chmod 755 "$libexec/rg"
+fi
 mkdir -p "$dir"
 for name in chui tiechui; do
     mv -f "$temp/$name" "$dir/$name"

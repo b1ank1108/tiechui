@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Local packaging. Python 3.10+, standard library only; never publishes.
 
-Dist runs on POSIX and Windows; install and uninstall are POSIX-only."""
+Dist runs on POSIX and Windows; install and uninstall are POSIX-only. Dist and ripgrep
+download the pinned ripgrep archive once into .local/ripgrep and verify it against RIPGREP_ASSETS."""
 import argparse
 from contextlib import contextmanager
 import gzip
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,21 @@ NPM = {"aarch64-apple-darwin": "darwin-arm64", "x86_64-apple-darwin": "darwin-x6
        "aarch64-unknown-linux-gnu": "linux-arm64", "x86_64-unknown-linux-gnu": "linux-x64",
        "x86_64-pc-windows-msvc": "win32-x64"}
 REPOSITORY = "https://github.com/b1ank1108/tiechui"
+# The ripgrep release bundled beside chui: upstream asset target, size and SHA-256 per release target.
+RIPGREP = "15.2.0"
+RIPGREP_ASSETS = {
+    "aarch64-apple-darwin": ("aarch64-apple-darwin", 1764284,
+                             "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4"),
+    "x86_64-apple-darwin": ("x86_64-apple-darwin", 1878284,
+                            "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1"),
+    "aarch64-unknown-linux-gnu": ("aarch64-unknown-linux-gnu", 1854661,
+                                  "a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d"),
+    # The static musl build also runs on glibc systems.
+    "x86_64-unknown-linux-gnu": ("x86_64-unknown-linux-musl", 2265718,
+                                 "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"),
+    "x86_64-pc-windows-msvc": ("x86_64-pc-windows-msvc", 1789611,
+                               "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5"),
+}
 
 
 def run(args, cwd=None, env=None, data=None):
@@ -188,18 +205,23 @@ def recover(prefix, state):
 
 
 def unpack(artifact):
+    """Contents include the bundled rg when present; older releases have none."""
     payload = Path(artifact).read_bytes()
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         entries = archive.getmembers()
-        if (len(entries) != 3 or {e.name for e in entries} != {*NAMES, "manifest.json"}
+        names = [e.name for e in entries]
+        required = {*NAMES, "manifest.json"}
+        if (len(names) != len(set(names)) or not required <= set(names) <= required | {"rg"}
                 or any(not e.isfile() or e.size > 512 * 1024 ** 2 for e in entries)):
-            raise RuntimeError("artifact must contain only regular chui, tiechui and manifest.json files")
+            raise RuntimeError("artifact must contain only regular chui, tiechui, rg and manifest.json files")
         contents = {e.name: archive.extractfile(e).read() for e in entries}
         manifest = json.loads(contents.pop("manifest.json"))
-        if manifest.get("schema_version") != 1 or set(manifest.get("files", {})) != set(NAMES):
+        expected = dict(manifest.get("files", {}), **manifest.get("bundled", {}))
+        if (manifest.get("schema_version") != 1 or set(manifest.get("files", {})) != set(NAMES)
+                or set(expected) != set(contents)):
             raise RuntimeError("unsupported artifact manifest")
         for name, data in contents.items():
-            if manifest["files"][name] != {"sha256": digest(data), "mode": 0o755}:
+            if {key: expected[name].get(key) for key in ("sha256", "mode")} != {"sha256": digest(data), "mode": 0o755}:
                 raise RuntimeError(f"artifact checksum mismatch: {name}")
         return manifest, contents, digest(payload)
 
@@ -324,6 +346,40 @@ def binaries(host):
     return tuple(name + ".exe" for name in NAMES) if "windows" in host else NAMES
 
 
+def rg_name(host):
+    return "rg.exe" if "windows" in host else "rg"
+
+
+def ripgrep(host, destination):
+    """Places the pinned rg for host in destination, verifying the upstream archive first."""
+    if host not in RIPGREP_ASSETS:
+        raise RuntimeError(f"no bundled ripgrep for {host}")
+    target, size, checksum = RIPGREP_ASSETS[host]
+    asset = f"ripgrep-{RIPGREP}-{target}." + ("zip" if "windows" in host else "tar.gz")
+    cache = ROOT / ".local/ripgrep" / asset
+    data = cache.read_bytes() if cache.is_file() else b""
+    if len(data) != size or digest(data) != checksum:
+        url = f"https://github.com/BurntSushi/ripgrep/releases/download/{RIPGREP}/{asset}"
+        print(f"Downloading {url}", flush=True)
+        with urllib.request.urlopen(url, timeout=120) as response:
+            data = response.read(size + 1)
+        if len(data) != size or digest(data) != checksum:
+            raise RuntimeError(f"ripgrep archive does not match its pinned checksum: {asset}")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        atomic(cache, data, 0o644)
+    member = f"ripgrep-{RIPGREP}-{target}/{rg_name(host)}"
+    if "windows" in host:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            binary = archive.read(member)
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            binary = archive.extractfile(member).read()
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / rg_name(host)).write_bytes(binary)
+    (destination / rg_name(host)).chmod(0o755)
+    return destination / rg_name(host)
+
+
 def build(archive, destination, jobs=2):
     space()
     with tempfile.TemporaryDirectory(prefix="dist-build-", dir=ROOT / ".local") as temporary:
@@ -347,35 +403,38 @@ def package(output, version, host, metadata, identical):
     if host not in NPM:
         raise RuntimeError(f"unsupported packaging host: {host}")
     names = binaries(host)
+    rg = rg_name(host)
     files = {name: {"sha256": digest((output / name).read_bytes()), "mode": 0o755} for name in names}
+    bundled = {rg: {"sha256": digest((output / rg).read_bytes()), "mode": 0o755, "version": RIPGREP}}
     manifest = dict(metadata, schema_version=1, version=version, target=host, files=files,
-                    reproducible=identical)
+                    bundled=bundled, reproducible=identical)
     write_json(output / "manifest.json", manifest)
+    members = (*names, rg)
     if "windows" in host:
         artifact = output / f"tiechui-{version}-{host}.zip"
         with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in (*names, "manifest.json"):
+            for name in (*members, "manifest.json"):
                 archive.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), (output / name).read_bytes(),
                                  zipfile.ZIP_DEFLATED)
     else:
         artifact = output / f"tiechui-{version}-{host}.tar.gz"
         with artifact.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped:
             with tarfile.open(fileobj=zipped, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-                for name in (*names, "manifest.json"):
+                for name in (*members, "manifest.json"):
                     data = (output / name).read_bytes()
                     info = tarfile.TarInfo(name)
-                    info.size, info.mode = len(data), 0o755 if name in names else 0o644
+                    info.size, info.mode = len(data), 0o755 if name in members else 0o644
                     archive.addfile(info, io.BytesIO(data))
     checksum = digest(artifact.read_bytes())
     (output / "SHA256SUMS").write_text("".join(
         f"{digest(path.read_bytes())}  {path.name}\n" for path in
-        (artifact, output / "manifest.json", *(output / name for name in names))))
+        (artifact, output / "manifest.json", *(output / name for name in members))))
     if "windows" in host:
         return artifact
     (output / "tiechui.rb").write_text(
         'class Tiechui < Formula\n  desc "Rust terminal coding agent"\n'
         f'  url "{artifact.as_uri()}"\n  version "{version}"\n  sha256 "{checksum}"\n'
-        '  def install\n    bin.install "chui", "tiechui"\n  end\nend\n')
+        '  def install\n    bin.install "chui", "tiechui"\n    (libexec/"tiechui").install "rg"\n  end\nend\n')
     return artifact
 
 
@@ -383,6 +442,7 @@ def dist(archive, metadata, output, ci=False):
     """CI builds once on every core; local runs compare two isolated builds on two jobs."""
     output.mkdir(parents=True, exist_ok=True)
     version, host, rust, lock = build(archive, output, (os.cpu_count() or 2) if ci else 2)
+    ripgrep(host, output)
     identical = None
     if not ci:
         with tempfile.TemporaryDirectory(prefix="dist-compare-", dir=ROOT / ".local") as second:
@@ -409,19 +469,21 @@ def npm(assets, version, output):
         archive = assets / name
         if not archive.is_file() or sums.get(name) != digest(archive.read_bytes()):
             raise RuntimeError(f"missing or mismatched release archive: {name}")
-        binary = binaries(host)[0]
+        # chui finds the bundled rg beside itself.
+        names = (binaries(host)[0], rg_name(host))
         if "windows" in host:
             with zipfile.ZipFile(archive) as files:
-                data = files.read(binary)
+                contents = {name: files.read(name) for name in names}
         else:
-            data = unpack(archive)[1][binary]
+            contents = unpack(archive)[1]
         os_name, cpu = platform.split("-")
         package = output / platform
         package.mkdir(parents=True)
-        (package / binary).write_bytes(data)
-        (package / binary).chmod(0o755)
+        for name in names:
+            (package / name).write_bytes(contents[name])
+            (package / name).chmod(0o755)
         manifest = dict(common, name="@tiechui/cli", version=f"{version}-{platform}",
-                        os=[os_name], cpu=[cpu], files=[binary])
+                        os=[os_name], cpu=[cpu], files=list(names))
         if os_name == "linux":
             manifest["libc"] = ["glibc"]
         (package / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -529,6 +591,9 @@ def main():
     command.add_argument("assets", type=Path)
     command.add_argument("--version", required=True)
     command.add_argument("--output", type=Path, required=True)
+    command = commands.add_parser("ripgrep")
+    command.add_argument("target", choices=sorted(RIPGREP_ASSETS))
+    command.add_argument("--output", type=Path, required=True)
     for name in ("install", "uninstall"):
         command = commands.add_parser(name)
         command.add_argument("--prefix", type=Path, required=True)
@@ -546,6 +611,8 @@ def main():
         verify()
     elif args.command == "npm":
         npm(args.assets, args.version, args.output)
+    elif args.command == "ripgrep":
+        print(ripgrep(args.target, args.output), flush=True)
     elif args.command == "install":
         install(args.artifact, args.prefix)
     else:

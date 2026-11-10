@@ -28,19 +28,37 @@ async fn ripgrep(cancel: &CancellationToken) -> Result<PathBuf, ToolError> {
                 .unwrap_or_default()
                 .join(".tiechui")
         });
-    let local = home
-        .join("bin")
-        .join(format!("rg{}", std::env::consts::EXE_SUFFIX));
+    let name = format!("rg{}", std::env::consts::EXE_SUFFIX);
+    let mut local = vec![home.join("bin").join(&name)];
+    local.extend(bundled(&name));
     find_binary(&local, "rg", cancel).await
 }
 
+/// Releases put rg beside chui (npm, Windows) or in `../libexec/tiechui` (install.sh, Homebrew).
+fn bundled(name: &str) -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return vec![];
+    };
+    // Homebrew links bin/chui into its Cellar, where libexec sits.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let Some(dir) = exe.parent() else {
+        return vec![];
+    };
+    let mut paths = vec![dir.join(name)];
+    paths.extend(
+        dir.parent()
+            .map(|prefix| prefix.join("libexec").join("tiechui").join(name)),
+    );
+    paths
+}
+
 async fn find_binary(
-    local: &Path,
+    local: &[PathBuf],
     program: &str,
     cancel: &CancellationToken,
 ) -> Result<PathBuf, ToolError> {
-    if local.exists() {
-        return Ok(local.into());
+    if let Some(local) = local.iter().find(|path| path.is_file()) {
+        return Ok(local.clone());
     }
     check(cancel)?;
     let mut command = Command::new(program);
@@ -52,7 +70,7 @@ async fn find_binary(
         return Ok(PathBuf::from(program));
     }
     check(cancel)?;
-    Err(ToolError("ripgrep (rg) is not available. Install a reviewed rg binary before using grep; Tiechui will not download it.".into()))
+    Err(ToolError("ripgrep (rg) is not available. Reinstall Tiechui to restore its bundled rg, or put a reviewed rg on PATH or in TIECHUI_HOME/bin; Tiechui will not download it.".into()))
 }
 
 struct ProcessResult {
@@ -707,7 +725,7 @@ mod tests {
     async fn unavailable_binaries_fail_without_falling_back_or_downloading() {
         let directory = tempfile::tempdir().unwrap();
         let error = find_binary(
-            &directory.path().join("rg"),
+            &[directory.path().join("rg")],
             "tiechui-fixture-command-that-does-not-exist",
             &CancellationToken::new(),
         )
@@ -715,6 +733,40 @@ mod tests {
         .unwrap_err();
         assert!(error.0.contains("will not download"));
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_first_local_binary_wins_over_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("missing");
+        let second = directory.path().join("rg");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::write(&second, "").unwrap();
+        let found = find_binary(
+            &[first, second.clone()],
+            "tiechui-fixture-command-that-does-not-exist",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found, second);
+    }
+
+    #[test]
+    fn bundled_rg_sits_beside_the_executable_or_in_libexec() {
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let dir = exe.parent().unwrap();
+        assert_eq!(
+            bundled("rg"),
+            [
+                dir.join("rg"),
+                dir.parent()
+                    .unwrap()
+                    .join("libexec")
+                    .join("tiechui")
+                    .join("rg"),
+            ]
+        );
     }
 
     #[cfg(unix)]

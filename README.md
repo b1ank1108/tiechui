@@ -56,8 +56,9 @@ answers to `~/.tiechui`. `chui setup` adds another provider later.
 
 ## Install
 
-macOS, Linux and Windows (x64) are supported. `rg` is used for content search;
-file discovery and `@` completion are built in. On Windows the bash tool runs
+macOS, Linux and Windows (x64) are supported. Content search uses ripgrep,
+which npm, the install scripts and the release archives bundle; file discovery
+and `@` completion are built in. On Windows the bash tool runs
 through Git Bash from [Git for Windows](https://git-scm.com/download/win); set
 `TIECHUI_GIT_BASH_PATH` if it is not found automatically.
 
@@ -76,9 +77,11 @@ an optional dependency. pnpm, yarn and bun work too.
 curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 ```
 
-It verifies the archive against `SHA256SUMS` and installs `chui` and `tiechui`
-into `~/.local/bin`. Set `TIECHUI_VERSION` to pin a release or
-`TIECHUI_INSTALL_DIR` to choose another directory.
+It verifies the archive against `SHA256SUMS`, installs `chui` and `tiechui`
+into `~/.local/bin`, and puts the bundled `rg` in `~/.local/libexec/tiechui`,
+where it does not replace an `rg` you already have. Set `TIECHUI_VERSION` to pin
+a release or `TIECHUI_INSTALL_DIR` to choose another directory; `rg` then goes
+to `libexec/tiechui` beside that directory's parent.
 
 **Windows (PowerShell).**
 
@@ -86,14 +89,16 @@ into `~/.local/bin`. Set `TIECHUI_VERSION` to pin a release or
 irm https://github.com/b1ank1108/tiechui/releases/latest/download/install.ps1 | iex
 ```
 
-It installs into `%LOCALAPPDATA%\Programs\tiechui` and adds that directory to
-the user `Path`. The same variables apply.
+It installs `chui.exe`, `tiechui.exe` and the bundled `rg.exe` into
+`%LOCALAPPDATA%\Programs\tiechui` and adds that directory to the user `Path`.
+The same variables apply.
 
 Building from source needs Rust through rustup (the checkout pins **1.95.0**
 with rustfmt and clippy) and Git.
 
 **From source.** `cargo install --locked --path crates/tiechui-cli --root
-<prefix>` installs `chui` and `tiechui` into `<prefix>/bin`. For development,
+<prefix>` installs `chui` and `tiechui` into `<prefix>/bin`, without `rg`:
+content search then uses `rg` from `PATH` or `~/.tiechui/bin`. For development,
 `cargo run --locked --bin chui -- --help` runs without installing.
 
 **Managed install from a source checkout (macOS and Linux).** Build a tarball
@@ -107,7 +112,8 @@ cargo xtask uninstall --prefix ~/.local
 
 The installer has no default prefix. It:
 
-- validates the archive and its manifest;
+- validates the archive and its manifest, including the bundled `rg`, which it
+  does not install (content search uses `rg` from `PATH`);
 - records the hash of each binary it owns in `<prefix>/.tiechui-install/`;
 - refuses to replace commands it did not install, including a `cargo install` copy;
 - repairs moved or partial installs;

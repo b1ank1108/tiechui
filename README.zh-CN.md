@@ -54,7 +54,8 @@ chui
 
 ## 安装
 
-支持 macOS、Linux 和 Windows (x64)。内容搜索使用 `rg`；文件发现和 `@` 补全是内置的。
+支持 macOS、Linux 和 Windows (x64)。内容搜索使用 ripgrep，npm、安装脚本和发布压缩包都自带一份；
+文件发现和 `@` 补全是内置的。
 Windows 上 bash 工具通过 [Git for Windows](https://git-scm.com/download/win) 的
 Git Bash 运行；自动找不到时设置 `TIECHUI_GIT_BASH_PATH`。
 
@@ -72,8 +73,10 @@ Node 16 及以上运行对应平台的原生构建，由 npm 作为可选依赖�
 curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install.sh | sh
 ```
 
-它用 `SHA256SUMS` 校验压缩包，把 `chui` 和 `tiechui` 装进 `~/.local/bin`。
-设置 `TIECHUI_VERSION` 可固定版本，`TIECHUI_INSTALL_DIR` 可换安装目录。
+它用 `SHA256SUMS` 校验压缩包，把 `chui` 和 `tiechui` 装进 `~/.local/bin`，
+自带的 `rg` 放在 `~/.local/libexec/tiechui`，不会替换你已有的 `rg`。
+设置 `TIECHUI_VERSION` 可固定版本，`TIECHUI_INSTALL_DIR` 可换安装目录；
+这时 `rg` 放在该目录上一级的 `libexec/tiechui`。
 
 **Windows (PowerShell)。**
 
@@ -81,12 +84,14 @@ curl -fsSL https://github.com/b1ank1108/tiechui/releases/latest/download/install
 irm https://github.com/b1ank1108/tiechui/releases/latest/download/install.ps1 | iex
 ```
 
-它装到 `%LOCALAPPDATA%\Programs\tiechui` 并把该目录加入用户 `Path`，同样的变量适用。
+它把 `chui.exe`、`tiechui.exe` 和自带的 `rg.exe` 装到 `%LOCALAPPDATA%\Programs\tiechui`，
+并把该目录加入用户 `Path`，同样的变量适用。
 
 从源码构建需要通过 rustup 安装的 Rust（仓库固定 **1.95.0**，含 rustfmt 和 clippy）和 Git。
 
 **从源码安装。** `cargo install --locked --path crates/tiechui-cli --root <prefix>`
-会把 `chui` 和 `tiechui` 装进 `<prefix>/bin`。开发时用
+会把 `chui` 和 `tiechui` 装进 `<prefix>/bin`，不含 `rg`：内容搜索改用 `PATH` 或
+`~/.tiechui/bin` 里的 `rg`。开发时用
 `cargo run --locked --bin chui -- --help` 免安装运行。
 
 **从源码仓库托管安装（macOS 和 Linux）。** 用 `cargo xtask dist` 构建 tarball，
@@ -100,7 +105,7 @@ cargo xtask uninstall --prefix ~/.local
 
 安装器没有默认 prefix。它会：
 
-- 校验压缩包及其清单；
+- 校验压缩包及其清单，包括自带的 `rg`，但不安装它（内容搜索使用 `PATH` 上的 `rg`）；
 - 在 `<prefix>/.tiechui-install/` 记录自己拥有的每个二进制的哈希；
 - 拒绝替换不是它安装的命令，包括 `cargo install` 装的副本；
 - 修复被移动或不完整的安装；

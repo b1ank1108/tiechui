@@ -1,4 +1,4 @@
-# Installs chui.exe and tiechui.exe from a GitHub release.
+# Installs chui.exe and tiechui.exe, plus the bundled rg.exe, from a GitHub release.
 # Usage: irm https://github.com/b1ank1108/tiechui/releases/latest/download/install.ps1 | iex
 # Environment: TIECHUI_VERSION (default: latest), TIECHUI_INSTALL_DIR (default: %LOCALAPPDATA%\Programs\tiechui).
 $ErrorActionPreference = 'Stop'
@@ -39,6 +39,11 @@ try {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     foreach ($name in 'chui.exe', 'tiechui.exe') {
         Copy-Item -Path (Join-Path $temp "out\$name") -Destination (Join-Path $dir $name) -Force
+    }
+    # chui finds the bundled rg.exe beside itself; older releases do not bundle it.
+    $rg = Join-Path $temp 'out\rg.exe'
+    if (Test-Path -LiteralPath $rg) {
+        Copy-Item -Path $rg -Destination (Join-Path $dir 'rg.exe') -Force
     }
 } finally {
     Remove-Item -Recurse -Force $temp
