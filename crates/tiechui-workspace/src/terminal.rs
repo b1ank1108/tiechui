@@ -36,6 +36,22 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// ConPTY asks where the cursor is before the shell starts and waits for the answer.
+const STARTUP_QUERY: &[u8] = b"\x1b[6n";
+
+/// Removes the startup query from the front of the output. `None` means the bytes so
+/// far could still be the query; `Some(true)` means it was removed and needs an answer.
+fn startup_query(pending: &mut Vec<u8>) -> Option<bool> {
+    if pending.len() < STARTUP_QUERY.len() && STARTUP_QUERY.starts_with(pending) {
+        return None;
+    }
+    let found = pending.starts_with(STARTUP_QUERY);
+    if found {
+        pending.drain(..STARTUP_QUERY.len());
+    }
+    Some(found)
+}
+
 /// The longest prefix that is whole UTF-8, leaving a split character for the next read.
 fn complete(bytes: &[u8]) -> usize {
     match std::str::from_utf8(bytes) {
@@ -87,8 +103,24 @@ impl Terminal {
         std::thread::spawn(move || {
             let mut chunk = [0; 8192];
             let mut pending = Vec::new();
+            // Clients attach late or more than once, so the server answers the query
+            // and keeps it out of the replay; later queries still reach the client.
+            let mut startup = cfg!(windows);
             while let Ok(n @ 1..) = reader.read(&mut chunk) {
                 pending.extend_from_slice(&chunk[..n]);
+                if startup {
+                    let Some(found) = startup_query(&mut pending) else {
+                        continue;
+                    };
+                    startup = false;
+                    if found && let Some(terminal) = weak.upgrade() {
+                        // A new pseudoconsole starts at the top left.
+                        let _ = terminal.write(b"\x1b[1;1R");
+                    }
+                    if pending.is_empty() {
+                        continue;
+                    }
+                }
                 let end = complete(&pending);
                 let data = String::from_utf8_lossy(&pending[..end]).into_owned();
                 pending.drain(..end);
@@ -151,6 +183,25 @@ impl Terminal {
         let mut child = lock(&self.child);
         if child.kill().is_ok() {
             let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_leading_cursor_query_is_answered_and_removed() {
+        let mut pending = b"\x1b[".to_vec();
+        assert_eq!(startup_query(&mut pending), None);
+        pending.extend_from_slice(b"6nprompt$ ");
+        assert_eq!(startup_query(&mut pending), Some(true));
+        assert_eq!(pending, b"prompt$ ");
+        for output in [&b"prompt\x1b[6n"[..], b"\x1b[31m", b"\x1b[?25l"] {
+            let mut pending = output.to_vec();
+            assert_eq!(startup_query(&mut pending), Some(false));
+            assert_eq!(pending, output);
         }
     }
 }
