@@ -55,6 +55,33 @@ if (-not (($path -split ';') -contains $dir)) {
     [Environment]::SetEnvironmentVariable('Path', (@($path, $dir) | Where-Object { $_ }) -join ';', 'User')
     Write-Host "Added $dir to the user Path; open a new terminal to use chui."
 }
-if (-not (Get-Command bash.exe -ErrorAction SilentlyContinue) -and -not $env:TIECHUI_GIT_BASH_PATH) {
-    Write-Host 'The bash tool needs Git for Windows: https://git-scm.com/download/win'
+# Looks where the bash tool looks (resolve_shell in crates/tiechui-exec/src/windows.rs): the
+# override alone when set, bash.exe on Path other than WSL's, beside the first git.exe on Path,
+# then the default Git for Windows directory.
+function Find-GitBash {
+    if ($env:TIECHUI_GIT_BASH_PATH) {
+        return (Test-Path -LiteralPath $env:TIECHUI_GIT_BASH_PATH -PathType Leaf)
+    }
+    $wsl = '\\(system32|windowsapps)\\'
+    $dirs = @($env:Path -split ';' | ForEach-Object { $_.Trim('"') } | Where-Object { $_ })
+    foreach ($d in $dirs) {
+        $bash = Join-Path $d 'bash.exe'
+        if ($bash -notmatch $wsl -and (Test-Path -LiteralPath $bash -PathType Leaf)) { return $true }
+    }
+    foreach ($d in $dirs) {
+        $git = Join-Path $d 'git.exe'
+        if ($git -notmatch $wsl -and (Test-Path -LiteralPath $git -PathType Leaf)) {
+            $root = Split-Path -Parent (Split-Path -Parent $git)
+            foreach ($bash in (Join-Path $root 'bin\bash.exe'), (Join-Path $root 'usr\bin\bash.exe')) {
+                if (Test-Path -LiteralPath $bash -PathType Leaf) { return $true }
+            }
+            break
+        }
+    }
+    return [bool]($env:ProgramFiles -and (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Git\bin\bash.exe') -PathType Leaf))
+}
+# A malformed Path entry must not fail an install that already succeeded.
+$gitBash = try { Find-GitBash } catch { $false }
+if (-not $gitBash) {
+    Write-Host 'Git Bash was not found. The bash tool needs Git for Windows (https://git-scm.com/download/win), or set TIECHUI_GIT_BASH_PATH to bash.exe.'
 }
