@@ -172,6 +172,38 @@ fn clone_source(source: &str) -> String {
     source.into()
 }
 
+/// A stored path as people write it: Windows paths lose the `\\?\` prefix that
+/// canonicalization adds, while the stored form remains the identity.
+pub fn display_path(path: &str) -> String {
+    if cfg!(windows) {
+        strip_verbatim(path)
+    } else {
+        path.into()
+    }
+}
+
+fn strip_verbatim(path: &str) -> String {
+    match path.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).into(),
+    }
+}
+
+#[test]
+fn verbatim_prefixes_are_hidden_from_displayed_paths() {
+    for (path, expected) in [
+        (r"\\?\E:\market place\repo", r"E:\market place\repo"),
+        (r"\\?\UNC\server\share\repo", r"\\server\share\repo"),
+        (r"E:\repo", r"E:\repo"),
+        (
+            "https://example.invalid/repo.git",
+            "https://example.invalid/repo.git",
+        ),
+    ] {
+        assert_eq!(strip_verbatim(path), expected);
+    }
+}
+
 #[cfg(all(test, windows))]
 #[test]
 fn clone_sources_preserve_urls_and_normalize_verbatim_paths() {

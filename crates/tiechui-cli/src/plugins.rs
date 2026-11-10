@@ -102,7 +102,9 @@ pub(crate) async fn run(
                     writeln!(
                         stdout,
                         "{}\t{}\t{}",
-                        market.name, market.source, market.commit
+                        market.name,
+                        marketplace::display_path(&market.source),
+                        market.commit
                     )
                     .map_err(|e| e.to_string())?;
                 }
@@ -214,7 +216,9 @@ pub(crate) async fn run(
                         writeln!(
                             stdout,
                             "  source: {}\n  content hash: {}",
-                            installation.source.display(),
+                            tiechui_module_plugins::marketplace::display_path(
+                                &installation.source.to_string_lossy()
+                            ),
                             installation.content_hash
                         )
                         .map_err(|e| e.to_string())?;
