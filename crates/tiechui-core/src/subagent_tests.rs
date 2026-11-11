@@ -4,6 +4,10 @@ use tiechui_plugin_api::{ChildRegistry, Module, ModuleConfig};
 struct Children(PathBuf);
 impl ChildRegistry for Children {
     fn build(&self, parent: &ToolContext, _: &str) -> Result<Registry, ToolError> {
+        self.build_default(parent)
+    }
+
+    fn build_default(&self, parent: &ToolContext) -> Result<Registry, ToolError> {
         let mut registry = Registry::default();
         tiechui_module_editing::EditingModule
             .register_child(&mut registry, &ModuleConfig::default())?;

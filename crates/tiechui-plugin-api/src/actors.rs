@@ -37,13 +37,18 @@ pub struct ChildRequest {
     pub tools: Option<Vec<String>>,
 }
 
-/// Parses a child thinking override; `Ok(None)` inherits the parent session's requested level.
-pub fn parse_child_thinking(value: &str) -> Result<Option<protocol::ThinkingLevel>, ToolError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildThinking {
+    Inherit,
+    Level(protocol::ThinkingLevel),
+}
+
+pub fn parse_child_thinking(value: &str) -> Result<ChildThinking, ToolError> {
     if value == "inherit" {
-        return Ok(None);
+        return Ok(ChildThinking::Inherit);
     }
     serde_json::from_value(serde_json::Value::String(value.into()))
-        .map(Some)
+        .map(ChildThinking::Level)
         .map_err(|_| {
             ToolError(format!(
                 "Invalid thinking level '{value}': expected off, minimal, low, medium, high, xhigh, max, or inherit"
@@ -79,8 +84,6 @@ pub trait ActorClient: Send + Sync {
 pub trait ChildRegistry: Send + Sync {
     fn build(&self, parent: &ToolContext, identity: &str) -> Result<Registry, ToolError>;
 
-    /// Builds a child registry for the unnamed default subagent without loading disk `.md` policies.
-    fn build_default(&self, parent: &ToolContext) -> Result<Registry, ToolError> {
-        self.build(parent, "default")
-    }
+    /// Builds an unnamed default child registry without loading disk agent definitions.
+    fn build_default(&self, parent: &ToolContext) -> Result<Registry, ToolError>;
 }

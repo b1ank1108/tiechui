@@ -1,7 +1,7 @@
 use super::*;
 use tiechui_plugin_api::{
-    CatalogModel, ChildRequest, ChildRunner, ModelCatalog, StaticContext, ToolError, async_trait,
-    parse_child_thinking,
+    CatalogModel, ChildRequest, ChildRunner, ChildThinking, ModelCatalog, StaticContext, ToolError,
+    async_trait, parse_child_thinking,
 };
 
 struct UsageEvents;
@@ -138,8 +138,8 @@ impl Runner {
     ) -> Result<Option<ReasoningLevel>, ToolError> {
         let desired = match requested.as_deref() {
             Some(raw) => match parse_child_thinking(raw)? {
-                Some(explicit) => thinking_level(explicit),
-                None => self.thinking,
+                ChildThinking::Level(explicit) => thinking_level(explicit),
+                ChildThinking::Inherit => self.thinking,
             },
             None => self.thinking,
         };
