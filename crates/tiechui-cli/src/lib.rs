@@ -23,6 +23,14 @@ fn mode() -> Arg {
         .help("permission mode; overrides permissions.mode")
 }
 
+fn yolo() -> Arg {
+    Arg::new("yolo")
+        .long("yolo")
+        .action(clap::ArgAction::SetTrue)
+        .conflicts_with("mode")
+        .help("shortcut for --mode yolo")
+}
+
 fn thinking() -> Arg {
     Arg::new("thinking")
         .long("thinking")
@@ -42,6 +50,7 @@ pub fn run(name: &'static str) {
             .arg(Arg::new("profile").long("profile").value_name("DIRECTORY")))
         .arg(Arg::new("model").long("model").value_name("PROVIDER/MODEL"))
         .arg(mode())
+        .arg(yolo())
         .arg(thinking())
         .arg(Arg::new("no-alt-screen")
             .long("no-alt-screen")
@@ -141,6 +150,7 @@ pub fn run(name: &'static str) {
                 .arg(Arg::new("model").long("model").value_name("PROVIDER/MODEL"))
                 .arg(thinking())
                 .arg(mode())
+                .arg(yolo().conflicts_with("approval"))
                 .arg(Arg::new("cwd").long("cwd").value_name("DIRECTORY"))
                 .arg(
                     Arg::new("approval")

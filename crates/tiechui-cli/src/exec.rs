@@ -76,12 +76,17 @@ impl Options {
     /// Arguments the subcommand does not define are absent.
     pub(crate) fn from_args(args: &ArgMatches) -> Self {
         let get = |id: &str| args.try_get_one::<String>(id).ok().flatten().cloned();
+        let yolo = args.try_get_one::<bool>("yolo").ok().flatten().copied() == Some(true);
         Self {
             cwd: get("cwd").map(PathBuf::from),
             resume: get("resume"),
             model: get("model"),
             thinking: get("thinking"),
-            mode: get("mode"),
+            mode: if yolo {
+                Some("yolo".into())
+            } else {
+                get("mode")
+            },
             approval: get("approval"),
         }
     }
@@ -195,7 +200,7 @@ pub(crate) async fn prepare(
         PermissionsModule::with_requester(
             cwd.clone(),
             user_home,
-            Arc::new(Prompts(interactions.clone())),
+            Arc::new(Prompts::new(interactions.clone())),
         )
     } else {
         PermissionsModule::headless(
@@ -243,6 +248,7 @@ pub(crate) async fn prepare(
             diagnostic.reason
         ));
     }
+    let prompts = Arc::new(Prompts::with_mode(interactions, permissions.mode()));
     let plugins =
         super::plugins::discovered(&cwd, &home, trusted, &loaded.config, &cancel, warnings)
             .map_err(config_error)?;
@@ -252,10 +258,7 @@ pub(crate) async fn prepare(
             plugin,
             &home,
             agent_trusted,
-            interactive.then(|| {
-                Arc::new(Prompts(interactions.clone()))
-                    as Arc<dyn tiechui_module_plugins::PluginHost>
-            }),
+            interactive.then(|| prompts.clone() as Arc<dyn tiechui_module_plugins::PluginHost>),
             cancel.clone(),
         ) {
             extension
@@ -278,9 +281,9 @@ pub(crate) async fn prepare(
     for diagnostic in &hooks.diagnostics {
         warnings.push(format!("hooks: {diagnostic}"));
     }
-    let ask = tiechui_module_ask::AskModule(interactive.then(|| {
-        Arc::new(Prompts(interactions.clone())) as Arc<dyn tiechui_module_ask::QuestionRequester>
-    }));
+    let ask = tiechui_module_ask::AskModule(
+        interactive.then(|| prompts.clone() as Arc<dyn tiechui_module_ask::QuestionRequester>),
+    );
     let rewind = tiechui_module_rewind::RewindModule {
         directory: home.join("state/rewind"),
     };
@@ -407,7 +410,7 @@ pub(crate) async fn prepare(
             trusted,
             cancel.clone(),
             if interactive {
-                Arc::new(Prompts(interactions.clone()))
+                prompts.clone()
             } else {
                 Arc::new(DeclineElicitation)
             },
@@ -438,10 +441,7 @@ pub(crate) async fn prepare(
         },
         child_home,
         agent_trusted,
-        interactive.then(|| {
-            Arc::new(Prompts(interactions.clone()))
-                as Arc<dyn tiechui_module_subagents::ProjectConfirmation>
-        }),
+        interactive.then_some(prompts as Arc<dyn tiechui_module_subagents::ProjectConfirmation>),
     )
     .map_err(runtime_error)?;
     registry.register_context_provider(Arc::new(StaticContext(vec!["You are Tiechui, a coding assistant. Use the available tools to complete the user's task. Read existing files before editing them. Keep answers concise.".into()])));

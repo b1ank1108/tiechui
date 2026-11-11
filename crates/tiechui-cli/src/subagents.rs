@@ -78,7 +78,7 @@ impl tiechui_module_subagents::ProjectConfirmation for super::approvals::Prompts
             }],
         };
         Ok(
-            matches!(self.0.ask(request, cancel).await, Some(ApprovalDecision::Accept { content: Some(v) }) if v["answers"]["project-agents"]["answers"].as_array().is_some_and(|a| a.iter().any(|v| v == "Run"))),
+            matches!(self.interactions.ask(request, cancel).await, Some(ApprovalDecision::Accept { content: Some(v) }) if v["answers"]["project-agents"]["answers"].as_array().is_some_and(|a| a.iter().any(|v| v == "Run"))),
         )
     }
 }
