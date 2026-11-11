@@ -68,12 +68,45 @@ fn usage(task: &AgentTask) -> String {
     if let Some(cost) = usage.cost_nano_usd {
         parts.push(format!("${:.4}", cost as f64 / 1e9));
     }
-    parts.push(plain(&task.model));
+    let model = plain(&task.model);
+    if !model.is_empty() {
+        parts.push(model);
+    }
     parts.join(" · ")
 }
 
 fn count(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+fn task_header_spans(task: &AgentTask, theme: &Theme) -> Vec<Span<'static>> {
+    let (icon, color) = state(task, theme);
+    let mut spans = vec![
+        Span::styled(format!("{icon} "), color),
+        Span::styled(
+            plain(&task.agent),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let model = plain(&task.model);
+    if !model.is_empty() {
+        spans.push(Span::styled(format!(" · {model}"), theme.dim));
+    }
+    spans.push(Span::styled(format!(" · {:?}", task.state), color));
+    spans
+}
+
+fn task_row_spans(task: &AgentTask, theme: &Theme) -> Vec<Span<'static>> {
+    let (icon, color) = state(task, theme);
+    let mut spans = vec![
+        Span::styled(format!("{icon} "), color),
+        Span::raw(plain(&task.agent)),
+    ];
+    let model = plain(&task.model);
+    if !model.is_empty() {
+        spans.push(Span::styled(format!(" · {model}"), theme.dim));
+    }
+    spans
 }
 
 /// A task in full: who and what, the output, then thinking, files and usage.
@@ -84,16 +117,8 @@ pub fn task_lines(
     expanded: bool,
     thinking: bool,
 ) -> Vec<Line<'static>> {
-    let (icon, color) = state(task, theme);
     let mut lines = wrap::wrap(
-        &[
-            Span::styled(format!("{icon} "), color),
-            Span::styled(
-                plain(&task.agent),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" · {:?}", task.state), color),
-        ],
+        &task_header_spans(task, theme),
         width,
         &[],
         &[Span::raw("  ")],
@@ -288,7 +313,7 @@ impl Panel {
                     .map(|(i, t)| (r.id.clone(), i, t))
             })
             .filter(|(_, _, t)| {
-                format!("{} {} {}", t.agent, t.task, t.output)
+                format!("{} {} {} {}", t.agent, t.model, t.task, t.output)
                     .to_lowercase()
                     .contains(&self.search.to_lowercase())
             })
@@ -445,13 +470,7 @@ impl Panel {
                 wrap::fit(line, if split { LIST } else { width }, true)
             };
             let mut list = std::iter::once(vec![Span::raw("Main session")])
-                .chain(tasks.iter().map(|(_, _, task)| {
-                    let (icon, color) = state(task, theme);
-                    vec![
-                        Span::styled(format!("{icon} "), color),
-                        Span::raw(plain(&task.agent)),
-                    ]
-                }))
+                .chain(tasks.iter().map(|(_, _, task)| task_row_spans(task, theme)))
                 .enumerate()
                 .skip(start)
                 .take(height)

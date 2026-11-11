@@ -451,7 +451,7 @@ pub struct AgentsListParams {
 pub struct AgentList {
     /// `$TIECHUI_HOME/agents`.
     pub dir: String,
-    /// Built-in agents, then definitions by name; a user definition hides a project one.
+    /// Definitions by name; a user definition hides a project one.
     pub agents: Vec<AgentEntry>,
 }
 
@@ -468,9 +468,8 @@ pub struct AgentEntry {
     /// requested thinking level when absent.
     pub thinking: Option<String>,
     pub prompt: String,
-    /// Absent for built-in agents.
-    pub path: Option<String>,
-    /// `builtin`, `user` or `project`.
+    pub path: String,
+    /// `user` or `project`.
     pub source: String,
 }
 

@@ -313,8 +313,9 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
   [modules/compaction](modules/compaction/README.md)
 - **子代理。**
-  - `subagent` 工具运行内置或用户定义的代理：`scout`、`planner`、`reviewer`、`worker`，或 profile、项目里的 `agents/*.md`。
-  - 一次派发是单个任务、并行批次或链。一个批次最多 8 个任务，同时运行 4 个。
+  - `subagent` 工具省略 `agent` 时运行默认通用子代理，也可指定 profile 或项目 `agents/*.md` 中的自定义代理。
+  - 任务可按需覆盖 `model`（`<provider>/<id>` 或 `inherit`）和 `thinking`；父会话会自动获知当前已就绪的候选模型目录。
+  - 一次派发可以是单个任务、最多 8 个任务的并行批次或顺序链。整个会话最多同时运行 8 个子任务，超出部分排队等待。
   - 子代理有自己的会话和授权，受父代理策略约束。
 
   [modules/subagents](modules/subagents/README.md)

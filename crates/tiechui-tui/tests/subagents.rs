@@ -17,7 +17,7 @@ fn records() -> Vec<AgentDispatch> {
         mode: "parallel".into(),
         tasks: vec![
             AgentTask {
-                agent: "worker".into(),
+                agent: "default".into(),
                 task: "Update the parser 👩‍💻 中文".into(),
                 state: AgentState::Completed,
                 output: "Updated parser.rs.\nTests pass.".into(),
@@ -31,7 +31,7 @@ fn records() -> Vec<AgentDispatch> {
                     ..Default::default()
                 },
                 turns: 2,
-                model: "fixture/model".into(),
+                model: "alpha/fast".into(),
             },
             AgentTask {
                 agent: "reviewer".into(),
@@ -44,7 +44,7 @@ fn records() -> Vec<AgentDispatch> {
                 thinking_path: None,
                 usage: TokenUsage::default(),
                 turns: 0,
-                model: "fixture/model".into(),
+                model: "beta/judge".into(),
             },
         ],
     }]
@@ -120,30 +120,49 @@ fn main_and_viewer_at_both_widths_and_palettes() {
     insta::assert_snapshot!("subagents", snapshots.join("\n\n"));
 }
 #[test]
-fn viewer_search_group_thinking_cancel_and_navigation() {
+fn viewer_search_by_model_group_thinking_cancel_and_navigation() {
     let mut panel = Panel::new(records());
     key(&mut panel, KeyCode::Right, KeyModifiers::NONE);
     assert!(
         matches!(key(&mut panel, KeyCode::Char('x'), KeyModifiers::CONTROL), Outcome::Cancel(id) if id == "dispatch")
     );
     key(&mut panel, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    for c in "reviewer".chars() {
+    for c in "beta/judge".chars() {
         key(&mut panel, KeyCode::Char(c), KeyModifiers::NONE);
     }
     key(&mut panel, KeyCode::Enter, KeyModifiers::NONE);
     key(&mut panel, KeyCode::Right, KeyModifiers::NONE);
     let theme = Theme::fixture(ColorLevel::TrueColor, false);
-    let screen = support::dump(&panel.render(40, 14, &theme, &[], true));
-    assert!(screen.contains("reviewer") && !screen.contains("worker"));
+    let screen = support::dump(&panel.render(80, 14, &theme, &[], true));
+    assert!(
+        screen.contains("reviewer")
+            && screen.contains("beta/judge")
+            && !screen.contains("alpha/fast"),
+        "{screen}"
+    );
     key(&mut panel, KeyCode::Enter, KeyModifiers::NONE);
-    let screen = support::dump(&panel.render(40, 14, &theme, &[], true));
-    assert!(screen.contains("Finished reviewing"));
+    let screen = support::dump(&panel.render(80, 14, &theme, &[], true));
+    assert!(
+        screen.contains("beta/judge") && screen.contains("Finished reviewing"),
+        "{screen}"
+    );
     key(&mut panel, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut panel, KeyCode::Char('s'), KeyModifiers::CONTROL);
     assert!(matches!(
         key(&mut panel, KeyCode::Enter, KeyModifiers::NONE),
         Outcome::Close
     ));
+}
+
+#[test]
+fn task_lines_omit_trailing_model_separator_when_model_is_empty() {
+    let theme = Theme::fixture(ColorLevel::TrueColor, false);
+    let mut task = records().remove(0).tasks.remove(1);
+    task.model.clear();
+    let lines = tiechui_tui::subagents::task_lines(&task, 80, &theme, true, false);
+    let rendered = support::dump(&lines);
+    assert!(rendered.contains("0 turns · 0 in · 0 out"), "{rendered}");
+    assert!(!rendered.contains("0 out ·"), "{rendered}");
 }
 
 #[test]

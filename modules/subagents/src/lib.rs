@@ -4,7 +4,7 @@ mod output;
 
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tiechui_plugin_api::{
@@ -16,6 +16,7 @@ use tiechui_plugin_api::{
 };
 
 const ENTRY: &str = "tiechui.subagents.record";
+const MAX_CONCURRENT_TASKS: usize = 8;
 
 #[async_trait]
 pub trait ProjectConfirmation: Send + Sync {
@@ -32,6 +33,7 @@ pub struct SubagentsModule {
     pub confirmation: Option<Arc<dyn ProjectConfirmation>>,
     pub children: Arc<dyn ChildRegistry>,
 }
+
 impl Module for SubagentsModule {
     fn id(&self) -> &str {
         "subagents"
@@ -42,11 +44,13 @@ impl Module for SubagentsModule {
             trusted: self.trusted,
             confirmation: self.confirmation.clone(),
             children: self.children.clone(),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TASKS)),
             runner: Mutex::new(None),
             state: Mutex::new(State::default()),
         });
         registry.register_resources(service.clone());
         registry.register_actor_client(service.clone());
+        registry.register_context_provider(service.clone());
         registry.register_runtime(service.clone());
         registry.register_command(service.clone());
         registry.register_tool(Arc::new(DispatchTool {
@@ -55,25 +59,50 @@ impl Module for SubagentsModule {
         }))
     }
 }
+
 #[derive(Default)]
 struct State {
     session: String,
     records: BTreeMap<String, AgentDispatch>,
     active: BTreeMap<String, CancellationToken>,
 }
+
 struct Service {
     home: PathBuf,
     trusted: bool,
     confirmation: Option<Arc<dyn ProjectConfirmation>>,
     children: Arc<dyn ChildRegistry>,
+    slots: Arc<tokio::sync::Semaphore>,
     runner: Mutex<Option<Arc<dyn ChildRunner>>>,
     state: Mutex<State>,
 }
+
 impl ActorClient for Service {
     fn bind(&self, runner: Arc<dyn ChildRunner>) {
         *self.runner.lock().unwrap_or_else(|e| e.into_inner()) = Some(runner);
     }
 }
+
+fn restore_records(state: &mut State, session_id: &str, entries: &[BranchEntry]) {
+    for (_, value) in entries
+        .iter()
+        .filter_map(|e| e.custom.as_ref())
+        .filter(|(kind, _)| kind == ENTRY)
+    {
+        let Ok(mut record) = serde_json::from_value::<AgentDispatch>(value.clone()) else {
+            continue;
+        };
+        record.session_id = session_id.to_owned();
+        for task in &mut record.tasks {
+            if task.state.active() {
+                task.state = AgentState::Cancelled;
+                task.diagnostic = Some("Interrupted before record settlement".into());
+            }
+        }
+        state.records.insert(record.id.clone(), record);
+    }
+}
+
 impl RuntimeExtension for Service {
     fn event(&self, event: &RuntimeEvent, branch: &BranchView) -> Result<RuntimeOutput, ToolError> {
         let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
@@ -89,23 +118,7 @@ impl RuntimeExtension for Service {
                     RuntimeEvent::Fork { entries } => entries,
                     _ => &branch.entries,
                 };
-                for (_, value) in entries
-                    .iter()
-                    .filter_map(|e| e.custom.as_ref())
-                    .filter(|(kind, _)| kind == ENTRY)
-                {
-                    if let Ok(mut record) = serde_json::from_value::<AgentDispatch>(value.clone()) {
-                        record.session_id = branch.session_id.clone();
-                        for task in &mut record.tasks {
-                            if task.state.active() {
-                                task.state = AgentState::Cancelled;
-                                task.diagnostic =
-                                    Some("Interrupted before record settlement".into());
-                            }
-                        }
-                        state.records.insert(record.id.clone(), record);
-                    }
-                }
+                restore_records(&mut state, &branch.session_id, entries);
             }
             RuntimeEvent::BeforeNavigate | RuntimeEvent::Shutdown | RuntimeEvent::Interrupt => {
                 for cancel in state.active.values() {
@@ -127,72 +140,359 @@ impl RuntimeExtension for Service {
     }
 }
 
-fn spec() -> ToolSpec {
-    let task = json!({"type":"object","required":["agent","task"],"properties":{"agent":{"type":"string"},"task":{"type":"string"},"cwd":{"type":"string"}}});
-    ToolSpec { name: "subagent".into(), description: "Delegate isolated tasks to scout, planner, reviewer or worker, or named user/project agents. Use exactly one of agent + task, tasks (at most 8; 4 concurrent), or chain (supports {previous}). Built-ins inherit the current model and thinking. Project definitions require user trust or interactive confirmation.".into(), input_schema: json!({"type":"object","properties":{
-        "agent":{"type":"string"},"task":{"type":"string"},"cwd":{"type":"string"},
-        "tasks":{"type":"array","items":task},"chain":{"type":"array","items":task},
-        "agentScope":{"type":"string","enum":["user","project","both"],"default":"user"}
-    }}) }
-}
-#[derive(Clone, serde::Deserialize)]
-struct Task {
-    agent: String,
-    task: String,
-    cwd: Option<String>,
-}
-fn parameters(value: &Value) -> Result<(&str, Vec<Task>), ToolError> {
-    let modes = usize::from(value.get("agent").is_some() || value.get("task").is_some())
-        + usize::from(value.get("tasks").is_some())
-        + usize::from(value.get("chain").is_some());
-    if modes != 1 {
-        return Err(ToolError(
-            "Use exactly one of agent + task, tasks, or chain".into(),
-        ));
+fn format_candidate(entry: &CatalogModel) -> String {
+    if !entry.reasoning {
+        return format!("- {} (reasoning: off)", entry.model);
     }
-    let (mode, tasks) = if let Some(tasks) = value.get("tasks") {
-        (
-            "parallel",
-            serde_json::from_value::<Vec<Task>>(tasks.clone()),
-        )
-    } else if let Some(tasks) = value.get("chain") {
-        ("chain", serde_json::from_value::<Vec<Task>>(tasks.clone()))
+    let levels = entry
+        .thinking_levels
+        .iter()
+        .filter_map(|level| {
+            serde_json::to_value(level)
+                .ok()?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("- {} (thinking: {levels})", entry.model)
+}
+
+fn format_catalog(catalog: &ModelCatalog) -> String {
+    let candidates: Vec<_> = catalog.candidates().map(format_candidate).collect();
+    let body = if candidates.is_empty() {
+        "No other candidate models are configured; subagents run on the active session model."
+            .to_owned()
     } else {
-        (
-            "single",
-            serde_json::from_value::<Task>(value.clone()).map(|t| vec![t]),
+        format!(
+            "Candidate models for `subagent` (`model` parameter):\n{}",
+            candidates.join("\n")
         )
     };
-    let tasks = tasks.map_err(|e| ToolError(e.to_string()))?;
-    if tasks.is_empty()
-        || tasks
+    format!(
+        "<subagent_models>\nActive session model: {}\n{body}\n</subagent_models>",
+        catalog.active
+    )
+}
+
+#[async_trait]
+impl ContextProvider for Service {
+    fn describe(&self, fragments: &[String]) -> Vec<PromptFragment> {
+        fragments
             .iter()
-            .any(|t| t.agent.trim().is_empty() || t.task.trim().is_empty())
-    {
+            .map(|text| PromptFragment {
+                label: "subagent_models".into(),
+                category: "System prompt".into(),
+                source: "Subagent model catalog".into(),
+                text: text.clone(),
+                references: vec![],
+            })
+            .collect()
+    }
+
+    async fn fragments(
+        &self,
+        _: &TurnInput,
+        _: CancellationToken,
+    ) -> Result<Vec<String>, ToolError> {
+        let runner = self
+            .runner
+            .lock()
+            .map_err(|e| ToolError(e.to_string()))?
+            .clone();
+        let Some(runner) = runner.filter(|runner| !runner.is_child()) else {
+            return Ok(vec![]);
+        };
+        let Some(catalog) = runner.model_catalog().filter(|catalog| !catalog.is_child) else {
+            return Ok(vec![]);
+        };
+        Ok(vec![format_catalog(&catalog)])
+    }
+}
+
+fn spec() -> ToolSpec {
+    let thinking = json!({
+        "type": "string",
+        "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "inherit"]
+    });
+    let task = json!({
+        "type": "object",
+        "required": ["task"],
+        "properties": {
+            "agent": {"type": "string"},
+            "task": {"type": "string"},
+            "cwd": {"type": "string"},
+            "model": {"type": "string"},
+            "thinking": thinking
+        }
+    });
+    ToolSpec {
+        name: "subagent".into(),
+        description: "Delegate isolated tasks to the default general-purpose subagent or a named user/project agent. Use exactly one of task, tasks (at most 8), or chain (supports {previous}). Up to 8 child tasks run concurrently across the session; extras queue. Project definitions require user trust or interactive confirmation.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string"},
+                "task": {"type": "string"},
+                "cwd": {"type": "string"},
+                "model": {"type": "string"},
+                "thinking": thinking,
+                "tasks": {"type": "array", "items": task},
+                "chain": {"type": "array", "items": task},
+                "agentScope": {"type": "string", "enum": ["user", "project", "both"], "default": "user"}
+            }
+        }),
+    }
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct Task {
+    agent: Option<String>,
+    task: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+}
+
+struct PreparedTask {
+    label: String,
+    custom_agent: Option<definitions::Definition>,
+    task: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+}
+
+fn parse_mode(value: &Value) -> Result<(&'static str, Vec<Task>), ToolError> {
+    let has = |key: &str| value.get(key).is_some_and(|v| !v.is_null());
+    let single = ["task", "agent", "cwd", "model", "thinking"]
+        .into_iter()
+        .any(has);
+    let modes = usize::from(single) + usize::from(has("tasks")) + usize::from(has("chain"));
+    if modes != 1 {
+        return Err(ToolError("Use exactly one of task, tasks, or chain".into()));
+    }
+    if let Some(tasks) = value.get("tasks").filter(|v| !v.is_null()) {
+        let parsed = serde_json::from_value(tasks.clone()).map_err(|e| ToolError(e.to_string()))?;
+        return Ok(("parallel", parsed));
+    }
+    if let Some(tasks) = value.get("chain").filter(|v| !v.is_null()) {
+        let parsed = serde_json::from_value(tasks.clone()).map_err(|e| ToolError(e.to_string()))?;
+        return Ok(("chain", parsed));
+    }
+    let parsed: Task =
+        serde_json::from_value(value.clone()).map_err(|e| ToolError(e.to_string()))?;
+    Ok(("single", vec![parsed]))
+}
+
+fn validate_raw_task(task: &Task) -> Result<(), ToolError> {
+    if task.task.trim().is_empty() {
         return Err(ToolError("Tasks must not be empty".into()));
     }
-    if mode == "parallel" && tasks.len() > 8 {
+    if task
+        .agent
+        .as_deref()
+        .is_some_and(|agent| agent.trim().is_empty())
+    {
+        return Err(ToolError(
+            "Agent name must not be blank; omit `agent` to use the default subagent".into(),
+        ));
+    }
+    if let Some(thinking) = task.thinking.as_deref() {
+        parse_child_thinking(thinking)?;
+    }
+    Ok(())
+}
+
+fn parameters(value: &Value) -> Result<(&'static str, Vec<Task>), ToolError> {
+    let (mode, tasks) = parse_mode(value)?;
+    if tasks.is_empty() {
+        return Err(ToolError("Tasks must not be empty".into()));
+    }
+    if mode == "parallel" && tasks.len() > MAX_CONCURRENT_TASKS {
         return Err(ToolError("At most 8 parallel tasks are allowed".into()));
     }
+    for task in &tasks {
+        validate_raw_task(task)?;
+    }
     Ok((mode, tasks))
+}
+
+fn unknown_agent_error(
+    name: &str,
+    agents: &BTreeMap<String, definitions::Definition>,
+) -> ToolError {
+    if agents.is_empty() {
+        return ToolError(format!(
+            "Unknown agent: {name}. No custom agents are defined in scope; omit `agent` to use the default subagent."
+        ));
+    }
+    let available = agents.keys().cloned().collect::<Vec<_>>().join(", ");
+    ToolError(format!(
+        "Unknown agent: {name}. Available custom agents: {available} (or omit `agent` to use the default subagent)."
+    ))
+}
+
+fn resolve_override(task: Option<&str>, agent: Option<&str>) -> Option<String> {
+    match task.or(agent) {
+        None | Some("inherit") => None,
+        Some(value) => Some(value.to_owned()),
+    }
+}
+
+fn available_models_label(catalog: Option<&ModelCatalog>) -> String {
+    match catalog {
+        Some(cat) if !cat.models.is_empty() => cat
+            .models
+            .iter()
+            .map(|entry| entry.model.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "none".into(),
+    }
+}
+
+fn validate_model(model: Option<&str>, catalog: Option<&ModelCatalog>) -> Result<(), ToolError> {
+    let Some(raw) = model else {
+        return Ok(());
+    };
+    let valid_syntax = raw
+        .split_once('/')
+        .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty());
+    if !valid_syntax {
+        return Err(ToolError(format!(
+            "Invalid model '{raw}': expected <provider>/<id>. Available models: {}",
+            available_models_label(catalog)
+        )));
+    }
+    if let Some(cat) = catalog
+        && !cat.models.iter().any(|entry| entry.model == raw)
+    {
+        return Err(ToolError(format!(
+            "Unknown or unavailable model '{raw}'. Available models: {}",
+            available_models_label(Some(cat))
+        )));
+    }
+    Ok(())
+}
+
+fn prepare_task(
+    raw: Task,
+    agents: &BTreeMap<String, definitions::Definition>,
+    catalog: Option<&ModelCatalog>,
+) -> Result<PreparedTask, ToolError> {
+    let (label, custom_agent) = match raw.agent {
+        None => ("default".to_owned(), None),
+        Some(name) => {
+            let def = agents
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| unknown_agent_error(&name, agents))?;
+            (def.name.clone(), Some(def))
+        }
+    };
+    let agent_model = custom_agent.as_ref().and_then(|def| def.model.as_deref());
+    let agent_thinking = custom_agent
+        .as_ref()
+        .and_then(|def| def.thinking.as_deref());
+    let model = resolve_override(raw.model.as_deref(), agent_model);
+    let thinking = resolve_override(raw.thinking.as_deref(), agent_thinking);
+    validate_model(model.as_deref(), catalog)?;
+    if let Some(level) = thinking.as_deref() {
+        parse_child_thinking(level)?;
+    }
+    Ok(PreparedTask {
+        label,
+        custom_agent,
+        task: raw.task,
+        cwd: raw.cwd,
+        model,
+        thinking,
+    })
+}
+
+fn prepare_tasks(
+    raw_tasks: Vec<Task>,
+    agents: &BTreeMap<String, definitions::Definition>,
+    catalog: Option<&ModelCatalog>,
+) -> Result<Vec<PreparedTask>, ToolError> {
+    raw_tasks
+        .into_iter()
+        .map(|task| prepare_task(task, agents, catalog))
+        .collect()
 }
 
 struct DispatchTool {
     service: Arc<Service>,
     spec: ToolSpec,
 }
+
 #[async_trait]
 impl Tool for DispatchTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
     }
     fn concurrency(&self, _: &Value) -> Concurrency {
-        Concurrency::Exclusive
+        Concurrency::Shared
     }
     async fn run(&self, call: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
         self.service.dispatch(call, ctx).await
     }
 }
+
+struct TaskSlot<'a> {
+    id: &'a str,
+    index: usize,
+    ctx: &'a ToolContext,
+    collector: Arc<Mutex<Collector>>,
+    child_cancel: CancellationToken,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+fn read_completed_output(buffer: &mut Collector) -> Option<(String, String)> {
+    if buffer.error.is_some() || buffer.status != Some(TurnStatus::Completed) {
+        return None;
+    }
+    match buffer
+        .output
+        .full()
+        .and_then(|text| Ok((text, buffer.thinking.full()?)))
+    {
+        Ok(full) => Some(full),
+        Err(error) => {
+            buffer.error = Some(error.0);
+            None
+        }
+    }
+}
+
+fn blank_agent_task(task: &PreparedTask) -> AgentTask {
+    AgentTask {
+        agent: task.label.clone(),
+        task: task.task.clone(),
+        state: AgentState::Waiting,
+        output: String::new(),
+        thinking: String::new(),
+        diagnostic: None,
+        output_path: None,
+        thinking_path: None,
+        usage: TokenUsage::default(),
+        turns: 0,
+        model: String::new(),
+    }
+}
+
+fn resolve_child_cwd(parent_cwd: &Path, child: Option<&str>) -> Result<PathBuf, ToolError> {
+    let cwd = std::fs::canonicalize(parent_cwd.join(child.unwrap_or(".")))?;
+    let boundary = std::fs::canonicalize(parent_cwd)?;
+    if !cwd.starts_with(&boundary) || !cwd.is_dir() {
+        return Err(ToolError(
+            "Child cwd must remain inside the parent workspace".into(),
+        ));
+    }
+    Ok(cwd)
+}
+
 impl Service {
     fn publish(&self, id: &str, ctx: &ToolContext) -> Result<(), ToolError> {
         let state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
@@ -208,108 +508,81 @@ impl Service {
         }
         Ok(())
     }
-    async fn dispatch(
-        self: &Arc<Self>,
-        call: ToolCall,
-        ctx: ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let (mode, tasks) = parameters(&call.arguments)?;
-        let scope = call.arguments["agentScope"].as_str().unwrap_or("user");
-        let agents = definitions::discover(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
-        let project = tasks
+
+    async fn confirm_project_agents(
+        &self,
+        tasks: &[PreparedTask],
+        cancel: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        if self.trusted {
+            return Ok(());
+        }
+        let mut project = Vec::new();
+        for agent in tasks
             .iter()
-            .filter_map(|task| agents.get(&task.agent))
-            .filter(|a| a.project)
-            .map(|a| a.path.clone())
-            .collect::<Vec<_>>();
-        if !project.is_empty() && !self.trusted {
-            let confirmation = self.confirmation.as_ref().ok_or_else(|| {
-                ToolError("Untrusted project agents require an interactive terminal".into())
-            })?;
-            if !confirmation.confirm(project, ctx.cancel.clone()).await? {
-                return Err(ToolError("Project agent execution declined".into()));
+            .filter_map(|task| task.custom_agent.as_ref())
+            .filter(|agent| agent.project)
+        {
+            if !project.contains(&agent.path) {
+                project.push(agent.path.clone());
             }
         }
-        let runner = self
-            .runner
-            .lock()
-            .map_err(|e| ToolError(e.to_string()))?
-            .clone()
-            .ok_or_else(|| ToolError("Child actors are unavailable".into()))?;
-        let cancel = ctx.cancel.child_token();
+        if project.is_empty() {
+            return Ok(());
+        }
+        let confirmation = self.confirmation.as_ref().ok_or_else(|| {
+            ToolError("Untrusted project agents require an interactive terminal".into())
+        })?;
+        if !confirmation.confirm(project, cancel.clone()).await? {
+            return Err(ToolError("Project agent execution declined".into()));
+        }
+        Ok(())
+    }
+
+    fn record_start(
+        &self,
+        id: &str,
+        mode: &str,
+        tasks: &[PreparedTask],
+        ctx: &ToolContext,
+        cancel: &CancellationToken,
+    ) -> Result<(), ToolError> {
         let record = AgentDispatch {
-            id: call.id.clone(),
+            id: id.to_owned(),
             session_id: ctx.scope.thread_id.0.clone(),
             mode: mode.into(),
-            tasks: tasks
-                .iter()
-                .map(|task| AgentTask {
-                    agent: task.agent.clone(),
-                    task: task.task.clone(),
-                    state: AgentState::Waiting,
-                    output: String::new(),
-                    thinking: String::new(),
-                    diagnostic: None,
-                    output_path: None,
-                    thinking_path: None,
-                    usage: TokenUsage::default(),
-                    turns: 0,
-                    model: String::new(),
-                })
-                .collect(),
+            tasks: tasks.iter().map(blank_agent_task).collect(),
         };
         {
             let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
             if state.session != ctx.scope.thread_id.0 {
                 return Err(ToolError("Session changed before dispatch".into()));
             }
-            state.records.insert(call.id.clone(), record.clone());
-            state.active.insert(call.id.clone(), cancel.clone());
+            state.records.insert(id.to_owned(), record.clone());
+            state.active.insert(id.to_owned(), cancel.clone());
         }
         (ctx.append_entry)(tools::CustomSessionEntry {
             kind: ENTRY.into(),
             data: json!(record),
         })?;
-        self.publish(&call.id, &ctx)?;
-        let execute = |index, task| {
-            self.run_task(
-                &call.id,
-                index,
-                task,
-                &agents,
-                runner.clone(),
-                &ctx,
-                cancel.clone(),
-            )
-        };
-        if mode == "parallel" {
-            let mut jobs = futures::stream::iter(
-                tasks
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, task)| execute(index, task)),
-            )
-            .buffer_unordered(4);
-            while jobs.next().await.is_some() {}
-        } else {
-            let mut previous = String::new();
-            for (index, mut task) in tasks.into_iter().enumerate() {
-                task.task = task.task.replace("{previous}", &previous);
-                match execute(index, task).await {
-                    Ok(output) => previous = output,
-                    Err(_) => break,
-                }
-            }
-        }
+        self.publish(id, ctx)
+    }
+
+    fn record_finish(
+        &self,
+        id: &str,
+        ctx: &ToolContext,
+        cancel: &CancellationToken,
+    ) -> Result<AgentDispatch, ToolError> {
         let record = {
             let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
             if state.session != ctx.scope.thread_id.0 {
                 return Err(ToolError("Session changed during dispatch".into()));
             }
-            state.active.remove(&call.id);
+            state.active.remove(id);
             let record = state
                 .records
-                .get_mut(&call.id)
+                .get_mut(id)
                 .ok_or_else(|| ToolError("Dispatch disappeared".into()))?;
             for task in &mut record.tasks {
                 if task.state.active() {
@@ -326,96 +599,264 @@ impl Service {
             kind: ENTRY.into(),
             data: json!(record),
         })?;
-        self.publish(&call.id, &ctx)?;
+        self.publish(id, ctx)?;
+        Ok(record)
+    }
+
+    fn bound_runner(&self) -> Result<Arc<dyn ChildRunner>, ToolError> {
+        self.runner
+            .lock()
+            .map_err(|e| ToolError(e.to_string()))?
+            .clone()
+            .ok_or_else(|| ToolError("Child actors are unavailable".into()))
+    }
+
+    async fn run_batch(
+        self: &Arc<Self>,
+        id: &str,
+        mode: &str,
+        tasks: Vec<PreparedTask>,
+        runner: Arc<dyn ChildRunner>,
+        ctx: &ToolContext,
+        cancel: CancellationToken,
+    ) {
+        if mode == "parallel" {
+            let mut jobs =
+                futures::stream::iter(tasks.into_iter().enumerate().map(|(index, task)| {
+                    self.run_task(id, index, task, runner.clone(), ctx, cancel.clone())
+                }))
+                .buffer_unordered(MAX_CONCURRENT_TASKS);
+            while jobs.next().await.is_some() {}
+            return;
+        }
+        let mut previous = String::new();
+        for (index, mut task) in tasks.into_iter().enumerate() {
+            task.task = task.task.replace("{previous}", &previous);
+            match self
+                .run_task(id, index, task, runner.clone(), ctx, cancel.clone())
+                .await
+            {
+                Ok(output) => previous = output,
+                Err(_) => break,
+            }
+        }
+    }
+
+    async fn dispatch(
+        self: &Arc<Self>,
+        call: ToolCall,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let (mode, raw_tasks) = parameters(&call.arguments)?;
+        let scope = call.arguments["agentScope"].as_str().unwrap_or("user");
+        let agents = definitions::discover(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
+        let runner = self.bound_runner()?;
+        let catalog = runner.model_catalog();
+        let tasks = prepare_tasks(raw_tasks, &agents, catalog.as_ref())?;
+        self.confirm_project_agents(&tasks, &ctx.cancel).await?;
+        let cancel = ctx.cancel.child_token();
+        self.record_start(&call.id, mode, &tasks, &ctx, &cancel)?;
+        self.run_batch(&call.id, mode, tasks, runner, &ctx, cancel.clone())
+            .await;
+        let record = self.record_finish(&call.id, &ctx, &cancel)?;
         Ok(result(&record))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    async fn acquire_slot(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ToolError> {
+        if cancel.is_cancelled() {
+            return Err(ToolError("Dispatch cancelled".into()));
+        }
+        let permit = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ToolError("Dispatch cancelled".into())),
+            permit = self.slots.clone().acquire_owned() => {
+                permit.map_err(|_| ToolError("Subagent semaphore closed".into()))?
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(ToolError("Dispatch cancelled".into()));
+        }
+        Ok(permit)
+    }
+
+    fn mark_running(
+        &self,
+        id: &str,
+        index: usize,
+        prompt: &str,
+        ctx: &ToolContext,
+    ) -> Result<(), ToolError> {
+        {
+            let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
+            if state.session != ctx.scope.thread_id.0 {
+                return Err(ToolError("Session changed".into()));
+            }
+            if let Some(record) = state.records.get_mut(id) {
+                record.tasks[index].state = AgentState::Running;
+                record.tasks[index].task = prompt.to_owned();
+            }
+        }
+        self.publish(id, ctx)
+    }
+
+    fn make_event_sink(
+        self: &Arc<Self>,
+        id: &str,
+        index: usize,
+        ctx: &ToolContext,
+        collector: Arc<Mutex<Collector>>,
+        stop: CancellationToken,
+    ) -> Arc<dyn Fn(Event) + Send + Sync> {
+        let service = self.clone();
+        let id = id.to_owned();
+        let ctx = ctx.clone();
+        Arc::new(move |event: Event| {
+            let mut buffer = collector.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(error) = buffer.event(&event.event) {
+                buffer.error = Some(error.0);
+                stop.cancel();
+            }
+            if buffer.error.is_some() {
+                stop.cancel();
+            }
+            if matches!(event.event, EventKind::ItemDelta { .. })
+                && buffer.published.elapsed() < std::time::Duration::from_millis(50)
+            {
+                return;
+            }
+            buffer.published = std::time::Instant::now();
+            if let Ok(mut state) = service.state.lock()
+                && state.session == ctx.scope.thread_id.0
+                && let Some(record) = state.records.get_mut(&id)
+            {
+                buffer.update(&mut record.tasks[index]);
+            }
+            drop(buffer);
+            let _ = service.publish(&id, &ctx);
+        })
+    }
+
+    async fn execute_child(
+        self: &Arc<Self>,
+        task: PreparedTask,
+        runner: Arc<dyn ChildRunner>,
+        slot: TaskSlot<'_>,
+    ) -> Result<(), ToolError> {
+        let cwd = resolve_child_cwd(&slot.ctx.cwd, task.cwd.as_deref())?;
+        let (registry, system, tools) = match &task.custom_agent {
+            Some(agent) => (
+                self.children.build(slot.ctx, &agent.name)?,
+                agent.prompt.clone(),
+                agent.tools.clone(),
+            ),
+            None => (self.children.build_default(slot.ctx)?, String::new(), None),
+        };
+        self.mark_running(slot.id, slot.index, &task.task, slot.ctx)?;
+        let events = self.make_event_sink(
+            slot.id,
+            slot.index,
+            slot.ctx,
+            slot.collector,
+            slot.child_cancel.clone(),
+        );
+        runner
+            .run(
+                ChildRequest {
+                    cwd,
+                    task: task.task,
+                    system,
+                    model: task.model,
+                    thinking: task.thinking,
+                    tools,
+                },
+                registry,
+                slot.child_cancel,
+                events,
+            )
+            .await
+    }
+
+    fn settle_task(
+        &self,
+        id: &str,
+        index: usize,
+        ctx: &ToolContext,
+        cancel: &CancellationToken,
+        buffer: &mut Collector,
+    ) -> Result<String, ToolError> {
+        let full = read_completed_output(buffer);
+        let usage = {
+            let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
+            if state.session != ctx.scope.thread_id.0 {
+                return Err(ToolError("Session changed".into()));
+            }
+            let record = state
+                .records
+                .get_mut(id)
+                .ok_or_else(|| ToolError("Dispatch disappeared".into()))?;
+            let result = &mut record.tasks[index];
+            buffer.update(result);
+            result.state = resolve_task_state(buffer, cancel);
+            result.diagnostic = buffer.error.clone();
+            if let Some((text, thinking)) = &full {
+                result.output = text.clone();
+                result.thinking = thinking.clone();
+            }
+            let partial = result.turns == 0 || buffer.partial;
+            (
+                result.state == AgentState::Completed,
+                Usage {
+                    input: result.usage.input,
+                    output: result.usage.output,
+                    cache_read: result.usage.cache_read,
+                    cache_write: result.usage.cache_write,
+                    partial,
+                    ..Default::default()
+                },
+            )
+        };
+        // Per-task totals are reported once, with an identity stable within the dispatch.
+        (ctx.append_entry)(tools::CustomSessionEntry {
+            kind: "runtime.usage".into(),
+            data: json!({"id":format!("child/{}/{id}/{index}", ctx.scope.turn_id.0),"usage":usage.1}),
+        })?;
+        self.publish(id, ctx)?;
+        if usage.0 {
+            return Ok(full.map(|(text, _)| text).unwrap_or_default());
+        }
+        Err(ToolError(
+            buffer
+                .error
+                .clone()
+                .unwrap_or_else(|| "Child did not complete".into()),
+        ))
+    }
+
     async fn run_task(
         self: &Arc<Self>,
         id: &str,
         index: usize,
-        task: Task,
-        agents: &BTreeMap<String, definitions::Definition>,
+        task: PreparedTask,
         runner: Arc<dyn ChildRunner>,
         ctx: &ToolContext,
         cancel: CancellationToken,
     ) -> Result<String, ToolError> {
-        if cancel.is_cancelled() {
-            return Err(ToolError("Dispatch cancelled".into()));
-        }
+        let permit = self.acquire_slot(&cancel).await?;
         let directory = self.home.join("state/subagents/output");
         let collector = Arc::new(Mutex::new(Collector::new(&directory)));
-        let child_cancel = cancel.child_token();
-        let outcome = async {
-            let agent = agents
-                .get(&task.agent)
-                .ok_or_else(|| ToolError(format!("Unknown agent: {}", task.agent)))?;
-            let cwd = std::fs::canonicalize(ctx.cwd.join(task.cwd.as_deref().unwrap_or(".")))?;
-            let boundary = std::fs::canonicalize(&ctx.cwd)?;
-            if !cwd.starts_with(&boundary) || !cwd.is_dir() {
-                return Err(ToolError(
-                    "Child cwd must remain inside the parent workspace".into(),
-                ));
-            }
-            let registry = self.children.build(ctx, &agent.name)?;
-            {
-                let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
-                if state.session != ctx.scope.thread_id.0 {
-                    return Err(ToolError("Session changed".into()));
-                }
-                if let Some(record) = state.records.get_mut(id) {
-                    record.tasks[index].state = AgentState::Running;
-                    record.tasks[index].task = task.task.clone();
-                }
-            }
-            self.publish(id, ctx)?;
-            let service = self.clone();
-            let id = id.to_owned();
-            let ctx = ctx.clone();
-            let buffer = collector.clone();
-            let stop = child_cancel.clone();
-            let events = Arc::new(move |event: Event| {
-                let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if let Err(error) = buffer.event(&event.event) {
-                    buffer.error = Some(error.0);
-                    stop.cancel();
-                }
-                if buffer.error.is_some() {
-                    stop.cancel();
-                }
-                if matches!(event.event, EventKind::ItemDelta { .. })
-                    && buffer.published.elapsed() < std::time::Duration::from_millis(50)
-                {
-                    return;
-                }
-                buffer.published = std::time::Instant::now();
-                if let Ok(mut state) = service.state.lock()
-                    && state.session == ctx.scope.thread_id.0
-                    && let Some(record) = state.records.get_mut(&id)
-                {
-                    buffer.update(&mut record.tasks[index]);
-                }
-                drop(buffer);
-                let _ = service.publish(&id, &ctx);
-            });
-            runner
-                .run(
-                    ChildRequest {
-                        cwd,
-                        task: task.task,
-                        system: agent.prompt.clone(),
-                        model: agent.model.clone(),
-                        thinking: None,
-                        tools: agent.tools.clone(),
-                    },
-                    registry,
-                    child_cancel,
-                    events,
-                )
-                .await
+        let slot = TaskSlot {
+            id,
+            index,
+            ctx,
+            collector: collector.clone(),
+            child_cancel: cancel.child_token(),
+            _permit: permit,
         };
-        let outcome = match std::panic::AssertUnwindSafe(outcome).catch_unwind().await {
+        let fut = self.execute_child(task, runner, slot);
+        let outcome = match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
             Ok(result) => result,
             Err(_) => Err(ToolError("Child execution panicked; task isolated".into())),
         };
@@ -427,65 +868,29 @@ impl Service {
                 buffer.error = Some(error.0);
             }
         }
-        let full = if buffer.error.is_none() && buffer.status == Some(TurnStatus::Completed) {
-            match buffer
-                .output
-                .full()
-                .and_then(|text| Ok((text, buffer.thinking.full()?)))
-            {
-                Ok(full) => Some(full),
-                Err(error) => {
-                    buffer.error = Some(error.0);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let mut state = self.state.lock().map_err(|e| ToolError(e.to_string()))?;
-        if state.session != ctx.scope.thread_id.0 {
-            return Err(ToolError("Session changed".into()));
-        }
-        let record = state
-            .records
-            .get_mut(id)
-            .ok_or_else(|| ToolError("Dispatch disappeared".into()))?;
-        let result = &mut record.tasks[index];
-        buffer.update(result);
-        result.state = if buffer.error.is_some() {
-            AgentState::Failed
-        } else if cancel.is_cancelled() && buffer.status != Some(TurnStatus::Completed) {
-            AgentState::Cancelled
-        } else {
-            match buffer.status {
-                Some(TurnStatus::Completed) => AgentState::Completed,
-                Some(TurnStatus::Interrupted) => AgentState::Cancelled,
-                _ => AgentState::Failed,
-            }
-        };
-        result.diagnostic = buffer.error.clone();
-        let success = result.state == AgentState::Completed;
-        if let Some((text, thinking)) = &full {
-            result.output = text.clone();
-            result.thinking = thinking.clone();
-        }
-        // Per-task totals are reported once, with an identity stable within the dispatch.
-        (ctx.append_entry)(tools::CustomSessionEntry {
-            kind: "runtime.usage".into(),
-            data: json!({"id":format!("child/{}/{id}/{index}", ctx.scope.turn_id.0),"usage":Usage { input: result.usage.input, output: result.usage.output, cache_read: result.usage.cache_read, cache_write: result.usage.cache_write, partial: result.turns == 0 || buffer.partial, ..Default::default() }}),
-        })?;
-        drop(state);
-        self.publish(id, ctx)?;
-        if success {
-            Ok(full.map(|(text, _)| text).unwrap_or_default())
-        } else {
-            Err(ToolError(
-                buffer
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Child did not complete".into()),
-            ))
-        }
+        self.settle_task(id, index, ctx, &cancel, &mut buffer)
+    }
+}
+
+fn resolve_task_state(buffer: &Collector, cancel: &CancellationToken) -> AgentState {
+    if buffer.error.is_some() {
+        return AgentState::Failed;
+    }
+    if cancel.is_cancelled() && buffer.status != Some(TurnStatus::Completed) {
+        return AgentState::Cancelled;
+    }
+    match buffer.status {
+        Some(TurnStatus::Completed) => AgentState::Completed,
+        Some(TurnStatus::Interrupted) => AgentState::Cancelled,
+        _ => AgentState::Failed,
+    }
+}
+
+fn qualify_model(model: &ModelInfo) -> String {
+    if model.provider.is_empty() {
+        model.id.clone()
+    } else {
+        format!("{}/{}", model.provider, model.id)
     }
 }
 
@@ -504,8 +909,9 @@ struct Collector {
     model: String,
     next_response: bool,
 }
+
 impl Collector {
-    fn new(directory: &std::path::Path) -> Self {
+    fn new(directory: &Path) -> Self {
         Self {
             published: std::time::Instant::now(),
             partial: false,
@@ -522,30 +928,85 @@ impl Collector {
             next_response: false,
         }
     }
-    fn event(&mut self, event: &EventKind) -> Result<(), ToolError> {
-        match event {
-            EventKind::Extension { name, data } if name == ACTOR_USAGE_EVENT => {
-                self.partial |= serde_json::from_value::<Option<Usage>>(data.clone())
-                    .ok()
-                    .flatten()
-                    .is_none_or(|usage| usage.partial);
+
+    fn start_assistant(&mut self, id: &str, text: &str) -> Result<(), ToolError> {
+        if self.next_response {
+            self.output.clear();
+            self.blocks.clear();
+            self.kinds.retain(|_, thinking| *thinking);
+            self.next_response = false;
+        } else if !self.output.text.is_empty() {
+            self.output.push("\n")?;
+        }
+        self.kinds.insert(id.to_owned(), false);
+        self.blocks.push((id.to_owned(), text.to_owned()));
+        self.output.push(text)
+    }
+
+    fn push_delta(&mut self, item_id: &str, delta: &str) -> Result<(), ToolError> {
+        let Some(&thinking) = self.kinds.get(item_id) else {
+            return Ok(());
+        };
+        let (blocks, output) = if thinking {
+            (&mut self.thinking_blocks, &mut self.thinking)
+        } else {
+            (&mut self.blocks, &mut self.output)
+        };
+        if let Some((_, text)) = blocks.iter_mut().find(|(id, _)| id == item_id) {
+            text.push_str(delta);
+        }
+        output.push(delta)
+    }
+
+    fn complete_text(&mut self, id: &str, text: &str) -> Result<(), ToolError> {
+        let thinking = self.kinds.get(id).copied().unwrap_or(false);
+        let (blocks, output) = if thinking {
+            (&mut self.thinking_blocks, &mut self.thinking)
+        } else {
+            (&mut self.blocks, &mut self.output)
+        };
+        let Some((_, previous)) = blocks.iter_mut().find(|(key, _)| key == id) else {
+            return Ok(());
+        };
+        if previous == text {
+            return Ok(());
+        }
+        *previous = text.to_owned();
+        output.clear();
+        for (i, (_, block_text)) in blocks.iter().enumerate() {
+            if i > 0 {
+                output.push("\n")?;
             }
+            output.push(block_text)?;
+        }
+        Ok(())
+    }
+
+    fn complete_item(&mut self, item: &Item) -> Result<bool, ToolError> {
+        match item {
+            Item::Known(
+                KnownItem::AssistantMessage { id, text } | KnownItem::Thinking { id, text },
+            ) => {
+                self.complete_text(&id.0, text)?;
+            }
+            Item::Known(KnownItem::ToolResult {
+                output,
+                is_error: true,
+                ..
+            }) if output["details"]["panic"] == true => {
+                self.error = Some("Child tool panicked".into());
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn item_event(&mut self, event: &EventKind) -> Result<bool, ToolError> {
+        match event {
             EventKind::ItemStarted {
                 item: Item::Known(KnownItem::AssistantMessage { id, text }),
                 ..
-            } => {
-                if self.next_response {
-                    self.output.clear();
-                    self.blocks.clear();
-                    self.kinds.retain(|_, thinking| *thinking);
-                    self.next_response = false;
-                } else if !self.output.text.is_empty() {
-                    self.output.push("\n")?;
-                }
-                self.kinds.insert(id.0.clone(), false);
-                self.blocks.push((id.0.clone(), text.clone()));
-                self.output.push(text)?;
-            }
+            } => self.start_assistant(&id.0, text)?,
             EventKind::ItemStarted {
                 item: Item::Known(KnownItem::Thinking { id, text }),
                 ..
@@ -554,81 +1015,51 @@ impl Collector {
                 self.thinking_blocks.push((id.0.clone(), text.clone()));
                 self.thinking.push(text)?;
             }
-            EventKind::ItemDelta { item_id, delta, .. } => {
-                if let Some(thinking) = self.kinds.get(&item_id.0) {
-                    let (blocks, output) = if *thinking {
-                        (&mut self.thinking_blocks, &mut self.thinking)
-                    } else {
-                        (&mut self.blocks, &mut self.output)
-                    };
-                    if let Some((_, text)) = blocks.iter_mut().find(|(id, _)| id == &item_id.0) {
-                        text.push_str(delta);
-                    }
-                    output.push(delta)?;
-                }
-            }
-            EventKind::ItemCompleted {
-                item:
-                    Item::Known(
-                        KnownItem::AssistantMessage { id, text } | KnownItem::Thinking { id, text },
-                    ),
-                ..
-            } => {
-                let thinking = self.kinds.get(&id.0).copied().unwrap_or(false);
-                let (blocks, output) = if thinking {
-                    (&mut self.thinking_blocks, &mut self.thinking)
-                } else {
-                    (&mut self.blocks, &mut self.output)
-                };
-                if let Some((_, previous)) = blocks.iter_mut().find(|(key, _)| key == &id.0)
-                    && previous != text
-                {
-                    *previous = text.clone();
-                    output.clear();
-                    for (i, (_, text)) in blocks.iter().enumerate() {
-                        if i > 0 {
-                            output.push("\n")?;
-                        }
-                        output.push(text)?;
-                    }
-                }
-            }
-            EventKind::ItemCompleted {
-                item:
-                    Item::Known(KnownItem::ToolResult {
-                        output,
-                        is_error: true,
-                        ..
-                    }),
-                ..
-            } if output["details"]["panic"] == true => {
-                self.error = Some("Child tool panicked".into());
-            }
-            EventKind::TokenUsageUpdated { total, .. } => {
-                self.usage = *total;
-                self.turns += 1;
-                self.next_response = true;
-            }
-            EventKind::SessionUpdated { model, .. } => self.model = model.id.clone(),
-            EventKind::TurnCompleted { turn } => self.status = Some(turn.status),
-            EventKind::Error { message } => self.error = Some(message.clone()),
-            _ => {}
+            EventKind::ItemDelta { item_id, delta, .. } => self.push_delta(&item_id.0, delta)?,
+            EventKind::ItemCompleted { item, .. } => return self.complete_item(item),
+            _ => return Ok(false),
         }
-        if self.blocks.len() + self.thinking_blocks.len() > 256
-            || self
-                .blocks
-                .iter()
-                .chain(&self.thinking_blocks)
-                .map(|(_, text)| text.len())
-                .sum::<usize>()
-                > 8 * 1024 * 1024
-        {
+        Ok(true)
+    }
+
+    fn check_limits(&self) -> Result<(), ToolError> {
+        let total_bytes: usize = self
+            .blocks
+            .iter()
+            .chain(&self.thinking_blocks)
+            .map(|(_, text)| text.len())
+            .sum();
+        if self.blocks.len() + self.thinking_blocks.len() > 256 || total_bytes > 8 * 1024 * 1024 {
             return Err(ToolError(
                 "Child live messages exceeded the 8 MiB / 256 block memory limit".into(),
             ));
         }
         Ok(())
     }
+
+    fn event(&mut self, event: &EventKind) -> Result<(), ToolError> {
+        if !self.item_event(event)? {
+            match event {
+                EventKind::Extension { name, data } if name == ACTOR_USAGE_EVENT => {
+                    self.partial |= serde_json::from_value::<Option<Usage>>(data.clone())
+                        .ok()
+                        .flatten()
+                        .is_none_or(|usage| usage.partial);
+                }
+                EventKind::TokenUsageUpdated { total, .. } => {
+                    self.usage = *total;
+                    self.turns += 1;
+                    self.next_response = true;
+                }
+                EventKind::SessionUpdated { model, .. } => self.model = qualify_model(model),
+                EventKind::TurnCompleted { turn } => self.status = Some(turn.status),
+                EventKind::Error { message } => self.error = Some(message.clone()),
+                _ => {}
+            }
+        }
+        self.check_limits()
+    }
+
     fn update(&self, task: &mut AgentTask) {
         task.output = self.output.text.clone();
         task.thinking = self.thinking.text.clone();
@@ -640,27 +1071,31 @@ impl Collector {
     }
 }
 
+fn task_label(task: &AgentTask) -> String {
+    if task.model.is_empty() {
+        task.agent.clone()
+    } else {
+        format!("{} · {}", task.agent, task.model)
+    }
+}
+
+fn format_task_summary(task: &AgentTask) -> String {
+    let mut text = format!(
+        "### [{}] {:?}\n\n{}",
+        task_label(task),
+        task.state,
+        output::prefix(&task.output, output::PREVIEW_BYTES)
+    );
+    if let Some(error) = &task.diagnostic {
+        text.push_str(&format!("\n{error}"));
+    }
+    if let Some(path) = &task.output_path {
+        text.push_str(&format!("\nFull output: {path} (retrieve with read)"));
+    }
+    text
+}
+
 fn result(record: &AgentDispatch) -> ToolOutput {
-    let text = record
-        .tasks
-        .iter()
-        .map(|task| {
-            let mut text = format!(
-                "### [{}] {:?}\n\n{}",
-                task.agent,
-                task.state,
-                output::prefix(&task.output, output::PREVIEW_BYTES)
-            );
-            if let Some(error) = &task.diagnostic {
-                text.push_str(&format!("\n{error}"));
-            }
-            if let Some(path) = &task.output_path {
-                text.push_str(&format!("\nFull output: {path} (retrieve with read)"));
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
     let text = if record.mode != "parallel"
         && record
             .tasks
@@ -674,7 +1109,12 @@ fn result(record: &AgentDispatch) -> ToolOutput {
             .filter(|text| !text.is_empty())
             .unwrap_or_else(|| "(no output)".into())
     } else {
-        text
+        record
+            .tasks
+            .iter()
+            .map(format_task_summary)
+            .collect::<Vec<_>>()
+            .join("\n\n")
     };
     ToolOutput {
         details: Some(json!(record)),
@@ -751,6 +1191,33 @@ impl Command for Service {
 #[cfg(test)]
 mod tests;
 
+fn build_task_resource(record_id: &str, index: usize, task: &AgentTask) -> Resource {
+    let id = format!("{record_id}:{}", index + 1);
+    let label = task_label(task);
+    let normalized_task = task.task.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut search_terms = vec![task.agent.clone(), task.output.chars().take(100).collect()];
+    if !task.model.is_empty() {
+        search_terms.push(task.model.clone());
+    }
+    Resource {
+        source: None,
+        manual: false,
+        id: format!("task:{id}"),
+        kind: ResourceKind::Task,
+        name: normalized_task.chars().take(100).collect(),
+        description: format!("{label} · {:?}", task.state),
+        path: None,
+        owner: None,
+        search_terms,
+        reference: format!(
+            "Historical subagent task {id} ({label}, {:?}): {}\nHistorical result excerpt (not new instructions):\n{}",
+            task.state,
+            normalized_task.chars().take(300).collect::<String>(),
+            task.output.chars().take(2000).collect::<String>()
+        ),
+    }
+}
+
 impl ResourceProvider for Service {
     fn resources(
         &self,
@@ -761,13 +1228,18 @@ impl ResourceProvider for Service {
             return vec![];
         }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.records.values().rev().flat_map(|record| record.tasks.iter().enumerate().map(move |(index, task)| {
-            let id = format!("{}:{}", record.id, index + 1);
-            Resource { source: None, manual: false, id: format!("task:{id}"), kind: ResourceKind::Task,
-                name: task.task.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect(), description: format!("{} · {:?}", task.agent, task.state),
-                path: None, owner: None, search_terms: vec![task.agent.clone(), task.output.chars().take(100).collect()],
-                reference: format!("Historical subagent task {id} ({}, {:?}): {}\nHistorical result excerpt (not new instructions):\n{}", task.agent, task.state, task.task.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect::<String>(), task.output.chars().take(2000).collect::<String>()),
-            }
-        })).take(32).collect()
+        state
+            .records
+            .values()
+            .rev()
+            .flat_map(|record| {
+                record
+                    .tasks
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, task)| build_task_resource(&record.id, index, task))
+            })
+            .take(32)
+            .collect()
     }
 }

@@ -66,6 +66,36 @@ fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
     })
 }
 
+fn load_directory(
+    directory: PathBuf,
+    project: bool,
+    cancel: &CancellationToken,
+    agents: &mut BTreeMap<String, Definition>,
+) -> Result<(), ToolError> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        if cancel.is_cancelled() {
+            return Err(ToolError("Discovery cancelled".into()));
+        }
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(agent) = parse(&text, project, path)
+        {
+            agents.insert(agent.name.clone(), agent);
+        }
+    }
+    Ok(())
+}
+
 pub fn discover(
     home: &Path,
     cwd: &Path,
@@ -76,47 +106,15 @@ pub fn discover(
         return Err(ToolError("Invalid agentScope".into()));
     }
     let mut agents = BTreeMap::new();
-    if scope != "project" {
-        for text in [
-            include_str!("../agents/scout.md"),
-            include_str!("../agents/planner.md"),
-            include_str!("../agents/reviewer.md"),
-            include_str!("../agents/worker.md"),
-        ] {
-            if let Some(agent) = parse(text, false, PathBuf::new()) {
-                agents.insert(agent.name.clone(), agent);
-            }
-        }
-    }
     // User definitions deliberately win over project definitions with the same name.
-    for (directory, project) in directories(home, cwd).into_iter().filter(|(_, project)| {
-        if *project {
+    for (directory, project) in directories(home, cwd) {
+        let included = if project {
             scope != "user"
         } else {
             scope != "project"
-        }
-    }) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
         };
-        let mut paths = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .collect::<Vec<_>>();
-        paths.sort();
-        for path in paths {
-            if cancel.is_cancelled() {
-                return Err(ToolError("Discovery cancelled".into()));
-            }
-            if path.extension().is_none_or(|e| e != "md") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if let Some(agent) = parse(&text, project, path) {
-                agents.insert(agent.name.clone(), agent);
-            }
+        if included {
+            load_directory(directory, project, cancel, &mut agents)?;
         }
     }
     Ok(agents)

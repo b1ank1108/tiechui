@@ -63,7 +63,7 @@ async fn actual_child_actor_edits_parent_checkpoint_inherits_model_and_isolates_
     let root = tempfile::tempdir().unwrap();
     let mut h = harness(
         vec![
-            invoke("subagent", json!({"agent":"worker","task":"child task"})),
+            invoke("subagent", json!({"task":"child task"})),
             invoke("write", json!({"path":"child.txt","content":"child edit"})),
             answer("CHILD_DONE"),
             answer("PARENT_DONE"),
@@ -87,11 +87,9 @@ async fn actual_child_actor_edits_parent_checkpoint_inherits_model_and_isolates_
             .any(|s| matches!(s.name.as_str(), "probe" | "subagent" | "create_goal"))
     );
     assert_eq!(users(&child), ["child task"]);
-    assert!(
-        !serde_json::to_string(&child)
-            .unwrap()
-            .contains("parent task")
-    );
+    let child_json = serde_json::to_string(&child).unwrap();
+    assert!(!child_json.contains("parent task"));
+    assert!(!child_json.contains("worker agent"));
     assert_eq!(
         std::fs::read_to_string(h._root.path().join("child.txt")).unwrap(),
         "child edit"
@@ -99,6 +97,8 @@ async fn actual_child_actor_edits_parent_checkpoint_inherits_model_and_isolates_
     let snapshot = h.snapshot().await;
     let records = records(&snapshot);
     let record = records.last().unwrap();
+    assert_eq!(record.tasks[0].agent, "default");
+    assert_eq!(record.tasks[0].model, "fake/a");
     assert_eq!(record.tasks[0].output, "CHILD_DONE");
     assert_eq!(record.tasks[0].state, AgentState::Completed);
     assert_eq!(record.tasks[0].turns, 2);
@@ -131,7 +131,7 @@ async fn actor_panic_is_a_task_diagnostic_and_parent_continues() {
     let root = tempfile::tempdir().unwrap();
     let mut h = harness(
         vec![
-            invoke("subagent", json!({"agent":"worker","task":"panic"})),
+            invoke("subagent", json!({"task":"panic"})),
             Script {
                 error: None,
                 steps: VecDeque::from([Step::Panic]),
@@ -165,7 +165,21 @@ async fn actor_panic_is_a_task_diagnostic_and_parent_continues() {
 async fn real_parallel_cancel_settles_before_navigation_and_keeps_finished_result() {
     let root = tempfile::tempdir().unwrap();
     let (_release, wait) = oneshot::channel();
-    let mut h = harness(vec![invoke("subagent", json!({"tasks":[{"agent":"worker","task":"quick"},{"agent":"worker","task":"wait"}]})), answer("FINISHED_CHILD"), Script { error: None, steps: VecDeque::from([Step::Wait(wait), Step::Event(finish(StopReason::EndTurn))]) }], root.path()).await;
+    let mut h = harness(
+        vec![
+            invoke(
+                "subagent",
+                json!({"tasks":[{"task":"quick"},{"task":"wait"}]}),
+            ),
+            answer("FINISHED_CHILD"),
+            Script {
+                error: None,
+                steps: VecDeque::from([Step::Wait(wait), Step::Event(finish(StopReason::EndTurn))]),
+            },
+        ],
+        root.path(),
+    )
+    .await;
     h.input("parent", InputDelivery::FollowUp).await;
     let turn = h.started_turn().await;
     h.until(|e| matches!(e, EventKind::ItemDelta { delta, .. } if delta.contains("FINISHED_CHILD") && delta.contains("Completed"))).await;
@@ -196,7 +210,7 @@ async fn goal_accounts_child_totals_once() {
     let mut h = harness(
         vec![
             invoke("create_goal", json!({"objective":"explicit fixture goal"})),
-            invoke("subagent", json!({"agent":"worker","task":"child"})),
+            invoke("subagent", json!({"task":"child"})),
             answer("CHILD"),
             invoke("update_goal", json!({"status":"complete"})),
             answer("DONE"),
@@ -227,7 +241,7 @@ async fn records_recover_after_actor_restart_and_follow_selected_branch() {
     let root = tempfile::tempdir().unwrap();
     let mut h = harness(
         vec![
-            invoke("subagent", json!({"agent":"planner","task":"plan"})),
+            invoke("subagent", json!({"task":"plan"})),
             answer("SAVED_CHILD"),
             answer("DONE"),
         ],
@@ -373,8 +387,28 @@ async fn tool_panic_settles_child_parent_anchored_writer_lease() {
 
 struct CatalogProvider {
     models: Vec<(String, u64, Vec<Option<ReasoningLevel>>)>,
+    delay_child: Duration,
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
     scripts: Mutex<VecDeque<Script>>,
     requests: mpsc::UnboundedSender<ModelRequest>,
+}
+
+impl CatalogProvider {
+    fn plain(
+        models: Vec<(String, u64, Vec<Option<ReasoningLevel>>)>,
+        scripts: Vec<Script>,
+        requests: mpsc::UnboundedSender<ModelRequest>,
+    ) -> Self {
+        Self {
+            models,
+            delay_child: Duration::ZERO,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            scripts: Mutex::new(scripts.into()),
+            requests,
+        }
+    }
 }
 
 #[async_trait]
@@ -415,6 +449,8 @@ impl ModelProvider for CatalogProvider {
         request: ModelRequest,
         _: CancellationToken,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        let is_child =
+            !self.delay_child.is_zero() && !request.tools.iter().any(|t| t.name == "subagent");
         self.requests.send(request).unwrap();
         let steps = self
             .scripts
@@ -430,7 +466,21 @@ impl ModelProvider for CatalogProvider {
                 _ => None,
             })
             .collect();
-        Ok(Box::pin(futures::stream::iter(events)))
+        if !is_child {
+            return Ok(Box::pin(futures::stream::iter(events)));
+        }
+        let in_flight = self.in_flight.clone();
+        let peak = self.peak.clone();
+        let delay = self.delay_child;
+        let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(active, Ordering::SeqCst);
+        let stream = futures::stream::once(async move {
+            tokio::time::sleep(delay).await;
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            futures::stream::iter(events)
+        })
+        .flatten();
+        Ok(Box::pin(stream))
     }
 }
 
@@ -568,6 +618,7 @@ impl Tool for SpawnChildTool {
 
 struct MultiProviderFixture {
     _root: TempDir,
+    store_path: PathBuf,
     handle: SessionHandle,
     thread: ThreadId,
     epoch: SessionEpoch,
@@ -579,12 +630,14 @@ struct MultiProviderFixture {
 }
 
 impl MultiProviderFixture {
-    async fn new(
-        alpha_scripts: Vec<Script>,
-        beta_scripts: Vec<Script>,
+    async fn spawn(
+        root: TempDir,
+        (alpha, alpha_rx): (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+        (beta, beta_rx): (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+        registry: Registry,
+        probe: Arc<ChildProbe>,
         thinking: Option<ReasoningLevel>,
     ) -> Self {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
         let dir = root.path().to_path_buf();
         let store = tokio::task::spawn_blocking(move || {
             let token = CancellationToken::new();
@@ -592,38 +645,8 @@ impl MultiProviderFixture {
         })
         .await
         .unwrap();
+        let store_path = store.path().to_path_buf();
         let thread = ThreadId(store.header().id.clone());
-        let (alpha_tx, alpha_rx) = mpsc::unbounded_channel();
-        let (beta_tx, beta_rx) = mpsc::unbounded_channel();
-        let full_levels: Vec<_> = std::iter::once(None)
-            .chain(ReasoningLevel::ALL.map(Some))
-            .collect();
-        let alpha = Arc::new(CatalogProvider {
-            models: vec![("alpha/fast".into(), 16000, vec![None])],
-            scripts: Mutex::new(alpha_scripts.into()),
-            requests: alpha_tx,
-        });
-        let beta = Arc::new(CatalogProvider {
-            models: vec![
-                ("beta/judge".into(), 32000, full_levels.clone()),
-                ("beta/org/nested".into(), 32000, full_levels),
-                (
-                    "beta/limited".into(),
-                    32000,
-                    vec![None, Some(ReasoningLevel::Low), Some(ReasoningLevel::High)],
-                ),
-                ("beta/unready".into(), 0, vec![None]),
-            ],
-            scripts: Mutex::new(beta_scripts.into()),
-            requests: beta_tx,
-        });
-        let probe = Arc::new(ChildProbe::default());
-        let mut registry = Registry::default();
-        registry.register_actor_client(probe.clone());
-        registry.register_context_provider(probe.clone());
-        registry
-            .register_tool(Arc::new(SpawnChildTool::new(probe.clone())))
-            .unwrap();
         let shutdown = CancellationToken::new();
         let handle = SessionActor::spawn(
             store,
@@ -653,6 +676,7 @@ impl MultiProviderFixture {
         );
         let mut fixture = Self {
             _root: root,
+            store_path,
             handle,
             thread,
             epoch: SessionEpoch(0),
@@ -666,6 +690,54 @@ impl MultiProviderFixture {
             .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
             .await;
         fixture
+    }
+
+    async fn new(
+        alpha_scripts: Vec<Script>,
+        beta_scripts: Vec<Script>,
+        thinking: Option<ReasoningLevel>,
+    ) -> Self {
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let (alpha_tx, alpha_rx) = mpsc::unbounded_channel();
+        let (beta_tx, beta_rx) = mpsc::unbounded_channel();
+        let full_levels: Vec<_> = std::iter::once(None)
+            .chain(ReasoningLevel::ALL.map(Some))
+            .collect();
+        let alpha = Arc::new(CatalogProvider::plain(
+            vec![("alpha/fast".into(), 16000, vec![None])],
+            alpha_scripts,
+            alpha_tx,
+        ));
+        let beta = Arc::new(CatalogProvider::plain(
+            vec![
+                ("beta/judge".into(), 32000, full_levels.clone()),
+                ("beta/org/nested".into(), 32000, full_levels),
+                (
+                    "beta/limited".into(),
+                    32000,
+                    vec![None, Some(ReasoningLevel::Low), Some(ReasoningLevel::High)],
+                ),
+                ("beta/unready".into(), 0, vec![None]),
+            ],
+            beta_scripts,
+            beta_tx,
+        ));
+        let probe = Arc::new(ChildProbe::default());
+        let mut registry = Registry::default();
+        registry.register_actor_client(probe.clone());
+        registry.register_context_provider(probe.clone());
+        registry
+            .register_tool(Arc::new(SpawnChildTool::new(probe.clone())))
+            .unwrap();
+        Self::spawn(
+            root,
+            (alpha, alpha_rx),
+            (beta, beta_rx),
+            registry,
+            probe,
+            thinking,
+        )
+        .await
     }
 
     async fn send(&mut self, id: &str, op: Op) {
@@ -973,4 +1045,173 @@ async fn session_model_catalog_tracks_active_model_excludes_unready_and_marks_ch
         "{switched_system}"
     );
     f.stop().await;
+}
+
+#[tokio::test]
+async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_calls() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join("agents")).unwrap();
+    std::fs::write(
+        home.join("agents/pinned.md"),
+        "---\nname: pinned\ndescription: custom\nmodel: alpha/fast\nthinking: low\n---\nPinned prompt",
+    )
+    .unwrap();
+
+    let (alpha_tx, alpha_rx) = mpsc::unbounded_channel();
+    let (beta_tx, beta_rx) = mpsc::unbounded_channel();
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let full_levels: Vec<_> = std::iter::once(None)
+        .chain(ReasoningLevel::ALL.map(Some))
+        .collect();
+
+    let ten_calls = reply(
+        (0..10)
+            .map(|i| {
+                Content::ToolCall(ToolCall {
+                    id: format!("conc-{i}"),
+                    name: "subagent".into(),
+                    arguments: json!({"task": format!("work-{i}"), "model": "beta/judge"}),
+                    opaque: None,
+                })
+            })
+            .collect(),
+    );
+
+    let alpha = Arc::new(CatalogProvider {
+        models: vec![("alpha/fast".into(), 16000, vec![None])],
+        delay_child: Duration::from_millis(5),
+        in_flight: in_flight.clone(),
+        peak: peak.clone(),
+        requests: alpha_tx,
+        scripts: Mutex::new(VecDeque::from([
+            invoke(
+                "subagent",
+                json!({"tasks": [
+                    {"task": "judge-inherit-thinking", "model": "beta/judge"},
+                    {"agent": "pinned", "task": "override-inherit", "model": "inherit"},
+                    {"task": "judge-low", "model": "beta/judge", "thinking": "low"}
+                ]}),
+            ),
+            answer("ALPHA_INHERITED"),
+            answer("TURN_ONE_DONE"),
+            invoke("subagent", json!({"agent": "scout", "task": "removed"})),
+            invoke("subagent", json!({"task": "bad", "model": "missing/nope"})),
+            answer("TURN_TWO_DONE"),
+            ten_calls,
+            answer("TURN_THREE_DONE"),
+        ])),
+    });
+    let mut beta_scripts = VecDeque::from([answer("BETA_HIGH"), answer("BETA_LOW")]);
+    for i in 0..10 {
+        beta_scripts.push_back(answer(&format!("DONE_{i}")));
+    }
+    let beta = Arc::new(CatalogProvider {
+        models: vec![("beta/judge".into(), 32000, full_levels)],
+        delay_child: Duration::from_millis(40),
+        in_flight: in_flight.clone(),
+        peak: peak.clone(),
+        requests: beta_tx,
+        scripts: Mutex::new(beta_scripts),
+    });
+
+    let mut registry = Registry::default();
+    registry.register_context_provider(Arc::new(StaticContext(vec![
+        "Base coding assistant.".into(),
+    ])));
+    tiechui_module_subagents::SubagentsModule {
+        home: home.clone(),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(Children(home.join("rewind"))),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+
+    let mut f = MultiProviderFixture::spawn(
+        root,
+        (alpha, alpha_rx),
+        (beta, beta_rx),
+        registry,
+        Arc::new(ChildProbe::default()),
+        Some(ReasoningLevel::High),
+    )
+    .await;
+
+    for (id, prompt) in [
+        ("t1", "compare"),
+        ("t2", "preflight"),
+        ("t3", "ten-concurrent"),
+    ] {
+        f.run_turn(id, prompt).await;
+    }
+
+    let parent_first = recv(&mut f.alpha_rx).await;
+    let parent_system = match &parent_first.messages[0].content[0] {
+        Content::Text { text, .. } => text.clone(),
+        _ => panic!("expected system prompt"),
+    };
+    assert!(parent_system.contains("alpha/fast"), "{parent_system}");
+    assert!(parent_system.contains("beta/judge"), "{parent_system}");
+    assert!(!parent_system.contains("providers.toml"), "{parent_system}");
+
+    let beta_req_1 = recv(&mut f.beta_rx).await;
+    let beta_req_2 = recv(&mut f.beta_rx).await;
+    let mut reasonings = [beta_req_1.reasoning, beta_req_2.reasoning];
+    reasonings.sort_by_key(|r| r.map(|l| l as u8));
+    assert_eq!(
+        reasonings,
+        [Some(ReasoningLevel::Low), Some(ReasoningLevel::High)]
+    );
+    for child_req in [&beta_req_1, &beta_req_2] {
+        let child_sys = serde_json::to_string(&child_req.messages[0]).unwrap();
+        assert!(!child_sys.contains("Candidate models"), "{child_sys}");
+    }
+
+    let tool_results = f.tool_results();
+    assert_eq!(tool_results.len(), 13);
+    assert!(!tool_results[0].1);
+    let summary_text = tool_results[0].0["content"][0]["text"].as_str().unwrap();
+    assert!(
+        summary_text.contains("### [default · beta/judge] Completed"),
+        "{summary_text}"
+    );
+    assert!(
+        summary_text.contains("### [pinned · alpha/fast] Completed"),
+        "{summary_text}"
+    );
+
+    assert!(tool_results[1].1);
+    assert!(
+        tool_results[1].0["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown agent: scout")
+    );
+    assert!(tool_results[2].1);
+    let bad_model_text = tool_results[2].0["content"][0]["text"].as_str().unwrap();
+    assert!(
+        bad_model_text.contains("alpha/fast") && bad_model_text.contains("beta/judge"),
+        "{bad_model_text}"
+    );
+
+    for (output, is_error) in &tool_results[3..] {
+        assert!(!*is_error, "expected concurrent call to succeed: {output}");
+    }
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert!(
+        (2..=8).contains(&observed_peak),
+        "expected peak in-flight in 2..=8, got {observed_peak}"
+    );
+
+    let store_path = f.store_path.clone();
+    let _root = f._root;
+    f.shutdown.cancel();
+    f.handle.task.await.unwrap().unwrap();
+    let reopened = SessionStore::open(&store_path, &CancellationToken::new()).unwrap();
+    let saved_records = records(&reopened);
+    assert_eq!(saved_records[1].tasks[0].model, "beta/judge");
+    assert_eq!(saved_records[1].tasks[1].model, "alpha/fast");
+    drop(_root);
 }

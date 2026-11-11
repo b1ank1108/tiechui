@@ -33,37 +33,31 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
             .await
             .and_then(value)
         }
-        _ => {
-            let p: AgentsListParams = parse(params)?;
-            let dir = home.join("agents").display().to_string();
-            let agents = blocking(move |cancel| {
-                let scope = if p.cwd.is_some() { "both" } else { "user" };
-                discover(&home, &project(&home, p.cwd)?, scope, cancel).map_err(|e| e.0)
-            })
-            .await?;
-            let mut agents: Vec<_> = agents
-                .into_values()
-                .map(|agent| AgentEntry {
-                    source: match (agent.project, agent.path.as_os_str().is_empty()) {
-                        (true, _) => "project",
-                        (false, true) => "builtin",
-                        (false, false) => "user",
-                    }
-                    .into(),
-                    path: (!agent.path.as_os_str().is_empty())
-                        .then(|| agent.path.display().to_string()),
-                    name: agent.name,
-                    description: agent.description,
-                    tools: agent.tools,
-                    model: agent.model,
-                    thinking: agent.thinking,
-                    prompt: agent.prompt,
-                })
-                .collect();
-            agents.sort_by_key(|agent| agent.source != "builtin");
-            value(AgentList { dir, agents })
-        }
+        _ => list(home, parse(params)?).await,
     }
+}
+
+async fn list(home: PathBuf, p: AgentsListParams) -> Reply {
+    let dir = home.join("agents").display().to_string();
+    let agents = blocking(move |cancel| {
+        let scope = if p.cwd.is_some() { "both" } else { "user" };
+        discover(&home, &project(&home, p.cwd)?, scope, cancel).map_err(|e| e.0)
+    })
+    .await?;
+    let agents = agents
+        .into_values()
+        .map(|agent| AgentEntry {
+            source: if agent.project { "project" } else { "user" }.into(),
+            path: agent.path.display().to_string(),
+            name: agent.name,
+            description: agent.description,
+            tools: agent.tools,
+            model: agent.model,
+            thinking: agent.thinking,
+            prompt: agent.prompt,
+        })
+        .collect();
+    value(AgentList { dir, agents })
 }
 
 /// Whether an agent file lies directly in a project (`true`) or user directory.

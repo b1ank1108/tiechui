@@ -4,29 +4,29 @@ expression: "snapshots.join(\"\\n\\n\")"
 ---
 40 / light=false / waiting
 [fg#666c77]•[-] [b]Delegating[fg#666c77] · 2 tasks
-[fg#666c77]  └ [fg#8fb996]✓ [-]worker    [fg#666c77]Update the parser 👩‍💻 中…
+[fg#666c77]  └ [fg#8fb996]✓ [-]default   [fg#666c77]Update the parser 👩‍💻 中…
 [-]      Updated parser.rs. Tests pass.
 [fg#666c77]    − [-]reviewer  [fg#666c77]Review pars… · cancelled
 [-]      Finished reviewing the first file.
 
 40 / light=false / finished
 [b,fg#8fb996]•[-] [b]Delegated[fg#666c77] · 2 tasks
-[fg#666c77]  └ [fg#8fb996]✓ [-]worker    [fg#666c77]Update the parser 👩‍💻 中…
+[fg#666c77]  └ [fg#8fb996]✓ [-]default   [fg#666c77]Update the parser 👩‍💻 中…
 [-]      [-]Updated parser.rs.
 [-]      [-]Tests pass.
 [-]      [fg#666c77]2 turns · 120 in · 30 out ·
-[-]      [fg#666c77]fixture/model
+[-]      [fg#666c77]alpha/fast
 [fg#666c77]    − [-]reviewer  [fg#666c77]Review pars… · cancelled
 [-]      [-]Finished reviewing the first file.
 [-]      [fg#666c77]0 turns · 0 in · 0 out ·
-[-]      [fg#666c77]fixture/model
+[-]      [fg#666c77]beta/judge
 
 40 / light=false / viewer
 [b]Subagents[fg#d6b07a] · Main needs input
 
 [b,fg#8fa8c9]  [-]Main session
-[b,fg#8fa8c9]› [fg#8fb996]✓ [b,fg#8fa8c9]worker
-[b,fg#8fa8c9]  [fg#666c77]− [-]reviewer
+[b,fg#8fa8c9]› [fg#8fb996]✓ [b,fg#8fa8c9]default[fg#666c77] · alpha/fast
+[b,fg#8fa8c9]  [fg#666c77]− [-]reviewer[fg#666c77] · beta/judge
 
 
 
@@ -40,7 +40,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 40 / light=false / output
 [b]Subagents
 
-[fg#8fb996]✓ [b]worker[fg#8fb996] · Completed
+[fg#8fb996]✓ [b]default[fg#666c77] · alpha/fast[fg#8fb996] · Completed
 [fg#666c77]Update the parser 👩‍💻 中文
 
 [-]Updated parser.rs.
@@ -49,37 +49,37 @@ expression: "snapshots.join(\"\\n\\n\")"
 [b,fg#666c77]Thinking
 [fg#666c77]Check boundaries before editing.
 
-[fg#666c77]2 turns · 120 in · 30 out ·
+[fg#666c77]2 turns · 120 in · 30 out · alpha/fast
 
 [-]↑/↓[d] scroll · [-]esc[d] back
 
 80 / light=false / waiting
 [fg#666c77]•[-] [b]Delegating[fg#666c77] · 2 tasks
-[fg#666c77]  └ [fg#8fb996]✓ [-]worker    [fg#666c77]Update the parser 👩‍💻 中文
+[fg#666c77]  └ [fg#8fb996]✓ [-]default   [fg#666c77]Update the parser 👩‍💻 中文
 [-]      Updated parser.rs. Tests pass.
 [fg#666c77]    − [-]reviewer  [fg#666c77]Review parser changes · cancelled
 [-]      Finished reviewing the first file.
 
 80 / light=false / finished
 [b,fg#8fb996]•[-] [b]Delegated[fg#666c77] · 2 tasks
-[fg#666c77]  └ [fg#8fb996]✓ [-]worker    [fg#666c77]Update the parser 👩‍💻 中文
+[fg#666c77]  └ [fg#8fb996]✓ [-]default   [fg#666c77]Update the parser 👩‍💻 中文
 [-]      [-]Updated parser.rs.
 [-]      [-]Tests pass.
-[-]      [fg#666c77]2 turns · 120 in · 30 out · fixture/model
+[-]      [fg#666c77]2 turns · 120 in · 30 out · alpha/fast
 [fg#666c77]    − [-]reviewer  [fg#666c77]Review parser changes · cancelled
 [-]      [-]Finished reviewing the first file.
-[-]      [fg#666c77]0 turns · 0 in · 0 out · fixture/model
+[-]      [fg#666c77]0 turns · 0 in · 0 out · beta/judge
 
 80 / light=false / viewer
 [b]Subagents[fg#d6b07a] · Main needs input
 
-[b,fg#8fa8c9]  [-]Main session[-]              [fg#666c77] │ [fg#8fb996]✓ [b]worker[fg#8fb996] · Completed
-[b,fg#8fa8c9]› [fg#8fb996]✓ [b,fg#8fa8c9]worker[-]                  [fg#666c77] │ [fg#666c77]Update the parser 👩‍💻 中文
-[b,fg#8fa8c9]  [fg#666c77]− [-]reviewer[-]                [fg#666c77] │ 
+[b,fg#8fa8c9]  [-]Main session[-]              [fg#666c77] │ [fg#8fb996]✓ [b]default[fg#666c77] · alpha/fast[fg#8fb996] · Completed
+[b,fg#8fa8c9]› [fg#8fb996]✓ [b,fg#8fa8c9]default[fg#666c77] · alpha/fast[-]    [fg#666c77] │ [fg#666c77]Update the parser 👩‍💻 中文
+[b,fg#8fa8c9]  [fg#666c77]− [-]reviewer[fg#666c77] · beta/judge[-]   [fg#666c77] │ 
 [-]                            [fg#666c77] │ [-]Updated parser.rs.
 [-]                            [fg#666c77] │ [-]Tests pass.
 [-]                            [fg#666c77] │ 
-[-]                            [fg#666c77] │ [fg#666c77]2 turns · 120 in · 30 out · fixture/model
+[-]                            [fg#666c77] │ [fg#666c77]2 turns · 120 in · 30 out · alpha/fast
 [-]                            [fg#666c77] │ 
 [-]                            [fg#666c77] │ 
 [-]                            [fg#666c77] │ 
@@ -89,7 +89,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 80 / light=false / output
 [b]Subagents
 
-[fg#8fb996]✓ [b]worker[fg#8fb996] · Completed
+[fg#8fb996]✓ [b]default[fg#666c77] · alpha/fast[fg#8fb996] · Completed
 [fg#666c77]Update the parser 👩‍💻 中文
 
 [-]Updated parser.rs.
@@ -98,35 +98,35 @@ expression: "snapshots.join(\"\\n\\n\")"
 [b,fg#666c77]Thinking
 [fg#666c77]Check boundaries before editing.
 
-[fg#666c77]2 turns · 120 in · 30 out · fixture/model
+[fg#666c77]2 turns · 120 in · 30 out · alpha/fast
 
 [-]↑/↓[d] scroll · [-]esc[d] back · [-]ctrl+x[d] stop · [-]ctrl+t[d] hide thinking
 
 40 / light=true / waiting
 [fg#9aa1ac]•[-] [b]Delegating[fg#9aa1ac] · 2 tasks
-[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]worker    [fg#9aa1ac]Update the parser 👩‍💻 中…
+[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]default   [fg#9aa1ac]Update the parser 👩‍💻 中…
 [-]      Updated parser.rs. Tests pass.
 [fg#9aa1ac]    − [-]reviewer  [fg#9aa1ac]Review pars… · cancelled
 [-]      Finished reviewing the first file.
 
 40 / light=true / finished
 [b,fg#4f8a5b]•[-] [b]Delegated[fg#9aa1ac] · 2 tasks
-[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]worker    [fg#9aa1ac]Update the parser 👩‍💻 中…
+[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]default   [fg#9aa1ac]Update the parser 👩‍💻 中…
 [-]      [-]Updated parser.rs.
 [-]      [-]Tests pass.
 [-]      [fg#9aa1ac]2 turns · 120 in · 30 out ·
-[-]      [fg#9aa1ac]fixture/model
+[-]      [fg#9aa1ac]alpha/fast
 [fg#9aa1ac]    − [-]reviewer  [fg#9aa1ac]Review pars… · cancelled
 [-]      [-]Finished reviewing the first file.
 [-]      [fg#9aa1ac]0 turns · 0 in · 0 out ·
-[-]      [fg#9aa1ac]fixture/model
+[-]      [fg#9aa1ac]beta/judge
 
 40 / light=true / viewer
 [b]Subagents[fg#a87a2f] · Main needs input
 
 [b,fg#4f6f9a]  [-]Main session
-[b,fg#4f6f9a]› [fg#4f8a5b]✓ [b,fg#4f6f9a]worker
-[b,fg#4f6f9a]  [fg#9aa1ac]− [-]reviewer
+[b,fg#4f6f9a]› [fg#4f8a5b]✓ [b,fg#4f6f9a]default[fg#9aa1ac] · alpha/fast
+[b,fg#4f6f9a]  [fg#9aa1ac]− [-]reviewer[fg#9aa1ac] · beta/judge
 
 
 
@@ -140,7 +140,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 40 / light=true / output
 [b]Subagents
 
-[fg#4f8a5b]✓ [b]worker[fg#4f8a5b] · Completed
+[fg#4f8a5b]✓ [b]default[fg#9aa1ac] · alpha/fast[fg#4f8a5b] · Completed
 [fg#9aa1ac]Update the parser 👩‍💻 中文
 
 [-]Updated parser.rs.
@@ -149,37 +149,37 @@ expression: "snapshots.join(\"\\n\\n\")"
 [b,fg#9aa1ac]Thinking
 [fg#9aa1ac]Check boundaries before editing.
 
-[fg#9aa1ac]2 turns · 120 in · 30 out ·
+[fg#9aa1ac]2 turns · 120 in · 30 out · alpha/fast
 
 [fg@0]↑/↓[fg@8] scroll · [fg@0]esc[fg@8] back
 
 80 / light=true / waiting
 [fg#9aa1ac]•[-] [b]Delegating[fg#9aa1ac] · 2 tasks
-[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]worker    [fg#9aa1ac]Update the parser 👩‍💻 中文
+[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]default   [fg#9aa1ac]Update the parser 👩‍💻 中文
 [-]      Updated parser.rs. Tests pass.
 [fg#9aa1ac]    − [-]reviewer  [fg#9aa1ac]Review parser changes · cancelled
 [-]      Finished reviewing the first file.
 
 80 / light=true / finished
 [b,fg#4f8a5b]•[-] [b]Delegated[fg#9aa1ac] · 2 tasks
-[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]worker    [fg#9aa1ac]Update the parser 👩‍💻 中文
+[fg#9aa1ac]  └ [fg#4f8a5b]✓ [-]default   [fg#9aa1ac]Update the parser 👩‍💻 中文
 [-]      [-]Updated parser.rs.
 [-]      [-]Tests pass.
-[-]      [fg#9aa1ac]2 turns · 120 in · 30 out · fixture/model
+[-]      [fg#9aa1ac]2 turns · 120 in · 30 out · alpha/fast
 [fg#9aa1ac]    − [-]reviewer  [fg#9aa1ac]Review parser changes · cancelled
 [-]      [-]Finished reviewing the first file.
-[-]      [fg#9aa1ac]0 turns · 0 in · 0 out · fixture/model
+[-]      [fg#9aa1ac]0 turns · 0 in · 0 out · beta/judge
 
 80 / light=true / viewer
 [b]Subagents[fg#a87a2f] · Main needs input
 
-[b,fg#4f6f9a]  [-]Main session[-]              [fg#9aa1ac] │ [fg#4f8a5b]✓ [b]worker[fg#4f8a5b] · Completed
-[b,fg#4f6f9a]› [fg#4f8a5b]✓ [b,fg#4f6f9a]worker[-]                  [fg#9aa1ac] │ [fg#9aa1ac]Update the parser 👩‍💻 中文
-[b,fg#4f6f9a]  [fg#9aa1ac]− [-]reviewer[-]                [fg#9aa1ac] │ 
+[b,fg#4f6f9a]  [-]Main session[-]              [fg#9aa1ac] │ [fg#4f8a5b]✓ [b]default[fg#9aa1ac] · alpha/fast[fg#4f8a5b] · Completed
+[b,fg#4f6f9a]› [fg#4f8a5b]✓ [b,fg#4f6f9a]default[fg#9aa1ac] · alpha/fast[-]    [fg#9aa1ac] │ [fg#9aa1ac]Update the parser 👩‍💻 中文
+[b,fg#4f6f9a]  [fg#9aa1ac]− [-]reviewer[fg#9aa1ac] · beta/judge[-]   [fg#9aa1ac] │ 
 [-]                            [fg#9aa1ac] │ [-]Updated parser.rs.
 [-]                            [fg#9aa1ac] │ [-]Tests pass.
 [-]                            [fg#9aa1ac] │ 
-[-]                            [fg#9aa1ac] │ [fg#9aa1ac]2 turns · 120 in · 30 out · fixture/model
+[-]                            [fg#9aa1ac] │ [fg#9aa1ac]2 turns · 120 in · 30 out · alpha/fast
 [-]                            [fg#9aa1ac] │ 
 [-]                            [fg#9aa1ac] │ 
 [-]                            [fg#9aa1ac] │ 
@@ -189,7 +189,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 80 / light=true / output
 [b]Subagents
 
-[fg#4f8a5b]✓ [b]worker[fg#4f8a5b] · Completed
+[fg#4f8a5b]✓ [b]default[fg#9aa1ac] · alpha/fast[fg#4f8a5b] · Completed
 [fg#9aa1ac]Update the parser 👩‍💻 中文
 
 [-]Updated parser.rs.
@@ -198,6 +198,6 @@ expression: "snapshots.join(\"\\n\\n\")"
 [b,fg#9aa1ac]Thinking
 [fg#9aa1ac]Check boundaries before editing.
 
-[fg#9aa1ac]2 turns · 120 in · 30 out · fixture/model
+[fg#9aa1ac]2 turns · 120 in · 30 out · alpha/fast
 
 [fg@0]↑/↓[fg@8] scroll · [fg@0]esc[fg@8] back · [fg@0]ctrl+x[fg@8] stop · [fg@0]ctrl+t[fg@8] hide thinking

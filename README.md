@@ -339,8 +339,9 @@ Disabling a module removes its commands. Plugins and [prompt templates](#skills-
 
   [modules/compaction](modules/compaction/README.md)
 - **Subagents.**
-  - The `subagent` tool runs built-in or user-defined agents: `scout`, `planner`, `reviewer`, `worker`, or `agents/*.md` from the profile or project.
-  - A dispatch is one task, a parallel batch, or a chain. A batch takes up to 8 tasks and runs 4 at once.
+  - The `subagent` tool runs a general-purpose subagent by default (`agent` omitted) or a custom agent defined in `agents/*.md` from the profile or project.
+  - Tasks can override `model` (`<provider>/<id>` or `inherit`) and `thinking`; the parent session receives a catalog of ready candidate models.
+  - A dispatch is one task, a parallel batch of up to 8 tasks, or a chain. Up to 8 child tasks run concurrently across the session, and extras queue.
   - Children have their own sessions and grants, within the parent's policy.
 
   [modules/subagents](modules/subagents/README.md)

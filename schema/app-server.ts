@@ -17,13 +17,9 @@ model: string | null,
  * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
  * requested thinking level when absent.
  */
-thinking: string | null, prompt: string, 
+thinking: string | null, prompt: string, path: string, 
 /**
- * Absent for built-in agents.
- */
-path: string | null, 
-/**
- * `builtin`, `user` or `project`.
+ * `user` or `project`.
  */
 source: string, };
 
@@ -33,7 +29,7 @@ export type AgentList = {
  */
 dir: string, 
 /**
- * Built-in agents, then definitions by name; a user definition hides a project one.
+ * Definitions by name; a user definition hides a project one.
  */
 agents: Array<AgentEntry>, };
 

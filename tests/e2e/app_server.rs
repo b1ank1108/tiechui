@@ -1282,20 +1282,12 @@ async fn agent_definitions_are_listed_saved_moved_and_deleted() {
             })
             .collect()
     };
-    let builtins = ["scout", "planner", "reviewer", "worker"]
-        .map(|name| (name.to_owned(), "builtin".to_owned()));
     let list = client.ok("agents/list", json!({"cwd": cwd})).await;
     assert_eq!(
         list["dir"],
         fixture.home.join("agents").display().to_string()
     );
-    let mut names = entries(&list);
-    names.sort();
-    let mut expected = builtins.to_vec();
-    expected.sort();
-    assert_eq!(names, expected);
-    assert!(list["agents"][0]["path"].is_null());
-    assert!(list["agents"][0]["thinking"].is_null());
+    assert_eq!(entries(&list), []);
 
     let user = fixture.home.join("agents").join("custom.md");
     std::fs::create_dir_all(user.parent().unwrap()).unwrap();
