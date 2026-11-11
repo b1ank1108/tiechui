@@ -227,6 +227,7 @@ compatibility.
 chui                                         # interactive, current directory
 chui --cwd ~/src/app --model gateway/example-model --thinking high
 chui --mode auto                             # permission mode for this run
+chui --yolo                                  # shortcut for --mode yolo
 chui --resume                                # pick a saved session
 chui --resume SESSION_ID
 chui exec "Explain the failing tests"        # headless, prints the answer
@@ -235,7 +236,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
 `chui exec` accepts:
 
-- `--model`, `--thinking`, `--mode` and `--cwd`;
+- `--model`, `--thinking`, `--mode`, `--yolo` and `--cwd`;
 - `--resume ID` (headless resume always needs an ID);
 - `--json`, which prints protocol events;
 - `--approval`, described in [Permissions and trust](#permissions-and-trust).
@@ -375,16 +376,22 @@ The **mode** decides what happens to a call the rules would ask about:
 | --- | --- |
 | `rules` (default) | You are asked |
 | `auto` | Edits inside the workspace pass. Anything else is reviewed by a one-off request to the session's model: allowed calls run, blocked calls return the reason to the model. After 3 blocks in a row or 20 in a session, or without model access, you are asked. Broad `bash` allows (`*`, interpreters, `npm run`, …) are ignored, so those commands are reviewed too |
-| `yolo` | Approved |
+| `yolo` | Approves asks (including protected-path writes and explicit `ask` rules), denies fail-closed rules without prompting and declines MCP elicitations |
 
 Set the mode with `permissions.mode` in the user config (project config cannot
-set it), or `--mode` for one run. `/permissions <mode>` switches the current
-session and saves the mode to `permissions.mode`, so a saved `yolo` applies to
-every later session until you switch back.
-In every mode, explicit denies apply, and writes to **protected paths** ask unless
-a user rule allows them: `.git`, `.agents`, `.claude`, `.tiechui`, `.vscode`,
-`.idea`, shell profiles, `.gitconfig`, `.mcp.json` and `.env` files. Invalid
-project rules never pass without you.
+set it), or pass `--mode` or `--yolo` for one run without modifying
+`config.toml` (`--yolo` conflicts with `--mode`, and in `chui exec` with an
+explicit `--approval`). `/permissions <mode>` switches the current session and
+saves the mode to `permissions.mode`, so a saved `yolo` applies to every later
+session until you switch back.
+Explicit `deny` rules apply in every mode. Writes to **protected paths** ask in
+`rules` and `auto` unless a user `protected_path` rule allows them: `.git`,
+`.agents`, `.claude`, `.tiechui`, `.vscode`, `.idea`, shell profiles,
+`.gitconfig`, `.mcp.json` and `.env` files. `yolo` approves those writes and
+explicit `ask` rules, declines MCP elicitations, and keeps `request_user_input`
+and folder, hook and plugin trust prompts. Invalid project permission rules fail
+closed. They ask in `rules` and `auto`, and `yolo` denies them immediately
+without prompting.
 
 Headless runs choose `--approval`:
 

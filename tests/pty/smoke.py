@@ -921,10 +921,17 @@ def model(f):
     s.exit()
 
 
+def tool_results(f):
+    return "\n".join(str(m["content"]) for m in f.mock.requests[-1]["messages"] if m["role"] == "tool")
+
+
 def approval(f):
     project = f.cwd / ".agents"
     project.mkdir()
-    (project / "config.toml").write_text('[[permissions.rules]]\nsurface="bash"\npattern="*"\naction="ask"\n')
+    (project / "config.toml").write_text(
+        '[[permissions.rules]]\nsurface="bash"\npattern="*"\naction="ask"\n'
+        '[[permissions.rules]]\nsurface="path"\npattern="blocked.secret"\naction="deny"\n'
+    )
     f.cli("trust", "allow")
     s = f.start()
     s.command("approval", "Run this command?")
@@ -938,11 +945,21 @@ def approval(f):
     s.draft("keep the fixture safe")
     s.send("\r")
     s.wait("APPROVAL_DONE")
-    results = [m["content"] for m in f.mock.requests[-1]["messages"] if m["role"] == "tool"]
-    s.check(any("keep the fixture safe" in str(result) for result in results), "Denial reason did not reach provider")
+    s.check("keep the fixture safe" in tool_results(f), "Denial reason did not reach provider")
     s.check((f.cwd / "allowed.txt").read_text() == "approved", "Allow once did not execute")
     s.check(not (f.cwd / "denied.txt").exists(), "Denied command executed")
     s.exit()
+    yolo = f.start("--yolo")
+    yolo.wait("⏵⏵ yolo")
+    yolo.command("yolo approval", "YOLO_DONE")
+    for prompt in (b"Run this command?", b"Apply these edits?", b"Allow this operation?"):
+        yolo.check(prompt not in yolo.raw, "Yolo mode opened an approval prompt")
+    yolo.check((f.cwd / ".env").read_text() == "SECRET=yolo\n", "Yolo protected write did not execute")
+    yolo.check((f.cwd / "yolo-bash.txt").read_text() == "yolo-bash", "Yolo ask command did not execute")
+    yolo.check(not (f.cwd / "blocked.secret").exists(), "Yolo executed a denied write")
+    yolo.check("Denied by policy" in tool_results(f), "Policy denial did not reach provider")
+    yolo.exit()
+    yolo.check("mode =" not in f.config.read_text(), "--yolo modified user config.toml")
 
 
 def consent(f):
@@ -1704,8 +1721,17 @@ CASES = {
     "theme": (theme, lambda: [Reply("```rs\nlet value = 42;\n```\n\nTHEME_HISTORY")]),
     "resume": (resume, lambda: [Reply("ALPHA_HISTORY"), Reply("BETA_HISTORY"), Reply("RESUMED_DONE")]),
     "model": (model, lambda: [Reply("BETA_DONE"), Reply("ALPHA_DONE")]),
-    "approval": (approval, lambda: [Reply(tools=[("bash", {"command": "printf approved > allowed.txt"})]),
-                                     Reply(tools=[("bash", {"command": "printf DENIED_SIDE_EFFECT > denied.txt"})]), Reply("APPROVAL_DONE")]),
+    "approval": (approval, lambda: [
+        Reply(tools=[("bash", {"command": "printf approved > allowed.txt"})]),
+        Reply(tools=[("bash", {"command": "printf DENIED_SIDE_EFFECT > denied.txt"})]),
+        Reply("APPROVAL_DONE"),
+        Reply(tools=[
+            ("write", {"path": ".env", "content": "SECRET=yolo\n"}),
+            ("bash", {"command": "printf yolo-bash > yolo-bash.txt"}),
+            ("write", {"path": "blocked.secret", "content": "nope\n"}),
+        ]),
+        Reply("YOLO_DONE"),
+    ]),
     "statusline": (statusline, lambda: [Reply("USAGE_DONE", usage=1000)]),
 }
 
