@@ -170,7 +170,14 @@ wait until `ToolCallStart` can carry a complete id and name. Completed calls mus
 have unique identities and object arguments. Reasoning uses the first non-empty
 field among `reasoning_content`, `reasoning`, and `reasoning_text` per delta,
 before text from the same chunk. The original field name stays in opaque replay
-data. All blocks complete in first-arrival order at `[DONE]` or EOF.
+data. Stream decoding records the last non-empty
+`extra_content.google.thought_signature` from assistant text deltas (including
+empty-content chunks) and tool-call deltas as
+`{"google":{"thought_signature":"..."}}` in block `opaque` metadata without
+synthesizing an empty text block. Request encoding replays valid signature
+`opaque` metadata on `assistant.extra_content` and `tool_calls[i].extra_content`,
+and leaves unsigned messages unchanged. All blocks complete in first-arrival
+order at `[DONE]` or EOF.
 
 A recognized, non-empty `finish_reason` is required; empty strings are absent.
 A missing `[DONE]` is accepted at clean
@@ -228,8 +235,10 @@ stream error.
   sent, although each message's reasoning level is persisted.
 - There are no vendor presets or other thinking formats; configure the eight
   compat fields explicitly.
-- Encrypted or structured `reasoning_details` and custom/grammar tools are not
-  supported; unsupported opaque replay is rejected.
+- Aside from `extra_content.google.thought_signature` on `openai-completions`,
+  other `extra_content` fields, encrypted or structured `reasoning_details`, and
+  custom/grammar tools are not supported; unrecognized `opaque` payloads are
+  rejected.
 - Prices are flat per model; there is no tiered pricing.
 
 ## Verification
@@ -244,8 +253,9 @@ levels, disabled thinking, and beta-header selection. A separate loopback socket
 server holds the connection open to test cancellation within 100 ms, an injected
 short read timeout before headers and during the body, and termination without EOF.
 Three OpenAI request snapshots cover first turn, tool-result images, and streamed
-reasoning replay on a later tool turn. Exact event tests cover text, reasoning,
-interleaved tools, errors, truncation, usage variants and missing `[DONE]`.
+reasoning replay on a later tool turn. Exact event and round-trip tests cover
+text, reasoning, interleaved tools, `thought_signature` replay, errors,
+truncation, usage variants and missing `[DONE]`.
 Two Responses request snapshots cover the first turn and encrypted reasoning,
 tool-result image and assistant replay; event tests cover summaries, calls
 completed without deltas, incomplete, failed and error events and truncation.
