@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tiechui_module_subagents::definitions::{Definition, directories, discover, render};
+use tiechui_plugin_api::parse_child_thinking;
 use tiechui_protocol::app::*;
 
 use super::prompts::{file_name, project, replace};
@@ -55,6 +56,7 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
                     description: agent.description,
                     tools: agent.tools,
                     model: agent.model,
+                    thinking: agent.thinking,
                     prompt: agent.prompt,
                 })
                 .collect();
@@ -75,6 +77,11 @@ fn scope(home: &Path, cwd: &Path, path: &Path) -> Option<bool> {
 
 fn save(home: &Path, p: AgentSaveParams) -> Result<(), String> {
     let name = file_name(&p.name)?;
+    p.thinking
+        .as_deref()
+        .map(parse_child_thinking)
+        .transpose()
+        .map_err(|e| e.0)?;
     let in_project = match (p.scope.as_str(), &p.cwd) {
         ("user", _) => false,
         ("project", Some(_)) => true,
@@ -102,6 +109,7 @@ fn save(home: &Path, p: AgentSaveParams) -> Result<(), String> {
         prompt: p.prompt,
         tools: p.tools.filter(|tools| !tools.is_empty()),
         model: p.model,
+        thinking: p.thinking,
         project: in_project,
         path: target.clone(),
     };

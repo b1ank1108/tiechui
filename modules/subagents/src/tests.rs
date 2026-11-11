@@ -300,22 +300,26 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
     let h = Harness::new();
     let directory = h.service.home.join("agents");
     std::fs::create_dir_all(&directory).unwrap();
-    let existing = "---\nname: old\ndescription: >\n  folded\npermission:\n  rules:\n  - allow: read\ntools:\n- bash\n# kept\n---\nOld";
-    let definition = definitions::Definition {
+    let existing = "---\n# header comment\nname: old\ndescription: >\n  folded\nthinking: low\npermission:\n  # rule comment\n  rules:\n  - allow: read\ntools:\n- bash\n# kept\n---\nOld";
+    let mut definition = definitions::Definition {
         name: "custom".into(),
         description: "Review: \"changes\"\nonly".into(),
         prompt: "\nNew prompt\n".into(),
         tools: Some(vec!["read".into(), "grep".into()]),
         model: Some("fake/b".into()),
+        thinking: Some("medium".into()),
         project: false,
         path: PathBuf::new(),
     };
     let text = definitions::render(existing, &definition);
+    assert!(text.contains("thinking: \"medium\"\n"), "{text}");
+    assert!(!text.contains("thinking: low"), "{text}");
+    assert!(text.contains("# header comment\n"), "{text}");
     assert!(
-        text.contains("permission:\n  rules:\n  - allow: read\n# kept\n---"),
+        text.contains("permission:\n  # rule comment\n  rules:\n  - allow: read\n# kept\n---"),
         "{text}"
     );
-    std::fs::write(directory.join("custom.md"), text).unwrap();
+    std::fs::write(directory.join("custom.md"), &text).unwrap();
     let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
     let custom = &agents["custom"];
     assert_eq!(custom.description, "Review: \"changes\" only");
@@ -325,7 +329,53 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         Some(&["read".to_owned(), "grep".to_owned()][..])
     );
     assert_eq!(custom.model.as_deref(), Some("fake/b"));
+    assert_eq!(custom.thinking.as_deref(), Some("medium"));
+    assert_eq!(agents["scout"].thinking, None);
     assert!(!agents["scout"].description.is_empty());
+
+    definition.thinking = None;
+    let cleared = definitions::render(&text, &definition);
+    assert!(!cleared.contains("thinking:"), "{cleared}");
+    assert!(cleared.contains("# header comment\n"), "{cleared}");
+    assert!(
+        cleared.contains("permission:\n  # rule comment\n  rules:\n  - allow: read\n# kept\n---"),
+        "{cleared}"
+    );
+    std::fs::write(directory.join("custom.md"), cleared).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["custom"].thinking, None);
+
+    for valid in [
+        "off", "minimal", "low", "medium", "high", "xhigh", "max", "inherit",
+    ] {
+        std::fs::write(
+            directory.join("valid.md"),
+            format!("---\nname: valid\ndescription: ok\nthinking: {valid}\n---\nBody"),
+        )
+        .unwrap();
+        let agents =
+            definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+        assert_eq!(agents["valid"].thinking.as_deref(), Some(valid));
+    }
+
+    std::fs::write(
+        directory.join("null_thinking.md"),
+        "---\nname: null_thinking\ndescription: ok\nthinking:\n---\nBody",
+    )
+    .unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["null_thinking"].thinking, None);
+
+    for invalid in ["bogus", "\"\"", "HIGH", "42", "true", "[low]"] {
+        std::fs::write(
+            directory.join("invalid.md"),
+            format!("---\nname: invalid\ndescription: bad\nthinking: {invalid}\n---\nBody"),
+        )
+        .unwrap();
+        let agents =
+            definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+        assert!(!agents.contains_key("invalid"), "accepted {invalid}");
+    }
 }
 
 #[tokio::test]

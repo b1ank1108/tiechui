@@ -464,6 +464,9 @@ pub struct AgentEntry {
     pub tools: Option<Vec<String>>,
     /// `provider/id`; the parent's model when absent.
     pub model: Option<String>,
+    /// `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
+    /// requested thinking level when absent.
+    pub thinking: Option<String>,
     pub prompt: String,
     /// Absent for built-in agents.
     pub path: Option<String>,
@@ -482,6 +485,8 @@ pub struct AgentSaveParams {
     pub description: String,
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
+    /// `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`.
+    pub thinking: Option<String>,
     pub prompt: String,
     /// The file being edited: rewritten in place keeping its other frontmatter, or removed
     /// when the name or scope changes.

@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use tiechui_plugin_api::{CancellationToken, ToolError, serde_json};
+use tiechui_plugin_api::{CancellationToken, ToolError, parse_child_thinking, serde_json};
 
 #[derive(Clone)]
 pub struct Definition {
@@ -12,8 +12,18 @@ pub struct Definition {
     pub prompt: String,
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub project: bool,
     pub path: PathBuf,
+}
+
+fn parse_thinking(value: Option<&YamlOwned>) -> Option<Option<String>> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Some(None);
+    };
+    let raw = value.as_str()?;
+    parse_child_thinking(raw).ok()?;
+    Some(Some(raw.to_owned()))
 }
 
 fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
@@ -50,6 +60,7 @@ fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
         prompt: prompt.trim().into(),
         tools,
         model: string("model"),
+        thinking: parse_thinking(value("thinking"))?,
         project,
         path,
     })
@@ -130,7 +141,7 @@ pub fn directories(home: &Path, cwd: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 /// A definition file with these fields; frontmatter keys other than `name`, `description`,
-/// `tools` and `model` in `existing` are kept.
+/// `tools`, `model` and `thinking` in `existing` are kept.
 pub fn render(existing: &str, definition: &Definition) -> String {
     let quote = |value: &str| serde_json::Value::from(value.replace('\n', " ")).to_string();
     let mut text = format!(
@@ -144,8 +155,13 @@ pub fn render(existing: &str, definition: &Definition) -> String {
             serde_json::Value::from(tools.clone())
         ));
     }
-    if let Some(model) = &definition.model {
-        text.push_str(&format!("model: {}\n", quote(model)));
+    for (key, value) in [
+        ("model", definition.model.as_deref()),
+        ("thinking", definition.thinking.as_deref()),
+    ] {
+        if let Some(value) = value {
+            text.push_str(&format!("{key}: {}\n", quote(value)));
+        }
     }
     let existing = existing
         .trim_start_matches('\u{feff}')
@@ -160,7 +176,7 @@ pub fn render(existing: &str, definition: &Definition) -> String {
         if !line.starts_with([' ', '\t', '-', '#'])
             && let Some((key, _)) = line.split_once(':')
         {
-            kept = !["name", "description", "tools", "model"].contains(&key.trim());
+            kept = !["name", "description", "tools", "model", "thinking"].contains(&key.trim());
         }
         if kept || line.starts_with('#') {
             text.push_str(line);

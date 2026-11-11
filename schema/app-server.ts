@@ -12,7 +12,12 @@ tools: Array<string> | null,
 /**
  * `provider/id`; the parent's model when absent.
  */
-model: string | null, prompt: string, 
+model: string | null, 
+/**
+ * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
+ * requested thinking level when absent.
+ */
+thinking: string | null, prompt: string, 
 /**
  * Absent for built-in agents.
  */
@@ -40,7 +45,11 @@ cwd: string | null,
 /**
  * `user` saves to `$TIECHUI_HOME/agents`, `project` to `<cwd>/.agents/agents`.
  */
-scope: string, name: string, description: string, tools: Array<string> | null, model: string | null, prompt: string, 
+scope: string, name: string, description: string, tools: Array<string> | null, model: string | null, 
+/**
+ * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`.
+ */
+thinking: string | null, prompt: string, 
 /**
  * The file being edited: rewritten in place keeping its other frontmatter, or removed
  * when the name or scope changes.

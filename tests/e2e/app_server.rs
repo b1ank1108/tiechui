@@ -1295,27 +1295,62 @@ async fn agent_definitions_are_listed_saved_moved_and_deleted() {
     expected.sort();
     assert_eq!(names, expected);
     assert!(list["agents"][0]["path"].is_null());
+    assert!(list["agents"][0]["thinking"].is_null());
 
     let user = fixture.home.join("agents").join("custom.md");
     std::fs::create_dir_all(user.parent().unwrap()).unwrap();
     std::fs::write(
         &user,
-        "---\nname: custom\ndescription: old\npermission:\n  mode: rules\n---\nOld",
+        "---\nname: custom\ndescription: old\npermission:\n  mode: rules\n# keep comment\n---\nOld",
     )
     .unwrap();
-    let save = |scope: &str, previous: Value| {
+    std::fs::write(
+        fixture.home.join("agents").join("broken.md"),
+        "---\nname: broken\ndescription: bad\nthinking: bogus\n---\nBroken",
+    )
+    .unwrap();
+    let save = |scope: &str, thinking: Value, previous: Value| {
         json!({"cwd": cwd, "scope": scope, "name": "custom", "description": "Checks: things",
-            "tools": ["read", "grep"], "model": "fixture/model", "prompt": "Check it", "previous": previous})
+            "tools": ["read", "grep"], "model": "fixture/model", "thinking": thinking,
+            "prompt": "Check it", "previous": previous})
     };
-    client.ok("agents/save", save("user", json!(user))).await;
+    for bad in [json!("bogus"), json!(""), json!("HIGH")] {
+        let error = client
+            .call("agents/save", save("user", bad.clone(), json!(user)))
+            .await
+            .unwrap_err();
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid thinking level"),
+            "{bad}: {error}"
+        );
+    }
+    assert!(
+        std::fs::read_to_string(&user)
+            .unwrap()
+            .contains("description: old")
+    );
+
+    client
+        .ok("agents/save", save("user", json!("medium"), json!(user)))
+        .await;
     let text = std::fs::read_to_string(&user).unwrap();
     assert!(
         text.contains(
-            "tools: [\"read\",\"grep\"]\nmodel: \"fixture/model\"\npermission:\n  mode: rules\n"
+            "tools: [\"read\",\"grep\"]\nmodel: \"fixture/model\"\nthinking: \"medium\"\npermission:\n  mode: rules\n# keep comment\n"
         ),
         "{text}"
     );
     let list = client.ok("agents/list", json!({"cwd": null})).await;
+    assert!(
+        list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["name"] != "broken")
+    );
     let custom = list["agents"]
         .as_array()
         .unwrap()
@@ -1326,28 +1361,50 @@ async fn agent_definitions_are_listed_saved_moved_and_deleted() {
     assert_eq!(
         custom,
         json!({"name": "custom", "description": "Checks: things", "tools": ["read", "grep"],
-            "model": "fixture/model", "prompt": "Check it", "path": user, "source": "user"})
+            "model": "fixture/model", "thinking": "medium", "prompt": "Check it",
+            "path": user, "source": "user"})
     );
+    client
+        .ok("agents/save", save("user", json!("inherit"), json!(user)))
+        .await;
+    let list = client.ok("agents/list", json!({"cwd": null})).await;
+    let custom = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "custom")
+        .unwrap();
+    assert_eq!(custom["thinking"], json!("inherit"));
     let error = client
-        .call("agents/save", save("user", Value::Null))
+        .call("agents/save", save("user", Value::Null, Value::Null))
         .await
         .unwrap_err();
     assert_eq!(error["message"], "custom already exists");
 
-    client.ok("agents/save", save("project", json!(user))).await;
+    client
+        .ok("agents/save", save("project", Value::Null, json!(user)))
+        .await;
     assert!(!user.exists());
     let project = fixture
         .cwd
         .canonicalize()
         .unwrap()
         .join(".agents/agents/custom.md");
+    let moved = std::fs::read_to_string(&project).unwrap();
+    assert!(!moved.contains("thinking:"), "{moved}");
     assert!(
-        std::fs::read_to_string(&project)
-            .unwrap()
-            .contains("permission:")
+        moved.contains("permission:\n  mode: rules\n# keep comment\n"),
+        "{moved}"
     );
     let list = client.ok("agents/list", json!({"cwd": cwd})).await;
-    assert!(entries(&list).contains(&("custom".into(), "project".into())));
+    let moved_entry = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "custom")
+        .unwrap();
+    assert_eq!(moved_entry["source"], json!("project"));
+    assert_eq!(moved_entry["thinking"], Value::Null);
     let outside = fixture.cwd.join("hello.txt");
     assert!(
         client
