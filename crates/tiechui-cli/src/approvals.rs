@@ -113,7 +113,6 @@ impl ElicitationHandler for Prompts {
         request: Value,
         cancel: CancellationToken,
     ) -> Result<Value, ToolError> {
-        // URL elicitations are declined rather than opened.
         if request["mode"] == "url" || self.mode.get() == PermissionMode::Yolo {
             return Ok(json!({"action": "decline"}));
         }

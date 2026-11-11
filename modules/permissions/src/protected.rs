@@ -1,5 +1,3 @@
-//! Sensitive workspace and home paths, and the bash allow rules that auto mode ignores.
-
 use std::path::{Component, Path, PathBuf};
 
 use tiechui_plugin_api::PermissionAction as Action;

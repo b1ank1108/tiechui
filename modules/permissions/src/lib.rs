@@ -306,10 +306,7 @@ impl Permissions {
                 Some(access.values[0].clone()),
                 false,
             );
-            // Only explicit user rules may allow; any scope may deny.
-            if gate.rule.surface != "protected_path"
-                || gate.rule.action != Action::Deny && gate.rule.origin != "user"
-            {
+            if !keeps_protected_rule(&gate.rule) {
                 gate.rule = Rule::new(
                     "protected_path",
                     "*",
@@ -837,6 +834,10 @@ impl Drop for Audit<'_> {
             let _ = self.failure();
         }
     }
+}
+
+fn keeps_protected_rule(rule: &Rule) -> bool {
+    rule.surface == "protected_path" && (rule.action == Action::Deny || rule.origin == "user")
 }
 
 fn synthetic_origin(origin: &'static str) -> &'static str {
