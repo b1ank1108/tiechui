@@ -146,15 +146,21 @@ async fn sanitization_handles_unicode_annotations_split_across_chunks() {
 
 #[tokio::test]
 async fn timeout_and_cancel_report_status_and_keep_output() {
-    for (command, expected) in [
-        ("sleep 30", "Command timed out after 0.05 seconds"),
+    // Kept output needs the shell to start and print first, which Git Bash on Windows can take
+    // longer than 50 ms to do.
+    for (command, timeout, expected) in [
+        ("sleep 30", 0.05, "Command timed out after 0.05 seconds"),
         (
             "printf '\\001ready\\033'; sleep 30",
-            "ready\n\nCommand timed out after 0.05 seconds",
+            2.0,
+            "ready\n\nCommand timed out after 2 seconds",
         ),
     ] {
         let result = BashTool::default()
-            .run(call(json!({"command":command,"timeout":0.05})), context())
+            .run(
+                call(json!({"command":command,"timeout":timeout})),
+                context(),
+            )
             .await
             .unwrap_err();
         assert_eq!(result.0, expected);
