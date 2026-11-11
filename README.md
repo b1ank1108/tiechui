@@ -523,7 +523,7 @@ just plugins-check                          # validates ../tiechui-plugins when 
 - The PTY suite is described in [tests/pty](tests/pty/README.md).
 
 **CI** (`.github/workflows/ci.yml`) runs `just check` and `just pty` on Linux
-and macOS. A Windows build and test runs as a non-blocking attempt.
+and macOS, and builds and runs the unit and doc tests on Windows.
 
 **Release** (`.github/workflows/release.yml`) runs on a `v*` tag that must match
 the workspace version:
@@ -558,13 +558,9 @@ Tiechui is young and changes quickly; config and session formats may still
 change before 1.0. Not yet supported:
 
 - an OS sandbox;
-- the OpenAI Responses wire;
 - subscription logins;
 - `chui mcp serve`;
 - Homebrew.
-
-Windows builds ship with each release, but the Windows CI job is not yet
-blocking.
 
 ## License
 

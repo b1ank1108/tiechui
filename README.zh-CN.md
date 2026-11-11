@@ -472,8 +472,8 @@ just plugins-check                          # 存在 ../tiechui-plugins 时校�
 - 磁盘较小时设置 `CARGO_INCREMENTAL=0`。
 - PTY 测试见 [tests/pty](tests/pty/README.md)。
 
-**CI**（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行 `just check` 和 `just pty`。
-Windows 构建和测试以不阻塞的方式运行。
+**CI**（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行 `just check` 和 `just pty`，
+在 Windows 上构建并运行单元测试和文档测试。
 
 **发布**（`.github/workflows/release.yml`）由与 workspace 版本一致的 `v*` tag 触发：
 
@@ -505,12 +505,9 @@ Windows 构建和测试以不阻塞的方式运行。
 Tiechui 还很年轻，变化很快；1.0 之前配置和会话格式仍可能改变。尚不支持：
 
 - 操作系统沙箱；
-- OpenAI Responses 协议；
 - 订阅登录；
 - `chui mcp serve`；
 - Homebrew。
-
-每个 release 都包含 Windows 构建，但 Windows 的 CI 任务目前还不阻塞合并。
 
 ## 许可证
 

@@ -263,9 +263,10 @@
           title: "资源菜单",
           candidates: () => fromSnapshots("resources__resource_and_permissions_snapshots", /^menu /),
           notes: [
-            N(">", "选中行粗体 Accent。"),
-            N("描述", "Tertiary，从中间省略（`A boun…e description`），首尾都可辨认。"),
-            N("窄屏", "不足 60 列时，来源与类型标签移到菜单底部的状态行。"),
+            N("Files  All", "首行是当前分组与匹配数，shift+tab 切换分组。"),
+            N("›", "选中行粗体 Accent。"),
+            N("描述", "Tertiary，放不下时在末尾截断。"),
+            N("窄屏", "不足 60 列时去掉右侧的类型列。"),
           ],
         },
         {
@@ -283,7 +284,8 @@
           title: "权限审批",
           candidates: () => fromSnapshots("app__prompt_layouts", /^\d+x\d+$/),
           notes: [
-            N("窄屏", "选项与规则行换成短文案，标题以 `…` 截断。"),
+            N("标题", "标题写明要做的事（Apply these edits? / Run this command?），右端是工具名与默认策略。"),
+            N("窄屏", "差异只留开头几行，过长的选项以 `…` 截断，标题右端让位。"),
             N("ctrl+o", "打开完整请求。"),
           ],
         },
@@ -314,28 +316,30 @@
         {
           title: "恢复会话",
           candidates: () => fromSnapshots("app__resume_layouts", undefined, {
-            extra: (_, part) => ({ 布局: { "100x16": "舒展", "100x12": "紧凑", "40x9": "窄屏" }[part.title] }),
+            extra: (_, part) => ({ 布局: { "100x16": "对话", "100x12": "详情", "40x9": "窄屏" }[part.title] }),
           }),
           notes: [
-            N("❯", "选中行。"),
-            N("[Cwd]", "方括号标出当前筛选与排序项，tab 在两组间切换焦点。"),
-            N("1 / 2", "页码贴在底部规则线右端。"),
-            N("ctrl+o", "在舒展与紧凑行之间切换。"),
+            N("›", "选中行。"),
+            N("This folder  All", "当前的筛选与排序项加粗，获得焦点的一组用 Accent；tab 切换焦点，←→ 改值。"),
+            N("│", "列表下方是选中会话的对话末尾；ctrl+e 加上会话详情，ctrl+t 打开完整转写。"),
+            N("1 / 2", "页码贴在底部提示行右端。"),
           ],
         },
         {
           title: "回退：消息",
           candidates: () => fromSnapshots("rewind__rewind_Messages"),
           notes: [
-            N("›", "选中行粗体，铺 5% 表面色。"),
+            N("›", "选中行粗体 Accent，最近一条标 latest。"),
             N("+24 −6", "增删统计分用 Success / Error，减号是 U+2212。"),
-            N("(1 uncounted)", "无法计数的文件单独说明，不算进数字。"),
           ],
         },
         {
           title: "回退：动作",
           candidates: () => fromSnapshots("rewind__rewind_Actions"),
-          notes: [N("动作", "恢复代码、对话或两者；不可用的项给出原因。")],
+          notes: [
+            N("动作", "恢复代码、对话或两者；不可用的项给出原因。"),
+            N("line counts unavailable", "无法计数的文件逐个注明，不算进标题右端的统计。"),
+          ],
         },
       ],
     },
