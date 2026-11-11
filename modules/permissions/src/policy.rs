@@ -176,7 +176,7 @@ pub(crate) fn compose(config: &PermissionsConfig) -> Vec<Rule> {
     }
     if config.project_invalid {
         for rule in &mut rules {
-            if rule.action == Action::Allow {
+            if rule.action != Action::Deny {
                 rule.action = Action::Ask;
                 rule.origin = "fail-closed";
             }

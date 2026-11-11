@@ -298,7 +298,7 @@ impl Permissions {
     }
 
     fn access_gates(&self, access: &Access, cwd: &Path, gates: &mut Vec<Gate>, tool: Option<&str>) {
-        if protected::protected(access) {
+        if protected::protected(access, &self.cwd, cwd) {
             let mut gate = self.gate(
                 "protected_path",
                 access.values.clone(),
@@ -310,7 +310,12 @@ impl Permissions {
             if gate.rule.surface != "protected_path"
                 || gate.rule.action != Action::Deny && gate.rule.origin != "user"
             {
-                gate.rule = Rule::new("protected_path", "*", Action::Ask, "builtin");
+                gate.rule = Rule::new(
+                    "protected_path",
+                    "*",
+                    Action::Ask,
+                    synthetic_origin(gate.rule.origin),
+                );
             }
             gates.push(gate);
         }
@@ -392,16 +397,19 @@ impl Permissions {
             for access in program.paths {
                 self.access_gates(&access, &shell_cwd, &mut gates, None);
             }
-            let fallback = policy::evaluate("bash", &["*".into()], &self.rules, &self.home).action;
+            let fallback_rule = policy::evaluate("bash", &["*".into()], &self.rules, &self.home);
+            let fallback = fallback_rule.action;
+            let origin = synthetic_origin(fallback_rule.origin);
             let mut units = Vec::new();
             for unit in program.units {
                 let pattern = command_pattern(&unit.values[0]);
                 let mut gate = self.gate("bash", unit.values, vec![pattern], None, false);
                 if fallback != Action::Allow && unit.wrapper && gate.rule.action == Action::Allow {
-                    gate.rule = Rule::new("bash", "<opaque-bash-wrapper>", Action::Ask, "builtin");
+                    gate.rule = Rule::new("bash", "<opaque-bash-wrapper>", Action::Ask, origin);
                 }
                 if gate.rule.surface == "*"
                     && gate.rule.action == Action::Ask
+                    && gate.rule.origin != "fail-closed"
                     && !writes
                     && unit.argv.as_deref().is_some_and(readonly::read_only)
                 {
@@ -420,7 +428,7 @@ impl Permissions {
             }
             if fallback != Action::Allow && program.unresolved {
                 units.push(Gate {
-                    rule: Rule::new("bash", "<unparsed-bash-subtree>", Action::Ask, "builtin"),
+                    rule: Rule::new("bash", "<unparsed-bash-subtree>", Action::Ask, origin),
                     ..self.gate(
                         "bash",
                         vec![command.into()],
@@ -621,7 +629,6 @@ impl Permissions {
                     }
                 }
             }
-            // Protected paths and broken project rules always reach the user.
             let settled = gate.surface != "protected_path" && gate.rule.origin != "fail-closed";
             let mut source = "approval";
             let decision = if let Some(verdict) = verdict {
@@ -631,7 +638,17 @@ impl Permissions {
                         reason: Some(reason),
                     },
                 }
-            } else if settled && mode == PermissionMode::Yolo {
+            } else if mode == PermissionMode::Yolo {
+                if gate.rule.origin == "fail-closed" {
+                    audit.write(gate, "denied", "fail-closed")?;
+                    return Ok(BeforeToolCall::Deny(denial(
+                        call,
+                        gate,
+                        "policy",
+                        Some("Invalid project permission configuration."),
+                        &self.cwd,
+                    )));
+                }
                 source = "yolo";
                 ApprovalDecision::AllowOnce
             } else if !settled && self.headless.is_some() {
@@ -819,6 +836,14 @@ impl Drop for Audit<'_> {
         if !self.finished {
             let _ = self.failure();
         }
+    }
+}
+
+fn synthetic_origin(origin: &'static str) -> &'static str {
+    if origin == "fail-closed" {
+        "fail-closed"
+    } else {
+        "builtin"
     }
 }
 

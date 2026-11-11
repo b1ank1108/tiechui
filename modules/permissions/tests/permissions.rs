@@ -859,6 +859,10 @@ async fn headless_modes_preserve_denies_and_default_never_prompts() {
         f.registry = Registry::from_modules(&[&module], &ModuleConfig::default()).unwrap();
         if policy == HeadlessPolicy::Unavailable && mode == PermissionMode::Yolo {
             assert_eq!(f.bash("rm temporary").await, BeforeToolCall::Allow);
+            assert_eq!(
+                f.call("write", json!({"path":".env"})).await,
+                BeforeToolCall::Allow
+            );
         } else {
             let text = denied(f.bash("rm temporary").await);
             assert!(text.contains(if policy == HeadlessPolicy::Deny {
@@ -867,6 +871,20 @@ async fn headless_modes_preserve_denies_and_default_never_prompts() {
                 "no interactive UI"
             }));
         }
+        let mut invalid = ModuleConfig::default();
+        invalid.permissions.project_invalid = true;
+        f.registry = Registry::from_modules(&[&module], &invalid).unwrap();
+        let text = denied(f.bash("git status").await);
+        assert!(
+            text.contains(
+                if policy == HeadlessPolicy::Deny || mode == PermissionMode::Yolo {
+                    "Denied by policy"
+                } else {
+                    "no interactive UI"
+                }
+            ),
+            "{text}"
+        );
         let mut config = ModuleConfig::default();
         config.permissions.rules =
             Some(serde_json::from_value(json!([rule("bash", "rm *", "deny")])).unwrap());
@@ -1173,12 +1191,8 @@ fn rules(value: Value) -> ModuleConfig {
 }
 
 #[tokio::test]
-async fn protected_paths_ask_in_every_mode_unless_user_rules_decide() {
-    for mode in [
-        PermissionMode::Rules,
-        PermissionMode::Auto,
-        PermissionMode::Yolo,
-    ] {
+async fn protected_paths_ask_in_rules_and_auto_and_pass_in_yolo_unless_denied() {
+    for mode in [PermissionMode::Rules, PermissionMode::Auto] {
         let mut f = Fixture::new(None);
         f.mode(mode, rules(json!([allow()])));
         for (tool, arguments) in [
@@ -1198,6 +1212,8 @@ async fn protected_paths_ask_in_every_mode_unless_user_rules_decide() {
             ("read", json!({"path":".env"})),
             ("write", json!({"path":".env.example"})),
             ("write", json!({"path":".claude/worktrees/a/src/lib.rs"})),
+            ("write", json!({"path":".agents/plans/plan.md"})),
+            ("write", json!({"path":".tiechui/state/rewind/snap.json"})),
             ("bash", json!({"command":"cat .git/config"})),
         ] {
             // Auto ignores the catch-all allow for bash and has no classifier here.
@@ -1210,6 +1226,29 @@ async fn protected_paths_ask_in_every_mode_unless_user_rules_decide() {
     let mut f = Fixture::new(None);
     f.mode(
         PermissionMode::Yolo,
+        rules(json!([
+            rule("bash", "git tag *", "ask"),
+            rule("path", "blocked.secret", "deny"),
+        ])),
+    );
+    for (tool, arguments) in [
+        ("write", json!({"path":".env"})),
+        ("write", json!({"path":".git/hooks/pre-commit"})),
+        ("bash", json!({"command":"git tag v1"})),
+    ] {
+        assert_eq!(f.call(tool, arguments).await, BeforeToolCall::Allow);
+    }
+    let reason = denied(f.call("write", json!({"path":"blocked.secret"})).await);
+    assert!(reason.contains("Denied by policy"), "{reason}");
+    assert_eq!(f.asks(), 0);
+    assert!(f.entries.lock().unwrap().iter().any(|entry| {
+        entry.data["surface"] == "protected_path"
+            && entry.data["outcome"] == "approved"
+            && entry.data["source"] == "yolo"
+    }));
+    let mut f = Fixture::new(None);
+    f.mode(
+        PermissionMode::Rules,
         rules(json!([allow(), rule("protected_path", "*.env", "allow")])),
     );
     assert_eq!(
@@ -1219,13 +1258,20 @@ async fn protected_paths_ask_in_every_mode_unless_user_rules_decide() {
     let mut config = rules(json!([allow()]));
     config.permissions.project_rules =
         serde_json::from_value(json!([rule("protected_path", "*", "allow")])).unwrap();
-    f.mode(PermissionMode::Yolo, config);
+    f.mode(PermissionMode::Rules, config);
     denied(f.call("write", json!({"path":".env"})).await);
     assert_eq!(f.asks(), 1);
+    let mut f = Fixture::new(None);
+    let mut config = rules(json!([allow()]));
+    config.permissions.project_rules =
+        serde_json::from_value(json!([rule("protected_path", "*", "deny")])).unwrap();
+    f.mode(PermissionMode::Yolo, config);
+    assert!(denied(f.call("write", json!({"path":".env"})).await).contains("Denied by policy"));
+    assert_eq!(f.asks(), 0);
 }
 
 #[tokio::test]
-async fn yolo_approves_asks_after_reviewers_but_not_fail_closed_rules() {
+async fn yolo_approves_asks_after_reviewers_and_denies_fail_closed_without_prompting() {
     struct Reviewer;
     #[async_trait]
     impl tiechui_plugin_api::ApprovalInterceptor for Reviewer {
@@ -1234,8 +1280,15 @@ async fn yolo_approves_asks_after_reviewers_but_not_fail_closed_rules() {
             call: &ToolCall,
             _: ToolContext,
         ) -> Result<Option<tiechui_plugin_api::ApprovalVerdict>, ToolError> {
-            Ok((call.arguments["command"] == "cargo publish")
-                .then(|| tiechui_plugin_api::ApprovalVerdict::Deny("hook refused".into())))
+            if call.arguments["command"] == "cargo publish" {
+                Ok(Some(tiechui_plugin_api::ApprovalVerdict::Deny(
+                    "hook refused".into(),
+                )))
+            } else if call.arguments["command"] == "cargo check" {
+                Ok(Some(tiechui_plugin_api::ApprovalVerdict::Allow))
+            } else {
+                Ok(None)
+            }
         }
     }
     let mut f = Fixture::new(None);
@@ -1248,6 +1301,7 @@ async fn yolo_approves_asks_after_reviewers_but_not_fail_closed_rules() {
         .register(&mut f.registry, &ModuleConfig::default())
         .unwrap();
     assert_eq!(f.bash("cargo test").await, BeforeToolCall::Allow);
+    assert_eq!(f.bash("cargo check").await, BeforeToolCall::Allow);
     assert_eq!(
         f.call("write", json!({"path":f.cwd.parent().unwrap().join("x")}))
             .await,
@@ -1260,13 +1314,194 @@ async fn yolo_approves_asks_after_reviewers_but_not_fail_closed_rules() {
             .lock()
             .unwrap()
             .iter()
-            .any(|entry| entry.data["source"] == "yolo")
+            .any(|entry| entry.data["source"] == "yolo" && entry.data["outcome"] == "approved")
     );
-    let mut config = rules(json!([allow()]));
-    config.permissions.project_invalid = true;
-    f.mode(PermissionMode::Yolo, config);
-    denied(f.bash("cargo test").await);
-    assert_eq!(f.asks(), 1);
+    for mut config in [ModuleConfig::default(), rules(json!([allow()]))] {
+        config.permissions.project_invalid = true;
+        let mut f = Fixture::new(None);
+        f.mode(PermissionMode::Yolo, config);
+        for (tool, arguments) in [
+            ("bash", json!({"command":"cargo test"})),
+            ("bash", json!({"command":"git status"})),
+            ("write", json!({"path":".env"})),
+        ] {
+            let text = denied(f.call(tool, arguments).await);
+            assert!(text.contains("Denied by policy"), "{text}");
+            assert!(
+                text.contains("Invalid project permission configuration."),
+                "{text}"
+            );
+        }
+        assert_eq!(f.asks(), 0);
+        assert!(f.entries.lock().unwrap().iter().all(|entry| {
+            entry.data["outcome"] == "denied" && entry.data["source"] == "fail-closed"
+        }));
+    }
+}
+
+#[tokio::test]
+async fn shell_path_extraction_separates_reads_writes_git_and_non_file_commands() {
+    let f = Fixture::new(Some(json!([allow()])));
+    for command in [
+        "git commit --allow-empty -m 'fix .env'",
+        "git add .env",
+        "git checkout -- .env",
+        "git clone https://example.com/repo.git",
+        "stat .env",
+        "file .env",
+        "diff .env .env.example",
+        "jq '.key' .env",
+        "sed 's/a/b/' .env",
+        "sort .env",
+        "tree .claude",
+        "uniq .env",
+        "sha256sum .env",
+        "cut -d= -f1 .env",
+        "tr 'a-z' 'A-Z' < .env",
+        "rg -g*.env /outside/pattern .env",
+        "find .git -name HEAD",
+        "cp .env copy.txt",
+        "dd if=.env of=copy.bin",
+        "cargo test .env",
+        "npm run .env",
+        "python3 app.py .env",
+        "echo .env",
+        "printf '%s' .env",
+    ] {
+        assert_eq!(f.bash(command).await, BeforeToolCall::Allow, "{command}");
+    }
+    assert_eq!(f.asks(), 0);
+
+    for command in [
+        "touch .env",
+        "mkdir .vscode",
+        "rm .env",
+        "rmdir .idea",
+        "truncate -s 0 .env",
+        "tee .env",
+        "chmod 0600 .env",
+        "chown root .env",
+        "chgrp wheel .env",
+        "cp copy.txt .env",
+        "cp -Starget copy.txt .env",
+        "cp -t .vscode copy.txt",
+        "cd sub && touch ../.env",
+        "mv copy.txt .env",
+        "ln -s copy.txt .env",
+        "install -m 0600 copy.txt .env",
+        "dd if=copy.bin of=.env",
+        "sed -i 's/a/b/' .env",
+        "sed -i '' 's/a/b/' .env",
+        "sed --in-place 's/a/b/' .env",
+        "sort -o .env copy.txt",
+        "tree -o .env",
+        "uniq copy.txt .env",
+        "find .claude/settings.json -delete",
+        "find src -fprint .env",
+        "find src -fprintf .env '%p\\n'",
+        "git diff --output=.env",
+        "git diff --output .env",
+        "git worktree add .claude/custom-hook",
+        "git clone https://example.com/repo.git .vscode",
+    ] {
+        let f = Fixture::new(Some(json!([allow()])));
+        let reason = denied(f.bash(command).await);
+        assert!(reason.contains("'protected_path'"), "{command}: {reason}");
+        assert_eq!(f.asks(), 1, "{command}");
+    }
+
+    let f = Fixture::new(Some(json!([
+        allow(),
+        rule("external_directory_read", "*", "deny"),
+    ])));
+    let outside = f.cwd.parent().unwrap().join("outside-target");
+    for command in [
+        format!("git -C {} status", outside.display()),
+        format!("git -C{} status", outside.display()),
+        format!("git diff --no-index a.txt {}", outside.display()),
+        format!("sed -f {} a.txt", outside.display()),
+    ] {
+        denied(f.bash(&command).await);
+    }
+    assert_eq!(f.asks(), 0);
+}
+
+#[tokio::test]
+async fn workspace_under_protected_ancestor_isolates_interior_and_keeps_sensitive_targets() {
+    let f = Fixture::new(None);
+    let skill_dir = f.home.join(".claude/skills/demo");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let module =
+        PermissionsModule::with_requester(skill_dir.clone(), f.home.clone(), f.prompter.clone())
+            .with_mode(PermissionMode::Auto);
+    let registry = Registry::from_modules(&[&module], &ModuleConfig::default()).unwrap();
+    let call = |name: &'static str, arguments: Value, cwd: PathBuf| {
+        let mut ctx = f.context();
+        ctx.cwd = cwd;
+        let interceptor = registry.interceptors()[0].interceptor.clone();
+        async move {
+            interceptor
+                .before(
+                    &ToolCall {
+                        id: "skill".into(),
+                        name: name.into(),
+                        arguments,
+                        opaque: None,
+                    },
+                    ctx,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        call("write", json!({"path":"SKILL.md"}), skill_dir.clone()).await,
+        BeforeToolCall::Allow
+    );
+    #[cfg(unix)]
+    {
+        let alias = f.cwd.join("symlink-home");
+        std::os::unix::fs::symlink(&f.home, &alias).unwrap();
+        let via_symlink = alias.join(".claude/skills/demo");
+        assert_eq!(
+            call("write", json!({"path":"SKILL.md"}), via_symlink).await,
+            BeforeToolCall::Allow
+        );
+    }
+    assert_eq!(f.asks(), 0);
+    for path in [".env", ".git/hooks/pre-commit", "../../settings.json"] {
+        let reason = denied(call("write", json!({"path":path}), skill_dir.clone()).await);
+        assert!(reason.contains("'protected_path'"), "{path}: {reason}");
+    }
+    assert_eq!(f.asks(), 3);
+
+    for direct in [f.home.join(".claude"), f.cwd.join(".git/modules/sub")] {
+        std::fs::create_dir_all(&direct).unwrap();
+        let prompter = Arc::new(Prompter::default());
+        let module =
+            PermissionsModule::with_requester(direct.clone(), f.home.clone(), prompter.clone())
+                .with_mode(PermissionMode::Auto);
+        let registry = Registry::from_modules(&[&module], &ModuleConfig::default()).unwrap();
+        let mut ctx = f.context();
+        ctx.cwd = direct.clone();
+        let reason = denied(
+            registry.interceptors()[0]
+                .interceptor
+                .before(
+                    &ToolCall {
+                        id: "direct".into(),
+                        name: "write".into(),
+                        arguments: json!({"path":"config"}),
+                        opaque: None,
+                    },
+                    ctx,
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(reason.contains("'protected_path'"), "{reason}");
+        assert_eq!(prompter.requests.lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]

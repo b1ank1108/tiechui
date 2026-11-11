@@ -486,7 +486,7 @@
           ]
         },
         {
-          "description": "Approves every ask except protected paths and fail-closed project rules.",
+          "description": "Approves every ask except fail-closed project rules, which are denied without prompting.",
           "type": "string",
           "enum": [
             "yolo"

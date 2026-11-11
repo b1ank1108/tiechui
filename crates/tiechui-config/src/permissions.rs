@@ -26,7 +26,7 @@ pub enum PermissionMode {
     Rules,
     /// Workspace edits pass; a model classifier reviews the remaining asks.
     Auto,
-    /// Approves every ask except protected paths and fail-closed project rules.
+    /// Approves every ask except fail-closed project rules, which are denied without prompting.
     Yolo,
 }
 
