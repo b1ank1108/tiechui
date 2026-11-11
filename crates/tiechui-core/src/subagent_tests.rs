@@ -1011,7 +1011,7 @@ async fn child_thinking_inherits_parent_requested_level_clamps_to_target_model_a
             ),
             invoke(
                 "spawn_child",
-                json!({"task": "clamp-up", "model": "beta/limited", "thinking": "medium"}),
+                json!({"task": "clamp-up", "model": "beta/limited", "thinking": "minimal"}),
             ),
             invoke(
                 "spawn_child",
@@ -1034,7 +1034,7 @@ async fn child_thinking_inherits_parent_requested_level_clamps_to_target_model_a
             answer("r4"),
             answer("r5"),
         ],
-        Some(ReasoningLevel::High),
+        Some(ReasoningLevel::Medium),
     )
     .await;
 
@@ -1044,9 +1044,9 @@ async fn child_thinking_inherits_parent_requested_level_clamps_to_target_model_a
     assert_eq!(parent_first.reasoning, None);
 
     for expected in [
-        Some(ReasoningLevel::High),
-        Some(ReasoningLevel::High),
-        Some(ReasoningLevel::High),
+        Some(ReasoningLevel::Medium),
+        Some(ReasoningLevel::Medium),
+        Some(ReasoningLevel::Low),
         Some(ReasoningLevel::High),
         None,
     ] {
