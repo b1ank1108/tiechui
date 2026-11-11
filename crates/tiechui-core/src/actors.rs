@@ -1,5 +1,8 @@
 use super::*;
-use tiechui_plugin_api::{ChildRequest, ChildRunner, StaticContext, ToolError, async_trait};
+use tiechui_plugin_api::{
+    CatalogModel, ChildRequest, ChildRunner, ModelCatalog, StaticContext, ToolError, async_trait,
+    parse_child_thinking,
+};
 
 struct UsageEvents;
 impl tiechui_plugin_api::RuntimeExtension for UsageEvents {
@@ -20,10 +23,132 @@ impl tiechui_plugin_api::RuntimeExtension for UsageEvents {
 }
 
 pub(super) struct Runner {
+    pub is_child: bool,
     pub providers: BTreeMap<String, Arc<dyn ModelProvider>>,
     pub model: ModelRef,
     pub thinking: Option<ReasoningLevel>,
     pub retry: Arc<dyn RetryPolicy>,
+}
+
+fn strip_provider<'a>(provider: &str, model: &'a tiechui_model::ModelId) -> &'a str {
+    model
+        .0
+        .strip_prefix(&format!("{provider}/"))
+        .unwrap_or(&model.0)
+}
+
+fn catalog_entry(
+    provider_name: &str,
+    provider: &dyn ModelProvider,
+    model_id: &tiechui_model::ModelId,
+) -> Option<CatalogModel> {
+    let capabilities = provider.capabilities(model_id);
+    if capabilities.context_window == 0 {
+        return None;
+    }
+    let id = strip_provider(provider_name, model_id).to_owned();
+    let thinking_levels = provider
+        .thinking_levels(model_id)
+        .into_iter()
+        .map(protocol_thinking)
+        .collect();
+    Some(CatalogModel {
+        model: format!("{provider_name}/{id}"),
+        provider: provider_name.to_owned(),
+        id,
+        reasoning: capabilities.reasoning,
+        thinking_levels,
+    })
+}
+
+impl Runner {
+    fn build_catalog(&self) -> ModelCatalog {
+        let active_id = strip_provider(&self.model.provider, &self.model.model);
+        let active = format!("{}/{active_id}", self.model.provider);
+        let mut models = Vec::new();
+        for (name, provider) in &self.providers {
+            for model_id in provider.models() {
+                if let Some(entry) = catalog_entry(name, provider.as_ref(), &model_id) {
+                    models.push(entry);
+                }
+            }
+        }
+        if !models.iter().any(|entry| entry.model == active)
+            && let Some(provider) = self.providers.get(&self.model.provider)
+            && let Some(entry) =
+                catalog_entry(&self.model.provider, provider.as_ref(), &self.model.model)
+        {
+            models.push(entry);
+        }
+        ModelCatalog {
+            is_child: self.is_child,
+            active,
+            models,
+        }
+    }
+
+    fn available_models_label(&self) -> String {
+        let catalog = self.build_catalog();
+        if catalog.models.is_empty() {
+            "none".into()
+        } else {
+            catalog
+                .models
+                .into_iter()
+                .map(|entry| entry.model)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+
+    fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
+        let Some(raw) = requested.filter(|value| value != "inherit") else {
+            return Ok(self.model.clone());
+        };
+        let Some((provider, _)) = raw
+            .split_once('/')
+            .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        else {
+            return Err(ToolError(format!(
+                "Invalid model '{raw}': expected <provider>/<id>. Available models: {}",
+                self.available_models_label()
+            )));
+        };
+        let target = tiechui_model::ModelId(raw.clone());
+        let ready = self
+            .providers
+            .get(provider)
+            .is_some_and(|instance| instance.capabilities(&target).context_window > 0);
+        if !ready {
+            return Err(ToolError(format!(
+                "Unknown or unavailable model '{raw}'. Available models: {}",
+                self.available_models_label()
+            )));
+        }
+        Ok(ModelRef {
+            provider: provider.into(),
+            model: target,
+        })
+    }
+
+    fn resolve_thinking(
+        &self,
+        model: &ModelRef,
+        requested: Option<String>,
+    ) -> Result<Option<ReasoningLevel>, ToolError> {
+        let desired = match requested.as_deref() {
+            Some(raw) => match parse_child_thinking(raw)? {
+                Some(explicit) => thinking_level(explicit),
+                None => self.thinking,
+            },
+            None => self.thinking,
+        };
+        let supported = self.providers.get(&model.provider).map_or_else(
+            || vec![None],
+            |provider| provider.thinking_levels(&model.model),
+        );
+        Ok(clamp(desired, &supported))
+    }
 }
 
 fn deliver(
@@ -42,6 +167,14 @@ fn deliver(
 
 #[async_trait]
 impl ChildRunner for Runner {
+    fn is_child(&self) -> bool {
+        self.is_child
+    }
+
+    fn model_catalog(&self) -> Option<ModelCatalog> {
+        Some(self.build_catalog())
+    }
+
     async fn run(
         &self,
         request: ChildRequest,
@@ -52,19 +185,11 @@ impl ChildRunner for Runner {
         if cancel.is_cancelled() {
             return Err(ToolError("Child cancelled".into()));
         }
-        let model = match request.model {
-            Some(model) => {
-                let (provider, _) = model
-                    .split_once('/')
-                    .ok_or_else(|| ToolError("Expected provider/model".into()))?;
-                ModelRef {
-                    provider: provider.into(),
-                    model: tiechui_model::ModelId(model),
-                }
-            }
-            None => self.model.clone(),
-        };
-        registry.register_context_provider(Arc::new(StaticContext(vec![request.system])));
+        let model = self.resolve_model(request.model)?;
+        let thinking = self.resolve_thinking(&model, request.thinking)?;
+        if !request.system.is_empty() {
+            registry.register_context_provider(Arc::new(StaticContext(vec![request.system])));
+        }
         registry.register_runtime(Arc::new(UsageEvents));
         if let Some(names) = request.tools {
             registry.restrict_tools(names);
@@ -80,12 +205,12 @@ impl ChildRunner for Runner {
         .map_err(|e| ToolError(e.to_string()))?;
         let thread_id = ThreadId(store.header().id.clone());
         let shutdown = cancel.child_token();
-        let mut handle = SessionActor::spawn(
+        let mut handle = SessionActor::spawn_child(
             store,
             SessionConfig {
                 compaction: Default::default(),
                 model,
-                thinking: self.thinking,
+                thinking,
                 providers: self.providers.clone(),
                 registry,
                 retry: self.retry.clone(),

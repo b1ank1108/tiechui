@@ -406,6 +406,7 @@ impl Service {
                         task: task.task,
                         system: agent.prompt.clone(),
                         model: agent.model.clone(),
+                        thinking: None,
                         tools: agent.tools.clone(),
                     },
                     registry,

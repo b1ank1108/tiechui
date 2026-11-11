@@ -65,6 +65,7 @@ pub struct SessionHandle {
 
 /// All mutable session and turn state lives in this task. Worker callbacks carry epochs.
 pub struct SessionActor {
+    child: bool,
     published_resources: std::sync::Mutex<Option<Vec<tiechui_protocol::Resource>>>,
     store: Option<SessionStore>,
     config: SessionConfig,
@@ -129,8 +130,25 @@ impl SessionActor {
     /// Open/create the store on a blocking thread before transferring ownership here.
     pub fn spawn(
         store: SessionStore,
+        config: SessionConfig,
+        shutdown: CancellationToken,
+    ) -> SessionHandle {
+        Self::spawn_with_role(store, config, shutdown, false)
+    }
+
+    pub(crate) fn spawn_child(
+        store: SessionStore,
+        config: SessionConfig,
+        shutdown: CancellationToken,
+    ) -> SessionHandle {
+        Self::spawn_with_role(store, config, shutdown, true)
+    }
+
+    fn spawn_with_role(
+        store: SessionStore,
         mut config: SessionConfig,
         shutdown: CancellationToken,
+        child: bool,
     ) -> SessionHandle {
         let (submissions, ops) = mpsc::channel(64);
         let (events, receiver) = broadcast::channel(1024);
@@ -141,6 +159,7 @@ impl SessionActor {
         let epoch = config.epoch;
         let sequence = store.entries().len() as u64;
         let actor = Self {
+            child,
             published_resources: std::sync::Mutex::new(None),
             thread: ThreadId(store.header().id.clone()),
             model: config.model.clone(),
@@ -370,7 +389,24 @@ impl SessionActor {
         self.emit(EventKind::ResourcesUpdated { resources });
     }
 
+    fn bind_actors(&self) {
+        if self.registry.actor_clients().is_empty() {
+            return;
+        }
+        let runner: Arc<dyn tiechui_plugin_api::ChildRunner> = Arc::new(actors::Runner {
+            is_child: self.child,
+            providers: self.config.providers.clone(),
+            model: self.model.clone(),
+            thinking: self.requested,
+            retry: self.config.retry.clone(),
+        });
+        for client in self.registry.actor_clients() {
+            client.bind(runner.clone());
+        }
+    }
+
     fn publish_session(&self) {
+        self.bind_actors();
         self.emit(EventKind::SessionUpdated {
             model: self.model_info(&self.model),
             thinking: protocol_thinking(self.thinking),
@@ -1971,14 +2007,7 @@ impl SessionActor {
             }
         }
         let (ctx, mut entries) = self.tool_context()?;
-        for client in self.registry.actor_clients() {
-            client.bind(Arc::new(actors::Runner {
-                providers: self.config.providers.clone(),
-                model: self.model.clone(),
-                thinking: self.thinking,
-                retry: self.config.retry.clone(),
-            }));
-        }
+        self.bind_actors();
         let turn_id = ctx.scope.turn_id.clone();
         for call in &calls {
             let id = ItemId(format!(

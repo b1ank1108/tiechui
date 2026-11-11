@@ -140,6 +140,15 @@ impl PermissionsModule {
         child.actor = Some(format!("Child {name}"));
         child.register(registry, &config)
     }
+    pub fn register_default_child(
+        &self,
+        registry: &mut Registry,
+        config: &ModuleConfig,
+    ) -> Result<(), ToolError> {
+        let mut child = self.clone();
+        child.actor = Some("Child default".into());
+        child.register(registry, config)
+    }
     pub fn headless(cwd: PathBuf, home: PathBuf, policy: HeadlessPolicy) -> Self {
         Self {
             policy_source: home.join(".tiechui/config.toml").display().to_string(),
@@ -1014,5 +1023,165 @@ impl tiechui_plugin_api::SessionObserver for Permissions {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.identity = None;
         sessions.rules.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiechui_plugin_api::{
+        PermissionRule,
+        protocol::{SessionEpoch, ThreadId, TurnId},
+        serde_json::json,
+        tools::ExecutionScope,
+    };
+
+    struct CapturingRequester {
+        requests: Mutex<Vec<ApprovalRequest>>,
+        decision: Mutex<ApprovalDecision>,
+    }
+
+    #[async_trait]
+    impl ApprovalRequester for CapturingRequester {
+        async fn request(
+            &self,
+            request: ApprovalRequest,
+            _: CancellationToken,
+        ) -> Result<ApprovalDecision, ToolError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(self.decision.lock().unwrap().clone())
+        }
+    }
+
+    fn test_context(cwd: &Path, thread: &str) -> ToolContext {
+        ToolContext {
+            invoker: None,
+            cwd: cwd.to_path_buf(),
+            branch: Arc::new(vec![]),
+            parent_session: None,
+            cancel: CancellationToken::new(),
+            updates: Arc::new(|_| {}),
+            append_entry: Arc::new(|_| Ok(())),
+            epoch: SessionEpoch(0),
+            scope: ExecutionScope {
+                thread_id: ThreadId(thread.into()),
+                turn_id: TurnId("turn".into()),
+            },
+            origin: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_child_skips_disk_default_agent_policy_and_isolates_child_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let cwd = dir.path().join("work");
+        std::fs::create_dir_all(home.join("agents")).unwrap();
+        std::fs::create_dir_all(cwd.join(".agents/agents")).unwrap();
+        std::fs::create_dir_all(cwd.join(".claude/agents")).unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        std::fs::write(
+            home.join("agents/default.md"),
+            "---\nname: default\ndescription: disk\npermission:\n  read: deny\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".agents/agents/default.md"),
+            "---\nname: default\ndescription: project\npermission:\n  ls: deny\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".claude/agents/default.md"),
+            "---\nname: default\ndescription: claude\npermission:\n  grep: deny\n---\n",
+        )
+        .unwrap();
+
+        let requester = Arc::new(CapturingRequester {
+            requests: Mutex::new(vec![]),
+            decision: Mutex::new(ApprovalDecision::AllowSession {
+                both_directions: false,
+            }),
+        });
+        let module =
+            PermissionsModule::with_requester(cwd.clone(), home.clone(), requester.clone());
+        let mut config = ModuleConfig::default();
+        config.permissions.rules = Some(vec![
+            PermissionRule {
+                surface: "*".into(),
+                pattern: "*".into(),
+                action: Action::Allow,
+                reason: None,
+            },
+            PermissionRule {
+                surface: "write".into(),
+                pattern: "*".into(),
+                action: Action::Ask,
+                reason: None,
+            },
+        ]);
+
+        let mut unnamed_a = Registry::default();
+        let mut unnamed_b = Registry::default();
+        module
+            .register_default_child(&mut unnamed_a, &config)
+            .unwrap();
+        module
+            .register_default_child(&mut unnamed_b, &config)
+            .unwrap();
+        assert!(unnamed_a.runtime_extensions().is_empty());
+
+        let call = |name: &str| ToolCall {
+            id: name.into(),
+            name: name.into(),
+            arguments: json!({"path": "note.txt", "content": "x"}),
+            opaque: None,
+        };
+        for tool in ["read", "ls", "grep"] {
+            assert_eq!(
+                unnamed_a.interceptors()[0]
+                    .interceptor
+                    .before(&call(tool), test_context(&cwd, "child-a"))
+                    .await
+                    .unwrap(),
+                BeforeToolCall::Allow,
+                "unnamed default child must not load {tool} rule from default.md"
+            );
+        }
+
+        assert_eq!(
+            unnamed_a.interceptors()[0]
+                .interceptor
+                .before(&call("write"), test_context(&cwd, "child-a"))
+                .await
+                .unwrap(),
+            BeforeToolCall::Allow
+        );
+        assert_eq!(
+            requester.requests.lock().unwrap()[0].actor.as_deref(),
+            Some("Child default")
+        );
+
+        *requester.decision.lock().unwrap() = ApprovalDecision::Deny { reason: None };
+        assert!(matches!(
+            unnamed_b.interceptors()[0]
+                .interceptor
+                .before(&call("write"), test_context(&cwd, "child-b"))
+                .await
+                .unwrap(),
+            BeforeToolCall::Deny(_)
+        ));
+
+        let mut named = Registry::default();
+        module
+            .register_child(&mut named, &config, &home, true, "default")
+            .unwrap();
+        assert!(matches!(
+            named.interceptors()[0]
+                .interceptor
+                .before(&call("read"), test_context(&cwd, "named"))
+                .await
+                .unwrap(),
+            BeforeToolCall::Deny(_)
+        ));
     }
 }
