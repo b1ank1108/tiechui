@@ -61,6 +61,9 @@ impl ChildRegistry for Children {
 
     fn build_default(&self, parent: &ToolContext) -> Result<Registry, ToolError> {
         let mut registry = self.base_registry()?;
+        registry.register_context_provider(Arc::new(StaticContext(vec![
+            super::exec::BASE_SYSTEM_PROMPT.into(),
+        ])));
         if self.config.modules.get("permissions") != Some(&false) {
             self.permissions
                 .register_default_child(&mut registry, &self.config)?;
@@ -185,6 +188,18 @@ mod tests {
         assert!(unnamed.tools().get("read").is_some());
         assert!(unnamed.tools().get("bash").is_some());
         assert!(unnamed.tools().get("subagent").is_none());
+        assert_eq!(unnamed.context_providers().len(), 1);
+        let fragments = unnamed.context_providers()[0]
+            .fragments(
+                &TurnInput {
+                    cwd: parent.cwd.clone(),
+                    content: vec![],
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fragments, vec![super::super::exec::BASE_SYSTEM_PROMPT]);
 
         let call = model::ToolCall {
             id: "read".into(),
@@ -202,6 +217,7 @@ mod tests {
         );
 
         let named = children.build(&parent, "default").unwrap();
+        assert!(named.context_providers().is_empty());
         assert!(matches!(
             named.interceptors()[0]
                 .interceptor

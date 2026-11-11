@@ -741,3 +741,697 @@ async fn sigint_during_bash_settles_session_and_can_resume() {
     assert_eq!(resumed.status.code(), Some(0), "{resumed:?}");
     fixture.server.verify().unwrap();
 }
+
+mod dual_subagents {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+    use tiechui_protocol::{AgentDispatch, AgentState};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    const BASE_CODING_PROMPT: &str = "You are Tiechui, a coding assistant. Use the available tools to complete the user's task. Read existing files before editing them. Keep answers concise.";
+    const VERIFY_SECRET: &str = "secret-tc-verify-key-999";
+
+    enum GatewayReply {
+        Text(String),
+        DelayedText(String, Duration),
+        Tools(Vec<(String, String, Value)>),
+    }
+
+    struct ConcurrencyTracker {
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl ConcurrencyTracker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            })
+        }
+
+        fn enter(&self) {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(current, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    struct MockGateway {
+        addr: SocketAddr,
+        requests: Arc<Mutex<Vec<Value>>>,
+        shutdown: CancellationToken,
+    }
+
+    impl Drop for MockGateway {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+        }
+    }
+
+    fn system_text(body: &Value) -> &str {
+        body["messages"]
+            .as_array()
+            .and_then(|messages| messages.first())
+            .filter(|msg| matches!(msg["role"].as_str(), Some("system" | "developer")))
+            .and_then(|msg| msg["content"].as_str())
+            .unwrap_or_default()
+    }
+
+    fn is_child_request(body: &Value) -> bool {
+        !system_text(body).contains("<subagent_models>")
+    }
+
+    fn has_tool_result(body: &Value) -> bool {
+        body["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .is_some_and(|msg| msg["role"] == "tool")
+    }
+
+    fn last_user_text(body: &Value) -> String {
+        body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .find(|msg| msg["role"] == "user")
+            .map(|msg| match &msg["content"] {
+                Value::String(text) => text.clone(),
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn encode_sse(reply: GatewayReply) -> (String, Duration) {
+        match reply {
+            GatewayReply::Text(text) => (sse_text(&text), Duration::ZERO),
+            GatewayReply::DelayedText(text, delay) => (sse_text(&text), delay),
+            GatewayReply::Tools(calls) => {
+                let wire_calls: Vec<_> = calls
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (id, name, args))| {
+                        json!({
+                            "index": index,
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args.to_string(),
+                            }
+                        })
+                    })
+                    .collect();
+                let sse = format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"index":0,"delta":{"tool_calls":wire_calls},"finish_reason":"tool_calls"}]}),
+                    json!({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8}}),
+                );
+                (sse, Duration::ZERO)
+            }
+        }
+    }
+
+    fn sse_text(text: &str) -> String {
+        format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}),
+        )
+    }
+
+    async fn read_post_json(stream: &mut TcpStream) -> Value {
+        let mut reader = BufReader::new(stream);
+        let mut content_length = 0usize;
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        assert!(
+            request_line.starts_with("POST /v1/chat/completions "),
+            "unexpected request line: {request_line}"
+        );
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).await.unwrap();
+            assert!(read > 0, "unexpected EOF while reading headers");
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    impl MockGateway {
+        async fn start(
+            tracker: Arc<ConcurrencyTracker>,
+            handler: impl Fn(&Value) -> GatewayReply + Send + Sync + 'static,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let shutdown = CancellationToken::new();
+            let handler = Arc::new(handler);
+            let recorded = requests.clone();
+            let stop = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    let accepted = tokio::select! {
+                        () = stop.cancelled() => break,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let Ok((mut stream, _)) = accepted else {
+                        break;
+                    };
+                    let handler = handler.clone();
+                    let recorded = recorded.clone();
+                    let tracker = tracker.clone();
+                    tokio::spawn(async move {
+                        let body = read_post_json(&mut stream).await;
+                        let child = is_child_request(&body);
+                        recorded.lock().unwrap().push(body.clone());
+                        let (sse, delay) = encode_sse(handler(&body));
+                        if child {
+                            tracker.enter();
+                        }
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        if child {
+                            tracker.leave();
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            sse.len(),
+                            sse
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            });
+            Self {
+                addr,
+                requests,
+                shutdown,
+            }
+        }
+
+        fn uri(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        fn requests(&self) -> Vec<Value> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn child_requests(&self) -> Vec<Value> {
+            self.requests()
+                .into_iter()
+                .filter(is_child_request)
+                .collect()
+        }
+    }
+
+    struct DualFixture {
+        root: TempDir,
+        home: PathBuf,
+        cwd: PathBuf,
+        alpha: MockGateway,
+        beta: MockGateway,
+        tracker: Arc<ConcurrencyTracker>,
+    }
+
+    impl DualFixture {
+        async fn new(
+            alpha_handler: impl Fn(&Value) -> GatewayReply + Send + Sync + 'static,
+            beta_handler: impl Fn(&Value) -> GatewayReply + Send + Sync + 'static,
+        ) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let cwd = root.path().join("work");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&cwd).unwrap();
+            let tracker = ConcurrencyTracker::new();
+            let alpha = MockGateway::start(tracker.clone(), alpha_handler).await;
+            let beta = MockGateway::start(tracker.clone(), beta_handler).await;
+            std::fs::write(
+                home.join("config.toml"),
+                "model = \"alpha/fast\"\nthinking = \"high\"\n\n[[permissions.rules]]\nsurface = \"subagent\"\npattern = \"*\"\naction = \"allow\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                home.join("providers.toml"),
+                format!(
+                    "[alpha]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key_env = \"TC_VERIFY_KEY\"\nmodels = [{{ id = \"fast\", context_window = 200000, max_output = 4096, reasoning = false }}]\n\n[beta]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key_env = \"TC_VERIFY_KEY\"\nmodels = [{{ id = \"judge\", context_window = 200000, max_output = 4096, reasoning = true }}]\n",
+                    alpha.uri(),
+                    beta.uri(),
+                ),
+            )
+            .unwrap();
+            Self {
+                root,
+                home,
+                cwd,
+                alpha,
+                beta,
+                tracker,
+            }
+        }
+
+        async fn exec_json(&self, prompt: &str) -> Output {
+            let mut command = support::command();
+            command
+                .env("TIECHUI_HOME", &self.home)
+                .env("HOME", self.root.path())
+                .env("TC_VERIFY_KEY", VERIFY_SECRET)
+                .args(["exec", prompt, "--cwd"])
+                .arg(&self.cwd)
+                .arg("--json")
+                .kill_on_drop(true);
+            tokio::time::timeout(Duration::from_secs(20), command.output())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        fn latest_store(&self) -> SessionStore {
+            let sessions =
+                tiechui_session::list(&self.home, &self.cwd, &CancellationToken::new()).unwrap();
+            assert!(!sessions.sessions.is_empty());
+            let store =
+                SessionStore::open_read_only(&sessions.sessions[0].path, &CancellationToken::new())
+                    .unwrap();
+            assert!(store.diagnostics().is_empty());
+            store
+        }
+
+        fn assert_no_secret_or_config_leak(&self) {
+            let providers_path = self.home.join("providers.toml").display().to_string();
+            for body in self
+                .alpha
+                .requests()
+                .into_iter()
+                .chain(self.beta.requests())
+            {
+                let raw = serde_json::to_string(&body).unwrap();
+                assert!(!raw.contains(VERIFY_SECRET), "secret leaked: {raw}");
+                assert!(!raw.contains("TC_VERIFY_KEY"), "env var name leaked: {raw}");
+                assert!(!raw.contains("providers.toml"), "config name leaked: {raw}");
+                assert!(!raw.contains(&providers_path), "config path leaked: {raw}");
+            }
+        }
+    }
+
+    fn settled_dispatches(store: &SessionStore) -> Vec<AgentDispatch> {
+        let mut by_id = std::collections::BTreeMap::new();
+        for entry in store.entries() {
+            if let tiechui_session::EntryKind::Custom { kind, data } = &entry.kind
+                && kind == "tiechui.subagents.record"
+            {
+                let dispatch: AgentDispatch = serde_json::from_value(data.clone()).unwrap();
+                by_id.insert(dispatch.id.clone(), dispatch);
+            }
+        }
+        by_id.into_values().collect()
+    }
+
+    fn tool_results(seen: &[Event]) -> Vec<(String, bool)> {
+        seen.iter()
+            .filter_map(|event| match &event.event {
+                EventKind::ItemCompleted {
+                    item:
+                        Item::Known(KnownItem::ToolResult {
+                            output, is_error, ..
+                        }),
+                    ..
+                } => Some((
+                    output["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    *is_error,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn subagent_default_single_chain_catalog_and_removed_builtin_preflight() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    return match last_user_text(body).as_str() {
+                        "single-job" => GatewayReply::Text("SINGLE_CHILD_DONE".into()),
+                        "chain-step-1" => GatewayReply::Text("STEP1_VALUE".into()),
+                        "chain-step-2:STEP1_VALUE" => GatewayReply::Text("CHAIN_FINAL_DONE".into()),
+                        other => panic!("unexpected child prompt: {other}"),
+                    };
+                }
+                if has_tool_result(body) {
+                    return GatewayReply::Text("PARENT_FINISHED".into());
+                }
+                match last_user_text(body).as_str() {
+                    "run-single" => GatewayReply::Tools(vec![(
+                        "call-single".into(),
+                        "subagent".into(),
+                        json!({"task": "single-job"}),
+                    )]),
+                    "run-chain" => GatewayReply::Tools(vec![(
+                        "call-chain".into(),
+                        "subagent".into(),
+                        json!({"chain": [
+                            {"task": "chain-step-1"},
+                            {"task": "chain-step-2:{previous}"}
+                        ]}),
+                    )]),
+                    "run-scout" => GatewayReply::Tools(vec![(
+                        "call-scout".into(),
+                        "subagent".into(),
+                        json!({"agent": "scout", "task": "explore repo"}),
+                    )]),
+                    other => panic!("unexpected parent prompt: {other}"),
+                }
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let single = fixture.exec_json("run-single").await;
+        assert_eq!(single.status.code(), Some(0), "{single:?}");
+        let single_results = tool_results(&events(&single));
+        assert_eq!(
+            single_results,
+            vec![("SINGLE_CHILD_DONE".to_owned(), false)]
+        );
+        let single_records = settled_dispatches(&fixture.latest_store());
+        assert_eq!(single_records.len(), 1);
+        assert_eq!(single_records[0].tasks[0].agent, "default");
+        assert_eq!(single_records[0].tasks[0].model, "alpha/fast");
+
+        let chain = fixture.exec_json("run-chain").await;
+        assert_eq!(chain.status.code(), Some(0), "{chain:?}");
+        let chain_results = tool_results(&events(&chain));
+        assert_eq!(chain_results, vec![("CHAIN_FINAL_DONE".to_owned(), false)]);
+        let chain_records = settled_dispatches(&fixture.latest_store());
+        assert_eq!(chain_records.len(), 1);
+        assert!(
+            chain_records[0]
+                .tasks
+                .iter()
+                .all(|t| t.agent == "default" && t.model == "alpha/fast")
+        );
+
+        let alpha_children = fixture.alpha.child_requests();
+        assert_eq!(alpha_children.len(), 3);
+        for child_body in &alpha_children {
+            let sys = system_text(child_body);
+            assert_eq!(sys, BASE_CODING_PROMPT);
+            assert!(!sys.contains("<subagent_models>"));
+            let has_subagent_tool = child_body["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|tool| tool["function"]["name"] == "subagent");
+            assert!(!has_subagent_tool);
+        }
+
+        let parent_sys = system_text(&fixture.alpha.requests()[0]).to_owned();
+        assert!(parent_sys.contains(BASE_CODING_PROMPT), "{parent_sys}");
+        assert!(
+            parent_sys.contains("Active session model: alpha/fast"),
+            "{parent_sys}"
+        );
+        assert!(
+            parent_sys.contains("- beta/judge (thinking: off, minimal, low, medium, high)"),
+            "{parent_sys}"
+        );
+
+        let child_count_before_scout = fixture.alpha.child_requests().len();
+        let scout = fixture.exec_json("run-scout").await;
+        assert_eq!(scout.status.code(), Some(0), "{scout:?}");
+        let scout_results = tool_results(&events(&scout));
+        assert_eq!(scout_results.len(), 1);
+        assert!(scout_results[0].1, "{scout_results:?}");
+        assert!(
+            scout_results[0].0.contains("Unknown agent: scout"),
+            "{}",
+            scout_results[0].0
+        );
+        assert_eq!(
+            fixture.alpha.child_requests().len(),
+            child_count_before_scout
+        );
+        assert!(fixture.beta.requests().is_empty());
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn subagent_cross_provider_tasks_override_model_and_clamp_requested_thinking() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    return match last_user_text(body).as_str() {
+                        "custom-inherit-task" => GatewayReply::Text("ALPHA_CUSTOM_OK".into()),
+                        "preset-inherit-task" => GatewayReply::Text("ALPHA_PRESET_OK".into()),
+                        other => panic!("unexpected alpha child prompt: {other}"),
+                    };
+                }
+                if has_tool_result(body) {
+                    return GatewayReply::Text("CROSS_DONE".into());
+                }
+                GatewayReply::Tools(vec![(
+                    "call-cross".into(),
+                    "subagent".into(),
+                    json!({"tasks": [
+                        {"task": "beta-default-high", "model": "beta/judge"},
+                        {"agent": "custom", "task": "custom-inherit-task", "model": "inherit"},
+                        {"agent": "judge_preset", "task": "preset-inherit-task", "model": "inherit"},
+                        {"task": "beta-explicit-low", "model": "beta/judge", "thinking": "low"}
+                    ]}),
+                )])
+            },
+            |body| match last_user_text(body).as_str() {
+                "beta-default-high" => GatewayReply::Text("BETA_HIGH_OK".into()),
+                "beta-explicit-low" => GatewayReply::Text("BETA_LOW_OK".into()),
+                other => panic!("unexpected beta child prompt: {other}"),
+            },
+        )
+        .await;
+
+        let agents_dir = fixture.home.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("custom.md"),
+            "---\nname: custom\ndescription: Alpha custom agent\nmodel: alpha/fast\n---\nYou are CustomHelper.",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_dir.join("judge_preset.md"),
+            "---\nname: judge_preset\ndescription: Beta preset agent\nmodel: beta/judge\nthinking: medium\n---\nYou are JudgePreset.",
+        )
+        .unwrap();
+
+        let output = fixture.exec_json("dispatch-cross").await;
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+        for parent_req in fixture
+            .alpha
+            .requests()
+            .into_iter()
+            .filter(|req| !is_child_request(req))
+        {
+            assert_eq!(parent_req["model"], "fast");
+            assert!(parent_req.get("reasoning_effort").is_none());
+        }
+
+        let alpha_children = fixture.alpha.child_requests();
+        assert_eq!(alpha_children.len(), 2);
+        for req in &alpha_children {
+            assert_eq!(req["model"], "fast");
+            assert!(req.get("reasoning_effort").is_none());
+        }
+        assert!(
+            alpha_children
+                .iter()
+                .any(|req| last_user_text(req) == "custom-inherit-task"
+                    && system_text(req) == "You are CustomHelper.")
+        );
+        assert!(
+            alpha_children
+                .iter()
+                .any(|req| last_user_text(req) == "preset-inherit-task"
+                    && system_text(req) == "You are JudgePreset.")
+        );
+
+        let beta_children = fixture.beta.child_requests();
+        assert_eq!(beta_children.len(), 2);
+        let high_req = beta_children
+            .iter()
+            .find(|req| last_user_text(req) == "beta-default-high")
+            .unwrap();
+        assert_eq!(high_req["model"], "judge");
+        assert_eq!(high_req["reasoning_effort"], "high");
+        assert_eq!(system_text(high_req), BASE_CODING_PROMPT);
+
+        let low_req = beta_children
+            .iter()
+            .find(|req| last_user_text(req) == "beta-explicit-low")
+            .unwrap();
+        assert_eq!(low_req["model"], "judge");
+        assert_eq!(low_req["reasoning_effort"], "low");
+        assert_eq!(system_text(low_req), BASE_CODING_PROMPT);
+
+        let results = tool_results(&events(&output));
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].1, "{results:?}");
+        let summary = &results[0].0;
+        for expected in [
+            "### [default · beta/judge] Completed",
+            "### [custom · alpha/fast] Completed",
+            "### [judge_preset · alpha/fast] Completed",
+            "BETA_HIGH_OK",
+            "ALPHA_CUSTOM_OK",
+            "ALPHA_PRESET_OK",
+            "BETA_LOW_OK",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "missing {expected} in:\n{summary}"
+            );
+        }
+
+        let dispatches = settled_dispatches(&fixture.latest_store());
+        assert_eq!(dispatches.len(), 1);
+        let pairs: Vec<_> = dispatches[0]
+            .tasks
+            .iter()
+            .map(|t| (t.agent.as_str(), t.model.as_str(), t.state))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("default", "beta/judge", AgentState::Completed),
+                ("custom", "alpha/fast", AgentState::Completed),
+                ("judge_preset", "alpha/fast", AgentState::Completed),
+                ("default", "beta/judge", AgentState::Completed),
+            ]
+        );
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn subagent_missing_model_preflight_lists_available_models_without_child_requests() {
+        let fixture = DualFixture::new(
+            |body| {
+                assert!(!is_child_request(body), "unexpected child request: {body}");
+                if has_tool_result(body) {
+                    return GatewayReply::Text("RECOVERED_AFTER_PREFLIGHT".into());
+                }
+                GatewayReply::Tools(vec![(
+                    "call-missing".into(),
+                    "subagent".into(),
+                    json!({"task": "do not spawn", "model": "missing/nope"}),
+                )])
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let output = fixture.exec_json("try-missing").await;
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(fixture.alpha.child_requests().is_empty());
+        assert!(fixture.beta.requests().is_empty());
+
+        let results = tool_results(&events(&output));
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "{results:?}");
+        assert!(results[0].0.contains("missing/nope"), "{}", results[0].0);
+        assert!(results[0].0.contains("alpha/fast"), "{}", results[0].0);
+        assert!(results[0].0.contains("beta/judge"), "{}", results[0].0);
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn subagent_ten_same_turn_calls_share_eight_slot_semaphore() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    let prompt = last_user_text(body);
+                    return GatewayReply::DelayedText(
+                        format!("ACK:{prompt}"),
+                        Duration::from_millis(150),
+                    );
+                }
+                if has_tool_result(body) {
+                    return GatewayReply::Text("ALL_TEN_DONE".into());
+                }
+                let calls = (0..10)
+                    .map(|index| {
+                        (
+                            format!("call-ten-{index}"),
+                            "subagent".to_owned(),
+                            json!({"task": format!("slot-job-{index}")}),
+                        )
+                    })
+                    .collect();
+                GatewayReply::Tools(calls)
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let output = fixture.exec_json("fanout-ten").await;
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+        let results = tool_results(&events(&output));
+        assert_eq!(results.len(), 10);
+        for (index, (text, is_error)) in results.iter().enumerate() {
+            assert!(!is_error, "call {index} failed: {text}");
+            assert_eq!(text, &format!("ACK:slot-job-{index}"));
+        }
+
+        assert_eq!(fixture.alpha.child_requests().len(), 10);
+        let peak = fixture.tracker.peak();
+        assert!(
+            peak > 1 && peak <= 8,
+            "expected 1 < peak <= 8 concurrent in-flight child requests, got {peak}"
+        );
+
+        let dispatches = settled_dispatches(&fixture.latest_store());
+        assert_eq!(dispatches.len(), 10);
+        assert!(dispatches.iter().all(|d| {
+            d.tasks.len() == 1
+                && d.tasks[0].agent == "default"
+                && d.tasks[0].model == "alpha/fast"
+                && d.tasks[0].state == AgentState::Completed
+        }));
+        fixture.assert_no_secret_or_config_leak();
+    }
+}

@@ -1423,12 +1423,20 @@ def subagents(f):
     s.send(ESC + "[1;3C")
     s.wait("Subagents")
     s.send(ESC + "[C")  # Any member selects the same dispatch for Ctrl+X.
+    s.wait("default · fixture/alpha")
     s.send("\x18")
-    s.wait("− worker")
+    s.wait("− default · fixture/alpha")
     s.send(ESC)
-    s.wait("PARENT_DONE")
+    s.wait("PARENT_DONE", absent="esc to interrupt")
     s.wait("· cancelled")
     s.wait("FINISHED_RESULT")
+    s.send("\x0f")
+    s.wait("· fixture/alpha")
+    s.send(ESC)
+    s.wait("›", absent="esc back")
+    s.command("/subagents", "✓ default · fixture/alpha")
+    s.send(ESC)
+    s.wait("›", absent="ctrl+x stop")
     s.check(len(f.mock.requests) == 5, "Cancellation started an unexpected child or request")
     s.exit()
 
@@ -1679,7 +1687,7 @@ CASES = {
     "t2-plugins": (t2_plugins, lambda: [Reply(tools=[("plugin_fixture_echo", {})]), Reply("T2_TOOL_DONE"), Reply(tools=[("plugin_fixture_echo", {"action": "deny"})]), Reply("T2_DENY_DONE")]),
     "composer-resources": (composer_resources, lambda: [Reply("RESOURCES_DONE")]),
     "diagnostics-disabled": (diagnostics_disabled, lambda: []),
-    "subagents": (subagents, lambda: [Reply(tools=[("subagent", {"tasks": [{"agent": "worker", "task": "edit a file"}, {"agent": "worker", "task": "inspect"}]})]), Reply(tools=[("write", {"path": "child.txt", "content": "child edit"})]), Reply("FINISHED_RESULT"), Reply("EDITED_WAIT", hold=True), Reply("PARENT_DONE")]),
+    "subagents": (subagents, lambda: [Reply(tools=[("subagent", {"tasks": [{"task": "edit a file"}, {"task": "inspect"}]})]), Reply(tools=[("write", {"path": "child.txt", "content": "child edit"})]), Reply("FINISHED_RESULT"), Reply("EDITED_WAIT", hold=True), Reply("PARENT_DONE")]),
     "range-compaction": (range_compaction, lambda: [Reply("OLD_RANGE_EVIDENCE " * 600 + "REPORT_END"), Reply(tools=[("context_status", {})]), Reply(tools=[("compact_history", lambda request: {"ranges": [{"candidate_id": first_candidate(request), "summary": RANGE_SUMMARY}]})]), Reply(tools=[("context_status", {})]), Reply("RANGE_COMPACTED"), Reply("RANGE_RELOADED")]),
     "compaction": (compaction, lambda: [Reply("FIRST_COMPACTION_TURN"), Reply("SECOND_COMPACTION_TURN", usage=9500), Reply("AUTO_CHECKPOINT", hold=True), Reply("AFTER_AUTO_COMPACTION"), Reply("MANUAL_CHECKPOINT", hold=True), Reply("COMPACTION_RESUMED")]),
     "btw": (btw, lambda: [Reply("MAIN_RUNNING", hold=True, tail=" MAIN_DONE"), Reply("SIDE_PARTIAL", hold=True, tail=" SIDE_DONE"), Reply("NEXT_MAIN_DONE")]),

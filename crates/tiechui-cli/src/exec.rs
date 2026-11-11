@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) type Failure = (i32, String);
 
+pub(crate) const BASE_SYSTEM_PROMPT: &str = "You are Tiechui, a coding assistant. Use the available tools to complete the user's task. Read existing files before editing them. Keep answers concise.";
 const MCP_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn config_error(error: impl ToString) -> Failure {
@@ -444,7 +445,7 @@ pub(crate) async fn prepare(
         interactive.then_some(prompts as Arc<dyn tiechui_module_subagents::ProjectConfirmation>),
     )
     .map_err(runtime_error)?;
-    registry.register_context_provider(Arc::new(StaticContext(vec!["You are Tiechui, a coding assistant. Use the available tools to complete the user's task. Read existing files before editing them. Keep answers concise.".into()])));
+    registry.register_context_provider(Arc::new(StaticContext(vec![BASE_SYSTEM_PROMPT.into()])));
     if loaded.config.modules.get("skills") != Some(&false) {
         let skills_cwd = context_cwd.clone();
         let skills_home = context_home.clone();
