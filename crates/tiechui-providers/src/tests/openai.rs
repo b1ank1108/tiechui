@@ -825,9 +825,10 @@ fn both_formats_use_per_model_level_maps_and_off_semantics() {
 #[tokio::test]
 async fn thought_signature_on_parallel_tool_calls_round_trips() {
     let fixture = concat!(
-        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"},\"extra_content\":{\"google\":{\"thought_signature\":\"AY89a19HjvBjUXH7\"}}}]}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}]}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"\"}}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig_initial\"}}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"},\"extra_content\":\"non_google_payload\"}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.txt\\\"\"},\"extra_content\":{\"google\":{\"thought_signature\":\"AY89a19HjvBjUXH7\"}}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"\"}}}]}}]}\n\n",
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6}}\n\n",
         "data: [DONE]\n\n",
     );
@@ -846,7 +847,8 @@ async fn thought_signature_on_parallel_tool_calls_round_trips() {
             Ok(args(0, "{\"path\":")),
             Ok(start(1, "call_1")),
             Ok(args(1, "{\"path\":\"b.txt\"}")),
-            Ok(args(0, "\"a.txt\"}")),
+            Ok(args(0, "\"a.txt\"")),
+            Ok(args(0, "}")),
             Ok(usage(10, 6, 0, 0)),
             Ok(complete(0, call_0.clone())),
             Ok(complete(1, call_1.clone())),
@@ -944,8 +946,9 @@ async fn thought_signature_on_leading_and_trailing_empty_text_deltas_round_trips
 
     let both = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_first\"}}}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Updated\"}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_last\"}}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Updated\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_inline\"}}}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":123}}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":42}}},\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     );
     assert_eq!(
@@ -960,7 +963,7 @@ async fn thought_signature_on_leading_and_trailing_empty_text_deltas_round_trips
                 Content::Text {
                     text: "Updated".into(),
                     opaque: Some(OpaqueData(
-                        "{\"google\":{\"thought_signature\":\"sig_last\"}}".into(),
+                        "{\"google\":{\"thought_signature\":\"sig_inline\"}}".into(),
                     )),
                 }
             )),

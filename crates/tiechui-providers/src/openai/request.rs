@@ -13,16 +13,25 @@ fn invalid(message: &str) -> ProviderError {
     ProviderError::new(ErrorKind::InvalidRequest, message)
 }
 
+pub(super) fn encode_thought_signature(extra: Option<&Value>) -> Option<OpaqueData> {
+    let sig = extra?
+        .get("google")?
+        .get("thought_signature")?
+        .as_str()
+        .filter(|sig| !sig.is_empty())?;
+    Some(OpaqueData(
+        json!({ "google": { "thought_signature": sig } }).to_string(),
+    ))
+}
+
 fn decode_google_extra(opaque: &OpaqueData) -> Result<Value, ProviderError> {
     let err = || invalid("unsupported assistant content or replay metadata");
     let parsed: Value = serde_json::from_str(&opaque.0).map_err(|_| err())?;
-    let valid = parsed
-        .as_object()
-        .filter(|obj| obj.len() == 1)
-        .and_then(|obj| obj.get("google")?.as_object())
-        .filter(|google| google.len() == 1)
-        .and_then(|google| google.get("thought_signature")?.as_str())
-        .is_some_and(|sig| !sig.is_empty());
+    let valid = parsed.as_object().is_some_and(|obj| obj.len() == 1)
+        && parsed["google"]
+            .as_object()
+            .is_some_and(|google| google.len() == 1)
+        && encode_thought_signature(Some(&parsed)).is_some();
     valid.then_some(parsed).ok_or_else(err)
 }
 

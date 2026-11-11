@@ -30,7 +30,7 @@ struct Delta {
     reasoning: Option<String>,
     reasoning_text: Option<String>,
     tool_calls: Option<Vec<ToolDelta>>,
-    extra_content: Option<ExtraContent>,
+    extra_content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -38,28 +38,12 @@ struct ToolDelta {
     index: Option<u32>,
     id: Option<String>,
     function: Option<FunctionDelta>,
-    extra_content: Option<ExtraContent>,
+    extra_content: Option<Value>,
 }
 
-#[derive(Deserialize)]
-struct ExtraContent {
-    google: Option<GoogleExtra>,
-}
-
-#[derive(Deserialize)]
-struct GoogleExtra {
-    thought_signature: Option<String>,
-}
-
-fn update_thought_signature(slot: &mut Option<OpaqueData>, extra: Option<ExtraContent>) {
-    if let Some(sig) = extra
-        .and_then(|extra| extra.google)
-        .and_then(|google| google.thought_signature)
-        .filter(|sig| !sig.is_empty())
-    {
-        *slot = Some(OpaqueData(
-            json!({ "google": { "thought_signature": sig } }).to_string(),
-        ));
+fn update_thought_signature(slot: &mut Option<OpaqueData>, extra: Option<&Value>) {
+    if let Some(opaque) = super::request::encode_thought_signature(extra) {
+        *slot = Some(opaque);
     }
 }
 
@@ -304,7 +288,7 @@ impl Decoder for State {
                     delta: text,
                 });
             }
-            update_thought_signature(&mut self.text_opaque, delta.extra_content);
+            update_thought_signature(&mut self.text_opaque, delta.extra_content.as_ref());
             for tool in delta.tool_calls.unwrap_or_default() {
                 // An existing index takes priority; later ids alias its first identity.
                 let index = tool
@@ -350,7 +334,7 @@ impl Decoder for State {
                     *stream_index = Some(incoming);
                     self.tools.insert(incoming, index);
                 }
-                update_thought_signature(&mut call.opaque, tool.extra_content);
+                update_thought_signature(&mut call.opaque, tool.extra_content.as_ref());
                 if let Some(id) = tool.id.filter(|id| !id.is_empty()) {
                     self.tool_ids.insert(id.clone(), index);
                     if call.id.is_empty() {
