@@ -1,7 +1,6 @@
 use super::*;
 use tiechui_plugin_api::{
-    CatalogModel, ChildRequest, ChildRunner, ChildThinking, ModelCatalog, StaticContext, ToolError,
-    async_trait,
+    CatalogModel, ChildRequest, ChildRunner, ModelCatalog, StaticContext, ToolError, async_trait,
 };
 
 struct UsageEvents;
@@ -75,7 +74,7 @@ impl Runner {
     }
 
     fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
-        let Some(raw) = requested.filter(|value| value != "inherit") else {
+        let Some(raw) = requested else {
             return Ok(self.model.clone());
         };
         let Some((provider, _)) = raw
@@ -107,11 +106,11 @@ impl Runner {
     fn resolve_thinking(
         &self,
         model: &ModelRef,
-        requested: Option<ChildThinking>,
+        requested: Option<ThinkingLevel>,
     ) -> Option<ReasoningLevel> {
         let desired = match requested {
-            Some(ChildThinking::Level(explicit)) => thinking_level(explicit),
-            None | Some(ChildThinking::Inherit) => self.thinking,
+            Some(explicit) => thinking_level(explicit),
+            None => self.thinking,
         };
         let supported = self.providers.get(&model.provider).map_or_else(
             || vec![None],

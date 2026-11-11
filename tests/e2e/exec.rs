@@ -812,7 +812,11 @@ mod dual_subagents {
     }
 
     fn is_child_request(body: &Value) -> bool {
-        !system_text(body).contains("<subagent_models>")
+        !body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
     }
 
     fn has_tool_result(body: &Value) -> bool {
@@ -1172,18 +1176,13 @@ mod dual_subagents {
                 .all(|t| t.agent == "default" && t.model == "alpha/fast")
         );
 
+        assert_eq!(fixture.alpha.requests().len(), 7);
         let alpha_children = fixture.alpha.child_requests();
         assert_eq!(alpha_children.len(), 3);
         for child_body in &alpha_children {
             let sys = system_text(child_body);
             assert_eq!(sys, BASE_CODING_PROMPT);
             assert!(!sys.contains("<subagent_models>"));
-            let has_subagent_tool = child_body["tools"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|tool| tool["function"]["name"] == "subagent");
-            assert!(!has_subagent_tool);
         }
 
         let parent_sys = system_text(&fixture.alpha.requests()[0]).to_owned();
@@ -1208,6 +1207,7 @@ mod dual_subagents {
             "{}",
             scout_results[0].0
         );
+        assert_eq!(fixture.alpha.requests().len(), 9);
         assert_eq!(
             fixture.alpha.child_requests().len(),
             child_count_before_scout
@@ -1370,6 +1370,7 @@ mod dual_subagents {
 
         let output = fixture.exec_json("try-missing").await;
         assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(fixture.alpha.requests().len(), 2);
         assert!(fixture.alpha.child_requests().is_empty());
         assert!(fixture.beta.requests().is_empty());
 

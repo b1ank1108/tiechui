@@ -23,7 +23,7 @@ struct RecordedRequest {
     task: String,
     system: String,
     model: Option<String>,
-    thinking: Option<ChildThinking>,
+    thinking: Option<ThinkingLevel>,
     tools: Option<Vec<String>>,
 }
 
@@ -106,11 +106,8 @@ impl ChildRunner for Runner {
         let resolved_model = request
             .model
             .clone()
-            .filter(|m| m != "inherit")
             .unwrap_or_else(|| self.catalog.lock().unwrap().active.clone());
-        let (provider, model_id) = resolved_model
-            .split_once('/')
-            .map_or(("", resolved_model.as_str()), |(p, id)| (p, id));
+        let (provider, model_id) = resolved_model.split_once('/').unwrap();
         events(event(EventKind::SessionUpdated {
             model: ModelInfo {
                 provider: provider.into(),
@@ -460,18 +457,12 @@ async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
     assert_eq!(by_task("t0").model.as_deref(), Some("beta/judge"));
     assert_eq!(by_task("t0").thinking, None);
     assert_eq!(by_task("t1").model.as_deref(), Some("alpha/fast"));
-    assert_eq!(
-        by_task("t1").thinking,
-        Some(ChildThinking::Level(ThinkingLevel::Low))
-    );
+    assert_eq!(by_task("t1").thinking, Some(ThinkingLevel::Low));
     assert_eq!(by_task("t1").tools, Some(vec!["read".into()]));
     assert_eq!(by_task("t2").model, None);
     assert_eq!(by_task("t2").thinking, None);
     assert_eq!(by_task("t3").model.as_deref(), Some("beta/judge"));
-    assert_eq!(
-        by_task("t3").thinking,
-        Some(ChildThinking::Level(ThinkingLevel::High))
-    );
+    assert_eq!(by_task("t3").thinking, Some(ThinkingLevel::High));
     assert_eq!(by_task("t4").model, None);
     assert_eq!(by_task("t4").thinking, None);
 

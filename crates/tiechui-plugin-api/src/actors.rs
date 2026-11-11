@@ -31,7 +31,7 @@ pub struct ChildRequest {
     pub task: String,
     pub system: String,
     pub model: Option<String>,
-    pub thinking: Option<ChildThinking>,
+    pub thinking: Option<protocol::ThinkingLevel>,
     pub tools: Option<Vec<String>>,
 }
 

@@ -267,7 +267,7 @@ struct PreparedTask {
     task: String,
     cwd: Option<String>,
     model: Option<String>,
-    thinking: Option<ChildThinking>,
+    thinking: Option<ThinkingLevel>,
 }
 
 fn parse_mode(value: &Value) -> Result<(&'static str, Vec<RawTask>), ToolError> {
@@ -374,7 +374,7 @@ fn prepare_task(
     };
     let thinking = match task.thinking.or(agent_thinking) {
         None | Some(ChildThinking::Inherit) => None,
-        Some(level @ ChildThinking::Level(_)) => Some(level),
+        Some(ChildThinking::Level(level)) => Some(level),
     };
     if let Some(m) = model.as_deref() {
         runner.validate_model(m)?;
@@ -387,17 +387,6 @@ fn prepare_task(
         model,
         thinking,
     })
-}
-
-fn prepare_tasks(
-    tasks: Vec<ValidatedTask>,
-    agents: &BTreeMap<String, definitions::Definition>,
-    runner: &dyn ChildRunner,
-) -> Result<Vec<PreparedTask>, ToolError> {
-    tasks
-        .into_iter()
-        .map(|task| prepare_task(task, agents, runner))
-        .collect()
 }
 
 struct DispatchTool {
@@ -629,7 +618,10 @@ impl Service {
         let scope = call.arguments["agentScope"].as_str().unwrap_or("user");
         let agents = definitions::discover(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
         let runner = self.bound_runner()?;
-        let tasks = prepare_tasks(raw_tasks, &agents, runner.as_ref())?;
+        let tasks = raw_tasks
+            .into_iter()
+            .map(|task| prepare_task(task, &agents, runner.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
         self.confirm_project_agents(&tasks, &ctx.cancel).await?;
         let cancel = ctx.cancel.child_token();
         self.record_start(&call.id, mode, &tasks, &ctx, &cancel)?;
@@ -863,14 +855,6 @@ fn resolve_task_state(buffer: &Collector, cancel: &CancellationToken) -> AgentSt
     }
 }
 
-fn qualify_model(model: &ModelInfo) -> String {
-    if model.provider.is_empty() {
-        model.id.clone()
-    } else {
-        format!("{}/{}", model.provider, model.id)
-    }
-}
-
 struct Collector {
     published: std::time::Instant,
     partial: bool,
@@ -1028,7 +1012,9 @@ impl Collector {
                     self.turns += 1;
                     self.next_response = true;
                 }
-                EventKind::SessionUpdated { model, .. } => self.model = qualify_model(model),
+                EventKind::SessionUpdated { model, .. } => {
+                    self.model = format!("{}/{}", model.provider, model.id);
+                }
                 EventKind::TurnCompleted { turn } => self.status = Some(turn.status),
                 EventKind::Error { message } => self.error = Some(message.clone()),
                 _ => {}

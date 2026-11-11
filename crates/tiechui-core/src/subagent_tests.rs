@@ -574,10 +574,18 @@ impl Tool for SpawnChildTool {
             .unwrap()
             .clone()
             .ok_or_else(|| ToolError("unbound runner".into()))?;
-        let thinking = call.arguments["thinking"]
+        let model = call.arguments["model"]
+            .as_str()
+            .filter(|v| *v != "inherit")
+            .map(str::to_owned);
+        let thinking = match call.arguments["thinking"]
             .as_str()
             .map(tiechui_plugin_api::parse_child_thinking)
-            .transpose()?;
+            .transpose()?
+        {
+            Some(tiechui_plugin_api::ChildThinking::Level(level)) => Some(level),
+            None | Some(tiechui_plugin_api::ChildThinking::Inherit) => None,
+        };
         let mut child_registry = Registry::default();
         let nested_probe = if call.arguments["probe_child_catalog"] == true {
             let nested = Arc::new(ChildProbe::default());
@@ -601,7 +609,7 @@ impl Tool for SpawnChildTool {
                         .unwrap_or("child")
                         .to_owned(),
                     system: "child-system".into(),
-                    model: call.arguments["model"].as_str().map(str::to_owned),
+                    model,
                     thinking,
                     tools: None,
                 },
