@@ -3,7 +3,7 @@ members = ["modules/ptc", "modules/tool-search", "modules/subagents", "modules/c
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -11,14 +11,14 @@ license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 rquickjs = { version = "0.14.0", features = ["allocator"] }
-tiechui-module-ptc = { version = "0.2.0", path = "modules/ptc" }
-tiechui-module-tool-search = { version = "0.2.0", path = "modules/tool-search" }
-tiechui-module-subagents = { version = "0.2.0", path = "modules/subagents" }
-tiechui-module-compaction = { version = "0.2.0", path = "modules/compaction" }
-tiechui-module-goal = { version = "0.2.0", path = "modules/goal" }
-tiechui-module-loop = { version = "0.2.0", path = "modules/loop" }
-tiechui-module-btw = { version = "0.2.0", path = "modules/btw" }
-tiechui-module-rewind = { version = "0.2.0", path = "modules/rewind" }
+tiechui-module-ptc = { version = "0.3.0", path = "modules/ptc" }
+tiechui-module-tool-search = { version = "0.3.0", path = "modules/tool-search" }
+tiechui-module-subagents = { version = "0.3.0", path = "modules/subagents" }
+tiechui-module-compaction = { version = "0.3.0", path = "modules/compaction" }
+tiechui-module-goal = { version = "0.3.0", path = "modules/goal" }
+tiechui-module-loop = { version = "0.3.0", path = "modules/loop" }
+tiechui-module-btw = { version = "0.3.0", path = "modules/btw" }
+tiechui-module-rewind = { version = "0.3.0", path = "modules/rewind" }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 base64 = "0.22.1"
@@ -53,30 +53,30 @@ sha2 = "0.10.9"
 similar = "2.7"
 syntect = { version = "5.3", default-features = false, features = ["parsing", "plist-load", "regex-fancy"] }
 tempfile = "3.23.0"
-tiechui-config = { version = "0.2.0", path = "crates/tiechui-config" }
-tiechui-core = { version = "0.2.0", path = "crates/tiechui-core" }
-tiechui-plugin-api = { version = "0.2.0", path = "crates/tiechui-plugin-api" }
-tiechui-plugin-sdk = { version = "0.2.0", path = "crates/tiechui-plugin-sdk" }
+tiechui-config = { version = "0.3.0", path = "crates/tiechui-config" }
+tiechui-core = { version = "0.3.0", path = "crates/tiechui-core" }
+tiechui-plugin-api = { version = "0.3.0", path = "crates/tiechui-plugin-api" }
+tiechui-plugin-sdk = { version = "0.3.0", path = "crates/tiechui-plugin-sdk" }
 ts-rs = { version = "12.0.1", features = ["serde-json-impl", "no-serde-warnings"] }
-tiechui-module-ask = { version = "0.2.0", path = "modules/ask" }
-tiechui-module-exec = { version = "0.2.0", path = "modules/exec" }
-tiechui-module-editing = { version = "0.2.0", path = "modules/editing" }
-tiechui-module-context = { version = "0.2.0", path = "modules/context" }
-tiechui-module-context-files = { version = "0.2.0", path = "modules/context-files" }
-tiechui-module-skills = { version = "0.2.0", path = "modules/skills" }
-tiechui-module-prompts = { version = "0.2.0", path = "modules/prompts" }
-tiechui-module-permissions = { version = "0.2.0", path = "modules/permissions" }
-tiechui-module-hooks = { version = "0.2.0", path = "modules/hooks" }
-tiechui-module-plugins = { version = "0.2.0", path = "modules/plugins" }
-tiechui-module-mcp = { version = "0.2.0", path = "modules/mcp" }
-tiechui-exec = { version = "0.2.0", path = "crates/tiechui-exec" }
-tiechui-model = { version = "0.2.0", path = "crates/tiechui-model" }
-tiechui-protocol = { version = "0.2.0", path = "crates/tiechui-protocol" }
-tiechui-providers = { version = "0.2.0", path = "crates/tiechui-providers" }
-tiechui-session = { version = "0.2.0", path = "crates/tiechui-session" }
-tiechui-tools = { version = "0.2.0", path = "crates/tiechui-tools" }
-tiechui-tui = { version = "0.2.0", path = "crates/tiechui-tui" }
-tiechui-workspace = { version = "0.2.0", path = "crates/tiechui-workspace" }
+tiechui-module-ask = { version = "0.3.0", path = "modules/ask" }
+tiechui-module-exec = { version = "0.3.0", path = "modules/exec" }
+tiechui-module-editing = { version = "0.3.0", path = "modules/editing" }
+tiechui-module-context = { version = "0.3.0", path = "modules/context" }
+tiechui-module-context-files = { version = "0.3.0", path = "modules/context-files" }
+tiechui-module-skills = { version = "0.3.0", path = "modules/skills" }
+tiechui-module-prompts = { version = "0.3.0", path = "modules/prompts" }
+tiechui-module-permissions = { version = "0.3.0", path = "modules/permissions" }
+tiechui-module-hooks = { version = "0.3.0", path = "modules/hooks" }
+tiechui-module-plugins = { version = "0.3.0", path = "modules/plugins" }
+tiechui-module-mcp = { version = "0.3.0", path = "modules/mcp" }
+tiechui-exec = { version = "0.3.0", path = "crates/tiechui-exec" }
+tiechui-model = { version = "0.3.0", path = "crates/tiechui-model" }
+tiechui-protocol = { version = "0.3.0", path = "crates/tiechui-protocol" }
+tiechui-providers = { version = "0.3.0", path = "crates/tiechui-providers" }
+tiechui-session = { version = "0.3.0", path = "crates/tiechui-session" }
+tiechui-tools = { version = "0.3.0", path = "crates/tiechui-tools" }
+tiechui-tui = { version = "0.3.0", path = "crates/tiechui-tui" }
+tiechui-workspace = { version = "0.3.0", path = "crates/tiechui-workspace" }
 trash = "5.2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-util = "0.7.18"
