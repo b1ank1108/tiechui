@@ -24,40 +24,6 @@ impl ModelCatalog {
             .iter()
             .filter(|entry| entry.model != self.active)
     }
-
-    pub fn available_label(&self) -> String {
-        if self.models.is_empty() {
-            "none".into()
-        } else {
-            self.models
-                .iter()
-                .map(|entry| entry.model.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    }
-}
-
-pub fn split_child_model<'a>(
-    model: &'a str,
-    catalog: &ModelCatalog,
-) -> Result<(&'a str, &'a str), ToolError> {
-    model
-        .split_once('/')
-        .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
-        .ok_or_else(|| {
-            ToolError(format!(
-                "Invalid model '{model}': expected <provider>/<id>. Available models: {}",
-                catalog.available_label()
-            ))
-        })
-}
-
-pub fn unknown_child_model_error(model: &str, catalog: &ModelCatalog) -> ToolError {
-    ToolError(format!(
-        "Unknown or unavailable model '{model}'. Available models: {}",
-        catalog.available_label()
-    ))
 }
 
 pub struct ChildRequest {

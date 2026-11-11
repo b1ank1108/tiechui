@@ -2002,7 +2002,6 @@ impl SessionActor {
             }
         }
         let (ctx, mut entries) = self.tool_context()?;
-        self.bind_actors();
         let turn_id = ctx.scope.turn_id.clone();
         for call in &calls {
             let id = ItemId(format!(

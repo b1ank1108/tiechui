@@ -1,7 +1,7 @@
 use super::*;
 use tiechui_plugin_api::{
     CatalogModel, ChildRequest, ChildRunner, ChildThinking, ModelCatalog, StaticContext, ToolError,
-    async_trait, split_child_model, unknown_child_model_error,
+    async_trait,
 };
 
 struct UsageEvents;
@@ -60,19 +60,43 @@ fn catalog_entry(
 }
 
 impl Runner {
+    fn available_models_label(&self) -> String {
+        let catalog = self.model_catalog();
+        if catalog.models.is_empty() {
+            "none".into()
+        } else {
+            catalog
+                .models
+                .iter()
+                .map(|entry| entry.model.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+
     fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
         let Some(raw) = requested.filter(|value| value != "inherit") else {
             return Ok(self.model.clone());
         };
-        let catalog = self.model_catalog();
-        let (provider, _) = split_child_model(&raw, &catalog)?;
+        let Some((provider, _)) = raw
+            .split_once('/')
+            .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        else {
+            return Err(ToolError(format!(
+                "Invalid model '{raw}': expected <provider>/<id>. Available models: {}",
+                self.available_models_label()
+            )));
+        };
         let target = tiechui_model::ModelId(raw.clone());
         let ready = self
             .providers
             .get(provider)
             .is_some_and(|instance| instance.capabilities(&target).context_window > 0);
         if !ready {
-            return Err(unknown_child_model_error(&raw, &catalog));
+            return Err(ToolError(format!(
+                "Unknown or unavailable model '{raw}'. Available models: {}",
+                self.available_models_label()
+            )));
         }
         Ok(ModelRef {
             provider: provider.into(),

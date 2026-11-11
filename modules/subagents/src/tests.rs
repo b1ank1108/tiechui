@@ -67,15 +67,15 @@ impl ChildRunner for Runner {
         self.catalog.lock().unwrap().clone()
     }
     fn validate_model(&self, model: &str) -> Result<(), ToolError> {
-        if model == "inherit" {
+        let catalog = self.model_catalog();
+        if catalog.models.iter().any(|entry| entry.model == model) {
             return Ok(());
         }
-        let catalog = self.model_catalog();
-        split_child_model(model, &catalog)?;
-        if !catalog.models.iter().any(|entry| entry.model == model) {
-            return Err(unknown_child_model_error(model, &catalog));
-        }
-        Ok(())
+        let available: Vec<_> = catalog.models.iter().map(|e| e.model.as_str()).collect();
+        Err(ToolError(format!(
+            "unavailable '{model}': {}",
+            available.join(", ")
+        )))
     }
     async fn run(
         &self,
