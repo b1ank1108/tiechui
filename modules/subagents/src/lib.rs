@@ -200,12 +200,13 @@ impl ContextProvider for Service {
             .lock()
             .map_err(|e| ToolError(e.to_string()))?
             .clone();
-        let Some(runner) = runner.filter(|runner| !runner.is_child()) else {
+        let Some(runner) = runner else {
             return Ok(vec![]);
         };
-        let Some(catalog) = runner.model_catalog().filter(|catalog| !catalog.is_child) else {
+        let catalog = runner.model_catalog();
+        if catalog.is_child {
             return Ok(vec![]);
-        };
+        }
         Ok(vec![format_catalog(&catalog)])
     }
 }
@@ -245,13 +246,21 @@ fn spec() -> ToolSpec {
     }
 }
 
-#[derive(Clone, serde::Deserialize)]
-struct Task {
+#[derive(serde::Deserialize)]
+struct RawTask {
     agent: Option<String>,
     task: String,
     cwd: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
+}
+
+struct ValidatedTask {
+    agent: Option<String>,
+    task: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    thinking: Option<ChildThinking>,
 }
 
 struct PreparedTask {
@@ -260,10 +269,10 @@ struct PreparedTask {
     task: String,
     cwd: Option<String>,
     model: Option<String>,
-    thinking: Option<String>,
+    thinking: Option<ChildThinking>,
 }
 
-fn parse_mode(value: &Value) -> Result<(&'static str, Vec<Task>), ToolError> {
+fn parse_mode(value: &Value) -> Result<(&'static str, Vec<RawTask>), ToolError> {
     let has = |key: &str| value.get(key).is_some_and(|v| !v.is_null());
     let single = ["task", "agent", "cwd", "model", "thinking"]
         .into_iter()
@@ -280,16 +289,16 @@ fn parse_mode(value: &Value) -> Result<(&'static str, Vec<Task>), ToolError> {
         let parsed = serde_json::from_value(tasks.clone()).map_err(|e| ToolError(e.to_string()))?;
         return Ok(("chain", parsed));
     }
-    let parsed: Task =
+    let parsed: RawTask =
         serde_json::from_value(value.clone()).map_err(|e| ToolError(e.to_string()))?;
     Ok(("single", vec![parsed]))
 }
 
-fn validate_raw_task(task: &Task) -> Result<(), ToolError> {
-    if task.task.trim().is_empty() {
+fn validate_raw_task(raw: RawTask) -> Result<ValidatedTask, ToolError> {
+    if raw.task.trim().is_empty() {
         return Err(ToolError("Tasks must not be empty".into()));
     }
-    if task
+    if raw
         .agent
         .as_deref()
         .is_some_and(|agent| agent.trim().is_empty())
@@ -298,23 +307,32 @@ fn validate_raw_task(task: &Task) -> Result<(), ToolError> {
             "Agent name must not be blank; omit `agent` to use the default subagent".into(),
         ));
     }
-    if let Some(thinking) = task.thinking.as_deref() {
-        parse_child_thinking(thinking)?;
-    }
-    Ok(())
+    let thinking = raw
+        .thinking
+        .as_deref()
+        .map(parse_child_thinking)
+        .transpose()?;
+    Ok(ValidatedTask {
+        agent: raw.agent,
+        task: raw.task,
+        cwd: raw.cwd,
+        model: raw.model,
+        thinking,
+    })
 }
 
-fn parameters(value: &Value) -> Result<(&'static str, Vec<Task>), ToolError> {
-    let (mode, tasks) = parse_mode(value)?;
-    if tasks.is_empty() {
+fn parameters(value: &Value) -> Result<(&'static str, Vec<ValidatedTask>), ToolError> {
+    let (mode, raw_tasks) = parse_mode(value)?;
+    if raw_tasks.is_empty() {
         return Err(ToolError("Tasks must not be empty".into()));
     }
-    if mode == "parallel" && tasks.len() > MAX_CONCURRENT_TASKS {
+    if mode == "parallel" && raw_tasks.len() > MAX_CONCURRENT_TASKS {
         return Err(ToolError("At most 8 parallel tasks are allowed".into()));
     }
-    for task in &tasks {
-        validate_raw_task(task)?;
-    }
+    let tasks = raw_tasks
+        .into_iter()
+        .map(validate_raw_task)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok((mode, tasks))
 }
 
@@ -333,19 +351,12 @@ fn unknown_agent_error(
     ))
 }
 
-fn resolve_override(task: Option<&str>, agent: Option<&str>) -> Option<String> {
-    match task.or(agent) {
-        None | Some("inherit") => None,
-        Some(value) => Some(value.to_owned()),
-    }
-}
-
 fn prepare_task(
-    raw: Task,
+    task: ValidatedTask,
     agents: &BTreeMap<String, definitions::Definition>,
     runner: &dyn ChildRunner,
 ) -> Result<PreparedTask, ToolError> {
-    let (label, custom_agent) = match raw.agent {
+    let (label, custom_agent) = match task.agent {
         None => ("default".to_owned(), None),
         Some(name) => {
             let def = agents
@@ -356,33 +367,34 @@ fn prepare_task(
         }
     };
     let agent_model = custom_agent.as_ref().and_then(|def| def.model.as_deref());
-    let agent_thinking = custom_agent
-        .as_ref()
-        .and_then(|def| def.thinking.as_deref());
-    let model = resolve_override(raw.model.as_deref(), agent_model);
-    let thinking = resolve_override(raw.thinking.as_deref(), agent_thinking);
+    let agent_thinking = custom_agent.as_ref().and_then(|def| def.thinking);
+    let model = match task.model.as_deref().or(agent_model) {
+        None | Some("inherit") => None,
+        Some(value) => Some(value.to_owned()),
+    };
+    let thinking = match task.thinking.or(agent_thinking) {
+        None | Some(ChildThinking::Inherit) => None,
+        Some(level @ ChildThinking::Level(_)) => Some(level),
+    };
     if let Some(m) = model.as_deref() {
         runner.validate_model(m)?;
-    }
-    if let Some(level) = thinking.as_deref() {
-        parse_child_thinking(level)?;
     }
     Ok(PreparedTask {
         label,
         custom_agent,
-        task: raw.task,
-        cwd: raw.cwd,
+        task: task.task,
+        cwd: task.cwd,
         model,
         thinking,
     })
 }
 
 fn prepare_tasks(
-    raw_tasks: Vec<Task>,
+    tasks: Vec<ValidatedTask>,
     agents: &BTreeMap<String, definitions::Definition>,
     runner: &dyn ChildRunner,
 ) -> Result<Vec<PreparedTask>, ToolError> {
-    raw_tasks
+    tasks
         .into_iter()
         .map(|task| prepare_task(task, agents, runner))
         .collect()

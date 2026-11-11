@@ -23,11 +23,10 @@ struct RecordedRequest {
     task: String,
     system: String,
     model: Option<String>,
-    thinking: Option<String>,
+    thinking: Option<ChildThinking>,
     tools: Option<Vec<String>>,
 }
 
-#[derive(Default)]
 struct Runner {
     current: AtomicUsize,
     maximum: AtomicUsize,
@@ -35,9 +34,25 @@ struct Runner {
     cleaned: AtomicUsize,
     tasks: Mutex<Vec<String>>,
     requests: Mutex<Vec<RecordedRequest>>,
-    catalog: Mutex<Option<ModelCatalog>>,
+    catalog: Mutex<ModelCatalog>,
     hold_until_eight: Option<Arc<tokio::sync::Barrier>>,
 }
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self {
+            current: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+            started: AtomicUsize::new(0),
+            cleaned: AtomicUsize::new(0),
+            tasks: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
+            catalog: Mutex::new(sample_catalog(false, false)),
+            hold_until_eight: None,
+        }
+    }
+}
+
 fn event(kind: EventKind) -> Event {
     Event {
         submission_id: None,
@@ -48,15 +63,19 @@ fn event(kind: EventKind) -> Event {
 }
 #[async_trait]
 impl ChildRunner for Runner {
-    fn is_child(&self) -> bool {
-        self.catalog
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|c| c.is_child)
-    }
-    fn model_catalog(&self) -> Option<ModelCatalog> {
+    fn model_catalog(&self) -> ModelCatalog {
         self.catalog.lock().unwrap().clone()
+    }
+    fn validate_model(&self, model: &str) -> Result<(), ToolError> {
+        if model == "inherit" {
+            return Ok(());
+        }
+        let catalog = self.model_catalog();
+        split_child_model(model, &catalog)?;
+        if !catalog.models.iter().any(|entry| entry.model == model) {
+            return Err(unknown_child_model_error(model, &catalog));
+        }
+        Ok(())
     }
     async fn run(
         &self,
@@ -70,17 +89,17 @@ impl ChildRunner for Runner {
             task: request.task.clone(),
             system: request.system.clone(),
             model: request.model.clone(),
-            thinking: request.thinking.clone(),
+            thinking: request.thinking,
             tools: request.tools.clone(),
         });
         if request.task == "panic" {
             panic!("isolated fixture");
         }
-        self.started.fetch_add(1, Ordering::SeqCst);
+        let order = self.started.fetch_add(1, Ordering::SeqCst) + 1;
         let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
         self.maximum.fetch_max(active, Ordering::SeqCst);
         if let Some(barrier) = &self.hold_until_eight
-            && self.started.load(Ordering::SeqCst) <= 8
+            && order <= 8
         {
             barrier.wait().await;
         }
@@ -88,14 +107,7 @@ impl ChildRunner for Runner {
             .model
             .clone()
             .filter(|m| m != "inherit")
-            .or_else(|| {
-                self.catalog
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|c| c.active.clone())
-            })
-            .unwrap_or_else(|| "alpha/fast".into());
+            .unwrap_or_else(|| self.catalog.lock().unwrap().active.clone());
         let (provider, model_id) = resolved_model
             .split_once('/')
             .map_or(("", resolved_model.as_str()), |(p, id)| (p, id));
@@ -392,7 +404,6 @@ async fn default_subagent_uses_build_default_and_rejects_removed_builtins_or_bla
 #[tokio::test]
 async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
     let h = Harness::new();
-    *h.runner.catalog.lock().unwrap() = Some(sample_catalog(false, false));
     let agents_dir = h.service.home.join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -453,12 +464,18 @@ async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
     assert_eq!(by_task("t0").model.as_deref(), Some("beta/judge"));
     assert_eq!(by_task("t0").thinking, None);
     assert_eq!(by_task("t1").model.as_deref(), Some("alpha/fast"));
-    assert_eq!(by_task("t1").thinking.as_deref(), Some("low"));
+    assert_eq!(
+        by_task("t1").thinking,
+        Some(ChildThinking::Level(ThinkingLevel::Low))
+    );
     assert_eq!(by_task("t1").tools, Some(vec!["read".into()]));
     assert_eq!(by_task("t2").model, None);
     assert_eq!(by_task("t2").thinking, None);
     assert_eq!(by_task("t3").model.as_deref(), Some("beta/judge"));
-    assert_eq!(by_task("t3").thinking.as_deref(), Some("high"));
+    assert_eq!(
+        by_task("t3").thinking,
+        Some(ChildThinking::Level(ThinkingLevel::High))
+    );
     assert_eq!(by_task("t4").model, None);
     assert_eq!(by_task("t4").thinking, None);
 
@@ -509,7 +526,6 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
         cwd: root.path().into(),
         content: vec![],
     };
-    *runner.catalog.lock().unwrap() = Some(sample_catalog(false, false));
     let multi = provider
         .fragments(&input, CancellationToken::new())
         .await
@@ -523,7 +539,7 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
     assert_eq!(described.len(), 1);
     assert_eq!(described[0].label, "subagent_models");
 
-    *runner.catalog.lock().unwrap() = Some(sample_catalog(false, true));
+    *runner.catalog.lock().unwrap() = sample_catalog(false, true);
     let single = provider
         .fragments(&input, CancellationToken::new())
         .await
@@ -536,7 +552,7 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
         single[0]
     );
 
-    *runner.catalog.lock().unwrap() = Some(sample_catalog(true, false));
+    *runner.catalog.lock().unwrap() = sample_catalog(true, false);
     let child = provider
         .fragments(&input, CancellationToken::new())
         .await
@@ -701,7 +717,7 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         prompt: "\nNew prompt\n".into(),
         tools: Some(vec!["read".into(), "grep".into()]),
         model: Some("fake/b".into()),
-        thinking: Some("medium".into()),
+        thinking: Some(ChildThinking::Level(ThinkingLevel::Medium)),
         project: false,
         path: PathBuf::new(),
     };
@@ -724,7 +740,10 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         Some(&["read".to_owned(), "grep".to_owned()][..])
     );
     assert_eq!(custom.model.as_deref(), Some("fake/b"));
-    assert_eq!(custom.thinking.as_deref(), Some("medium"));
+    assert_eq!(
+        custom.thinking,
+        Some(ChildThinking::Level(ThinkingLevel::Medium))
+    );
 
     definition.thinking = None;
     let cleared = definitions::render(&text, &definition);
@@ -738,8 +757,15 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
     let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
     assert_eq!(agents["custom"].thinking, None);
 
-    for valid in [
-        "off", "minimal", "low", "medium", "high", "xhigh", "max", "inherit",
+    for (valid, expected) in [
+        ("off", ChildThinking::Level(ThinkingLevel::Off)),
+        ("minimal", ChildThinking::Level(ThinkingLevel::Minimal)),
+        ("low", ChildThinking::Level(ThinkingLevel::Low)),
+        ("medium", ChildThinking::Level(ThinkingLevel::Medium)),
+        ("high", ChildThinking::Level(ThinkingLevel::High)),
+        ("xhigh", ChildThinking::Level(ThinkingLevel::Xhigh)),
+        ("max", ChildThinking::Level(ThinkingLevel::Max)),
+        ("inherit", ChildThinking::Inherit),
     ] {
         std::fs::write(
             directory.join("valid.md"),
@@ -748,7 +774,8 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         .unwrap();
         let agents =
             definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
-        assert_eq!(agents["valid"].thinking.as_deref(), Some(valid));
+        assert_eq!(agents["valid"].thinking, Some(expected));
+        assert_eq!(agents["valid"].thinking.unwrap().as_str(), valid);
     }
 
     std::fs::write(

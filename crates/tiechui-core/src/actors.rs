@@ -1,7 +1,7 @@
 use super::*;
 use tiechui_plugin_api::{
     CatalogModel, ChildRequest, ChildRunner, ChildThinking, ModelCatalog, StaticContext, ToolError,
-    async_trait, parse_child_thinking, split_child_model, unknown_child_model_error,
+    async_trait, split_child_model, unknown_child_model_error,
 };
 
 struct UsageEvents;
@@ -62,7 +62,60 @@ fn catalog_entry(
 }
 
 impl Runner {
-    fn build_catalog(&self) -> ModelCatalog {
+    fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
+        let Some(raw) = requested.filter(|value| value != "inherit") else {
+            return Ok(self.model.clone());
+        };
+        let catalog = self.model_catalog();
+        let (provider, _) = split_child_model(&raw, &catalog)?;
+        let target = tiechui_model::ModelId(raw.clone());
+        let ready = self
+            .providers
+            .get(provider)
+            .is_some_and(|instance| instance.capabilities(&target).context_window > 0);
+        if !ready {
+            return Err(unknown_child_model_error(&raw, &catalog));
+        }
+        Ok(ModelRef {
+            provider: provider.into(),
+            model: target,
+        })
+    }
+
+    fn resolve_thinking(
+        &self,
+        model: &ModelRef,
+        requested: Option<ChildThinking>,
+    ) -> Option<ReasoningLevel> {
+        let desired = match requested {
+            Some(ChildThinking::Level(explicit)) => thinking_level(explicit),
+            None | Some(ChildThinking::Inherit) => self.thinking,
+        };
+        let supported = self.providers.get(&model.provider).map_or_else(
+            || vec![None],
+            |provider| provider.thinking_levels(&model.model),
+        );
+        clamp(desired, &supported)
+    }
+}
+
+fn deliver(
+    events: &Arc<dyn Fn(Event) + Send + Sync>,
+    event: Event,
+    shutdown: &CancellationToken,
+    diagnostic: &mut Option<String>,
+) {
+    if diagnostic.is_none()
+        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| events(event))).is_err()
+    {
+        *diagnostic = Some("Child event consumer panicked".into());
+        shutdown.cancel();
+    }
+}
+
+#[async_trait]
+impl ChildRunner for Runner {
+    fn model_catalog(&self) -> ModelCatalog {
         let active_id = strip_provider(&self.model.provider, &self.model.model);
         let active = format!("{}/{active_id}", self.model.provider);
         let mut models = Vec::new();
@@ -87,70 +140,6 @@ impl Runner {
         }
     }
 
-    fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
-        let Some(raw) = requested.filter(|value| value != "inherit") else {
-            return Ok(self.model.clone());
-        };
-        let catalog = self.build_catalog();
-        let (provider, _) = split_child_model(&raw, Some(&catalog))?;
-        let target = tiechui_model::ModelId(raw.clone());
-        let ready = self
-            .providers
-            .get(provider)
-            .is_some_and(|instance| instance.capabilities(&target).context_window > 0);
-        if !ready {
-            return Err(unknown_child_model_error(&raw, Some(&catalog)));
-        }
-        Ok(ModelRef {
-            provider: provider.into(),
-            model: target,
-        })
-    }
-
-    fn resolve_thinking(
-        &self,
-        model: &ModelRef,
-        requested: Option<String>,
-    ) -> Result<Option<ReasoningLevel>, ToolError> {
-        let desired = match requested.as_deref() {
-            Some(raw) => match parse_child_thinking(raw)? {
-                ChildThinking::Level(explicit) => thinking_level(explicit),
-                ChildThinking::Inherit => self.thinking,
-            },
-            None => self.thinking,
-        };
-        let supported = self.providers.get(&model.provider).map_or_else(
-            || vec![None],
-            |provider| provider.thinking_levels(&model.model),
-        );
-        Ok(clamp(desired, &supported))
-    }
-}
-
-fn deliver(
-    events: &Arc<dyn Fn(Event) + Send + Sync>,
-    event: Event,
-    shutdown: &CancellationToken,
-    diagnostic: &mut Option<String>,
-) {
-    if diagnostic.is_none()
-        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| events(event))).is_err()
-    {
-        *diagnostic = Some("Child event consumer panicked".into());
-        shutdown.cancel();
-    }
-}
-
-#[async_trait]
-impl ChildRunner for Runner {
-    fn is_child(&self) -> bool {
-        self.is_child
-    }
-
-    fn model_catalog(&self) -> Option<ModelCatalog> {
-        Some(self.build_catalog())
-    }
-
     fn validate_model(&self, model: &str) -> Result<(), ToolError> {
         self.resolve_model(Some(model.to_owned())).map(|_| ())
     }
@@ -166,7 +155,7 @@ impl ChildRunner for Runner {
             return Err(ToolError("Child cancelled".into()));
         }
         let model = self.resolve_model(request.model)?;
-        let thinking = self.resolve_thinking(&model, request.thinking)?;
+        let thinking = self.resolve_thinking(&model, request.thinking);
         if !request.system.is_empty() {
             registry.register_context_provider(Arc::new(StaticContext(vec![request.system])));
         }

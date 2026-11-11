@@ -40,13 +40,9 @@ impl ModelCatalog {
     }
 }
 
-fn available_models_label(catalog: Option<&ModelCatalog>) -> String {
-    catalog.map_or_else(|| "none".into(), ModelCatalog::available_label)
-}
-
 pub fn split_child_model<'a>(
     model: &'a str,
-    catalog: Option<&ModelCatalog>,
+    catalog: &ModelCatalog,
 ) -> Result<(&'a str, &'a str), ToolError> {
     model
         .split_once('/')
@@ -54,15 +50,15 @@ pub fn split_child_model<'a>(
         .ok_or_else(|| {
             ToolError(format!(
                 "Invalid model '{model}': expected <provider>/<id>. Available models: {}",
-                available_models_label(catalog)
+                catalog.available_label()
             ))
         })
 }
 
-pub fn unknown_child_model_error(model: &str, catalog: Option<&ModelCatalog>) -> ToolError {
+pub fn unknown_child_model_error(model: &str, catalog: &ModelCatalog) -> ToolError {
     ToolError(format!(
         "Unknown or unavailable model '{model}'. Available models: {}",
-        available_models_label(catalog)
+        catalog.available_label()
     ))
 }
 
@@ -71,7 +67,7 @@ pub struct ChildRequest {
     pub task: String,
     pub system: String,
     pub model: Option<String>,
-    pub thinking: Option<String>,
+    pub thinking: Option<ChildThinking>,
     pub tools: Option<Vec<String>>,
 }
 
@@ -79,6 +75,21 @@ pub struct ChildRequest {
 pub enum ChildThinking {
     Inherit,
     Level(protocol::ThinkingLevel),
+}
+
+impl ChildThinking {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Level(protocol::ThinkingLevel::Off) => "off",
+            Self::Level(protocol::ThinkingLevel::Minimal) => "minimal",
+            Self::Level(protocol::ThinkingLevel::Low) => "low",
+            Self::Level(protocol::ThinkingLevel::Medium) => "medium",
+            Self::Level(protocol::ThinkingLevel::High) => "high",
+            Self::Level(protocol::ThinkingLevel::Xhigh) => "xhigh",
+            Self::Level(protocol::ThinkingLevel::Max) => "max",
+        }
+    }
 }
 
 pub fn parse_child_thinking(value: &str) -> Result<ChildThinking, ToolError> {
@@ -96,27 +107,9 @@ pub fn parse_child_thinking(value: &str) -> Result<ChildThinking, ToolError> {
 
 #[async_trait]
 pub trait ChildRunner: Send + Sync {
-    fn is_child(&self) -> bool {
-        false
-    }
+    fn model_catalog(&self) -> ModelCatalog;
 
-    fn model_catalog(&self) -> Option<ModelCatalog> {
-        None
-    }
-
-    fn validate_model(&self, model: &str) -> Result<(), ToolError> {
-        if model == "inherit" {
-            return Ok(());
-        }
-        let catalog = self.model_catalog();
-        split_child_model(model, catalog.as_ref())?;
-        if let Some(cat) = catalog.as_ref()
-            && !cat.models.iter().any(|entry| entry.model == model)
-        {
-            return Err(unknown_child_model_error(model, Some(cat)));
-        }
-        Ok(())
-    }
+    fn validate_model(&self, model: &str) -> Result<(), ToolError>;
 
     /// Returns only after the actor and its active tools have settled, including cancellation.
     async fn run(

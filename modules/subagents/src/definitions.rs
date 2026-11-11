@@ -3,7 +3,9 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use tiechui_plugin_api::{CancellationToken, ToolError, parse_child_thinking, serde_json};
+use tiechui_plugin_api::{
+    CancellationToken, ChildThinking, ToolError, parse_child_thinking, serde_json,
+};
 
 #[derive(Clone)]
 pub struct Definition {
@@ -12,18 +14,19 @@ pub struct Definition {
     pub prompt: String,
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
-    pub thinking: Option<String>,
+    pub thinking: Option<ChildThinking>,
     pub project: bool,
     pub path: PathBuf,
 }
 
-fn parse_thinking(value: Option<&YamlOwned>) -> Option<Option<String>> {
+fn parse_thinking(value: Option<&YamlOwned>) -> Option<Option<ChildThinking>> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Some(None);
     };
-    let raw = value.as_str()?;
-    parse_child_thinking(raw).ok()?;
-    Some(Some(raw.to_owned()))
+    value
+        .as_str()
+        .and_then(|raw| parse_child_thinking(raw).ok())
+        .map(Some)
 }
 
 fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
@@ -155,7 +158,7 @@ pub fn render(existing: &str, definition: &Definition) -> String {
     }
     for (key, value) in [
         ("model", definition.model.as_deref()),
-        ("thinking", definition.thinking.as_deref()),
+        ("thinking", definition.thinking.map(ChildThinking::as_str)),
     ] {
         if let Some(value) = value {
             text.push_str(&format!("{key}: {}\n", quote(value)));

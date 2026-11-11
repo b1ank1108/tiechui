@@ -53,7 +53,7 @@ async fn list(home: PathBuf, p: AgentsListParams) -> Reply {
             description: agent.description,
             tools: agent.tools,
             model: agent.model,
-            thinking: agent.thinking,
+            thinking: agent.thinking.map(|t| t.as_str().to_owned()),
             prompt: agent.prompt,
         })
         .collect();
@@ -71,7 +71,8 @@ fn scope(home: &Path, cwd: &Path, path: &Path) -> Option<bool> {
 
 fn save(home: &Path, p: AgentSaveParams) -> Result<(), String> {
     let name = file_name(&p.name)?;
-    p.thinking
+    let thinking = p
+        .thinking
         .as_deref()
         .map(parse_child_thinking)
         .transpose()
@@ -103,7 +104,7 @@ fn save(home: &Path, p: AgentSaveParams) -> Result<(), String> {
         prompt: p.prompt,
         tools: p.tools.filter(|tools| !tools.is_empty()),
         model: p.model,
-        thinking: p.thinking,
+        thinking,
         project: in_project,
         path: target.clone(),
     };

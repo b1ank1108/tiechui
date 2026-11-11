@@ -389,9 +389,16 @@ async fn tool_panic_settles_child_parent_anchored_writer_lease() {
     );
 }
 
+fn full_reasoning_levels() -> Vec<Option<ReasoningLevel>> {
+    std::iter::once(None)
+        .chain(ReasoningLevel::ALL.map(Some))
+        .collect()
+}
+
 struct CatalogProvider {
     models: Vec<(String, u64, Vec<Option<ReasoningLevel>>)>,
-    delay_child: Duration,
+    child_started: AtomicUsize,
+    hold_window: Option<(usize, usize, Arc<tokio::sync::Barrier>)>,
     in_flight: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     scripts: Mutex<VecDeque<Script>>,
@@ -406,7 +413,8 @@ impl CatalogProvider {
     ) -> Self {
         Self {
             models,
-            delay_child: Duration::ZERO,
+            child_started: AtomicUsize::new(0),
+            hold_window: None,
             in_flight: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
             scripts: Mutex::new(scripts.into()),
@@ -453,8 +461,7 @@ impl ModelProvider for CatalogProvider {
         request: ModelRequest,
         _: CancellationToken,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let is_child =
-            !self.delay_child.is_zero() && !request.tools.iter().any(|t| t.name == "subagent");
+        let is_child = !request.tools.iter().any(|t| t.name == "subagent");
         self.requests.send(request).unwrap();
         let steps = self
             .scripts
@@ -473,13 +480,20 @@ impl ModelProvider for CatalogProvider {
         if !is_child {
             return Ok(Box::pin(futures::stream::iter(events)));
         }
+        let order = self.child_started.fetch_add(1, Ordering::SeqCst) + 1;
+        let hold = self
+            .hold_window
+            .as_ref()
+            .filter(|(start, end, _)| (*start..=*end).contains(&order))
+            .map(|(_, _, barrier)| barrier.clone());
         let in_flight = self.in_flight.clone();
         let peak = self.peak.clone();
-        let delay = self.delay_child;
         let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         peak.fetch_max(active, Ordering::SeqCst);
         let stream = futures::stream::once(async move {
-            tokio::time::sleep(delay).await;
+            if let Some(barrier) = hold {
+                barrier.wait().await;
+            }
             in_flight.fetch_sub(1, Ordering::SeqCst);
             futures::stream::iter(events)
         })
@@ -507,11 +521,13 @@ impl tiechui_plugin_api::ContextProvider for ChildProbe {
         _: &TurnInput,
         _: CancellationToken,
     ) -> Result<Vec<String>, ToolError> {
-        let runner = self.runner.lock().unwrap().clone();
-        let catalog = runner.as_ref().and_then(|r| r.model_catalog());
-        let Some(catalog) = catalog.filter(|c| !c.is_child) else {
+        let Some(runner) = self.runner.lock().unwrap().clone() else {
             return Ok(vec![]);
         };
+        let catalog = runner.model_catalog();
+        if catalog.is_child {
+            return Ok(vec![]);
+        }
         let candidates = catalog
             .candidates()
             .map(|m| format!("{}:{:?}", m.model, m.thinking_levels))
@@ -558,6 +574,10 @@ impl Tool for SpawnChildTool {
             .unwrap()
             .clone()
             .ok_or_else(|| ToolError("unbound runner".into()))?;
+        let thinking = call.arguments["thinking"]
+            .as_str()
+            .map(tiechui_plugin_api::parse_child_thinking)
+            .transpose()?;
         let mut child_registry = Registry::default();
         let nested_probe = if call.arguments["probe_child_catalog"] == true {
             let nested = Arc::new(ChildProbe::default());
@@ -582,7 +602,7 @@ impl Tool for SpawnChildTool {
                         .to_owned(),
                     system: "child-system".into(),
                     model: call.arguments["model"].as_str().map(str::to_owned),
-                    thinking: call.arguments["thinking"].as_str().map(str::to_owned),
+                    thinking,
                     tools: None,
                 },
                 child_registry,
@@ -605,19 +625,25 @@ impl Tool for SpawnChildTool {
                 }),
             )
             .await?;
-        let child_flag = nested_probe.and_then(|nested| {
+        let child_catalog_is_child = nested_probe.and_then(|nested| {
             let bound = nested.runner.lock().unwrap().clone()?;
-            Some((bound.is_child(), bound.model_catalog()))
+            Some(bound.model_catalog().is_child)
         });
         Ok(ToolOutput {
             details: Some(json!({
                 "model": *seen_model.lock().unwrap(),
-                "child_is_child": child_flag.as_ref().map(|(flag, _)| *flag),
-                "child_catalog_is_child": child_flag.and_then(|(_, cat)| cat.map(|c| c.is_child)),
+                "child_catalog_is_child": child_catalog_is_child,
             })),
             ..ToolOutput::text(seen_text.lock().unwrap().clone())
         })
     }
+}
+
+struct ProbeSetup {
+    alpha: (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+    beta: (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+    registry: Registry,
+    probe: Arc<ChildProbe>,
 }
 
 struct MultiProviderFixture {
@@ -634,21 +660,14 @@ struct MultiProviderFixture {
 }
 
 impl MultiProviderFixture {
-    async fn spawn(
+    async fn spawn_store(
         root: TempDir,
+        store: SessionStore,
         (alpha, alpha_rx): (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
         (beta, beta_rx): (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
-        registry: Registry,
-        probe: Arc<ChildProbe>,
-        thinking: Option<ReasoningLevel>,
+        (registry, probe): (Registry, Arc<ChildProbe>),
+        (thinking, epoch): (Option<ReasoningLevel>, SessionEpoch),
     ) -> Self {
-        let dir = root.path().to_path_buf();
-        let store = tokio::task::spawn_blocking(move || {
-            let token = CancellationToken::new();
-            SessionStore::create(&dir.join("sessions"), &dir, &token).unwrap()
-        })
-        .await
-        .unwrap();
         let store_path = store.path().to_path_buf();
         let thread = ThreadId(store.header().id.clone());
         let shutdown = CancellationToken::new();
@@ -674,7 +693,7 @@ impl MultiProviderFixture {
                     ..Default::default()
                 }),
                 interactions: None,
-                epoch: SessionEpoch(0),
+                epoch,
             },
             shutdown.clone(),
         );
@@ -683,7 +702,7 @@ impl MultiProviderFixture {
             store_path,
             handle,
             thread,
-            epoch: SessionEpoch(0),
+            epoch,
             alpha_rx,
             beta_rx,
             probe,
@@ -696,17 +715,36 @@ impl MultiProviderFixture {
         fixture
     }
 
-    async fn new(
-        alpha_scripts: Vec<Script>,
-        beta_scripts: Vec<Script>,
+    async fn spawn(
+        root: TempDir,
+        alpha: (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+        beta: (Arc<CatalogProvider>, mpsc::UnboundedReceiver<ModelRequest>),
+        registry: Registry,
+        probe: Arc<ChildProbe>,
         thinking: Option<ReasoningLevel>,
     ) -> Self {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let dir = root.path().to_path_buf();
+        let store = tokio::task::spawn_blocking(move || {
+            let token = CancellationToken::new();
+            SessionStore::create(&dir.join("sessions"), &dir, &token).unwrap()
+        })
+        .await
+        .unwrap();
+        Self::spawn_store(
+            root,
+            store,
+            alpha,
+            beta,
+            (registry, probe),
+            (thinking, SessionEpoch(0)),
+        )
+        .await
+    }
+
+    fn probe_setup(alpha_scripts: Vec<Script>, beta_scripts: Vec<Script>) -> ProbeSetup {
         let (alpha_tx, alpha_rx) = mpsc::unbounded_channel();
         let (beta_tx, beta_rx) = mpsc::unbounded_channel();
-        let full_levels: Vec<_> = std::iter::once(None)
-            .chain(ReasoningLevel::ALL.map(Some))
-            .collect();
+        let full_levels = full_reasoning_levels();
         let alpha = Arc::new(CatalogProvider::plain(
             vec![("alpha/fast".into(), 16000, vec![None])],
             alpha_scripts,
@@ -733,13 +771,56 @@ impl MultiProviderFixture {
         registry
             .register_tool(Arc::new(SpawnChildTool::new(probe.clone())))
             .unwrap();
-        Self::spawn(
-            root,
-            (alpha, alpha_rx),
-            (beta, beta_rx),
+        ProbeSetup {
+            alpha: (alpha, alpha_rx),
+            beta: (beta, beta_rx),
             registry,
             probe,
+        }
+    }
+
+    async fn new(
+        alpha_scripts: Vec<Script>,
+        beta_scripts: Vec<Script>,
+        thinking: Option<ReasoningLevel>,
+    ) -> Self {
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let setup = Self::probe_setup(alpha_scripts, beta_scripts);
+        Self::spawn(
+            root,
+            setup.alpha,
+            setup.beta,
+            setup.registry,
+            setup.probe,
             thinking,
+        )
+        .await
+    }
+
+    async fn resume(
+        self,
+        alpha_scripts: Vec<Script>,
+        beta_scripts: Vec<Script>,
+        thinking: Option<ReasoningLevel>,
+        epoch: SessionEpoch,
+    ) -> Self {
+        let store_path = self.store_path;
+        let root = self._root;
+        self.shutdown.cancel();
+        self.handle.task.await.unwrap().unwrap();
+        let store = tokio::task::spawn_blocking(move || {
+            SessionStore::open(&store_path, &CancellationToken::new()).unwrap()
+        })
+        .await
+        .unwrap();
+        let setup = Self::probe_setup(alpha_scripts, beta_scripts);
+        Self::spawn_store(
+            root,
+            store,
+            setup.alpha,
+            setup.beta,
+            (setup.registry, setup.probe),
+            (thinking, epoch),
         )
         .await
     }
@@ -1073,120 +1154,27 @@ async fn requested_thinking_on_non_reasoning_parent_survives_reload_model_switch
         Some(ReasoningLevel::High)
     );
 
-    let store_path = f.store_path.clone();
-    let thread = f.thread.clone();
-    let _root = f._root;
-    f.shutdown.cancel();
-    f.handle.task.await.unwrap().unwrap();
-
-    let reopened = tokio::task::spawn_blocking(move || {
-        SessionStore::open(&store_path, &CancellationToken::new()).unwrap()
-    })
-    .await
-    .unwrap();
-    let (alpha_tx, mut alpha_rx) = mpsc::unbounded_channel();
-    let (beta_tx, mut beta_rx) = mpsc::unbounded_channel();
-    let full_levels: Vec<_> = std::iter::once(None)
-        .chain(ReasoningLevel::ALL.map(Some))
-        .collect();
-    let alpha = Arc::new(CatalogProvider::plain(
-        vec![("alpha/fast".into(), 16000, vec![None])],
-        vec![
-            invoke(
-                "spawn_child",
-                json!({"task": "after-resume", "model": "beta/judge"}),
-            ),
-            answer("turn-3-done"),
-        ],
-        alpha_tx,
-    ));
-    let beta = Arc::new(CatalogProvider::plain(
-        vec![("beta/judge".into(), 32000, full_levels)],
-        vec![answer("beta-3")],
-        beta_tx,
-    ));
-    let probe = Arc::new(ChildProbe::default());
-    let mut registry = Registry::default();
-    registry.register_actor_client(probe.clone());
-    registry
-        .register_tool(Arc::new(SpawnChildTool::new(probe)))
-        .unwrap();
-    let shutdown = CancellationToken::new();
-    let mut resumed = SessionActor::spawn(
-        reopened,
-        SessionConfig {
-            compaction: tiechui_plugin_api::CompactionConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            model: ModelRef {
-                provider: "alpha".into(),
-                model: ModelId("alpha/fast".into()),
-            },
-            thinking: None,
-            providers: BTreeMap::from([
-                ("alpha".into(), alpha as Arc<dyn ModelProvider>),
-                ("beta".into(), beta as Arc<dyn ModelProvider>),
-            ]),
-            registry,
-            retry: Arc::new(BoundedRetry {
-                max_retries: 0,
-                ..Default::default()
-            }),
-            interactions: None,
-            epoch: SessionEpoch(5),
-        },
-        shutdown.clone(),
-    );
-    loop {
-        let ev = tokio::time::timeout(Duration::from_secs(5), resumed.events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if matches!(ev.event, EventKind::ThreadStarted { .. }) {
-            break;
-        }
-    }
-    resumed
-        .submissions
-        .send(Submission {
-            id: SubmissionId("t3".into()),
-            thread_id: thread,
-            epoch: SessionEpoch(5),
-            op: Op::UserInput {
-                content: vec![InputContent::Text {
-                    text: "third".into(),
-                }],
-                delivery: InputDelivery::FollowUp,
-            },
-        })
-        .await
-        .unwrap();
-    loop {
-        let ev = tokio::time::timeout(Duration::from_secs(5), resumed.events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if matches!(
-            ev.event,
-            EventKind::TurnCompleted {
-                turn: Turn {
-                    status: TurnStatus::Completed,
-                    ..
-                }
-            }
-        ) {
-            break;
-        }
-    }
-    assert_eq!(recv(&mut alpha_rx).await.reasoning, None);
+    let mut resumed = f
+        .resume(
+            vec![
+                invoke(
+                    "spawn_child",
+                    json!({"task": "after-resume", "model": "beta/judge"}),
+                ),
+                answer("turn-3-done"),
+            ],
+            vec![answer("beta-3")],
+            None,
+            SessionEpoch(5),
+        )
+        .await;
+    resumed.run_turn("t3", "third").await;
+    assert_eq!(recv(&mut resumed.alpha_rx).await.reasoning, None);
     assert_eq!(
-        recv(&mut beta_rx).await.reasoning,
+        recv(&mut resumed.beta_rx).await.reasoning,
         Some(ReasoningLevel::High)
     );
-    shutdown.cancel();
-    resumed.task.await.unwrap().unwrap();
-    drop(_root);
+    resumed.stop().await;
 }
 
 #[tokio::test]
@@ -1216,7 +1204,6 @@ async fn session_model_catalog_tracks_active_model_excludes_unready_and_marks_ch
     assert!(!system_text.contains("beta/unready"), "{system_text}");
 
     let tool_output = &f.tool_results()[0].0;
-    assert_eq!(tool_output["details"]["child_is_child"], true);
     assert_eq!(tool_output["details"]["child_catalog_is_child"], true);
 
     let child_req = recv(&mut f.beta_rx).await;
@@ -1270,9 +1257,6 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
     let (beta_tx, beta_rx) = mpsc::unbounded_channel();
     let in_flight = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let full_levels: Vec<_> = std::iter::once(None)
-        .chain(ReasoningLevel::ALL.map(Some))
-        .collect();
 
     let ten_calls = reply(
         (0..10)
@@ -1289,7 +1273,8 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
 
     let alpha = Arc::new(CatalogProvider {
         models: vec![("alpha/fast".into(), 16000, vec![None])],
-        delay_child: Duration::from_millis(5),
+        child_started: AtomicUsize::new(0),
+        hold_window: None,
         in_flight: in_flight.clone(),
         peak: peak.clone(),
         requests: alpha_tx,
@@ -1316,8 +1301,9 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
         beta_scripts.push_back(answer(&format!("DONE_{i}")));
     }
     let beta = Arc::new(CatalogProvider {
-        models: vec![("beta/judge".into(), 32000, full_levels)],
-        delay_child: Duration::from_millis(40),
+        models: vec![("beta/judge".into(), 32000, full_reasoning_levels())],
+        child_started: AtomicUsize::new(0),
+        hold_window: Some((3, 10, Arc::new(tokio::sync::Barrier::new(8)))),
         in_flight: in_flight.clone(),
         peak: peak.clone(),
         requests: beta_tx,
@@ -1347,13 +1333,11 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
     )
     .await;
 
-    for (id, prompt) in [
-        ("t1", "compare"),
-        ("t2", "preflight"),
-        ("t3", "ten-concurrent"),
-    ] {
-        f.run_turn(id, prompt).await;
-    }
+    f.run_turn("t1", "compare").await;
+    f.run_turn("t2", "preflight").await;
+    tokio::time::timeout(Duration::from_secs(5), f.run_turn("t3", "ten-concurrent"))
+        .await
+        .expect("ten concurrent subagent calls should complete without deadlock");
 
     let parent_first = recv(&mut f.alpha_rx).await;
     let parent_system = match &parent_first.messages[0].content[0] {
@@ -1408,10 +1392,7 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
         assert!(!*is_error, "expected concurrent call to succeed: {output}");
     }
     let observed_peak = peak.load(Ordering::SeqCst);
-    assert!(
-        (2..=8).contains(&observed_peak),
-        "expected peak in-flight in 2..=8, got {observed_peak}"
-    );
+    assert_eq!(observed_peak, 8);
 
     let store_path = f.store_path.clone();
     let _root = f._root;
