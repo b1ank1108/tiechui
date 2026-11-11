@@ -121,7 +121,7 @@ impl Permission {
             match key.code {
                 KeyCode::Esc => self.reason = None,
                 KeyCode::Enter => {
-                    let text = reason.0.trim();
+                    let text = reason.text().trim();
                     return Outcome::Answer(ApprovalDecision::Deny {
                         reason: (!text.is_empty()).then(|| text.to_owned()),
                     });
@@ -287,10 +287,10 @@ impl Permission {
                 Span::styled("Tell the agent what to do instead", theme.dim),
             ]));
             let (lines, (row, column)) = reason.render("", width, theme);
-            // The last four rows, where the cursor is.
-            let skip = lines.len().saturating_sub(4);
+            // The last four rows, or four from the cursor's when it is above them.
+            let skip = lines.len().saturating_sub(4).min(row);
             cursor = Some((options.len() + row - skip, column));
-            options.extend(lines.into_iter().skip(skip));
+            options.extend(lines.into_iter().skip(skip).take(4));
         } else {
             let rows: Vec<Row> = self
                 .choices

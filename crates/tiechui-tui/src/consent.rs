@@ -10,7 +10,7 @@ use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 
 use crate::palette::{Palette, detect_color_level};
-use crate::prompt::choice;
+use crate::prompt::{self, choice};
 use crate::render::Screen;
 use crate::rewind::clean;
 use crate::status_picker::surface;
@@ -54,7 +54,7 @@ const ROWS: usize = 10;
 struct Prompt<'a> {
     question: &'a Question,
     selected: usize,
-    text: String,
+    field: prompt::Input,
     checked: BTreeSet<usize>,
 }
 
@@ -63,18 +63,19 @@ impl<'a> Prompt<'a> {
         Self {
             question,
             selected: 0,
-            text: question
-                .input
-                .as_ref()
-                .map(|input| input.text.clone())
-                .unwrap_or_default(),
+            field: prompt::Input::new(
+                question
+                    .input
+                    .as_ref()
+                    .map_or("", |input| input.text.as_str()),
+            ),
             checked: BTreeSet::new(),
         }
     }
 
     /// Indices of the choices the text matches, as a subsequence ignoring case.
     fn shown(&self) -> Vec<usize> {
-        let query = self.text.to_lowercase();
+        let query = self.field.text().to_lowercase();
         (0..self.question.choices.len())
             .filter(|index| {
                 let choice = self.question.choices[*index].to_lowercase();
@@ -93,16 +94,13 @@ impl<'a> Prompt<'a> {
         let typing = self.question.input.is_some();
         let shown = self.shown();
         let count = shown.len();
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match key.code {
             KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return Some(Answer::Interrupted);
             }
             KeyCode::Esc => return Some(Answer::Dismissed),
             KeyCode::Enter => {
-                let text = self.text.trim();
+                let text = self.field.text().trim();
                 if !self.checked.is_empty() {
                     return Some(Answer::Choices(self.checked.iter().copied().collect()));
                 }
@@ -122,13 +120,11 @@ impl<'a> Prompt<'a> {
                     self.checked.insert(*index);
                 }
             }
-            KeyCode::Backspace if typing => {
-                self.text.pop();
-                self.selected = 0;
-            }
-            KeyCode::Char(c) if typing && plain => {
-                self.text.push(c);
-                self.selected = 0;
+            _ if typing => {
+                let revision = self.field.revision();
+                if self.field.key(&key) && self.field.revision() != revision {
+                    self.selected = 0;
+                }
             }
             KeyCode::Char('k') if count > 0 => self.selected = (self.selected + count - 1) % count,
             KeyCode::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
@@ -167,24 +163,32 @@ impl<'a> Prompt<'a> {
         lines.push(Line::default());
         let mut cursor = None;
         if let Some(input) = &question.input {
-            let text = if input.secret {
-                "•".repeat(self.text.chars().count())
-            } else {
-                clean(&self.text)
+            let shown = |text: &str| {
+                if input.secret {
+                    "•".repeat(text.chars().count())
+                } else {
+                    clean(text)
+                }
             };
-            // The tail stays visible, where typing happens.
+            let (before, after) = self.field.text().split_at(self.field.cursor());
+            // One row, scrolled so the cursor stays on it.
             let room = width.saturating_sub(5);
-            let mut tail: String = text.chars().rev().collect::<String>();
-            while wrap::width(&tail) > room {
-                tail.pop();
+            let mut before: String = shown(before).chars().rev().collect();
+            while wrap::width(&before) > room {
+                before.pop();
             }
-            let tail: String = tail.chars().rev().collect();
-            cursor = Some((lines.len(), 4 + wrap::width(&tail)));
-            lines.push(Line::from(vec![
-                indent[0].clone(),
-                Span::styled("> ", theme.dim),
-                Span::raw(tail),
-            ]));
+            let before: String = before.chars().rev().collect();
+            cursor = Some((lines.len(), 4 + wrap::width(&before)));
+            lines.push(wrap::fit(
+                vec![
+                    indent[0].clone(),
+                    Span::styled("> ", theme.dim),
+                    Span::raw(before),
+                    Span::raw(shown(after)),
+                ],
+                width,
+                false,
+            ));
             if !question.choices.is_empty() {
                 lines.push(Line::default());
             }
@@ -464,6 +468,46 @@ mod tests {
         assert_eq!(
             Prompt::new(&question).key(press(KeyCode::Enter)),
             Some(Answer::Text("sk-1".into()))
+        );
+    }
+
+    #[test]
+    fn a_prefilled_field_is_edited_where_the_cursor_is() {
+        let question = Question {
+            title: "Context window".into(),
+            body: vec![],
+            choices: vec![],
+            dismiss: "back",
+            input: Some(Input {
+                text: "128000".into(),
+                secret: false,
+            }),
+            multiple: false,
+        };
+        let theme = Theme::fixture(ColorLevel::TrueColor, false);
+        let mut prompt = Prompt::new(&question);
+        prompt.key(press(KeyCode::Home));
+        prompt.key(press(KeyCode::Right));
+        prompt.key(press(KeyCode::Backspace));
+        prompt.key(press(KeyCode::Char('2')));
+        let (lines, cursor) = prompt.render(40, &theme);
+        let (row, column) = cursor.unwrap();
+        let text: String = lines[row]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text.trim_end(), "  > 228000");
+        assert_eq!(column, 5);
+        // A long value scrolls so the cursor stays on the row.
+        for _ in 0..40 {
+            prompt.key(press(KeyCode::Char('0')));
+        }
+        let (_, cursor) = prompt.render(20, &theme);
+        assert_eq!(cursor.unwrap().1, 19);
+        assert_eq!(
+            prompt.key(press(KeyCode::Enter)),
+            Some(Answer::Text(format!("2{}28000", "0".repeat(40))))
         );
     }
 }

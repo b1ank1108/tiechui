@@ -35,7 +35,9 @@ struct Field {
 impl Field {
     fn value(&self) -> Option<Value> {
         match &self.kind {
-            Kind::Text(input) if !input.0.trim().is_empty() => Some(Value::String(input.0.clone())),
+            Kind::Text(input) if !input.text().trim().is_empty() => {
+                Some(Value::String(input.text().to_owned()))
+            }
             Kind::Text(_) => None,
             Kind::Select {
                 options, chosen, ..

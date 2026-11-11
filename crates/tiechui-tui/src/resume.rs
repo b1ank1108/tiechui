@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use tokio_util::sync::CancellationToken;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prompt::Input;
 use crate::sheet;
@@ -248,7 +249,7 @@ impl Resume {
     fn refilter(&mut self, preserve: bool, path: Option<PathBuf>) {
         let keep = preserve && self.touched;
         let path = path.filter(|_| keep);
-        self.filtered = matches(self.list(), &self.query.0, self.created);
+        self.filtered = matches(self.list(), self.query.text(), self.created);
         let list = self.list();
         let found = path.and_then(|path| self.filtered.iter().position(|i| list[*i].path == path));
         let wanted = if keep { self.selected } else { 0 };
@@ -309,11 +310,11 @@ impl Resume {
         self.error = None;
         if key.code == KeyCode::Esc {
             if self.full.take().is_none() {
-                if self.query.0.is_empty() {
+                if self.query.text().is_empty() {
                     return Outcome::Cancel;
                 }
                 self.touched = true;
-                self.query.0.clear();
+                self.query.clear();
                 self.reconcile(true);
                 self.follow();
             }
@@ -437,7 +438,7 @@ impl Resume {
             None if self.filtered.is_empty() => {
                 let text = if self.loading[usize::from(self.all)] {
                     "Loading sessions…"
-                } else if !self.query.0.is_empty() {
+                } else if !self.query.text().is_empty() {
                     "No matching sessions"
                 } else {
                     "No sessions yet"
@@ -519,18 +520,26 @@ impl Resume {
         )
     }
 
-    /// `Search` and the query with a block cursor; the query's tail stays visible.
+    /// `Search` and the query with a block cursor, which stays visible.
     fn search(&self, width: usize, theme: &Theme) -> Vec<Span<'static>> {
-        let room = width.saturating_sub(11);
-        let mut text = self.query.0.clone();
-        while wrap::width(&text) > room {
-            text.remove(0);
+        let room = width.saturating_sub(10);
+        let (before, after) = self.query.text().split_at(self.query.cursor());
+        let mut after = after.graphemes(true);
+        let under = after.next().unwrap_or(" ").to_owned();
+        let mut before = before.to_owned();
+        while wrap::width(&before) + wrap::width(&under) > room {
+            before.remove(0);
+        }
+        let mut after = after.as_str().to_owned();
+        while wrap::width(&before) + wrap::width(&under) + wrap::width(&after) > room {
+            after.pop();
         }
         vec![
             Span::raw("  "),
             Span::styled("Search  ", theme.dim),
-            Span::raw(text),
-            Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(before),
+            Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(after),
         ]
     }
 

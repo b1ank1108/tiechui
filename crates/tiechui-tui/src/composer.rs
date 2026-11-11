@@ -897,6 +897,13 @@ impl Composer {
         (row, wrap::width(&self.text()[start..at.max(start)]))
     }
 
+    /// Every visual row `width` wide, and the cursor's row and column among them.
+    pub fn rows(&self, width: usize) -> (Vec<Range<usize>>, (usize, usize)) {
+        let rows = self.layout(width);
+        let position = self.position(&rows, self.draft.cursor);
+        (rows, position)
+    }
+
     /// Moves between visual rows keeping the column; returns false at the first or last row.
     pub fn vertical(&mut self, width: usize, up: bool) -> bool {
         let rows = self.layout(width);
