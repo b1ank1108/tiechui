@@ -46,7 +46,7 @@ fn catalog_entry(
     if capabilities.context_window == 0 {
         return None;
     }
-    let id = strip_provider(provider_name, model_id).to_owned();
+    let id = strip_provider(provider_name, model_id);
     let thinking_levels = provider
         .thinking_levels(model_id)
         .into_iter()
@@ -54,8 +54,6 @@ fn catalog_entry(
         .collect();
     Some(CatalogModel {
         model: format!("{provider_name}/{id}"),
-        provider: provider_name.to_owned(),
-        id,
         reasoning: capabilities.reasoning,
         thinking_levels,
     })

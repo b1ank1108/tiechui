@@ -147,12 +147,7 @@ fn format_candidate(entry: &CatalogModel) -> String {
     let levels = entry
         .thinking_levels
         .iter()
-        .filter_map(|level| {
-            serde_json::to_value(level)
-                .ok()?
-                .as_str()
-                .map(str::to_owned)
-        })
+        .map(|&level| ChildThinking::Level(level).as_str())
         .collect::<Vec<_>>()
         .join(", ");
     format!("- {} (thinking: {levels})", entry.model)

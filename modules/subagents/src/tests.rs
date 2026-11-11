@@ -260,16 +260,12 @@ impl Harness {
 fn sample_catalog(is_child: bool, single_only: bool) -> ModelCatalog {
     let mut models = vec![CatalogModel {
         model: "alpha/fast".into(),
-        provider: "alpha".into(),
-        id: "fast".into(),
         reasoning: false,
         thinking_levels: vec![ThinkingLevel::Off],
     }];
     if !single_only {
         models.push(CatalogModel {
             model: "beta/judge".into(),
-            provider: "beta".into(),
-            id: "judge".into(),
             reasoning: true,
             thinking_levels: vec![
                 ThinkingLevel::Off,

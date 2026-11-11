@@ -7,8 +7,6 @@ pub const ACTOR_USAGE_EVENT: &str = "actor.usage";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogModel {
     pub model: String,
-    pub provider: String,
-    pub id: String,
     pub reasoning: bool,
     pub thinking_levels: Vec<protocol::ThinkingLevel>,
 }
