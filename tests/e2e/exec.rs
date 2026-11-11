@@ -1025,6 +1025,10 @@ mod dual_subagents {
         }
 
         async fn exec_json(&self, prompt: &str) -> Output {
+            self.exec_args(prompt, &["--json"]).await
+        }
+
+        async fn exec_args(&self, prompt: &str, extra: &[&str]) -> Output {
             let mut command = support::command();
             command
                 .env("TIECHUI_HOME", &self.home)
@@ -1032,7 +1036,7 @@ mod dual_subagents {
                 .env("TC_VERIFY_KEY", VERIFY_SECRET)
                 .args(["exec", prompt, "--cwd"])
                 .arg(&self.cwd)
-                .arg("--json")
+                .args(extra)
                 .kill_on_drop(true);
             tokio::time::timeout(Duration::from_secs(20), command.output())
                 .await
@@ -1375,6 +1379,59 @@ mod dual_subagents {
         assert!(results[0].0.contains("missing/nope"), "{}", results[0].0);
         assert!(results[0].0.contains("alpha/fast"), "{}", results[0].0);
         assert!(results[0].0.contains("beta/judge"), "{}", results[0].0);
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn subagent_resume_on_non_reasoning_parent_preserves_requested_thinking() {
+        let fixture = DualFixture::new(
+            |body| {
+                assert!(!is_child_request(body), "unexpected alpha child: {body}");
+                if has_tool_result(body) {
+                    return GatewayReply::Text("RESUMED_PARENT_DONE".into());
+                }
+                match last_user_text(body).as_str() {
+                    "turn-one" => GatewayReply::Text("TURN_ONE_DONE".into()),
+                    "turn-two-resume" => GatewayReply::Tools(vec![(
+                        "call-resumed-judge".into(),
+                        "subagent".into(),
+                        json!({"task": "resumed-judge-task", "model": "beta/judge"}),
+                    )]),
+                    other => panic!("unexpected parent prompt: {other}"),
+                }
+            },
+            |body| match last_user_text(body).as_str() {
+                "resumed-judge-task" => GatewayReply::Text("RESUMED_BETA_HIGH_OK".into()),
+                other => panic!("unexpected beta child prompt: {other}"),
+            },
+        )
+        .await;
+
+        let turn_one = fixture.exec_json("turn-one").await;
+        assert_eq!(turn_one.status.code(), Some(0), "{turn_one:?}");
+        let session_id = events(&turn_one)[0].thread_id.0.clone();
+
+        std::fs::write(
+            fixture.home.join("config.toml"),
+            "model = \"alpha/fast\"\n\n[[permissions.rules]]\nsurface = \"subagent\"\npattern = \"*\"\naction = \"allow\"\n",
+        )
+        .unwrap();
+
+        let turn_two = fixture
+            .exec_args("turn-two-resume", &["--resume", &session_id, "--json"])
+            .await;
+        assert_eq!(turn_two.status.code(), Some(0), "{turn_two:?}");
+        let results = tool_results(&events(&turn_two));
+        assert_eq!(results, vec![("RESUMED_BETA_HIGH_OK".to_owned(), false)]);
+
+        for parent_req in fixture.alpha.requests() {
+            assert_eq!(parent_req["model"], "fast");
+            assert!(parent_req.get("reasoning_effort").is_none());
+        }
+        let beta_children = fixture.beta.child_requests();
+        assert_eq!(beta_children.len(), 1);
+        assert_eq!(beta_children[0]["model"], "judge");
+        assert_eq!(beta_children[0]["reasoning_effort"], "high");
         fixture.assert_no_secret_or_config_leak();
     }
 

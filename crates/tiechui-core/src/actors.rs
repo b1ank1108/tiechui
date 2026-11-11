@@ -1,7 +1,7 @@
 use super::*;
 use tiechui_plugin_api::{
     CatalogModel, ChildRequest, ChildRunner, ChildThinking, ModelCatalog, StaticContext, ToolError,
-    async_trait, parse_child_thinking,
+    async_trait, parse_child_thinking, split_child_model, unknown_child_model_error,
 };
 
 struct UsageEvents;
@@ -87,43 +87,19 @@ impl Runner {
         }
     }
 
-    fn available_models_label(&self) -> String {
-        let catalog = self.build_catalog();
-        if catalog.models.is_empty() {
-            "none".into()
-        } else {
-            catalog
-                .models
-                .into_iter()
-                .map(|entry| entry.model)
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    }
-
     fn resolve_model(&self, requested: Option<String>) -> Result<ModelRef, ToolError> {
         let Some(raw) = requested.filter(|value| value != "inherit") else {
             return Ok(self.model.clone());
         };
-        let Some((provider, _)) = raw
-            .split_once('/')
-            .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
-        else {
-            return Err(ToolError(format!(
-                "Invalid model '{raw}': expected <provider>/<id>. Available models: {}",
-                self.available_models_label()
-            )));
-        };
+        let catalog = self.build_catalog();
+        let (provider, _) = split_child_model(&raw, Some(&catalog))?;
         let target = tiechui_model::ModelId(raw.clone());
         let ready = self
             .providers
             .get(provider)
             .is_some_and(|instance| instance.capabilities(&target).context_window > 0);
         if !ready {
-            return Err(ToolError(format!(
-                "Unknown or unavailable model '{raw}'. Available models: {}",
-                self.available_models_label()
-            )));
+            return Err(unknown_child_model_error(&raw, Some(&catalog)));
         }
         Ok(ModelRef {
             provider: provider.into(),
@@ -173,6 +149,10 @@ impl ChildRunner for Runner {
 
     fn model_catalog(&self) -> Option<ModelCatalog> {
         Some(self.build_catalog())
+    }
+
+    fn validate_model(&self, model: &str) -> Result<(), ToolError> {
+        self.resolve_model(Some(model.to_owned())).map(|_| ())
     }
 
     async fn run(

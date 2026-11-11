@@ -26,6 +26,44 @@ impl ModelCatalog {
             .iter()
             .filter(|entry| entry.model != self.active)
     }
+
+    pub fn available_label(&self) -> String {
+        if self.models.is_empty() {
+            "none".into()
+        } else {
+            self.models
+                .iter()
+                .map(|entry| entry.model.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+fn available_models_label(catalog: Option<&ModelCatalog>) -> String {
+    catalog.map_or_else(|| "none".into(), ModelCatalog::available_label)
+}
+
+pub fn split_child_model<'a>(
+    model: &'a str,
+    catalog: Option<&ModelCatalog>,
+) -> Result<(&'a str, &'a str), ToolError> {
+    model
+        .split_once('/')
+        .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        .ok_or_else(|| {
+            ToolError(format!(
+                "Invalid model '{model}': expected <provider>/<id>. Available models: {}",
+                available_models_label(catalog)
+            ))
+        })
+}
+
+pub fn unknown_child_model_error(model: &str, catalog: Option<&ModelCatalog>) -> ToolError {
+    ToolError(format!(
+        "Unknown or unavailable model '{model}'. Available models: {}",
+        available_models_label(catalog)
+    ))
 }
 
 pub struct ChildRequest {
@@ -64,6 +102,20 @@ pub trait ChildRunner: Send + Sync {
 
     fn model_catalog(&self) -> Option<ModelCatalog> {
         None
+    }
+
+    fn validate_model(&self, model: &str) -> Result<(), ToolError> {
+        if model == "inherit" {
+            return Ok(());
+        }
+        let catalog = self.model_catalog();
+        split_child_model(model, catalog.as_ref())?;
+        if let Some(cat) = catalog.as_ref()
+            && !cat.models.iter().any(|entry| entry.model == model)
+        {
+            return Err(unknown_child_model_error(model, Some(cat)));
+        }
+        Ok(())
     }
 
     /// Returns only after the actor and its active tools have settled, including cancellation.

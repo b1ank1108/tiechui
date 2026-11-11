@@ -986,6 +986,210 @@ async fn child_thinking_inherits_parent_requested_level_clamps_to_target_model_a
 }
 
 #[tokio::test]
+async fn requested_thinking_on_non_reasoning_parent_survives_reload_model_switch_and_resume() {
+    let mut f = MultiProviderFixture::new(
+        vec![
+            invoke(
+                "spawn_child",
+                json!({"task": "after-reload", "model": "beta/judge"}),
+            ),
+            answer("turn-1-done"),
+            invoke(
+                "spawn_child",
+                json!({"task": "after-switch-reload", "model": "beta/judge"}),
+            ),
+            answer("turn-2-done"),
+        ],
+        vec![answer("beta-1"), answer("beta-2")],
+        Some(ReasoningLevel::High),
+    )
+    .await;
+
+    f.send("reload-1", Op::Reload).await;
+    let reloaded = f
+        .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+        .await;
+    f.epoch = reloaded.epoch;
+
+    f.run_turn("t1", "first").await;
+    assert_eq!(recv(&mut f.alpha_rx).await.reasoning, None);
+    assert_eq!(recv(&mut f.alpha_rx).await.reasoning, None);
+    assert_eq!(
+        recv(&mut f.beta_rx).await.reasoning,
+        Some(ReasoningLevel::High)
+    );
+
+    f.send(
+        "to-beta",
+        Op::SetModel {
+            provider: "beta".into(),
+            model: "beta/judge".into(),
+        },
+    )
+    .await;
+    f.until(|e| {
+        matches!(
+            e,
+            EventKind::SessionUpdated {
+                model,
+                thinking: ThinkingLevel::High,
+                ..
+            } if model.provider == "beta" && model.id == "judge"
+        )
+    })
+    .await;
+
+    f.send(
+        "to-alpha",
+        Op::SetModel {
+            provider: "alpha".into(),
+            model: "alpha/fast".into(),
+        },
+    )
+    .await;
+    f.until(|e| {
+        matches!(
+            e,
+            EventKind::SessionUpdated {
+                model,
+                thinking: ThinkingLevel::Off,
+                ..
+            } if model.provider == "alpha" && model.id == "fast"
+        )
+    })
+    .await;
+
+    f.send("reload-2", Op::Reload).await;
+    let reloaded = f
+        .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+        .await;
+    f.epoch = reloaded.epoch;
+
+    f.run_turn("t2", "second").await;
+    assert_eq!(recv(&mut f.alpha_rx).await.reasoning, None);
+    assert_eq!(recv(&mut f.alpha_rx).await.reasoning, None);
+    assert_eq!(
+        recv(&mut f.beta_rx).await.reasoning,
+        Some(ReasoningLevel::High)
+    );
+
+    let store_path = f.store_path.clone();
+    let thread = f.thread.clone();
+    let _root = f._root;
+    f.shutdown.cancel();
+    f.handle.task.await.unwrap().unwrap();
+
+    let reopened = tokio::task::spawn_blocking(move || {
+        SessionStore::open(&store_path, &CancellationToken::new()).unwrap()
+    })
+    .await
+    .unwrap();
+    let (alpha_tx, mut alpha_rx) = mpsc::unbounded_channel();
+    let (beta_tx, mut beta_rx) = mpsc::unbounded_channel();
+    let full_levels: Vec<_> = std::iter::once(None)
+        .chain(ReasoningLevel::ALL.map(Some))
+        .collect();
+    let alpha = Arc::new(CatalogProvider::plain(
+        vec![("alpha/fast".into(), 16000, vec![None])],
+        vec![
+            invoke(
+                "spawn_child",
+                json!({"task": "after-resume", "model": "beta/judge"}),
+            ),
+            answer("turn-3-done"),
+        ],
+        alpha_tx,
+    ));
+    let beta = Arc::new(CatalogProvider::plain(
+        vec![("beta/judge".into(), 32000, full_levels)],
+        vec![answer("beta-3")],
+        beta_tx,
+    ));
+    let probe = Arc::new(ChildProbe::default());
+    let mut registry = Registry::default();
+    registry.register_actor_client(probe.clone());
+    registry
+        .register_tool(Arc::new(SpawnChildTool::new(probe)))
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let mut resumed = SessionActor::spawn(
+        reopened,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: ModelRef {
+                provider: "alpha".into(),
+                model: ModelId("alpha/fast".into()),
+            },
+            thinking: None,
+            providers: BTreeMap::from([
+                ("alpha".into(), alpha as Arc<dyn ModelProvider>),
+                ("beta".into(), beta as Arc<dyn ModelProvider>),
+            ]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: SessionEpoch(5),
+        },
+        shutdown.clone(),
+    );
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), resumed.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(ev.event, EventKind::ThreadStarted { .. }) {
+            break;
+        }
+    }
+    resumed
+        .submissions
+        .send(Submission {
+            id: SubmissionId("t3".into()),
+            thread_id: thread,
+            epoch: SessionEpoch(5),
+            op: Op::UserInput {
+                content: vec![InputContent::Text {
+                    text: "third".into(),
+                }],
+                delivery: InputDelivery::FollowUp,
+            },
+        })
+        .await
+        .unwrap();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), resumed.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(
+            ev.event,
+            EventKind::TurnCompleted {
+                turn: Turn {
+                    status: TurnStatus::Completed,
+                    ..
+                }
+            }
+        ) {
+            break;
+        }
+    }
+    assert_eq!(recv(&mut alpha_rx).await.reasoning, None);
+    assert_eq!(
+        recv(&mut beta_rx).await.reasoning,
+        Some(ReasoningLevel::High)
+    );
+    shutdown.cancel();
+    resumed.task.await.unwrap().unwrap();
+    drop(_root);
+}
+
+#[tokio::test]
 async fn session_model_catalog_tracks_active_model_excludes_unready_and_marks_child_sessions() {
     let mut f = MultiProviderFixture::new(
         vec![

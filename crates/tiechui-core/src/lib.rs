@@ -364,16 +364,6 @@ impl SessionActor {
         }
     }
 
-    /// Clamps the requested level to the current model, recording a change.
-    async fn apply_thinking(&mut self) -> Result<(), String> {
-        let level = clamp(self.requested, &self.levels(&self.model));
-        if level != self.thinking {
-            self.append(EntryKind::ThinkingChange { level }).await?;
-            self.thinking = level;
-        }
-        Ok(())
-    }
-
     /// Model, thinking level and usage, for status displays.
     fn publish_resources(&self) {
         let resources = self.registry.resources();
@@ -776,7 +766,7 @@ impl SessionActor {
         }
         if !has_thinking {
             self.append(EntryKind::ThinkingChange {
-                level: self.thinking,
+                level: self.requested,
             })
             .await?;
         }
@@ -825,7 +815,7 @@ impl SessionActor {
                     .await?;
                     self.model = model;
                     self.last_request = None;
-                    self.apply_thinking().await?;
+                    self.thinking = clamp(self.requested, &self.levels(&self.model));
                     self.publish_session();
                 } else {
                     self.emit(EventKind::Error {
@@ -834,8 +824,13 @@ impl SessionActor {
                 }
             }
             Op::SetThinking { level } => {
-                self.requested = thinking_level(level);
-                self.apply_thinking().await?;
+                let next = thinking_level(level);
+                if next != self.requested {
+                    self.append(EntryKind::ThinkingChange { level: next })
+                        .await?;
+                }
+                self.requested = next;
+                self.thinking = clamp(self.requested, &self.levels(&self.model));
                 self.publish_session();
             }
             Op::Branch { entry_id } => {

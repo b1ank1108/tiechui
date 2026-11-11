@@ -340,46 +340,10 @@ fn resolve_override(task: Option<&str>, agent: Option<&str>) -> Option<String> {
     }
 }
 
-fn available_models_label(catalog: Option<&ModelCatalog>) -> String {
-    match catalog {
-        Some(cat) if !cat.models.is_empty() => cat
-            .models
-            .iter()
-            .map(|entry| entry.model.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "none".into(),
-    }
-}
-
-fn validate_model(model: Option<&str>, catalog: Option<&ModelCatalog>) -> Result<(), ToolError> {
-    let Some(raw) = model else {
-        return Ok(());
-    };
-    let valid_syntax = raw
-        .split_once('/')
-        .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty());
-    if !valid_syntax {
-        return Err(ToolError(format!(
-            "Invalid model '{raw}': expected <provider>/<id>. Available models: {}",
-            available_models_label(catalog)
-        )));
-    }
-    if let Some(cat) = catalog
-        && !cat.models.iter().any(|entry| entry.model == raw)
-    {
-        return Err(ToolError(format!(
-            "Unknown or unavailable model '{raw}'. Available models: {}",
-            available_models_label(Some(cat))
-        )));
-    }
-    Ok(())
-}
-
 fn prepare_task(
     raw: Task,
     agents: &BTreeMap<String, definitions::Definition>,
-    catalog: Option<&ModelCatalog>,
+    runner: &dyn ChildRunner,
 ) -> Result<PreparedTask, ToolError> {
     let (label, custom_agent) = match raw.agent {
         None => ("default".to_owned(), None),
@@ -397,7 +361,9 @@ fn prepare_task(
         .and_then(|def| def.thinking.as_deref());
     let model = resolve_override(raw.model.as_deref(), agent_model);
     let thinking = resolve_override(raw.thinking.as_deref(), agent_thinking);
-    validate_model(model.as_deref(), catalog)?;
+    if let Some(m) = model.as_deref() {
+        runner.validate_model(m)?;
+    }
     if let Some(level) = thinking.as_deref() {
         parse_child_thinking(level)?;
     }
@@ -414,11 +380,11 @@ fn prepare_task(
 fn prepare_tasks(
     raw_tasks: Vec<Task>,
     agents: &BTreeMap<String, definitions::Definition>,
-    catalog: Option<&ModelCatalog>,
+    runner: &dyn ChildRunner,
 ) -> Result<Vec<PreparedTask>, ToolError> {
     raw_tasks
         .into_iter()
-        .map(|task| prepare_task(task, agents, catalog))
+        .map(|task| prepare_task(task, agents, runner))
         .collect()
 }
 
@@ -651,8 +617,7 @@ impl Service {
         let scope = call.arguments["agentScope"].as_str().unwrap_or("user");
         let agents = definitions::discover(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
         let runner = self.bound_runner()?;
-        let catalog = runner.model_catalog();
-        let tasks = prepare_tasks(raw_tasks, &agents, catalog.as_ref())?;
+        let tasks = prepare_tasks(raw_tasks, &agents, runner.as_ref())?;
         self.confirm_project_agents(&tasks, &ctx.cancel).await?;
         let cancel = ctx.cancel.child_token();
         self.record_start(&call.id, mode, &tasks, &ctx, &cancel)?;

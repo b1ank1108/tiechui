@@ -180,33 +180,6 @@ impl Harness {
         let root = tempfile::tempdir().unwrap();
         let children = Arc::new(RegistryProbe::default());
         let runner = Arc::new(Runner::default());
-        let mut registry = Registry::default();
-        SubagentsModule {
-            home: root.path().join("home"),
-            trusted: false,
-            confirmation: None,
-            children: children.clone(),
-        }
-        .register(&mut registry, &ModuleConfig::default())
-        .unwrap();
-        for client in registry.actor_clients() {
-            client.bind(runner.clone());
-        }
-        for ext in registry.runtime_extensions() {
-            ext.event(
-                &RuntimeEvent::Restore { navigation: false },
-                &BranchView {
-                    session_id: "parent".into(),
-                    leaf: "root".into(),
-                    cwd: root.path().into(),
-                    parent_session: None,
-                    entries: vec![],
-                },
-            )
-            .unwrap();
-        }
-        let tool = registry.tools().get("subagent").unwrap();
-        assert_eq!(tool.concurrency(&json!({})), Concurrency::Shared);
         let service = Arc::new(Service {
             home: root.path().join("home"),
             trusted: false,
@@ -512,13 +485,33 @@ async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
 
 #[tokio::test]
 async fn context_provider_exposes_active_and_candidates_to_parent_only() {
-    let h = Harness::new();
+    let root = tempfile::tempdir().unwrap();
+    let runner = Arc::new(Runner::default());
+    let mut registry = Registry::default();
+    SubagentsModule {
+        home: root.path().join("home"),
+        trusted: false,
+        confirmation: None,
+        children: Arc::new(RegistryProbe::default()),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+
+    let tool = registry.tools().get("subagent").unwrap();
+    assert_eq!(tool.concurrency(&json!({})), Concurrency::Shared);
+    for client in registry.actor_clients() {
+        client.bind(runner.clone());
+    }
+    assert_eq!(registry.context_providers().len(), 1);
+    let provider = &registry.context_providers()[0];
+
     let input = TurnInput {
-        cwd: h.ctx.cwd.clone(),
+        cwd: root.path().into(),
         content: vec![],
     };
-    *h.runner.catalog.lock().unwrap() = Some(sample_catalog(false, false));
-    let multi = ContextProvider::fragments(h.service.as_ref(), &input, CancellationToken::new())
+    *runner.catalog.lock().unwrap() = Some(sample_catalog(false, false));
+    let multi = provider
+        .fragments(&input, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(multi.len(), 1);
@@ -526,9 +519,13 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
     assert!(multi[0].contains("beta/judge"), "{}", multi[0]);
     assert!(multi[0].contains("low, medium, high"), "{}", multi[0]);
     assert!(!multi[0].contains("providers.toml"), "{}", multi[0]);
+    let described = provider.describe(&multi);
+    assert_eq!(described.len(), 1);
+    assert_eq!(described[0].label, "subagent_models");
 
-    *h.runner.catalog.lock().unwrap() = Some(sample_catalog(false, true));
-    let single = ContextProvider::fragments(h.service.as_ref(), &input, CancellationToken::new())
+    *runner.catalog.lock().unwrap() = Some(sample_catalog(false, true));
+    let single = provider
+        .fragments(&input, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(single.len(), 1);
@@ -539,8 +536,9 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
         single[0]
     );
 
-    *h.runner.catalog.lock().unwrap() = Some(sample_catalog(true, false));
-    let child = ContextProvider::fragments(h.service.as_ref(), &input, CancellationToken::new())
+    *runner.catalog.lock().unwrap() = Some(sample_catalog(true, false));
+    let child = provider
+        .fragments(&input, CancellationToken::new())
         .await
         .unwrap();
     assert!(child.is_empty());
