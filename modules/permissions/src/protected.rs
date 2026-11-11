@@ -47,17 +47,33 @@ fn scoped(path: &Path, inside_root: bool, root: &Path, cwd: &Path) -> PathBuf {
 }
 
 fn symlinked_relative(path: &Path, root: &Path, cwd: &Path) -> Option<PathBuf> {
-    let real = crate::path::canonical(cwd).ok()?;
+    let cwd = crate::path::normalize(cwd);
+    let real = crate::path::canonical(&cwd).ok()?;
     let cwd_rel = real.strip_prefix(root).ok()?;
-    if cwd_rel.as_os_str().is_empty() && !isolatable(cwd) {
+    let lexical_root = strip_suffix(&cwd, cwd_rel)?;
+    if crate::path::canonical(&lexical_root).ok().as_deref() != Some(root)
+        || !isolatable(&lexical_root)
+    {
         return None;
     }
-    Some(cwd_rel.join(path.strip_prefix(cwd).ok()?))
+    path.strip_prefix(&lexical_root).ok().map(Path::to_owned)
+}
+
+fn strip_suffix(path: &Path, suffix: &Path) -> Option<PathBuf> {
+    let mut parts = path.components();
+    for tail in suffix.components().rev() {
+        if parts.next_back() != Some(tail) {
+            return None;
+        }
+    }
+    Some(parts.as_path().to_owned())
 }
 
 fn isolatable(root: &Path) -> bool {
     let parts = normal_parts(root);
-    !parts.iter().any(|part| part == ".git")
+    !parts
+        .iter()
+        .any(|part| matches!(part.as_str(), ".git" | ".vscode" | ".idea"))
         && !parts
             .last()
             .is_some_and(|last| DIRECTORIES.contains(&last.as_str()))
@@ -164,6 +180,41 @@ mod tests {
         let git_sub = home.join("repo/.git/modules/sub");
         std::fs::create_dir_all(&git_sub).unwrap();
         assert!(check("config", &git_sub, "write"));
+
+        for ide_sub in [
+            home.join("repo/.vscode/extensions"),
+            home.join("repo/.idea/runConfigurations"),
+        ] {
+            std::fs::create_dir_all(&ide_sub).unwrap();
+            assert!(check("settings.json", &ide_sub, "write"));
+        }
+
+        #[cfg(unix)]
+        {
+            let dotfiles = home.join("dotfiles");
+            let target = dotfiles.join("claude");
+            std::fs::create_dir_all(&target).unwrap();
+            let linked_claude = home.join("alt-home/.claude");
+            std::fs::create_dir_all(linked_claude.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&target, &linked_claude).unwrap();
+            let access = Access::new(
+                "settings.json",
+                &linked_claude,
+                &home,
+                Some("write"),
+                "write",
+            )
+            .unwrap();
+            assert!(protected(&access, &dotfiles, &linked_claude));
+
+            let direct_claude = home.join("direct-home/.claude");
+            std::fs::create_dir_all(direct_claude.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(dotfiles.join("sub")).unwrap();
+            std::os::unix::fs::symlink(&dotfiles, &direct_claude).unwrap();
+            let sub_cwd = direct_claude.join("sub");
+            let access = Access::new("note.json", &sub_cwd, &home, Some("write"), "write").unwrap();
+            assert!(protected(&access, &dotfiles, &sub_cwd));
+        }
     }
 
     #[test]

@@ -190,11 +190,10 @@ impl Inspector<'_> {
         let values = unit_values(first, head, &words[1..], typed);
         let payload = payload_index(head, words);
         let inline = inline_script_index(head, words);
-        let wrapper = is_wrapper(head, payload, inline);
+        let wrapper = is_wrapper(head, words, payload, inline);
         let argv: Option<Vec<String>> = (!has_env)
             .then(|| words.iter().map(|w| w.value.clone()).collect())
             .flatten();
-        let force_read = argv.as_deref().is_some_and(super::readonly::read_only);
         self.program.units.push(Unit {
             values,
             wrapper,
@@ -205,7 +204,7 @@ impl Inspector<'_> {
         if skips_outer_operands(head, inline) {
             return Ok(());
         }
-        self.extract_operands(head, &words[1..], cwd, force_read)
+        self.extract_operands(head, &words[1..], cwd)
     }
 
     fn expand_wrapper(
@@ -223,22 +222,102 @@ impl Inspector<'_> {
                 .map(|w| w.value.as_deref().unwrap_or(&w.raw))
                 .collect::<Vec<_>>()
                 .join(" ");
-            self.parse(&text, cwd, depth + 1)?;
-        } else if let Some(at) = inline {
-            if let Some(Some(text)) = words.get(at).map(|w| &w.value) {
-                self.parse(text, cwd, depth + 1)?;
+            return self.parse(&text, cwd, depth + 1);
+        }
+        if head == "find" {
+            return self.expand_find(&words[1..], cwd, depth);
+        }
+        if let Some(text) = inline.and_then(|at| words.get(at)?.value.as_deref()) {
+            return self.parse(text, cwd, depth + 1);
+        }
+        self.expand_outer_wrapper(head, words, payload, cwd, depth)
+    }
+
+    fn expand_outer_wrapper(
+        &mut self,
+        head: &str,
+        words: &[Word],
+        payload: Option<usize>,
+        cwd: &mut PathBuf,
+        depth: usize,
+    ) -> Result<(), ToolError> {
+        let limit = payload.unwrap_or(words.len());
+        let mut inner_cwd = self.wrapper_cwd(head, &words[1..limit], cwd)?;
+        let Some(at) = payload.filter(|at| *at < words.len()) else {
+            return Ok(());
+        };
+        let text = words[at..]
+            .iter()
+            .map(|w| w.raw.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let target_cwd = if matches!(head, "command" | "exec") {
+            cwd
+        } else {
+            &mut inner_cwd
+        };
+        self.words(&words[at..], &text, target_cwd, depth + 1, false)
+    }
+
+    fn wrapper_cwd(
+        &mut self,
+        head: &str,
+        prefix: &[Word],
+        cwd: &Path,
+    ) -> Result<PathBuf, ToolError> {
+        let mut inner = cwd.to_owned();
+        let Some(short) = wrapper_chdir_short(head) else {
+            return Ok(inner);
+        };
+        let mut at = 0;
+        while let Some(value) = prefix.get(at).and_then(|w| w.value.as_deref()) {
+            if let Some((step, dir)) = flag_value(prefix, at, Some(short), Some("chdir")) {
+                self.apply_chdir(dir, &mut inner)?;
+                at += step;
+            } else if let Some(step) = wrapper_prefix_step(head, value) {
+                at += step;
+            } else {
+                break;
             }
-        } else if let Some(at) = payload
-            && at < words.len()
-        {
-            let text = words[at..]
+        }
+        Ok(inner)
+    }
+
+    fn expand_find(&mut self, args: &[Word], cwd: &Path, depth: usize) -> Result<(), ToolError> {
+        let clauses = find_exec_clauses(args);
+        if clauses.is_empty() {
+            return Ok(());
+        }
+        let own = find_own_words(args);
+        let (roots, _) = find_roots(&own);
+        for clause in clauses {
+            let text = clause
+                .words
                 .iter()
                 .map(|w| w.raw.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            self.words(&words[at..], &text, cwd, depth + 1, false)?;
+            if clause.exec_dir {
+                for root in &roots {
+                    let mut root_cwd = self.find_exec_cwd(root, cwd)?;
+                    self.words(clause.words, &text, &mut root_cwd, depth + 1, false)?;
+                }
+            } else {
+                let mut clause_cwd = cwd.to_owned();
+                self.words(clause.words, &text, &mut clause_cwd, depth + 1, false)?;
+            }
         }
         Ok(())
+    }
+
+    fn find_exec_cwd(&self, root: &str, cwd: &Path) -> Result<PathBuf, ToolError> {
+        let mut dir = Access::new(root, cwd, self.home, None, "read")?.lexical;
+        if dir.is_file()
+            && let Some(parent) = dir.parent()
+        {
+            dir = parent.to_owned();
+        }
+        Ok(dir)
     }
 
     fn emit_operand(
@@ -246,7 +325,6 @@ impl Inspector<'_> {
         value: &str,
         cwd: &Path,
         direction: &'static str,
-        force_read: bool,
     ) -> Result<(), ToolError> {
         if value.is_empty()
             || value.contains(['\n', '\0'])
@@ -257,8 +335,7 @@ impl Inspector<'_> {
         {
             return Ok(());
         }
-        let dir = if force_read { "read" } else { direction };
-        self.path(value, cwd, dir)
+        self.path(value, cwd, direction)
     }
 
     fn extract_operands(
@@ -266,13 +343,12 @@ impl Inspector<'_> {
         head: &str,
         args: &[Word],
         cwd: &mut PathBuf,
-        force_read: bool,
     ) -> Result<(), ToolError> {
         if head == "git" {
-            return self.git_operands(args, cwd, force_read);
+            return self.git_operands(args, cwd);
         }
         for (value, direction) in command_operands(head, args) {
-            self.emit_operand(value, cwd, direction, force_read)?;
+            self.emit_operand(value, cwd, direction)?;
         }
         if matches!(head, "cd" | "pushd")
             && let Some(path) = positional_args(args, "", &[]).into_iter().flatten().next()
@@ -282,51 +358,66 @@ impl Inspector<'_> {
         Ok(())
     }
 
-    fn git_operands(
-        &mut self,
-        args: &[Word],
-        cwd: &Path,
-        force_read: bool,
-    ) -> Result<(), ToolError> {
+    fn git_operands(&mut self, args: &[Word], cwd: &Path) -> Result<(), ToolError> {
         let mut git_cwd = cwd.to_owned();
-        let mut at = 0;
-        let mut subcommand = None;
-        while at < args.len() {
-            if let Some((step, dir)) = flag_value(args, at, Some(('C', "Cc")), None) {
-                self.apply_git_chdir(dir, &mut git_cwd, force_read)?;
-                at += step;
-            } else if let Some(step) = git_global_flag_step(&args[at]) {
-                at += step;
-            } else {
-                subcommand = args[at].value.as_deref();
-                at += 1;
-                break;
-            }
-        }
-        if let Some(sub) = subcommand {
-            for (value, direction) in git_subcommand_operands(sub, &args[at..]) {
-                self.emit_operand(value, &git_cwd, direction, force_read)?;
-            }
+        let Some((sub, rest)) = self.scan_git_globals(args, &mut git_cwd)? else {
+            return Ok(());
+        };
+        for (value, direction) in git_subcommand_operands(sub, rest) {
+            self.emit_operand(value, &git_cwd, direction)?;
         }
         Ok(())
     }
 
-    fn apply_git_chdir(
+    fn scan_git_globals<'b>(
+        &mut self,
+        args: &'b [Word],
+        git_cwd: &mut PathBuf,
+    ) -> Result<Option<(&'b str, &'b [Word])>, ToolError> {
+        let mut at = 0;
+        while at < args.len() {
+            if let Some((step, dir)) = flag_value(args, at, Some(('C', "Cc")), Some("work-tree")) {
+                self.apply_chdir(dir, git_cwd)?;
+                at += step;
+            } else if let Some((step, dir)) = flag_value(args, at, None, Some("git-dir")) {
+                if let Some(dir) = dir {
+                    self.emit_operand(dir, git_cwd, "read")?;
+                }
+                at += step;
+            } else if let Some(step) = git_global_flag_step(&args[at]) {
+                at += step;
+            } else {
+                return Ok(args[at].value.as_deref().map(|sub| (sub, &args[at + 1..])));
+            }
+        }
+        Ok(None)
+    }
+
+    fn apply_chdir(
         &mut self,
         dir: Option<&str>,
-        git_cwd: &mut PathBuf,
-        force_read: bool,
+        target_cwd: &mut PathBuf,
     ) -> Result<(), ToolError> {
         if let Some(dir) = dir {
-            self.emit_operand(dir, git_cwd, "read", force_read)?;
-            *git_cwd = Access::new(dir, git_cwd, self.home, None, "read")?.lexical;
+            self.emit_operand(dir, target_cwd, "read")?;
+            *target_cwd = Access::new(dir, target_cwd, self.home, None, "read")?.lexical;
         }
         Ok(())
     }
 }
 
-fn is_wrapper(head: &str, payload: Option<usize>, inline: Option<usize>) -> bool {
-    payload.is_some() || inline.is_some() || head == "eval"
+fn is_wrapper(head: &str, words: &[Word], payload: Option<usize>, inline: Option<usize>) -> bool {
+    payload.is_some() || inline.is_some() || head == "eval" || has_find_exec(head, words)
+}
+
+fn has_find_exec(head: &str, words: &[Word]) -> bool {
+    head == "find"
+        && words[1..].iter().any(|w| {
+            matches!(
+                w.value.as_deref(),
+                Some("-exec" | "-execdir" | "-ok" | "-okdir")
+            )
+        })
 }
 
 fn skips_outer_operands(head: &str, inline: Option<usize>) -> bool {
@@ -516,7 +607,8 @@ fn structured_write_operands<'a>(
     args: &'a [Word],
 ) -> Option<Vec<(&'a str, &'static str)>> {
     match head {
-        "chmod" | "chown" | "chgrp" => Some(chmod_operands(args)),
+        "chmod" => Some(chmod_operands(args)),
+        "chown" | "chgrp" => Some(chown_operands(args)),
         "cp" | "mv" | "ln" | "install" => Some(copy_operands(head, args)),
         "dd" => Some(dd_operands(args)),
         "sed" => Some(sed_operands(args)),
@@ -640,6 +732,54 @@ fn has_flag_before_ddash(args: &[Word], target: &str) -> bool {
 }
 
 fn chmod_operands(args: &[Word]) -> Vec<(&str, &'static str)> {
+    let (mut out, mut has_mode) = (Vec::new(), false);
+    let pos = walk_flags(args, |at, token| {
+        chmod_flag(args, at, token, &mut has_mode, &mut out)
+    });
+    let skip = usize::from(!has_mode);
+    out.extend(pos.into_iter().skip(skip).flatten().map(|p| (p, "write")));
+    out
+}
+
+fn chmod_flag<'a>(
+    args: &'a [Word],
+    at: usize,
+    token: &str,
+    has_mode: &mut bool,
+    out: &mut Vec<(&'a str, &'static str)>,
+) -> usize {
+    if let Some((step, file)) = flag_value(args, at, None, Some("reference")) {
+        *has_mode = true;
+        if let Some(file) = file {
+            out.push((file, "read"));
+        }
+        return step;
+    }
+    if !*has_mode && !is_chmod_option(token) {
+        *has_mode = true;
+    }
+    1
+}
+
+fn is_chmod_option(token: &str) -> bool {
+    if let Some(long) = token.strip_prefix("--") {
+        return matches!(
+            long,
+            "recursive"
+                | "silent"
+                | "quiet"
+                | "verbose"
+                | "changes"
+                | "no-preserve-root"
+                | "preserve-root"
+        );
+    }
+    token
+        .strip_prefix('-')
+        .is_some_and(|c| !c.is_empty() && c.chars().all(|ch| "RfhvcHLP".contains(ch)))
+}
+
+fn chown_operands(args: &[Word]) -> Vec<(&str, &'static str)> {
     let skip = usize::from(!has_flag_before_ddash(args, "--reference"));
     positional_args(args, "", &["reference"])
         .into_iter()
@@ -847,31 +987,104 @@ fn output_flag_operands<'a>(head: &str, args: &'a [Word]) -> Vec<(&'a str, &'sta
     out
 }
 
-fn find_operands(args: &[Word]) -> Vec<(&str, &'static str)> {
-    let own = find_own_words(args);
+struct FindExec<'a> {
+    exec_dir: bool,
+    words: &'a [Word],
+}
+
+fn find_exec_clauses(args: &[Word]) -> Vec<FindExec<'_>> {
+    let mut clauses = Vec::new();
     let mut at = 0;
-    while let Some(word) = own.get(at) {
-        let token = word.value.as_deref().unwrap_or(&word.raw);
-        if token == "-D" {
-            at += 2;
-        } else if matches!(token, "-H" | "-L" | "-P") || token.starts_with("-O") {
-            at += 1;
+    while let Some(word) = args.get(at) {
+        if let Some(flag @ ("-exec" | "-execdir" | "-ok" | "-okdir")) = word.value.as_deref() {
+            let start = at + 1;
+            let end = args[start..]
+                .iter()
+                .position(|w| matches!(w.value.as_deref(), Some(";" | "+")))
+                .map_or(args.len(), |rel| start + rel);
+            if start < end {
+                clauses.push(FindExec {
+                    exec_dir: matches!(flag, "-execdir" | "-okdir"),
+                    words: &args[start..end],
+                });
+            }
+            at = (end + 1).min(args.len());
         } else {
-            break;
+            at += 1;
         }
     }
+    clauses
+}
+
+fn find_operands(args: &[Word]) -> Vec<(&str, &'static str)> {
+    let own = find_own_words(args);
+    let (roots, at) = find_roots(&own);
+    find_predicate_operands(&own[at..], roots)
+}
+
+fn find_roots<'a>(own: &[&'a Word]) -> (Vec<&'a str>, usize) {
     let mut roots = Vec::new();
+    let mut at = scan_find_options(own, &mut roots);
     while let Some(word) = own.get(at) {
         let token = word.value.as_deref().unwrap_or(&word.raw);
         if token.starts_with('-') || matches!(token, "(" | "!") {
             break;
         }
-        if let Some(root) = word.value.as_deref() {
-            roots.push(root);
-        }
+        roots.extend(word.value.as_deref());
         at += 1;
     }
-    find_predicate_operands(&own[at..], roots)
+    if roots.is_empty() {
+        roots.push(".");
+    }
+    (roots, at)
+}
+
+fn scan_find_options<'a>(own: &[&'a Word], roots: &mut Vec<&'a str>) -> usize {
+    let mut at = 0;
+    while let Some(word) = own.get(at) {
+        let token = word.value.as_deref().unwrap_or(&word.raw);
+        if token == "-D" {
+            at += 2;
+        } else if let Some((step, root)) = find_file_root(own, at) {
+            roots.extend(root);
+            at += step;
+        } else if is_find_leading_flag(token) {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    at
+}
+
+fn find_file_root<'a>(own: &[&'a Word], at: usize) -> Option<(usize, Option<&'a str>)> {
+    let token = own.get(at)?.value.as_deref()?;
+    if matches!(
+        token,
+        "-false" | "-fls" | "-follow" | "-fprint" | "-fprint0" | "-fprintf" | "-fstype"
+    ) {
+        return None;
+    }
+    let cluster = token.strip_prefix('-')?;
+    let pos = cluster.find('f')?;
+    if !cluster[..pos].chars().all(|c| "HLPXdsxE".contains(c)) {
+        return None;
+    }
+    let tail = &cluster[pos + 1..];
+    if tail.is_empty() {
+        Some((2, own.get(at + 1).and_then(|w| w.value.as_deref())))
+    } else {
+        Some((1, Some(tail)))
+    }
+}
+
+fn is_find_leading_flag(token: &str) -> bool {
+    if token.starts_with("-O") {
+        return true;
+    }
+    token
+        .strip_prefix('-')
+        .is_some_and(|c| !c.is_empty() && c.chars().all(|ch| "HLPXdsxE".contains(ch)))
 }
 
 fn find_own_words(args: &[Word]) -> Vec<&Word> {
@@ -919,7 +1132,7 @@ fn find_predicate_operands<'a>(
 }
 
 fn git_subcommand_operands<'a>(sub: &str, args: &'a [Word]) -> Vec<(&'a str, &'static str)> {
-    let mut out = git_output_flags(args);
+    let mut out = git_output_flags(sub, args);
     match sub {
         "diff" if has_flag_before_ddash(args, "--no-index") => {
             out.extend(
@@ -969,14 +1182,19 @@ fn git_subcommand_operands<'a>(sub: &str, args: &'a [Word]) -> Vec<(&'a str, &'s
     out
 }
 
-fn git_output_flags(args: &[Word]) -> Vec<(&str, &'static str)> {
+fn git_output_flags<'a>(sub: &str, args: &'a [Word]) -> Vec<(&'a str, &'static str)> {
+    let short = matches!(sub, "archive" | "format-patch").then_some(('o', "o"));
     let mut out = Vec::new();
     let mut at = 0;
     while let Some(word) = args.get(at) {
         if word.value.as_deref() == Some("--") {
             break;
         }
-        if let Some((step, path)) = flag_value(args, at, None, Some("output")) {
+        if let Some((step, path)) = flag_value(args, at, short, Some("output")).or_else(|| {
+            (sub == "format-patch")
+                .then(|| flag_value(args, at, None, Some("output-directory")))
+                .flatten()
+        }) {
             if let Some(path) = path {
                 out.push((path, "write"));
             }
@@ -1006,6 +1224,10 @@ fn grep_flag<'a>(
     out: &mut Vec<(&'a str, &'static str)>,
 ) -> usize {
     const STOP: &str = "efmABCgtT";
+    if token == "--files" {
+        *has_pattern = true;
+        return 1;
+    }
     if let Some((step, _)) = flag_value(args, at, Some(('e', STOP)), Some("regexp")) {
         *has_pattern = true;
         return step;
@@ -1095,32 +1317,13 @@ struct Word {
     value: Option<String>,
 }
 
+const PAYLOAD_WRAPPERS: &[&str] = &[
+    "command", "exec", "env", "sudo", "xargs", "nohup", "nice", "timeout", "stdbuf", "setsid",
+    "time",
+];
+
 fn payload_index(head: &str, words: &[Word]) -> Option<usize> {
-    if head == "find" {
-        return words
-            .iter()
-            .position(|w| {
-                matches!(
-                    w.value.as_deref(),
-                    Some("-exec" | "-execdir" | "-ok" | "-okdir")
-                )
-            })
-            .map(|at| at + 1);
-    }
-    if !matches!(
-        head,
-        "command"
-            | "exec"
-            | "env"
-            | "sudo"
-            | "xargs"
-            | "nohup"
-            | "nice"
-            | "timeout"
-            | "stdbuf"
-            | "setsid"
-            | "time"
-    ) {
+    if !PAYLOAD_WRAPPERS.contains(&head) {
         return None;
     }
     let mut at = 1;
@@ -1129,46 +1332,73 @@ fn payload_index(head: &str, words: &[Word]) -> Option<usize> {
         if value == "--" {
             return Some(at + 1);
         }
-        if head == "env" && value.contains('=') {
-            at += 1;
-            continue;
-        }
-        if !value.starts_with('-') || value == "-" {
-            if head == "timeout" {
-                at += 1;
-            }
-            return Some(at);
-        }
-        if head == "command" && value.chars().skip(1).any(|c| c != 'p') {
+        if let Some(step) = wrapper_prefix_step(head, value) {
+            at += step;
+        } else if value.starts_with('-') && value != "-" {
             return None;
+        } else {
+            return Some(at + usize::from(head == "timeout"));
         }
-        if head == "exec" {
-            let flags = value.trim_start_matches('-');
-            for (index, flag) in flags.char_indices() {
-                if flag == 'a' {
-                    if index + 1 == flags.len() {
-                        at += 1;
-                    }
-                    break;
-                }
-                if !matches!(flag, 'c' | 'l') {
-                    return None;
-                }
-            }
-        } else if matches!(
-            (head, value),
-            (
-                "sudo",
-                "-u" | "-g" | "-h" | "-p" | "-C" | "-T" | "-R" | "-D"
-            ) | ("env", "-u" | "--unset" | "-C" | "--chdir")
-                | ("xargs", "-I" | "-i" | "-n" | "-P" | "-d" | "-s" | "-E")
-                | ("nice", "-n")
-        ) {
-            at += 1;
-        }
-        at += 1;
     }
     None
+}
+
+fn wrapper_chdir_short(head: &str) -> Option<(char, &'static str)> {
+    match head {
+        "env" => Some(('C', "Cu")),
+        "sudo" => Some(('D', "ughpCTRD")),
+        _ => None,
+    }
+}
+
+fn wrapper_prefix_step(head: &str, value: &str) -> Option<usize> {
+    if head == "env" && !value.starts_with('-') && value.contains('=') {
+        return Some(1);
+    }
+    if value.starts_with('-') && !matches!(value, "-" | "--") {
+        return wrapper_flag_step(head, value);
+    }
+    None
+}
+
+fn wrapper_flag_step(head: &str, value: &str) -> Option<usize> {
+    match head {
+        "command" => value.chars().skip(1).all(|c| c == 'p').then_some(1),
+        "exec" => exec_flag_step(value),
+        "env" => Some(1 + usize::from(option_takes_next(value, "uC", &["unset", "chdir"]))),
+        "sudo" => Some(
+            1 + usize::from(option_takes_next(
+                value,
+                "ughpCTRD",
+                &[
+                    "user",
+                    "group",
+                    "host",
+                    "prompt",
+                    "close-from",
+                    "command-timeout",
+                    "chroot",
+                    "chdir",
+                ],
+            )),
+        ),
+        "xargs" => Some(1 + usize::from(option_takes_next(value, "IinPdsE", &[]))),
+        "nice" => Some(1 + usize::from(option_takes_next(value, "n", &["adjustment"]))),
+        _ => Some(1),
+    }
+}
+
+fn exec_flag_step(value: &str) -> Option<usize> {
+    let flags = value.trim_start_matches('-');
+    for (index, flag) in flags.char_indices() {
+        if flag == 'a' {
+            return Some(1 + usize::from(index + 1 == flags.len()));
+        }
+        if !matches!(flag, 'c' | 'l') {
+            return None;
+        }
+    }
+    Some(1)
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {

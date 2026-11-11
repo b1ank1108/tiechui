@@ -81,7 +81,8 @@ profiles, `.mcp.json`, `.ripgreprc`, and `.env` / `.env.*` (not `.env.example`,
 `.env.sample`, `.env.template`). The `worktrees`, `plans`, and `state`
 subdirectories under `.claude`, `.agents`, and `.tiechui` are exempt, and
 workspace-interior accesses ignore ancestor directory names above `root` unless
-`root` itself is inside `.git` or is a protected directory root. In `yolo`,
+`root` itself is inside `.git`, `.vscode`, or `.idea`, or is a protected
+directory root. In `yolo`,
 remaining `ask` gates (including explicit `ask` rules and `protected_path`) are
 approved (`outcome = "approved"`, `source = "yolo"`), `fail-closed` rules from
 invalid project config are denied without prompting (`Invalid project permission

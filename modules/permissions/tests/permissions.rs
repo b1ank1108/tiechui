@@ -1427,6 +1427,90 @@ async fn shell_path_extraction_separates_reads_writes_git_and_non_file_commands(
 }
 
 #[tokio::test]
+async fn shell_path_extraction_covers_chmod_wrappers_find_clauses_rg_and_git_flags() {
+    let f = Fixture::new(Some(json!([allow()])));
+    for command in [
+        "chmod -x script.sh",
+        "git clone -o .env https://example.com/repo.git",
+        "find -name '*.rs'",
+    ] {
+        assert_eq!(f.bash(command).await, BeforeToolCall::Allow, "{command}");
+    }
+    assert_eq!(f.asks(), 0);
+
+    for command in [
+        "chmod -x .git/hooks/pre-commit",
+        "chmod -w .env",
+        "chmod -R -rx .vscode",
+        "chmod --recursive -w .idea",
+        "chmod --reference=copy.txt .env",
+        "chmod --reference copy.txt .env",
+        "env -C .claude touch settings.json",
+        "env -C.claude touch settings.json",
+        "env --chdir=.git touch config",
+        "env --chdir .git touch config",
+        "env FOO=1 --chdir=.vscode touch settings.json",
+        "sudo -D .git rm config",
+        "sudo -D.git rm config",
+        "sudo --chdir=.idea rm workspace.xml",
+        "sudo --chdir .idea rm workspace.xml",
+        "find src -exec true \\; -exec rm .env \\;",
+        "find src -ok true \\; -ok touch .vscode/settings.json \\;",
+        "find .git -execdir rm config \\;",
+        "find .claude -okdir touch settings.json \\;",
+        "find .git -execdir rm config {} +",
+        "find -f .claude -delete",
+        "find -L -f src -f .git -delete",
+        "cd .claude && find -name '*.bak' -delete",
+        "git --work-tree=.claude diff --output=settings.json",
+        "git --work-tree .vscode diff --output settings.json",
+        "git archive -o .env HEAD",
+        "git archive -o.env HEAD",
+        "git format-patch -o .vscode -1",
+        "git format-patch -o.vscode -1",
+    ] {
+        let f = Fixture::new(Some(json!([allow()])));
+        let reason = denied(f.bash(command).await);
+        assert!(reason.contains("'protected_path'"), "{command}: {reason}");
+        assert_eq!(f.asks(), 1, "{command}");
+    }
+
+    let f = Fixture::new(Some(json!([allow(), rule("bash", "rm *", "deny")])));
+    denied(
+        f.bash("find src -exec printf '%s' {} \\; -exec rm -f {} \\;")
+            .await,
+    );
+    assert_eq!(f.asks(), 0);
+
+    let f = Fixture::new(Some(json!([
+        allow(),
+        rule("external_directory_read", "*", "deny"),
+    ])));
+    let outside = f.cwd.parent().unwrap().join("outside-target");
+    for command in [
+        format!("chmod --reference {} a.txt", outside.display()),
+        format!("chmod --reference={} a.txt", outside.display()),
+        format!("env -C {} true", outside.display()),
+        format!("env --chdir={} true", outside.display()),
+        format!("sudo -D {} true", outside.display()),
+        format!("sudo --chdir={} true", outside.display()),
+        format!("rg --files {}", outside.display()),
+        format!("rg -g '*.rs' --files {}", outside.display()),
+        format!("git --git-dir {} status", outside.display()),
+        format!("git --git-dir={} status", outside.display()),
+        format!("git --work-tree {} status", outside.display()),
+        format!("git --work-tree={} status", outside.display()),
+    ] {
+        let reason = denied(f.bash(&command).await);
+        assert!(
+            reason.contains("external_directory_read"),
+            "{command}: {reason}"
+        );
+    }
+    assert_eq!(f.asks(), 0);
+}
+
+#[tokio::test]
 async fn workspace_under_protected_ancestor_isolates_interior_and_keeps_sensitive_targets() {
     let f = Fixture::new(None);
     let skill_dir = f.home.join(".claude/skills/demo");
@@ -1475,7 +1559,12 @@ async fn workspace_under_protected_ancestor_isolates_interior_and_keeps_sensitiv
     }
     assert_eq!(f.asks(), 3);
 
-    for direct in [f.home.join(".claude"), f.cwd.join(".git/modules/sub")] {
+    for direct in [
+        f.home.join(".claude"),
+        f.cwd.join(".git/modules/sub"),
+        f.cwd.join(".vscode/extensions"),
+        f.cwd.join(".idea/runConfigurations"),
+    ] {
         std::fs::create_dir_all(&direct).unwrap();
         let prompter = Arc::new(Prompter::default());
         let module =
@@ -1501,6 +1590,59 @@ async fn workspace_under_protected_ancestor_isolates_interior_and_keeps_sensitiv
         );
         assert!(reason.contains("'protected_path'"), "{reason}");
         assert_eq!(prompter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    {
+        let backing = f.cwd.join("dotfiles-claude");
+        std::fs::create_dir_all(&backing).unwrap();
+        let claude_link = f.home.join("linked-home/.claude");
+        std::fs::create_dir_all(claude_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&backing, &claude_link).unwrap();
+        let prompter = Arc::new(Prompter::default());
+        let module =
+            PermissionsModule::with_requester(f.cwd.clone(), f.home.clone(), prompter.clone())
+                .with_mode(PermissionMode::Auto);
+        let registry = Registry::from_modules(&[&module], &ModuleConfig::default()).unwrap();
+        let interceptor = &registry.interceptors()[0].interceptor;
+
+        let mut write_ctx = f.context();
+        write_ctx.cwd = claude_link.clone();
+        let reason = denied(
+            interceptor
+                .before(
+                    &ToolCall {
+                        id: "symlink-write".into(),
+                        name: "write".into(),
+                        arguments: json!({"path":"settings.json"}),
+                        opaque: None,
+                    },
+                    write_ctx,
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(reason.contains("'protected_path'"), "{reason}");
+
+        let reason = denied(
+            interceptor
+                .before(
+                    &ToolCall {
+                        id: "symlink-bash".into(),
+                        name: "bash".into(),
+                        arguments: json!({
+                            "command": "touch settings.json",
+                            "workdir": claude_link,
+                        }),
+                        opaque: None,
+                    },
+                    f.context(),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(reason.contains("'protected_path'"), "{reason}");
+        assert_eq!(prompter.requests.lock().unwrap().len(), 2);
     }
 }
 

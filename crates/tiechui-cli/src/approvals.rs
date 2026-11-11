@@ -11,20 +11,15 @@ use tiechui_plugin_api::{
 };
 use tiechui_protocol::{ApprovalDecision, ApprovalRequest, FilePreview};
 
+pub(crate) struct Requester(pub Interactions);
+
 pub(crate) struct Prompts {
     pub(crate) interactions: Interactions,
     mode: SharedPermissionMode,
 }
 
 impl Prompts {
-    pub(crate) fn new(interactions: Interactions) -> Self {
-        Self {
-            interactions,
-            mode: SharedPermissionMode::default(),
-        }
-    }
-
-    pub(crate) fn with_mode(interactions: Interactions, mode: SharedPermissionMode) -> Self {
+    pub(crate) fn new(interactions: Interactions, mode: SharedPermissionMode) -> Self {
         Self { interactions, mode }
     }
 }
@@ -72,7 +67,7 @@ impl tiechui_module_ask::QuestionRequester for Prompts {
 }
 
 #[async_trait]
-impl ApprovalRequester for Prompts {
+impl ApprovalRequester for Requester {
     async fn request(
         &self,
         request: Request,
@@ -92,7 +87,7 @@ impl ApprovalRequester for Prompts {
             session_patterns: request.session_patterns,
             preview,
         };
-        Ok(match self.interactions.ask(request, cancel).await {
+        Ok(match self.0.ask(request, cancel).await {
             Some(ApprovalDecision::AllowOnce) => Decision::AllowOnce,
             Some(ApprovalDecision::AllowSession { both_directions }) => {
                 Decision::AllowSession { both_directions }
@@ -156,6 +151,7 @@ mod tests {
         handle: SessionHandle,
         thread: ThreadId,
         prompts: Arc<Prompts>,
+        requester: Arc<Requester>,
         mode: SharedPermissionMode,
     }
 
@@ -168,7 +164,8 @@ mod tests {
             let (interactions, inbox) = Interactions::new();
             let mode = SharedPermissionMode::default();
             mode.set(initial);
-            let prompts = Arc::new(Prompts::with_mode(interactions, mode.clone()));
+            let requester = Arc::new(Requester(interactions.clone()));
+            let prompts = Arc::new(Prompts::new(interactions, mode.clone()));
             let handle = SessionActor::spawn(
                 store,
                 SessionConfig {
@@ -196,6 +193,7 @@ mod tests {
                 handle,
                 thread: ThreadId(String::new()),
                 prompts,
+                requester,
                 mode,
             };
             loop {
@@ -403,12 +401,12 @@ mod tests {
         assert!(matches!(seen, ApprovalRequest::Questions { .. }));
         assert!(confirm.await.unwrap());
 
-        let prompts = h.prompts.clone();
+        let requester = h.requester.clone();
         let dir = h._dir.path().to_path_buf();
         let a_cancel = cancel.clone();
         let approval = tokio::spawn(async move {
             ApprovalRequester::request(
-                prompts.as_ref(),
+                requester.as_ref(),
                 Request {
                     actor: None,
                     call: tiechui_model::ToolCall {

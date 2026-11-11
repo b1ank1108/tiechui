@@ -15,7 +15,7 @@ use tiechui_protocol::*;
 use tiechui_providers::{ErrorKind, ModelProvider};
 use tiechui_session::{EntryKind, ModelRef, SessionStore};
 
-use crate::approvals::Prompts;
+use crate::approvals::{Prompts, Requester};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -200,7 +200,7 @@ pub(crate) async fn prepare(
         PermissionsModule::with_requester(
             cwd.clone(),
             user_home,
-            Arc::new(Prompts::new(interactions.clone())),
+            Arc::new(Requester(interactions.clone())),
         )
     } else {
         PermissionsModule::headless(
@@ -248,7 +248,7 @@ pub(crate) async fn prepare(
             diagnostic.reason
         ));
     }
-    let prompts = Arc::new(Prompts::with_mode(interactions, permissions.mode()));
+    let prompts = Arc::new(Prompts::new(interactions, permissions.mode()));
     let plugins =
         super::plugins::discovered(&cwd, &home, trusted, &loaded.config, &cancel, warnings)
             .map_err(config_error)?;
