@@ -5,12 +5,25 @@ use tiechui_config::{
     CompletionsCompat, MaxTokensField, ModelConfig, ThinkingFormat, ThinkingLevel,
     ThinkingLevelValue,
 };
-use tiechui_model::{Content, ModelRequest, Role};
+use tiechui_model::{Content, ModelRequest, OpaqueData, Role};
 
 use crate::{ErrorKind, ProviderError};
 
 fn invalid(message: &str) -> ProviderError {
     ProviderError::new(ErrorKind::InvalidRequest, message)
+}
+
+fn decode_google_extra(opaque: &OpaqueData) -> Result<Value, ProviderError> {
+    let err = || invalid("unsupported assistant content or replay metadata");
+    let parsed: Value = serde_json::from_str(&opaque.0).map_err(|_| err())?;
+    let valid = parsed
+        .as_object()
+        .filter(|obj| obj.len() == 1)
+        .and_then(|obj| obj.get("google")?.as_object())
+        .filter(|google| google.len() == 1)
+        .and_then(|google| google.get("thought_signature")?.as_str())
+        .is_some_and(|sig| !sig.is_empty());
+    valid.then_some(parsed).ok_or_else(err)
 }
 
 pub(super) fn reasoning_field(field: &str) -> bool {
@@ -102,12 +115,16 @@ pub(crate) fn encode(
             }
             Role::Assistant => {
                 let mut text_parts = Vec::new();
+                let mut text_extra = None;
                 let mut thinking = Vec::new();
                 let mut field = None;
                 let mut calls = Vec::new();
                 for block in &message.content {
                     match block {
-                        Content::Text { text, opaque: None } => {
+                        Content::Text { text, opaque } => {
+                            if let Some(opaque) = opaque {
+                                text_extra = Some(decode_google_extra(opaque)?);
+                            }
                             if !text.trim().is_empty() {
                                 text_parts.push(text.as_str());
                             }
@@ -127,7 +144,9 @@ pub(crate) fn encode(
                                 thinking.push(text.as_str());
                             }
                         }
-                        Content::ToolCall(call) if call.opaque.is_none() => {
+                        Content::ToolCall(call) => {
+                            let extra =
+                                call.opaque.as_ref().map(decode_google_extra).transpose()?;
                             if call.id.is_empty()
                                 || call.name.is_empty()
                                 || !call.arguments.is_object()
@@ -139,7 +158,11 @@ pub(crate) fn encode(
                             }
                             pending.insert(call.id.clone());
                             tool_history = true;
-                            calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments.to_string()}}));
+                            let mut item = json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments.to_string()}});
+                            if let Some(extra) = extra {
+                                item["extra_content"] = extra;
+                            }
+                            calls.push(item);
                         }
                         _ => {
                             return Err(invalid(
@@ -153,6 +176,9 @@ pub(crate) fn encode(
                     continue;
                 }
                 let mut outgoing = json!({"role":"assistant", "content":if text.is_empty() { Value::Null } else { json!(text) }});
+                if let Some(extra) = text_extra {
+                    outgoing["extra_content"] = extra;
+                }
                 if !calls.is_empty() {
                     outgoing["tool_calls"] = json!(calls);
                 }

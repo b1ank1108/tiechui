@@ -821,3 +821,312 @@ fn both_formats_use_per_model_level_maps_and_off_semantics() {
         }
     }
 }
+
+#[tokio::test]
+async fn thought_signature_on_parallel_tool_calls_round_trips() {
+    let fixture = concat!(
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"},\"extra_content\":{\"google\":{\"thought_signature\":\"AY89a19HjvBjUXH7\"}}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"\"}}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let sig_opaque = OpaqueData("{\"google\":{\"thought_signature\":\"AY89a19HjvBjUXH7\"}}".into());
+    let call_0 = Content::ToolCall(ToolCall {
+        id: "call_0".into(),
+        name: "read".into(),
+        arguments: json!({"path": "a.txt"}),
+        opaque: Some(sig_opaque),
+    });
+    let call_1 = call("call_1", "b.txt");
+    assert_eq!(
+        collect(fixture).await,
+        vec![
+            Ok(start(0, "call_0")),
+            Ok(args(0, "{\"path\":")),
+            Ok(start(1, "call_1")),
+            Ok(args(1, "{\"path\":\"b.txt\"}")),
+            Ok(args(0, "\"a.txt\"}")),
+            Ok(usage(10, 6, 0, 0)),
+            Ok(complete(0, call_0.clone())),
+            Ok(complete(1, call_1.clone())),
+            Ok(finish(StopReason::ToolUse, 10, 6, 0, 0)),
+        ]
+    );
+    let mut request = request();
+    request.tools = vec![tool("read")];
+    request.messages.extend([
+        message(Role::Assistant, vec![call_0, call_1]),
+        message(
+            Role::Tool,
+            vec![
+                Content::ToolResult(ToolResult {
+                    call_id: "call_0".into(),
+                    content: vec![text("alpha")],
+                    is_error: false,
+                }),
+                Content::ToolResult(ToolResult {
+                    call_id: "call_1".into(),
+                    content: vec![text("beta")],
+                    is_error: false,
+                }),
+            ],
+        ),
+        message(Role::User, vec![text("Continue")]),
+    ]);
+    let config = config("http://fixture.invalid");
+    let body = crate::openai::request::encode(&request, &config.models[0], &config.compat).unwrap();
+    let assistant = &body["messages"][1];
+    assert!(assistant.get("extra_content").is_none());
+    assert_eq!(
+        assistant["tool_calls"][0]["extra_content"],
+        json!({"google": {"thought_signature": "AY89a19HjvBjUXH7"}})
+    );
+    assert!(assistant["tool_calls"][1].get("extra_content").is_none());
+}
+
+#[tokio::test]
+async fn thought_signature_on_leading_and_trailing_empty_text_deltas_round_trips() {
+    let trailing = concat!(
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_trailing\"}}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let trailing_text = Content::Text {
+        text: "Hello!".into(),
+        opaque: Some(OpaqueData(
+            "{\"google\":{\"thought_signature\":\"sig_trailing\"}}".into(),
+        )),
+    };
+    assert_eq!(
+        collect(trailing).await,
+        vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                delta: "Hello".into(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                delta: "!".into(),
+            }),
+            Ok(complete(0, trailing_text.clone())),
+            Ok(missing_usage(StopReason::EndTurn)),
+        ]
+    );
+
+    let leading_and_post_finish = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_leading\"}}}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"\"}}}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    assert_eq!(
+        collect(leading_and_post_finish).await,
+        vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                delta: "Answer".into(),
+            }),
+            Ok(complete(
+                0,
+                Content::Text {
+                    text: "Answer".into(),
+                    opaque: Some(OpaqueData(
+                        "{\"google\":{\"thought_signature\":\"sig_leading\"}}".into(),
+                    )),
+                }
+            )),
+            Ok(missing_usage(StopReason::EndTurn)),
+        ]
+    );
+
+    let both = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_first\"}}}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Updated\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_last\"}}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    assert_eq!(
+        collect(both).await,
+        vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                delta: "Updated".into(),
+            }),
+            Ok(complete(
+                0,
+                Content::Text {
+                    text: "Updated".into(),
+                    opaque: Some(OpaqueData(
+                        "{\"google\":{\"thought_signature\":\"sig_last\"}}".into(),
+                    )),
+                }
+            )),
+            Ok(missing_usage(StopReason::EndTurn)),
+        ]
+    );
+
+    let mut request = request();
+    request.messages.extend([
+        message(Role::Assistant, vec![trailing_text]),
+        message(Role::User, vec![text("Follow up")]),
+    ]);
+    let config = config("http://fixture.invalid");
+    let body = crate::openai::request::encode(&request, &config.models[0], &config.compat).unwrap();
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"], "Hello!");
+    assert_eq!(
+        body["messages"][1]["extra_content"],
+        json!({"google": {"thought_signature": "sig_trailing"}})
+    );
+}
+
+#[tokio::test]
+async fn thinking_only_with_trailing_thought_signature_skips_empty_text() {
+    let fixture = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Plan first.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig_unused\"}}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let thinking = Content::Thinking {
+        text: "Plan first.".into(),
+        redacted: false,
+        opaque: Some(OpaqueData("reasoning_content".into())),
+    };
+    let events = collect(fixture).await;
+    assert_eq!(
+        events,
+        vec![
+            Ok(StreamEvent::ThinkingDelta {
+                index: 0,
+                delta: "Plan first.".into(),
+            }),
+            Ok(complete(0, thinking.clone())),
+            Ok(missing_usage(StopReason::EndTurn)),
+        ]
+    );
+
+    let config = config("http://fixture.invalid");
+    for assistant_blocks in [
+        vec![thinking.clone()],
+        vec![
+            thinking,
+            Content::Text {
+                text: "   \n\t ".into(),
+                opaque: Some(OpaqueData(
+                    "{\"google\":{\"thought_signature\":\"sig_ws\"}}".into(),
+                )),
+            },
+        ],
+    ] {
+        let mut request = request();
+        request.messages.extend([
+            message(Role::Assistant, assistant_blocks),
+            message(Role::User, vec![text("Continue")]),
+        ]);
+        let body =
+            crate::openai::request::encode(&request, &config.models[0], &config.compat).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+}
+
+#[test]
+fn invalid_thought_signature_opaque_is_rejected() {
+    let config = config("http://fixture.invalid");
+    let valid = OpaqueData("{\"google\":{\"thought_signature\":\"sig_ok\"}}".into());
+
+    let mut ok_req = request();
+    ok_req.tools = vec![tool("read")];
+    ok_req.messages.extend([
+        message(
+            Role::Assistant,
+            vec![
+                Content::Text {
+                    text: "Checking".into(),
+                    opaque: Some(valid.clone()),
+                },
+                Content::ToolCall(ToolCall {
+                    id: "call_ok".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    opaque: Some(valid),
+                }),
+            ],
+        ),
+        message(
+            Role::Tool,
+            vec![Content::ToolResult(ToolResult {
+                call_id: "call_ok".into(),
+                content: vec![text("ok")],
+                is_error: false,
+            })],
+        ),
+    ]);
+    assert!(crate::openai::request::encode(&ok_req, &config.models[0], &config.compat).is_ok());
+
+    for bad in [
+        "not-json",
+        "[]",
+        "{}",
+        "{\"google\":{\"thought_signature\":\"sig\"},\"extra\":1}",
+        "{\"other\":{\"thought_signature\":\"sig\"}}",
+        "{\"google\":\"sig\"}",
+        "{\"google\":{}}",
+        "{\"google\":{\"thought_signature\":\"sig\",\"extra\":1}}",
+        "{\"google\":{\"other\":\"sig\"}}",
+        "{\"google\":{\"thought_signature\":123}}",
+        "{\"google\":{\"thought_signature\":\"\"}}",
+    ] {
+        let bad_opaque = OpaqueData(bad.into());
+        for text_value in ["Answer", ""] {
+            let mut req = request();
+            req.messages.push(message(
+                Role::Assistant,
+                vec![Content::Text {
+                    text: text_value.into(),
+                    opaque: Some(bad_opaque.clone()),
+                }],
+            ));
+            let err = crate::openai::request::encode(&req, &config.models[0], &config.compat)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::InvalidRequest, "{bad}");
+            assert_eq!(
+                err.message, "unsupported assistant content or replay metadata",
+                "{bad}"
+            );
+        }
+
+        let mut tool_req = request();
+        tool_req.tools = vec![tool("read")];
+        tool_req.messages.extend([
+            message(
+                Role::Assistant,
+                vec![Content::ToolCall(ToolCall {
+                    id: "call_bad".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    opaque: Some(bad_opaque),
+                })],
+            ),
+            message(
+                Role::Tool,
+                vec![Content::ToolResult(ToolResult {
+                    call_id: "call_bad".into(),
+                    content: vec![text("out")],
+                    is_error: false,
+                })],
+            ),
+        ]);
+        let err = crate::openai::request::encode(&tool_req, &config.models[0], &config.compat)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest, "{bad}");
+        assert_eq!(
+            err.message, "unsupported assistant content or replay metadata",
+            "{bad}"
+        );
+    }
+}
