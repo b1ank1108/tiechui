@@ -16,6 +16,7 @@ use tiechui_plugin_api::{
 };
 
 const ENTRY: &str = "tiechui.subagents.record";
+const MAX_PARALLEL_TASKS: usize = 8;
 const MAX_CONCURRENT_TASKS: usize = 8;
 
 #[async_trait]
@@ -224,7 +225,9 @@ fn spec() -> ToolSpec {
     });
     ToolSpec {
         name: "subagent".into(),
-        description: "Delegate isolated tasks to the default general-purpose subagent or a named user/project agent. Use exactly one of task, tasks (at most 8), or chain (supports {previous}). Up to 8 child tasks run concurrently across the session; extras queue. Project definitions require user trust or interactive confirmation.".into(),
+        description: format!(
+            "Delegate isolated tasks to the default general-purpose subagent or a named user/project agent. Use exactly one of task, tasks (at most {MAX_PARALLEL_TASKS}), or chain (supports {{previous}}). Up to {MAX_CONCURRENT_TASKS} child tasks run concurrently across the session; extras queue. Project definitions require user trust or interactive confirmation."
+        ),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -321,8 +324,10 @@ fn parameters(value: &Value) -> Result<(&'static str, Vec<ValidatedTask>), ToolE
     if raw_tasks.is_empty() {
         return Err(ToolError("Tasks must not be empty".into()));
     }
-    if mode == "parallel" && raw_tasks.len() > MAX_CONCURRENT_TASKS {
-        return Err(ToolError("At most 8 parallel tasks are allowed".into()));
+    if mode == "parallel" && raw_tasks.len() > MAX_PARALLEL_TASKS {
+        return Err(ToolError(format!(
+            "At most {MAX_PARALLEL_TASKS} parallel tasks are allowed"
+        )));
     }
     let tasks = raw_tasks
         .into_iter()
@@ -598,7 +603,7 @@ impl Service {
                 futures::stream::iter(tasks.into_iter().enumerate().map(|(index, task)| {
                     self.run_task(id, index, task, runner.clone(), ctx, cancel.clone())
                 }))
-                .buffer_unordered(MAX_CONCURRENT_TASKS);
+                .buffer_unordered(MAX_PARALLEL_TASKS);
             while jobs.next().await.is_some() {}
             return;
         }
