@@ -46,11 +46,25 @@ impl RegisteredRoot {
 
 #[derive(Default)]
 struct State {
-    roots: Vec<RegisteredRoot>,
+    client_roots: BTreeMap<u64, Vec<RegisteredRoot>>,
     last: Option<Vec<PortEntry>>,
     rescan_at: Option<Instant>,
     started: bool,
     closed: bool,
+}
+
+impl State {
+    fn merged_roots(&self) -> Vec<RegisteredRoot> {
+        let mut by_raw = BTreeMap::new();
+        for roots in self.client_roots.values() {
+            for item in roots {
+                by_raw
+                    .entry(item.raw.clone())
+                    .or_insert_with(|| item.clone());
+            }
+        }
+        by_raw.into_values().collect()
+    }
 }
 
 pub(crate) struct PortMonitor {
@@ -68,43 +82,83 @@ impl PortMonitor {
         })
     }
 
-    pub(crate) fn list(self: &Arc<Self>, raw_roots: &[String]) -> Result<Vec<PortEntry>> {
+    pub(crate) fn list(
+        self: &Arc<Self>,
+        client_id: u64,
+        raw_roots: &[String],
+    ) -> Result<Vec<PortEntry>> {
         let mut seen = BTreeSet::new();
-        let mut roots = Vec::with_capacity(raw_roots.len());
+        let mut caller_roots = Vec::with_capacity(raw_roots.len());
         for item in raw_roots {
             if seen.insert(item.clone()) {
-                roots.push(RegisteredRoot::new(item.clone())?);
+                caller_roots.push(RegisteredRoot::new(item.clone())?);
             }
         }
-        let ports = if roots.is_empty() {
+        let union_roots = {
+            let mut state = lock(&self.state);
+            if caller_roots.is_empty() {
+                state.client_roots.remove(&client_id);
+            } else {
+                state.client_roots.insert(client_id, caller_roots.clone());
+            }
+            state.merged_roots()
+        };
+        let union_ports = if union_roots.is_empty() {
             Vec::new()
         } else {
-            scan_attributed(&roots)
+            scan_attributed(&union_roots)
+        };
+        let caller_ports = if caller_roots.is_empty() {
+            Vec::new()
+        } else if same_roots(&caller_roots, &union_roots) {
+            union_ports.clone()
+        } else {
+            scan_attributed(&caller_roots)
         };
         let notify = {
             let mut state = lock(&self.state);
-            let changed_from_prior = state
-                .last
-                .as_ref()
-                .is_some_and(|previous| previous != &ports);
-            state.roots = roots;
-            state.last = Some(ports.clone());
-            if !state.roots.is_empty() && !state.started && !state.closed {
-                state.started = true;
-                spawn_watcher(Arc::clone(self));
+            let current_union = state.merged_roots();
+            if !same_roots(&current_union, &union_roots) {
+                false
+            } else {
+                let changed_from_prior = state
+                    .last
+                    .as_ref()
+                    .is_some_and(|previous| previous != &union_ports);
+                state.last = Some(union_ports.clone());
+                if !current_union.is_empty() && !state.started && !state.closed {
+                    state.started = true;
+                    spawn_watcher(Arc::clone(self));
+                }
+                self.wake.notify_all();
+                changed_from_prior
             }
-            self.wake.notify_all();
-            changed_from_prior
         };
         if notify {
-            (self.sink)(
-                "ports/changed",
-                json!(PortsChanged {
-                    ports: ports.clone()
-                }),
-            );
+            (self.sink)("ports/changed", json!(PortsChanged { ports: union_ports }));
         }
-        Ok(ports)
+        Ok(caller_ports)
+    }
+
+    pub(crate) fn remove_client(&self, client_id: u64) {
+        let should_rescan = {
+            let mut state = lock(&self.state);
+            if state.client_roots.remove(&client_id).is_none() {
+                false
+            } else if state.client_roots.is_empty() {
+                state.last = None;
+                state.rescan_at = None;
+                self.wake.notify_all();
+                false
+            } else {
+                state.rescan_at = Some(Instant::now());
+                self.wake.notify_all();
+                true
+            }
+        };
+        if should_rescan {
+            self.rescan_now();
+        }
     }
 
     pub(crate) fn stop(self: &Arc<Self>, params: &PortStopParams) -> Result<()> {
@@ -114,7 +168,7 @@ impl PortMonitor {
         }
         let candidate_roots = {
             let state = lock(&self.state);
-            let mut roots = state.roots.clone();
+            let mut roots = state.merged_roots();
             if !roots.iter().any(|r| r.raw == target_root.raw) {
                 roots.push(target_root);
             }
@@ -137,7 +191,7 @@ impl PortMonitor {
         self.rescan_now();
         {
             let mut state = lock(&self.state);
-            if !state.roots.is_empty() && !state.closed {
+            if !state.client_roots.is_empty() && !state.closed {
                 state.rescan_at = Some(Instant::now() + RESCAN_DELAY);
                 if !state.started {
                     state.started = true;
@@ -152,7 +206,7 @@ impl PortMonitor {
     pub(crate) fn close(&self) {
         let mut state = lock(&self.state);
         state.closed = true;
-        state.roots.clear();
+        state.client_roots.clear();
         state.rescan_at = None;
         self.wake.notify_all();
     }
@@ -160,10 +214,11 @@ impl PortMonitor {
     fn rescan_now(&self) {
         let roots = {
             let state = lock(&self.state);
-            if state.closed || state.roots.is_empty() {
+            let merged = state.merged_roots();
+            if state.closed || merged.is_empty() {
                 return;
             }
-            state.roots.clone()
+            merged
         };
         self.apply_scan(&roots);
     }
@@ -172,7 +227,8 @@ impl PortMonitor {
         let ports = scan_attributed(roots);
         let emit = {
             let mut state = lock(&self.state);
-            if state.closed || !same_roots(&state.roots, roots) {
+            let merged = state.merged_roots();
+            if state.closed || !same_roots(&merged, roots) {
                 false
             } else if state.last.as_ref() != Some(&ports) {
                 state.last = Some(ports.clone());
@@ -196,7 +252,7 @@ fn spawn_watcher(monitor: Arc<PortMonitor>) {
         loop {
             let roots = {
                 let mut state = lock(&monitor.state);
-                while !state.closed && state.roots.is_empty() {
+                while !state.closed && state.client_roots.is_empty() {
                     state = monitor
                         .wake
                         .wait(state)
@@ -224,10 +280,11 @@ fn spawn_watcher(monitor: Arc<PortMonitor>) {
                 if state.rescan_at.is_some_and(|at| Instant::now() >= at) {
                     state.rescan_at = None;
                 }
-                if state.roots.is_empty() {
+                let merged = state.merged_roots();
+                if merged.is_empty() {
                     continue;
                 }
-                state.roots.clone()
+                merged
             };
 
             monitor.apply_scan(&roots);

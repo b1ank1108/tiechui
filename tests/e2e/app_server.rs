@@ -1682,8 +1682,17 @@ async fn socket_daemon_serves_concurrent_clients_ports_and_reconnects_without_dr
     assert_eq!(init_b["home"], expected_home);
 
     let cwd = fixture.cwd.display().to_string();
+    let other_dir = fixture.root.path().join("other-client-repo");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let other_cwd = other_dir.display().to_string();
     let initial_ports = client_a.ok("ports/list", json!({"roots": [cwd]})).await;
     assert_eq!(initial_ports, json!([]));
+    let other_ports = client_b
+        .ok("ports/list", json!({"roots": [other_cwd]}))
+        .await;
+    assert_eq!(other_ports, json!([]));
+    let cleared_b = client_b.ok("ports/list", json!({"roots": []})).await;
+    assert_eq!(cleared_b, json!([]));
 
     let mut listener_proc = tokio::process::Command::new(std::env::current_exe().unwrap())
         .current_dir(&fixture.cwd)

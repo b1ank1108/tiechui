@@ -111,7 +111,7 @@ async fn serve_stdio() -> i32 {
         }
     });
     let archiving = tokio::spawn(server.clone().archive_inactive());
-    let code = read_client_lines(&server, &out, tokio::io::stdin()).await;
+    let code = read_client_lines(&server, client_id, &out, tokio::io::stdin()).await;
     server.remove_client(client_id);
     drop(out);
     server.shutdown_all().await;
@@ -122,6 +122,7 @@ async fn serve_stdio() -> i32 {
 
 async fn read_client_lines<R: AsyncRead + Unpin>(
     server: &Arc<Server>,
+    client_id: u64,
     out: &ClientOut,
     reader: R,
 ) -> i32 {
@@ -139,7 +140,7 @@ async fn read_client_lines<R: AsyncRead + Unpin>(
                 eprintln!("chui app-server: a message exceeds 16 MiB");
                 break 1;
             }
-            Ok(_) => server.receive(out, &line),
+            Ok(_) => server.receive(client_id, out, &line),
             Err(error) => {
                 eprintln!("chui app-server: {error}");
                 break 1;
@@ -342,7 +343,8 @@ async fn serve_socket(path: &Path) -> i32 {
                         });
                         let server_reader = server.clone();
                         tokio::spawn(async move {
-                            let _ = read_client_lines(&server_reader, &out, read_half).await;
+                            let _ =
+                                read_client_lines(&server_reader, client_id, &out, read_half).await;
                             server_reader.remove_client(client_id);
                             drop(out);
                             let _ = writer.await;
@@ -494,6 +496,8 @@ impl Server {
 
     fn remove_client(&self, id: u64) {
         if lock(&self.clients).remove(&id).is_some() {
+            #[cfg(feature = "workspace")]
+            self.workspace.remove_client(id);
             self.touch();
         }
     }
@@ -530,7 +534,7 @@ impl Server {
         broadcast(&self.clients, &line);
     }
 
-    fn receive(self: &Arc<Self>, out: &ClientOut, line: &[u8]) {
+    fn receive(self: &Arc<Self>, client_id: u64, out: &ClientOut, line: &[u8]) {
         self.touch();
         match serde_json::from_slice::<JsonRpcMessage>(line) {
             Ok(JsonRpcMessage::Request(request)) => {
@@ -539,7 +543,7 @@ impl Server {
                 let params = request.params.map_or(Value::Null, |params| json!(params));
                 tokio::spawn(async move {
                     server
-                        .dispatch(&out, request.id, &request.method, params)
+                        .dispatch(client_id, &out, request.id, &request.method, params)
                         .await;
                     server.touch();
                 });
@@ -550,7 +554,14 @@ impl Server {
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, out: &ClientOut, id: Id, method: &str, params: Value) {
+    async fn dispatch(
+        self: &Arc<Self>,
+        client_id: u64,
+        out: &ClientOut,
+        id: Id,
+        method: &str,
+        params: Value,
+    ) {
         let reply = match method {
             "initialize" => self.initialize(params),
             "session/list" => self.list(params).await,
@@ -639,7 +650,7 @@ impl Server {
             }
             #[cfg(feature = "workspace")]
             _ if workspace::handles(method) => {
-                workspace::dispatch(&self.workspace, method, params).await
+                workspace::dispatch(&self.workspace, client_id, method, params).await
             }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
         };

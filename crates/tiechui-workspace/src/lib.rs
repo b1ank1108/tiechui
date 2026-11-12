@@ -50,7 +50,6 @@ pub fn root(root: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The watchers, terminals and port monitor of one server.
 pub struct Workspace {
     sink: Sink,
     watches: Mutex<HashMap<PathBuf, watch::Watch>>,
@@ -128,7 +127,19 @@ impl Workspace {
     }
 
     pub fn list_ports(&self, roots: &[String]) -> Result<Vec<PortEntry>> {
-        self.ports.list(roots)
+        self.list_ports_for_client(0, roots)
+    }
+
+    pub fn list_ports_for_client(
+        &self,
+        client_id: u64,
+        roots: &[String],
+    ) -> Result<Vec<PortEntry>> {
+        self.ports.list(client_id, roots)
+    }
+
+    pub fn remove_client(&self, client_id: u64) {
+        self.ports.remove_client(client_id);
     }
 
     pub fn stop_port(&self, params: &PortStopParams) -> Result<()> {

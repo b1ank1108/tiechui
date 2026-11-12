@@ -1,5 +1,3 @@
-//! `fs/*`, `git/*`, `terminal/*` and `ports/*` for the project directories of desktop clients.
-
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -20,10 +18,15 @@ pub(super) fn handles(method: &str) -> bool {
         .any(|group| method.starts_with(group))
 }
 
-pub(super) async fn dispatch(workspace: &Arc<Workspace>, method: &str, params: Value) -> Reply {
+pub(super) async fn dispatch(
+    workspace: &Arc<Workspace>,
+    client_id: u64,
+    method: &str,
+    params: Value,
+) -> Reply {
     let workspace = workspace.clone();
     let method = method.to_owned();
-    tokio::task::spawn_blocking(move || handle(&workspace, &method, params))
+    tokio::task::spawn_blocking(move || handle(&workspace, client_id, &method, params))
         .await
         .map_err(internal)?
 }
@@ -37,7 +40,7 @@ fn call<P: DeserializeOwned, R: Serialize>(
         .and_then(value)
 }
 
-fn handle(workspace: &Workspace, method: &str, params: Value) -> Reply {
+fn handle(workspace: &Workspace, client_id: u64, method: &str, params: Value) -> Reply {
     match method {
         "fs/tree" => call(params, |p: RootParams| ws::tree(&ws::root(&p.root)?)),
         "fs/list" => call(params, |p: FileParams| {
@@ -98,7 +101,9 @@ fn handle(workspace: &Workspace, method: &str, params: Value) -> Reply {
             workspace.kill_terminal(&p.id);
             Ok(())
         }),
-        "ports/list" => call(params, |p: PortsListParams| workspace.list_ports(&p.roots)),
+        "ports/list" => call(params, |p: PortsListParams| {
+            workspace.list_ports_for_client(client_id, &p.roots)
+        }),
         "ports/stop" => call(params, |p: PortStopParams| workspace.stop_port(&p)),
         _ => Err(super::failure(-32601, format!("unknown method {method}"))),
     }
