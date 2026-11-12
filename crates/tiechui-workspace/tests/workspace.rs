@@ -442,6 +442,13 @@ fn tcp_listener_helper() {
     }
 }
 
+/// Each Windows scan runs netstat and a PowerShell process query, far slower than lsof or /proc.
+const SCAN_SLACK: Duration = if cfg!(windows) {
+    Duration::from_secs(3)
+} else {
+    Duration::ZERO
+};
+
 struct SpawnedListener {
     pid: u32,
     port: u16,
@@ -557,7 +564,15 @@ fn ports_attribute_by_longest_prefix_respect_boundaries_and_symlinks() {
         })
         .map(|e| (e.root.as_str(), e.port, e.pid, !e.process.is_empty()))
         .collect();
-    let mut expected = vec![
+    let mut expected = vec![(
+        nested_str.as_str(),
+        listener_cmdline.port,
+        listener_cmdline.pid,
+        true,
+    )];
+    // Windows does not expose another process's working directory, so only the command line counts.
+    #[cfg(not(windows))]
+    expected.extend([
         (
             repo_str.as_str(),
             listener_parent.port,
@@ -570,13 +585,7 @@ fn ports_attribute_by_longest_prefix_respect_boundaries_and_symlinks() {
             listener_nested.pid,
             true,
         ),
-        (
-            nested_str.as_str(),
-            listener_cmdline.port,
-            listener_cmdline.pid,
-            true,
-        ),
-    ];
+    ]);
     expected.sort_by_key(|&(root, port, pid, _)| (root, port, pid));
     assert_eq!(relevant, expected);
 
@@ -623,9 +632,10 @@ fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
     assert!(initial.is_empty(), "unexpected initial ports: {initial:?}");
 
     let unrelated = SpawnedListener::start(&outside, None, false);
-    let owned = SpawnedListener::start(&repo, None, false);
+    let owned_script = repo.join("server.js").display().to_string();
+    let owned = SpawnedListener::start(&repo, Some(&owned_script), false);
 
-    let appear_deadline = Instant::now() + Duration::from_secs(3);
+    let appear_deadline = Instant::now() + Duration::from_secs(3) + SCAN_SLACK;
     loop {
         let got = notices.lock().unwrap().iter().any(|(method, params)| {
             method == "ports/changed"
@@ -642,7 +652,7 @@ fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
         }
         assert!(
             Instant::now() < appear_deadline,
-            "ports/changed did not report spawned listener within 3s: {:?}",
+            "ports/changed did not report spawned listener in time: {:?}",
             *notices.lock().unwrap()
         );
         std::thread::sleep(Duration::from_millis(40));
@@ -688,7 +698,7 @@ fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
         })
         .unwrap();
 
-    let stop_deadline = stop_started + Duration::from_secs(1);
+    let stop_deadline = stop_started + Duration::from_secs(1) + SCAN_SLACK;
     loop {
         let cleared = notices.lock().unwrap().iter().any(|(method, params)| {
             method == "ports/changed"
@@ -701,7 +711,7 @@ fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
         }
         assert!(
             Instant::now() < stop_deadline,
-            "ports/changed did not converge within 1s after stop: {:?}",
+            "ports/changed did not converge in time after stop: {:?}",
             *notices.lock().unwrap()
         );
         std::thread::sleep(Duration::from_millis(20));

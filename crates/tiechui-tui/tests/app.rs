@@ -217,7 +217,8 @@ fn compaction_progress_degraded_checkpoint_and_pause_are_visible() {
 
 #[test]
 fn retry_wait_pauses_activity_and_resumes_when_request_starts() {
-    let at = Instant::now() - Duration::from_secs(400);
+    let at = Instant::now();
+    let now = at + Duration::from_secs(400);
     let mut app = ready(100);
     app.event_at(
         event(EventKind::TurnStarted {
@@ -237,7 +238,7 @@ fn retry_wait_pauses_activity_and_resumes_when_request_starts() {
     app.event_at(waiting(), at + Duration::from_secs(10));
     // Repeated waiting notifications must not restart the pause.
     app.event_at(waiting(), at + Duration::from_secs(100));
-    let lines = text(&app.live().0).join("\n");
+    let lines = text(&app.live_at(now).0).join("\n");
     assert!(
         lines.contains("Retrying request (10s • esc to interrupt)"),
         "{lines}"
@@ -252,7 +253,7 @@ fn retry_wait_pauses_activity_and_resumes_when_request_starts() {
         }),
         at + Duration::from_secs(380),
     );
-    let lines = text(&app.live().0).join("\n");
+    let lines = text(&app.live_at(now).0).join("\n");
     assert!(!lines.contains("Retrying request"));
     assert!(
         lines.contains("Working (30s • esc to interrupt)"),
@@ -265,7 +266,11 @@ fn retry_wait_pauses_activity_and_resumes_when_request_starts() {
         }),
         at + Duration::from_secs(700),
     );
-    assert!(!text(&app.live().0).join("\n").contains("Retrying request"));
+    assert!(
+        !text(&app.live_at(now).0)
+            .join("\n")
+            .contains("Retrying request")
+    );
 }
 
 fn running(width: usize) -> App {

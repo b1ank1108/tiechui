@@ -2731,7 +2731,10 @@ impl App {
     /// Streaming tail, live tools, working status, queued previews, then the composer between
     /// two rules, with notices and the mention popup or shortcuts below.
     pub fn live(&mut self) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
-        let now = Instant::now();
+        self.live_at(Instant::now())
+    }
+
+    pub fn live_at(&mut self, now: Instant) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
         let lines = self.transcript.live(now - self.epoch, now);
         self.bottom(lines, now)
     }
