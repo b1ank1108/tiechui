@@ -488,7 +488,7 @@ just plugins-check                          # 存在 ../tiechui-plugins 时校�
 
 - 在原生 Linux x86_64 与 aarch64、macOS arm64 与 x86_64 runner 上构建 tarball，并为 Windows x86_64 构建 zip；
 - 把它们和合并的 `SHA256SUMS` 附加到**草稿** release，由你手动发布；
-- 带注释 tag 的说明（`git tag -a v0.4.1 -F notes.md`）就是 release 说明；
+- 带注释 tag 的说明（`git tag -a v0.5.0 -F notes.md`）就是 release 说明；
 - 发布 release 后，`.github/workflows/npm.yml` 发布 `@tiechui/cli`。
 
 ### 目录结构

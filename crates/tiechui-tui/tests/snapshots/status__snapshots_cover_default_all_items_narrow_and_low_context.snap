@@ -33,8 +33,8 @@ expression: "out.join(\"\\n\\n\")"
 [-]context-remaining   [fg#9aa0aa] 75%
 [-]context-used        [fg#9aa0aa]25% used
 [-]context-used        [fg#9aa0aa] 25%
-[-]version             [fg#666c77]0.4.1
-[-]version             [fg#666c77] 0.4.1
+[-]version             [fg#666c77]0.5.0
+[-]version             [fg#666c77] 0.5.0
 [-]context-window-size [fg#666c77]200k
 [-]context-window-size [fg#666c77] 200k
 [-]used-tokens         [fg#666c77]120 used

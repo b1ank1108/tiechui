@@ -538,7 +538,7 @@ the workspace version:
 
 - it builds tarballs on native Linux x86_64 and aarch64 and macOS arm64 and x86_64 runners, and a zip for Windows x86_64;
 - it attaches them and a combined `SHA256SUMS` to a **draft** release, which you publish by hand;
-- the annotated tag message (`git tag -a v0.4.1 -F notes.md`) becomes the release notes;
+- the annotated tag message (`git tag -a v0.5.0 -F notes.md`) becomes the release notes;
 - publishing the release runs `.github/workflows/npm.yml`, which publishes `@tiechui/cli`.
 
 ### Layout
