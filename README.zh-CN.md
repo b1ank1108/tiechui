@@ -29,11 +29,11 @@
 
 ## 亮点
 
-- **两种 provider 协议。** Anthropic Messages 与 OpenAI Chat Completions，含兼容网关。
+- **三种 provider 协议。** Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses，含兼容网关。
 - **可回退的会话。** 追加写入的 JSONL，支持分支、恢复、回退和压缩。
 - **权限闸门。** 对工具、shell 命令、路径和 MCP 调用的规则，分三种模式：`rules`、`auto`（由模型审查规则本会询问的调用）和 `yolo`。
 - **后台 shell。** 长时间运行的命令可转入后台，结束时通知模型。
-- **模块。** 提问、旁聊、目标、定时提示、子代理、技能、hooks 和 MCP。
+- **模块。** 提问、旁聊、目标、定时提示、子代理、技能、提示模板、hooks 和 MCP。
 - **插件。** 声明式 T1 包；进程外 T2 JSON-RPC 插件，附 Rust 与 TypeScript SDK；以及 Git 市场。
 
 交互界面和 `exec` 共用同一个会话 actor、provider、工具、权限和模块。
@@ -191,6 +191,7 @@ theme = "automatic"                    # 跟随终端背景
 - 思考级别会被限制在模型 `thinking_levels` 声明的范围内。`openai-responses` 关闭思考时发送
   effort `none`；不支持它的模型可把 `off` 映射为 `"minimal"` 或标记为 `false`。
 - 模型还可以设置 `cache_retention`、`prices`，Anthropic 上还有 `fallback_models`。
+- `[network]` 为模型和 MCP 请求设置代理、绕过代理的主机和额外的 CA 证书文件。它与 `[sessions]`（`archive_after_days`）、`[skills]`（`disabled`，会话排除的技能名）只从 `~/.tiechui/config.toml` 读取。
 
 每个 provider 的密钥来自 `providers.toml` 里的 `api_key`，或 `api_key_env` 指定的
 环境变量，二者不能同时使用。直接写入的密钥不会进入工具继承的环境；用 `chmod 600`
@@ -221,7 +222,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 - `--approval`，见[权限与信任](#权限与信任)。
 
 其他子命令有 `setup`、`doctor`、`trust`、`plugin`、`skills`、`hooks` 和 `mcp`，都支持 `--help`。
-`chui app-server` 通过 stdio 上的 JSON-RPC 向桌面客户端提供会话及其项目的文件、Git 与终端，以及用户的供应商、设置与 MCP 服务器，类型生成在 `schema/app-server.ts`。
+`chui app-server` 通过 stdio 上的 JSON-RPC 向桌面客户端提供会话及其项目的文件、Git 与终端，以及用户的供应商、设置、MCP 服务器、技能、提示模板、子代理定义与 hooks，类型生成在 `schema/app-server.ts`。
 内置工具是 `read`、`write`、`edit`、`grep`、`find` 和 `bash`，以及管理后台命令的
 `shell_list`、`shell_output` 和 `shell_stop`。模块、插件和 MCP 服务器会添加更多工具。
 
@@ -258,7 +259,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | --- | --- |
 | `/model [provider/id]`、`/thinking [level]` | 切换模型或思考级别，并保存为新会话的默认值 |
 | `/new`、`/resume`、`/retry` | 新会话、已保存的会话、重试失败的请求 |
-| `/reload` | 重新加载配置、上下文文件、技能、MCP、插件和 hooks |
+| `/reload` | 重新加载配置、上下文文件、技能、提示模板、MCP、插件和 hooks |
 | `/compact [instructions]` | 立即总结较早的上下文 |
 | `/context [system\|tools\|injections\|messages\|cache]` | 查看发送给模型的内容 |
 | `/rewind [detach]` | 把代码、对话或两者恢复到更早的回合 |
@@ -275,7 +276,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `/theme`、`/statusline` | 语法主题选择器、状态行显示项 |
 | `/help`、`/quit` | 快捷键、退出 |
 
-禁用模块会移除它的命令。插件可以添加命令。
+禁用模块会移除它的命令。插件和[提示模板](#技能提示模板上下文文件和-hooks)可以添加命令。
 
 ### 功能
 
@@ -367,7 +368,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | `yolo` | 未指定 `--mode` 时等同于 `--mode yolo` |
 
 `chui trust allow|deny|status --cwd DIR`（或 `/trust`）决定是否加载项目的 `.agents/`
-配置、规则、技能和 hooks，并兼容 `.claude/`。命令 hooks 和 T2 插件能力有各自的审批。
+配置、规则、技能、提示模板和 hooks，并兼容 `.claude/`。命令 hooks 和 T2 插件能力有各自的审批。
 见 [modules/permissions](modules/permissions/README.md)。
 
 `chui` 第一次打开含有这些文件的项目时会询问，并按 Git 根目录保存答案。之后对新增或
@@ -402,18 +403,20 @@ chui plugin add ./path/to/package # 本地包
 - [Rust SDK](crates/tiechui-plugin-sdk/README.md)
 - [TypeScript SDK](sdk/typescript/README.md)：零依赖，Node 25，无需 npm
 
-### 技能、上下文文件和 hooks
+### 技能、提示模板、上下文文件和 hooks
 
 **技能**从以下位置加载：
 
 - 主目录和已信任项目中的 `.agents/skills` 与 `.claude/skills`；
 - profile 的 `skills/`。
 
-这些根目录默认被发现，无需配置技能段。用 `chui skills list` 列出技能，或在界面中用
+这些根目录默认被发现；`[skills] disabled` 可排除指定名称的技能。用 `chui skills list` 列出技能，或在界面中用
 `/skills` 选择。`AGENTS.md` 和其他上下文文件见
 [modules/context-files](modules/context-files/README.md)。
 
-**Hooks：** `chui hooks list` 列出，`chui hooks trust` 批准命令 hooks。
+**提示模板**是放在 profile 的 `prompts/` 以及已信任项目 `.agents/prompts` 和 `.claude/commands` 中的 Markdown 模板。每个文件注册为同名命令；`/name text` 会把正文中的 `$ARGUMENTS` 替换后作为用户消息发送。见 [modules/prompts](modules/prompts/README.md)。
+
+**Hooks：** `chui hooks list` 列出，`chui hooks trust` 批准命令 hooks。桌面客户端只编辑 `hooks.json` 文件；保存在其中的处理器即视为已批准，之前已批准的处理器也保持批准状态。
 
 ### MCP
 
@@ -485,7 +488,7 @@ just plugins-check                          # 存在 ../tiechui-plugins 时校�
 
 - 在原生 Linux x86_64 与 aarch64、macOS arm64 与 x86_64 runner 上构建 tarball，并为 Windows x86_64 构建 zip；
 - 把它们和合并的 `SHA256SUMS` 附加到**草稿** release，由你手动发布；
-- 带注释 tag 的说明（`git tag -a v0.2.0 -F notes.md`）就是 release 说明；
+- 带注释 tag 的说明（`git tag -a v0.4.0 -F notes.md`）就是 release 说明；
 - 发布 release 后，`.github/workflows/npm.yml` 发布 `@tiechui/cli`。
 
 ### 目录结构
@@ -499,7 +502,7 @@ just plugins-check                          # 存在 ../tiechui-plugins 时校�
 | `crates/tiechui-exec`、`tiechui-tools` | 进程执行、内置工具 |
 | `crates/tiechui-tui`、`tiechui-cli` | 终端界面（只依赖协议）、CLI |
 | `crates/tiechui-plugin-api`、`tiechui-plugin-sdk`、`sdk/typescript` | 模块 API、插件 SDK |
-| `modules/` | editing、exec、permissions、ask、hooks、context-files、skills、mcp、plugins、context、rewind、btw、goal、loop、compaction、subagents、tool-search、ptc |
+| `modules/` | editing、exec、permissions、ask、hooks、context-files、skills、prompts、mcp、plugins、context、rewind、btw、goal、loop、compaction、subagents、tool-search、ptc |
 | `xtask/`、`scripts/`、`tests/` | 维护任务、打包、PTY 测试 |
 | `site/` | 由 TUI 快照渲染的界面一览 |
 

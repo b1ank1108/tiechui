@@ -129,15 +129,17 @@
   function statusStates() {
     const lines = DATA.snapshots.status__snapshots_cover_default_all_items_narrow_and_low_context.parts;
     const [text, icons] = ["== default", "== default icons"].map((title) => lines.find((p) => p.title === title).lines[0]);
-    const ctx = "[fg#f2b590]";
     return [
-      ["会话开始", "Context 100% left", "\uf240 100%"],
-      ["检查点后", "Context compacted", "\ueac5 compacted"],
-    ].map(([state, item, icon]) => ({
+      ["会话开始", "  [fg#9aa0aa]100% left[fg#666c77] / 200k", "     [fg#9aa0aa]\uf240 100%[fg#666c77] / 200k"],
+      ["检查点后", "[fg#a99ccf]◇ compacted[fg#666c77] · 200k", "[fg#a99ccf]\ueac5 compacted[fg#666c77] · 200k"],
+    ].map(([state, nextText, nextIcon]) => ({
       axes: { 状态: state },
-      lines: [text.replace(`${ctx}Context 75% left`, ctx + item), "", icons.replace(/\[fg#f2b590\]\S+ 75%/, ctx + icon)],
+      lines: [
+        text.replace("   [fg#9aa0aa]75% left[fg#666c77] / 200k", nextText),
+        "",
+        icons.replace(/ {6}\[fg#9aa0aa\]\S+ 75%\[fg#666c77\] \/ 200k/, nextIcon),
+      ],
       mode: "dark",
-      cols: W,
       source: "status__snapshots_cover_default_all_items_narrow_and_low_context",
     }));
   }
@@ -425,8 +427,9 @@
             extra: (_, part) => ({ 视图: { waiting: "等待中", finished: "已完成", viewer: "浏览器", output: "输出" }[part.title.split(" / ").pop()] }),
           }),
           notes: [
-            N("↑120 ↓30", "输入 / 输出 token；R / W 为缓存读写。"),
-            N("浏览器", "左列任务、右列详情；^F 搜索、^S 分组、^T 显示思考。"),
+            N("default · alpha/fast", "省略 agent 时运行默认通用子代理；任务行与详情标出实际运行的 `provider/id`。"),
+            N("120 in · 30 out", "已完成任务列出回合数、输入与输出 token 及模型名。"),
+            N("浏览器", "左列任务、右列详情；`ctrl+x` 停止、`ctrl+f` 搜索、`ctrl+t` 切换思考段落。"),
           ],
         },
         {
@@ -724,7 +727,7 @@
     const table = el("div", "glyphs");
     for (const [g, meaning] of [
       ["•", "条目引导符：消息、工具、动作"], ["◦", "非 truecolor 下的交替帧"], ["└", "工具输出树枝"],
-      ["›", "输入提示符、选中项"], ["❯", "resume 选中行"], ["↳", "排队中的消息"],
+      ["›", "输入提示符、选中项"], ["↳", "排队中的消息"],
       ["■", "错误段落；/context 中的类别格"], ["◧", "/context 混合格"], ["□", "/context 空闲格"],
       ["─", "规则线；回合结束线"], ["…", "截断：末尾或中间"], ["·", "同一行内的分隔"],
       ["◇", "模型内部活动：上下文维护、检查点"], ["◆", "降级的检查点"], ["▲", "可恢复的暂停"],

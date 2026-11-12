@@ -29,7 +29,7 @@
 
 ## Highlights
 
-- **Two provider wires.** Anthropic Messages and OpenAI Chat Completions, including compatible gateways.
+- **Three provider wires.** Anthropic Messages, OpenAI Chat Completions and OpenAI Responses, including compatible gateways.
 - **Sessions you can rewind.** Append-only JSONL with branches, resume, rewind and compaction.
 - **A permission gate.** Rules for tools, shell commands, paths and MCP calls, in three modes: `rules`, `auto` (a model reviews what the rules would ask about) and `yolo`.
 - **Background shells.** Long-running commands move to the background; the model is told when they finish.
@@ -538,7 +538,7 @@ the workspace version:
 
 - it builds tarballs on native Linux x86_64 and aarch64 and macOS arm64 and x86_64 runners, and a zip for Windows x86_64;
 - it attaches them and a combined `SHA256SUMS` to a **draft** release, which you publish by hand;
-- the annotated tag message (`git tag -a v0.2.0 -F notes.md`) becomes the release notes;
+- the annotated tag message (`git tag -a v0.4.0 -F notes.md`) becomes the release notes;
 - publishing the release runs `.github/workflows/npm.yml`, which publishes `@tiechui/cli`.
 
 ### Layout
