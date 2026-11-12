@@ -1416,10 +1416,10 @@ async fn shell_path_extraction_separates_reads_writes_git_and_non_file_commands(
     ])));
     let outside = f.cwd.parent().unwrap().join("outside-target");
     for command in [
-        format!("git -C {} status", outside.display()),
-        format!("git -C{} status", outside.display()),
-        format!("git diff --no-index a.txt {}", outside.display()),
-        format!("sed -f {} a.txt", outside.display()),
+        format!("git -C '{}' status", outside.display()),
+        format!("git -C'{}' status", outside.display()),
+        format!("git diff --no-index a.txt '{}'", outside.display()),
+        format!("sed -f '{}' a.txt", outside.display()),
     ] {
         denied(f.bash(&command).await);
     }
@@ -1488,18 +1488,18 @@ async fn shell_path_extraction_covers_chmod_wrappers_find_clauses_rg_and_git_fla
     ])));
     let outside = f.cwd.parent().unwrap().join("outside-target");
     for command in [
-        format!("chmod --reference {} a.txt", outside.display()),
-        format!("chmod --reference={} a.txt", outside.display()),
-        format!("env -C {} true", outside.display()),
-        format!("env --chdir={} true", outside.display()),
-        format!("sudo -D {} true", outside.display()),
-        format!("sudo --chdir={} true", outside.display()),
-        format!("rg --files {}", outside.display()),
-        format!("rg -g '*.rs' --files {}", outside.display()),
-        format!("git --git-dir {} status", outside.display()),
-        format!("git --git-dir={} status", outside.display()),
-        format!("git --work-tree {} status", outside.display()),
-        format!("git --work-tree={} status", outside.display()),
+        format!("chmod --reference '{}' a.txt", outside.display()),
+        format!("chmod --reference='{}' a.txt", outside.display()),
+        format!("env -C '{}' true", outside.display()),
+        format!("env --chdir='{}' true", outside.display()),
+        format!("sudo -D '{}' true", outside.display()),
+        format!("sudo --chdir='{}' true", outside.display()),
+        format!("rg --files '{}'", outside.display()),
+        format!("rg -g '*.rs' --files '{}'", outside.display()),
+        format!("git --git-dir '{}' status", outside.display()),
+        format!("git --git-dir='{}' status", outside.display()),
+        format!("git --work-tree '{}' status", outside.display()),
+        format!("git --work-tree='{}' status", outside.display()),
     ] {
         let reason = denied(f.bash(&command).await);
         assert!(
