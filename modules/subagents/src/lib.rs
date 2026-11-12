@@ -199,11 +199,7 @@ impl ContextProvider for Service {
         let Some(runner) = runner else {
             return Ok(vec![]);
         };
-        let catalog = runner.model_catalog();
-        if catalog.is_child {
-            return Ok(vec![]);
-        }
-        Ok(vec![format_catalog(&catalog)])
+        Ok(vec![format_catalog(&runner.model_catalog())])
     }
 }
 

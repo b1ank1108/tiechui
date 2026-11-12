@@ -22,7 +22,6 @@ impl tiechui_plugin_api::RuntimeExtension for UsageEvents {
 }
 
 pub(super) struct Runner {
-    pub is_child: bool,
     pub providers: BTreeMap<String, Arc<dyn ModelProvider>>,
     pub model: ModelRef,
     pub thinking: Option<ReasoningLevel>,
@@ -154,11 +153,7 @@ impl ChildRunner for Runner {
         {
             models.push(entry);
         }
-        ModelCatalog {
-            is_child: self.is_child,
-            active,
-            models,
-        }
+        ModelCatalog { active, models }
     }
 
     fn validate_model(&self, model: &str) -> Result<(), ToolError> {
@@ -195,7 +190,7 @@ impl ChildRunner for Runner {
         .map_err(|e| ToolError(e.to_string()))?;
         let thread_id = ThreadId(store.header().id.clone());
         let shutdown = cancel.child_token();
-        let mut handle = SessionActor::spawn_child(
+        let mut handle = SessionActor::spawn(
             store,
             SessionConfig {
                 compaction: Default::default(),

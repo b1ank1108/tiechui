@@ -65,7 +65,6 @@ pub struct SessionHandle {
 
 /// All mutable session and turn state lives in this task. Worker callbacks carry epochs.
 pub struct SessionActor {
-    child: bool,
     published_resources: std::sync::Mutex<Option<Vec<tiechui_protocol::Resource>>>,
     store: Option<SessionStore>,
     config: SessionConfig,
@@ -130,25 +129,8 @@ impl SessionActor {
     /// Open/create the store on a blocking thread before transferring ownership here.
     pub fn spawn(
         store: SessionStore,
-        config: SessionConfig,
-        shutdown: CancellationToken,
-    ) -> SessionHandle {
-        Self::spawn_with_role(store, config, shutdown, false)
-    }
-
-    pub(crate) fn spawn_child(
-        store: SessionStore,
-        config: SessionConfig,
-        shutdown: CancellationToken,
-    ) -> SessionHandle {
-        Self::spawn_with_role(store, config, shutdown, true)
-    }
-
-    fn spawn_with_role(
-        store: SessionStore,
         mut config: SessionConfig,
         shutdown: CancellationToken,
-        child: bool,
     ) -> SessionHandle {
         let (submissions, ops) = mpsc::channel(64);
         let (events, receiver) = broadcast::channel(1024);
@@ -159,7 +141,6 @@ impl SessionActor {
         let epoch = config.epoch;
         let sequence = store.entries().len() as u64;
         let actor = Self {
-            child,
             published_resources: std::sync::Mutex::new(None),
             thread: ThreadId(store.header().id.clone()),
             model: config.model.clone(),
@@ -384,7 +365,6 @@ impl SessionActor {
             return;
         }
         let runner: Arc<dyn tiechui_plugin_api::ChildRunner> = Arc::new(actors::Runner {
-            is_child: self.child,
             providers: self.config.providers.clone(),
             model: self.model.clone(),
             thinking: self.requested,

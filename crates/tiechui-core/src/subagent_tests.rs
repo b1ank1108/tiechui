@@ -525,9 +525,6 @@ impl tiechui_plugin_api::ContextProvider for ChildProbe {
             return Ok(vec![]);
         };
         let catalog = runner.model_catalog();
-        if catalog.is_child {
-            return Ok(vec![]);
-        }
         let candidates = catalog
             .candidates()
             .map(|m| format!("{}:{:?}", m.model, m.thinking_levels))
@@ -586,15 +583,6 @@ impl Tool for SpawnChildTool {
             Some(tiechui_plugin_api::ChildThinking::Level(level)) => Some(level),
             None | Some(tiechui_plugin_api::ChildThinking::Inherit) => None,
         };
-        let mut child_registry = Registry::default();
-        let nested_probe = if call.arguments["probe_child_catalog"] == true {
-            let nested = Arc::new(ChildProbe::default());
-            child_registry.register_actor_client(nested.clone());
-            child_registry.register_context_provider(nested.clone());
-            Some(nested)
-        } else {
-            None
-        };
         let seen_model = Arc::new(Mutex::new(String::new()));
         let seen_text = Arc::new(Mutex::new(String::new()));
         let model_slot = seen_model.clone();
@@ -613,7 +601,7 @@ impl Tool for SpawnChildTool {
                     thinking,
                     tools: None,
                 },
-                child_registry,
+                Registry::default(),
                 ctx.cancel.child_token(),
                 Arc::new(move |event| {
                     probe.spawned_events.fetch_add(1, Ordering::SeqCst);
@@ -633,15 +621,8 @@ impl Tool for SpawnChildTool {
                 }),
             )
             .await?;
-        let child_catalog_is_child = nested_probe.and_then(|nested| {
-            let bound = nested.runner.lock().unwrap().clone()?;
-            Some(bound.model_catalog().is_child)
-        });
         Ok(ToolOutput {
-            details: Some(json!({
-                "model": *seen_model.lock().unwrap(),
-                "child_catalog_is_child": child_catalog_is_child,
-            })),
+            details: Some(json!({"model": *seen_model.lock().unwrap()})),
             ..ToolOutput::text(seen_text.lock().unwrap().clone())
         })
     }
@@ -1186,12 +1167,12 @@ async fn requested_thinking_on_non_reasoning_parent_survives_reload_model_switch
 }
 
 #[tokio::test]
-async fn session_model_catalog_tracks_active_model_excludes_unready_and_marks_child_sessions() {
+async fn session_model_catalog_tracks_active_model_and_excludes_unready() {
     let mut f = MultiProviderFixture::new(
         vec![
             invoke(
                 "spawn_child",
-                json!({"task": "inspect child catalog", "model": "beta/judge", "probe_child_catalog": true}),
+                json!({"task": "inspect child catalog", "model": "beta/judge"}),
             ),
             answer("turn-1-done"),
         ],
@@ -1210,9 +1191,6 @@ async fn session_model_catalog_tracks_active_model_excludes_unready_and_marks_ch
     assert!(system_text.contains("active=alpha/fast"), "{system_text}");
     assert!(system_text.contains("beta/judge:"), "{system_text}");
     assert!(!system_text.contains("beta/unready"), "{system_text}");
-
-    let tool_output = &f.tool_results()[0].0;
-    assert_eq!(tool_output["details"]["child_catalog_is_child"], true);
 
     let child_req = recv(&mut f.beta_rx).await;
     let child_system = match &child_req.messages[0].content[0] {

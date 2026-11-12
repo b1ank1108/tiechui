@@ -47,7 +47,7 @@ impl Default for Runner {
             cleaned: AtomicUsize::new(0),
             tasks: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
-            catalog: Mutex::new(sample_catalog(false, false)),
+            catalog: Mutex::new(sample_catalog(false)),
             hold_until_eight: None,
         }
     }
@@ -254,7 +254,7 @@ impl Harness {
     }
 }
 
-fn sample_catalog(is_child: bool, single_only: bool) -> ModelCatalog {
+fn sample_catalog(single_only: bool) -> ModelCatalog {
     let mut models = vec![CatalogModel {
         model: "alpha/fast".into(),
         reasoning: false,
@@ -273,7 +273,6 @@ fn sample_catalog(is_child: bool, single_only: bool) -> ModelCatalog {
         });
     }
     ModelCatalog {
-        is_child,
         active: "alpha/fast".into(),
         models,
     }
@@ -526,7 +525,7 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
     assert_eq!(described.len(), 1);
     assert_eq!(described[0].label, "subagent_models");
 
-    *runner.catalog.lock().unwrap() = sample_catalog(false, true);
+    *runner.catalog.lock().unwrap() = sample_catalog(true);
     let single = provider
         .fragments(&input, CancellationToken::new())
         .await
@@ -538,13 +537,6 @@ async fn context_provider_exposes_active_and_candidates_to_parent_only() {
         "{}",
         single[0]
     );
-
-    *runner.catalog.lock().unwrap() = sample_catalog(true, false);
-    let child = provider
-        .fragments(&input, CancellationToken::new())
-        .await
-        .unwrap();
-    assert!(child.is_empty());
 }
 
 #[tokio::test]

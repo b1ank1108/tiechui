@@ -13,7 +13,6 @@ pub struct CatalogModel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCatalog {
-    pub is_child: bool,
     pub active: String,
     pub models: Vec<CatalogModel>,
 }
