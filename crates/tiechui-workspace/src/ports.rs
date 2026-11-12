@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -557,6 +558,7 @@ fn resolve_token_path(token: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(target_os = "linux"))]
 fn normalize_listen_endpoint(raw: &str) -> Option<(String, u16)> {
     let endpoint = raw.split(" (").next().unwrap_or(raw).trim();
     if endpoint.contains("->") {
