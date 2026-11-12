@@ -29,7 +29,7 @@ use tiechui_protocol::{
     Event, EventKind, Op, PERMISSION_MODE_EVENT, SessionEpoch, Submission, SubmissionId, ThreadId,
 };
 use tiechui_session::{Entry, EntryKind, SessionStore};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,8 +38,11 @@ use crate::exec::{Open, Options, Prepared, locations, prepare};
 use projection::Projection;
 
 const MAX_FRAME: u64 = 16 << 20;
+#[cfg(unix)]
+const DEFAULT_DAEMON_IDLE: Duration = Duration::from_secs(30 * 60);
 
 type Reply = Result<Value, rpc::Error>;
+type ClientOut = mpsc::UnboundedSender<String>;
 
 struct Live {
     path: PathBuf,
@@ -56,17 +59,39 @@ struct Live {
 
 struct Server {
     home: PathBuf,
-    out: mpsc::UnboundedSender<String>,
+    clients: Arc<Mutex<HashMap<u64, ClientOut>>>,
+    next_client: AtomicU64,
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
     schedules: tiechui_module_loop::Schedules,
     next: AtomicU64,
     /// Wakes the archiving of inactive sessions early.
     sweep: Notify,
+    activity: Arc<Notify>,
+    activity_seq: Arc<AtomicU64>,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
 
-pub(crate) async fn run() -> i32 {
+pub(crate) async fn run(args: &clap::ArgMatches) -> i32 {
+    if let Some(raw) = args.get_one::<String>("connect") {
+        return connect_socket(&expand_socket_path(raw)).await;
+    }
+    if let Some(raw) = args.get_one::<String>("socket") {
+        return serve_socket(&expand_socket_path(raw)).await;
+    }
+    serve_stdio().await
+}
+
+fn expand_socket_path(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = tiechui_config::user_home()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(raw)
+}
+
+async fn serve_stdio() -> i32 {
     let home = match locations(&Options::default()) {
         Ok((_, _, _, home)) => home,
         Err((code, message)) => {
@@ -74,7 +99,8 @@ pub(crate) async fn run() -> i32 {
             return code;
         }
     };
-    let (out, mut lines) = mpsc::unbounded_channel::<String>();
+    let server = Server::new(home);
+    let (client_id, out, mut lines) = server.add_client();
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(mut line) = lines.recv().await {
@@ -84,22 +110,26 @@ pub(crate) async fn run() -> i32 {
             }
         }
     });
-    let server = Arc::new(Server {
-        home,
-        #[cfg(feature = "workspace")]
-        workspace: workspace::new(out.clone()),
-        out,
-        sessions: Mutex::default(),
-        schedules: Default::default(),
-        next: AtomicU64::new(1),
-        sweep: Notify::new(),
-    });
     let archiving = tokio::spawn(server.clone().archive_inactive());
-    let mut stdin = BufReader::new(tokio::io::stdin());
+    let code = read_client_lines(&server, &out, tokio::io::stdin()).await;
+    server.remove_client(client_id);
+    drop(out);
+    server.shutdown_all().await;
+    archiving.abort();
+    writer.abort();
+    code
+}
+
+async fn read_client_lines<R: AsyncRead + Unpin>(
+    server: &Arc<Server>,
+    out: &ClientOut,
+    reader: R,
+) -> i32 {
+    let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
-    let code = loop {
+    loop {
         line.clear();
-        match (&mut stdin)
+        match (&mut reader)
             .take(MAX_FRAME + 1)
             .read_until(b'\n', &mut line)
             .await
@@ -109,22 +139,258 @@ pub(crate) async fn run() -> i32 {
                 eprintln!("chui app-server: a message exceeds 16 MiB");
                 break 1;
             }
-            Ok(_) => server.receive(&line),
+            Ok(_) => server.receive(out, &line),
             Err(error) => {
                 eprintln!("chui app-server: {error}");
                 break 1;
             }
         }
-    };
-    let open: Vec<_> = lock(&server.sessions).keys().cloned().collect();
-    for thread in open {
-        server.close(&thread).await;
     }
-    #[cfg(feature = "workspace")]
-    server.workspace.close();
+}
+
+#[cfg(not(unix))]
+async fn connect_socket(path: &Path) -> i32 {
+    eprintln!(
+        "chui app-server: {}: Unix domain sockets are not supported on this platform",
+        path.display()
+    );
+    1
+}
+
+#[cfg(not(unix))]
+async fn serve_socket(path: &Path) -> i32 {
+    eprintln!(
+        "chui app-server: {}: Unix domain sockets are not supported on this platform",
+        path.display()
+    );
+    1
+}
+
+#[cfg(unix)]
+async fn connect_socket(path: &Path) -> i32 {
+    let stream = match tokio::net::UnixStream::connect(path).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("chui app-server: {}: {error}", path.display());
+            return 1;
+        }
+    };
+    let (mut sock_read, mut sock_write) = stream.into_split();
+    let stdin_failed = Arc::new(AtomicBool::new(false));
+    let stdin_failed_writer = stdin_failed.clone();
+    let to_sock = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 16384];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if sock_write.write_all(&buf[..n]).await.is_err()
+                        || sock_write.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("chui app-server: {error}");
+                    stdin_failed_writer.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        let _ = sock_write.shutdown().await;
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut buf = [0u8; 16384];
+    let mut code = 0;
+    loop {
+        match sock_read.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if stdout.write_all(&buf[..n]).await.is_err() || stdout.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(error) => {
+                eprintln!("chui app-server: {}: {error}", path.display());
+                code = 1;
+                break;
+            }
+        }
+    }
+    to_sock.abort();
+    if code == 0 && stdin_failed.load(Ordering::Relaxed) {
+        1
+    } else {
+        code
+    }
+}
+
+#[cfg(unix)]
+async fn serve_socket(path: &Path) -> i32 {
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+
+    let home = match locations(&Options::default()) {
+        Ok((_, _, _, home)) => home,
+        Err((code, message)) => {
+            eprintln!("chui: {message}");
+            return code;
+        }
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+        && let Err(error) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+    {
+        eprintln!("chui app-server: {}: {error}", parent.display());
+        return 1;
+    }
+
+    if tokio::net::UnixStream::connect(path).await.is_ok() {
+        return 0;
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() {
+            eprintln!(
+                "chui app-server: {}: file exists and is not a socket",
+                path.display()
+            );
+            return 1;
+        }
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("chui app-server: {}: {error}", path.display());
+            return 1;
+        }
+    }
+
+    let listener = match tokio::net::UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if tokio::net::UnixStream::connect(path).await.is_ok() {
+                return 0;
+            }
+            eprintln!("chui app-server: {}: {error}", path.display());
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("chui app-server: {}: {error}", path.display());
+            return 1;
+        }
+    };
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(path);
+        eprintln!("chui app-server: {}: {error}", path.display());
+        return 1;
+    }
+    let bound_id = std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+
+    let idle_timeout = std::env::var("CHUI_DAEMON_IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(DEFAULT_DAEMON_IDLE, Duration::from_millis);
+    let server = Server::new(home);
+    let archiving = tokio::spawn(server.clone().archive_inactive());
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let mut idle_state: Option<(u64, tokio::time::Instant)> = None;
+
+    loop {
+        let notified = server.activity.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let seq_now = server.activity_seq.load(Ordering::Acquire);
+        if server.is_idle() {
+            match idle_state {
+                Some((armed_seq, _)) if armed_seq == seq_now => {}
+                _ => {
+                    idle_state = Some((seq_now, tokio::time::Instant::now() + idle_timeout));
+                }
+            }
+        } else {
+            idle_state = None;
+        }
+
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        idle_state = None;
+                        let (client_id, out, mut lines) = server.add_client();
+                        let (read_half, mut write_half) = stream.into_split();
+                        let server_writer = server.clone();
+                        let writer = tokio::spawn(async move {
+                            while let Some(mut line) = lines.recv().await {
+                                line.push('\n');
+                                if write_half.write_all(line.as_bytes()).await.is_err()
+                                    || write_half.flush().await.is_err()
+                                {
+                                    server_writer.remove_client(client_id);
+                                    break;
+                                }
+                            }
+                            let _ = write_half.shutdown().await;
+                        });
+                        let server_reader = server.clone();
+                        tokio::spawn(async move {
+                            let _ = read_client_lines(&server_reader, &out, read_half).await;
+                            server_reader.remove_client(client_id);
+                            drop(out);
+                            let _ = writer.await;
+                            server_reader.touch();
+                        });
+                    }
+                    Err(error) => {
+                        eprintln!("chui app-server: accept: {error}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            () = &mut notified => {}
+            () = async {
+                match idle_state {
+                    Some((_, deadline)) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if server.is_idle()
+                    && idle_state.is_some_and(|(armed_seq, _)| {
+                        armed_seq == server.activity_seq.load(Ordering::Acquire)
+                    })
+                {
+                    break;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => break,
+            _ = async {
+                match sigterm.as_mut() {
+                    Some(sig) => {
+                        let _ = sig.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => break,
+        }
+    }
+
+    if let Some(expected) = bound_id
+        && let Ok(meta) = std::fs::symlink_metadata(path)
+        && (meta.dev(), meta.ino()) == expected
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    server.shutdown_all().await;
     archiving.abort();
-    writer.abort();
-    code
+    0
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -164,38 +430,127 @@ async fn blocking<T: Send + 'static>(
         .map_err(internal)
 }
 
+fn broadcast(clients: &Mutex<HashMap<u64, ClientOut>>, line: &str) {
+    for out in lock(clients).values() {
+        let _ = out.send(line.to_owned());
+    }
+}
+
+fn respond(out: &ClientOut, id: Id, reply: Reply) {
+    let message = match reply {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+    };
+    let _ = out.send(message.to_string());
+}
+
 impl Server {
-    fn send(&self, message: Value) {
-        let _ = self.out.send(message.to_string());
+    fn new(home: PathBuf) -> Arc<Self> {
+        let clients = Arc::new(Mutex::new(HashMap::<u64, ClientOut>::new()));
+        let activity = Arc::new(Notify::new());
+        let activity_seq = Arc::new(AtomicU64::new(0));
+        #[cfg(feature = "workspace")]
+        let workspace = {
+            let ws_clients = clients.clone();
+            let ws_activity = activity.clone();
+            let ws_seq = activity_seq.clone();
+            workspace::new(Arc::new(move |method, params| {
+                let line =
+                    json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
+                broadcast(&ws_clients, &line);
+                if matches!(method, "terminal/output" | "terminal/exit") {
+                    ws_seq.fetch_add(1, Ordering::Release);
+                    ws_activity.notify_one();
+                }
+            }))
+        };
+        Arc::new(Self {
+            home,
+            clients,
+            next_client: AtomicU64::new(1),
+            sessions: Mutex::default(),
+            schedules: Default::default(),
+            next: AtomicU64::new(1),
+            sweep: Notify::new(),
+            activity,
+            activity_seq,
+            #[cfg(feature = "workspace")]
+            workspace,
+        })
+    }
+
+    fn touch(&self) {
+        self.activity_seq.fetch_add(1, Ordering::Release);
+        self.activity.notify_one();
+    }
+
+    fn add_client(&self) -> (u64, ClientOut, mpsc::UnboundedReceiver<String>) {
+        let id = self.next_client.fetch_add(1, Ordering::Relaxed);
+        let (out, lines) = mpsc::unbounded_channel();
+        lock(&self.clients).insert(id, out.clone());
+        self.touch();
+        (id, out, lines)
+    }
+
+    fn remove_client(&self, id: u64) {
+        if lock(&self.clients).remove(&id).is_some() {
+            self.touch();
+        }
+    }
+
+    #[cfg(unix)]
+    fn is_idle(&self) -> bool {
+        if !lock(&self.clients).is_empty() {
+            return false;
+        }
+        if lock(&self.sessions)
+            .values()
+            .any(|live| lock(&live.projection).busy())
+        {
+            return false;
+        }
+        #[cfg(feature = "workspace")]
+        if self.workspace.alive_terminals() > 0 {
+            return false;
+        }
+        true
+    }
+
+    async fn shutdown_all(&self) {
+        let open: Vec<_> = lock(&self.sessions).keys().cloned().collect();
+        for thread in open {
+            self.close(&thread).await;
+        }
+        #[cfg(feature = "workspace")]
+        self.workspace.close();
     }
 
     fn notify(&self, method: &str, params: impl Serialize) {
-        self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+        let line = json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
+        broadcast(&self.clients, &line);
     }
 
-    fn respond(&self, id: Id, reply: Reply) {
-        self.send(match reply {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
-        });
-    }
-
-    fn receive(self: &Arc<Self>, line: &[u8]) {
+    fn receive(self: &Arc<Self>, out: &ClientOut, line: &[u8]) {
+        self.touch();
         match serde_json::from_slice::<JsonRpcMessage>(line) {
             Ok(JsonRpcMessage::Request(request)) => {
                 let server = self.clone();
+                let out = out.clone();
                 let params = request.params.map_or(Value::Null, |params| json!(params));
                 tokio::spawn(async move {
-                    server.dispatch(request.id, &request.method, params).await;
+                    server
+                        .dispatch(&out, request.id, &request.method, params)
+                        .await;
+                    server.touch();
                 });
             }
             // This server sends no requests, so responses and notifications are unexpected.
             Ok(_) => {}
-            Err(error) => self.respond(Id::Null, Err(failure(-32700, error))),
+            Err(error) => respond(out, Id::Null, Err(failure(-32700, error))),
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, id: Id, method: &str, params: Value) {
+    async fn dispatch(self: &Arc<Self>, out: &ClientOut, id: Id, method: &str, params: Value) {
         let reply = match method {
             "initialize" => self.initialize(params),
             "session/list" => self.list(params).await,
@@ -210,7 +565,7 @@ impl Server {
                     _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
                 };
                 match opened {
-                    Ok(live) => return self.snapshot(id, &live),
+                    Ok(live) => return self.snapshot(out, id, &live),
                     Err(error) => Err(error),
                 }
             }
@@ -288,7 +643,7 @@ impl Server {
             }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
         };
-        self.respond(id, reply);
+        respond(out, id, reply);
     }
 
     fn initialize(&self, params: Value) -> Reply {
@@ -326,13 +681,14 @@ impl Server {
     }
 
     /// Responds while holding the projection, so later events follow the snapshot.
-    fn snapshot(&self, id: Id, live: &Live) {
+    fn snapshot(&self, out: &ClientOut, id: Id, live: &Live) {
         let projection = lock(&live.projection);
         let thread_id = match projection.snapshot().first() {
             Some(event) => event.thread_id.clone(),
-            None => return self.respond(id, Err(internal("session has not started"))),
+            None => return respond(out, id, Err(internal("session has not started"))),
         };
-        self.respond(
+        respond(
+            out,
             id,
             value(Snapshot {
                 thread_id,
@@ -527,6 +883,7 @@ impl Server {
                             ready.send_replace(epoch);
                         }
                     }
+                    self.touch();
                     if settled && let Ok(live) = self.live(&thread) {
                         self.settle(&thread, &live);
                     }
@@ -552,6 +909,7 @@ impl Server {
                 },
             );
         }
+        self.touch();
     }
 
     async fn submit(&self, thread: &ThreadId, op: Op) -> Result<SubmitResult, rpc::Error> {

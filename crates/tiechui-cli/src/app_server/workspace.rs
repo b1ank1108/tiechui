@@ -1,25 +1,21 @@
-//! `fs/*`, `git/*` and `terminal/*` for the project directories of desktop clients.
+//! `fs/*`, `git/*`, `terminal/*` and `ports/*` for the project directories of desktop clients.
 
 use std::sync::Arc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tiechui_protocol::workspace::*;
-use tiechui_workspace::{self as ws, Workspace};
-use tokio::sync::mpsc;
+use tiechui_workspace::{self as ws, Sink, Workspace};
 
 use super::{Reply, internal, parse, value};
 
-pub(super) fn new(out: mpsc::UnboundedSender<String>) -> Arc<Workspace> {
-    Arc::new(Workspace::new(Arc::new(move |method, params| {
-        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let _ = out.send(message.to_string());
-    })))
+pub(super) fn new(sink: Sink) -> Arc<Workspace> {
+    Arc::new(Workspace::new(sink))
 }
 
 pub(super) fn handles(method: &str) -> bool {
-    ["fs/", "git/", "terminal/"]
+    ["fs/", "git/", "terminal/", "ports/"]
         .iter()
         .any(|group| method.starts_with(group))
 }
@@ -102,6 +98,8 @@ fn handle(workspace: &Workspace, method: &str, params: Value) -> Reply {
             workspace.kill_terminal(&p.id);
             Ok(())
         }),
+        "ports/list" => call(params, |p: PortsListParams| workspace.list_ports(&p.roots)),
+        "ports/stop" => call(params, |p: PortStopParams| workspace.stop_port(&p)),
         _ => Err(super::failure(-32601, format!("unknown method {method}"))),
     }
 }

@@ -411,3 +411,333 @@ fn watches_report_files_and_git_state() {
     }));
     workspace.unwatch(&root);
 }
+
+#[test]
+#[ignore]
+fn tcp_listener_helper() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    #[cfg(unix)]
+    if std::env::var_os("TC_TEST_IGNORE_SIGTERM").is_some() {
+        const SIGTERM: i32 = 15;
+        const SIG_IGN: usize = 1;
+        unsafe extern "C" {
+            fn signal(sig: i32, handler: usize) -> usize;
+        }
+        unsafe {
+            signal(SIGTERM, SIG_IGN);
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "LISTEN_PORT={port}").unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+
+    for stream in listener.incoming() {
+        let _ = stream;
+    }
+}
+
+struct SpawnedListener {
+    pid: u32,
+    port: u16,
+    exited: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SpawnedListener {
+    fn start(cwd: &Path, extra_arg: Option<&str>, ignore_sigterm: bool) -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.current_dir(cwd)
+            .args(["--ignored", "--nocapture", "tcp_listener_helper"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(arg) = extra_arg {
+            cmd.arg(arg);
+        }
+        if ignore_sigterm {
+            cmd.env("TC_TEST_IGNORE_SIGTERM", "1");
+        }
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+        let stdout = child.stdout.take().unwrap();
+        let port: u16 = BufReader::new(stdout)
+            .lines()
+            .find_map(|line| {
+                line.ok()?
+                    .trim()
+                    .strip_prefix("LISTEN_PORT=")
+                    .and_then(|p| p.parse().ok())
+            })
+            .expect("helper did not print LISTEN_PORT");
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_flag = exited.clone();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            exited_flag.store(true, Ordering::SeqCst);
+        });
+        Self { pid, port, exited }
+    }
+
+    fn is_exited(&self) -> bool {
+        self.exited.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn stop_now(&self) {
+        if self.is_exited() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            unsafe {
+                kill(self.pid as i32, 9);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+                .output();
+        }
+    }
+}
+
+impl Drop for SpawnedListener {
+    fn drop(&mut self) {
+        self.stop_now();
+    }
+}
+
+#[test]
+fn ports_attribute_by_longest_prefix_respect_boundaries_and_symlinks() {
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let nested = repo.join("packages/web");
+    let sibling = base.path().join("repo-extra");
+    let outside = base.path().join("outside");
+    let real_target = base.path().join("real target");
+    for dir in [&repo, &nested, &sibling, &outside, &real_target] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let listener_parent = SpawnedListener::start(&repo, None, false);
+    let listener_nested = SpawnedListener::start(&nested, None, false);
+    let nested_script = nested.join("server.js").display().to_string();
+    let listener_cmdline = SpawnedListener::start(&outside, Some(&nested_script), false);
+    let listener_sibling = SpawnedListener::start(&sibling, None, false);
+
+    let workspace = ws::Workspace::new(Arc::new(|_, _| {}));
+    let repo_str = repo.display().to_string();
+    let nested_str = nested.display().to_string();
+    let ports = workspace
+        .list_ports(&[repo_str.clone(), nested_str.clone()])
+        .unwrap();
+
+    let relevant: Vec<_> = ports
+        .iter()
+        .filter(|e| {
+            [
+                listener_parent.pid,
+                listener_nested.pid,
+                listener_cmdline.pid,
+                listener_sibling.pid,
+            ]
+            .contains(&e.pid)
+        })
+        .map(|e| (e.root.as_str(), e.port, e.pid, !e.process.is_empty()))
+        .collect();
+    let mut expected = vec![
+        (
+            repo_str.as_str(),
+            listener_parent.port,
+            listener_parent.pid,
+            true,
+        ),
+        (
+            nested_str.as_str(),
+            listener_nested.port,
+            listener_nested.pid,
+            true,
+        ),
+        (
+            nested_str.as_str(),
+            listener_cmdline.port,
+            listener_cmdline.pid,
+            true,
+        ),
+    ];
+    expected.sort_by_key(|&(root, port, pid, _)| (root, port, pid));
+    assert_eq!(relevant, expected);
+
+    #[cfg(unix)]
+    {
+        let link = base.path().join("linked-project");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+        let listener_real = SpawnedListener::start(&real_target, None, false);
+        let link_str = link.display().to_string();
+        let linked_ports = workspace
+            .list_ports(std::slice::from_ref(&link_str))
+            .unwrap();
+        assert!(
+            linked_ports.iter().any(|e| e.root == link_str
+                && e.pid == listener_real.pid
+                && e.port == listener_real.port),
+            "expected symlinked root attribution in {linked_ports:?}"
+        );
+    }
+    workspace.close();
+}
+
+#[test]
+fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("project-a");
+    let other_repo = base.path().join("project-b");
+    let outside = base.path().join("outside");
+    for dir in [&repo, &other_repo, &outside] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let notices = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let sink = notices.clone();
+    let workspace = ws::Workspace::new(Arc::new(move |method, params| {
+        sink.lock().unwrap().push((method.to_owned(), params));
+    }));
+
+    let repo_str = repo.display().to_string();
+    let other_str = other_repo.display().to_string();
+    let initial = workspace
+        .list_ports(&[repo_str.clone(), other_str.clone()])
+        .unwrap();
+    assert!(initial.is_empty(), "unexpected initial ports: {initial:?}");
+
+    let unrelated = SpawnedListener::start(&outside, None, false);
+    let owned = SpawnedListener::start(&repo, None, false);
+
+    let appear_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let got = notices.lock().unwrap().iter().any(|(method, params)| {
+            method == "ports/changed"
+                && serde_json::from_value::<PortsChanged>(params.clone())
+                    .map(|p| {
+                        p.ports.iter().any(|e| {
+                            e.root == repo_str && e.pid == owned.pid && e.port == owned.port
+                        }) && p.ports.iter().all(|e| e.pid != unrelated.pid)
+                    })
+                    .unwrap_or(false)
+        });
+        if got {
+            break;
+        }
+        assert!(
+            Instant::now() < appear_deadline,
+            "ports/changed did not report spawned listener within 3s: {:?}",
+            *notices.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    assert!(
+        workspace
+            .stop_port(&PortStopParams {
+                root: repo_str.clone(),
+                pid: std::process::id(),
+                port: None,
+            })
+            .is_err()
+    );
+    assert!(
+        workspace
+            .stop_port(&PortStopParams {
+                root: repo_str.clone(),
+                pid: unrelated.pid,
+                port: Some(unrelated.port),
+            })
+            .is_err()
+    );
+    assert!(!unrelated.is_exited());
+    assert!(
+        workspace
+            .stop_port(&PortStopParams {
+                root: other_str,
+                pid: owned.pid,
+                port: Some(owned.port),
+            })
+            .is_err()
+    );
+    assert!(!owned.is_exited());
+
+    notices.lock().unwrap().clear();
+    let stop_started = Instant::now();
+    workspace
+        .stop_port(&PortStopParams {
+            root: repo_str.clone(),
+            pid: owned.pid,
+            port: Some(owned.port),
+        })
+        .unwrap();
+
+    let stop_deadline = stop_started + Duration::from_secs(1);
+    loop {
+        let cleared = notices.lock().unwrap().iter().any(|(method, params)| {
+            method == "ports/changed"
+                && serde_json::from_value::<PortsChanged>(params.clone())
+                    .map(|p| p.ports.iter().all(|e| e.pid != owned.pid))
+                    .unwrap_or(false)
+        });
+        if cleared && owned.is_exited() {
+            break;
+        }
+        assert!(
+            Instant::now() < stop_deadline,
+            "ports/changed did not converge within 1s after stop: {:?}",
+            *notices.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(std::net::TcpListener::bind(("127.0.0.1", owned.port)).is_ok());
+
+    #[cfg(unix)]
+    {
+        let stubborn = SpawnedListener::start(&repo, None, true);
+        let wait_stubborn = Instant::now() + Duration::from_secs(3);
+        while !workspace
+            .list_ports(std::slice::from_ref(&repo_str))
+            .unwrap()
+            .iter()
+            .any(|e| e.pid == stubborn.pid)
+        {
+            assert!(Instant::now() < wait_stubborn);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        notices.lock().unwrap().clear();
+        let started = Instant::now();
+        workspace
+            .stop_port(&PortStopParams {
+                root: repo_str,
+                pid: stubborn.pid,
+                port: Some(stubborn.port),
+            })
+            .unwrap();
+        let deadline = started + Duration::from_secs(1);
+        while !stubborn.is_exited() {
+            assert!(
+                Instant::now() < deadline,
+                "stubborn listener was not SIGKILLed"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    workspace.close();
+}

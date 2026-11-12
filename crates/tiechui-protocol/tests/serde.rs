@@ -440,3 +440,54 @@ fn rpc_envelopes_reject_invalid_shapes() {
         serde_json::from_value(json!({"jsonrpc":"2.0","method":"event"})).unwrap();
     assert!(matches!(notification, JsonRpcMessage::Notification(_)));
 }
+
+#[test]
+fn workspace_port_contracts_round_trip() {
+    use tiechui_protocol::workspace::{PortEntry, PortStopParams, PortsChanged, PortsListParams};
+
+    let list = PortsListParams {
+        roots: vec!["/repo".into(), "/repo/packages/web".into()],
+    };
+    assert_eq!(
+        round_trip(&list),
+        json!({"roots": ["/repo", "/repo/packages/web"]})
+    );
+
+    let entry = PortEntry {
+        root: "/repo/packages/web".into(),
+        port: 5173,
+        pid: 4242,
+        process: "node".into(),
+        address: "127.0.0.1".into(),
+    };
+    assert_eq!(
+        round_trip(&PortsChanged { ports: vec![entry] }),
+        json!({
+            "ports": [{
+                "root": "/repo/packages/web",
+                "port": 5173,
+                "pid": 4242,
+                "process": "node",
+                "address": "127.0.0.1"
+            }]
+        })
+    );
+
+    let stop_without_port: PortStopParams =
+        serde_json::from_value(json!({"root": "/repo", "pid": 4242})).unwrap();
+    assert_eq!(stop_without_port.port, None);
+    assert_eq!(
+        round_trip(&stop_without_port),
+        json!({"root": "/repo", "pid": 4242})
+    );
+
+    let stop_with_port = PortStopParams {
+        root: "/repo".into(),
+        pid: 4242,
+        port: Some(5173),
+    };
+    assert_eq!(
+        round_trip(&stop_with_port),
+        json!({"root": "/repo", "pid": 4242, "port": 5173})
+    );
+}

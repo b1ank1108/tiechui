@@ -1,5 +1,5 @@
-//! `chui app-server` workspace services: files, Git and terminals for desktop clients.
-//! File paths are relative to the project `root` and use `/`.
+//! `chui app-server` workspace services: files, Git, terminals and listening ports for desktop
+//! clients. File paths are relative to the project `root` and use `/`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -375,4 +375,37 @@ pub struct TerminalOutput {
 pub struct TerminalExit {
     pub id: String,
     pub code: i32,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PortsListParams {
+    pub roots: Vec<String>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+pub struct PortEntry {
+    pub root: String,
+    pub port: u16,
+    pub pid: u32,
+    pub process: String,
+    pub address: String,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PortStopParams {
+    pub root: String,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub port: Option<u16>,
+}
+
+/// The `ports/changed` notification.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PortsChanged {
+    pub ports: Vec<PortEntry>,
 }

@@ -136,6 +136,10 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::TerminalResizeParams>();
                 d.visit::<workspace::TerminalOutput>();
                 d.visit::<workspace::TerminalExit>();
+                d.visit::<workspace::PortsListParams>();
+                d.visit::<workspace::PortEntry>();
+                d.visit::<workspace::PortStopParams>();
+                d.visit::<workspace::PortsChanged>();
                 d.visit::<tiechui_protocol::ContextSnapshot>();
                 d.visit::<tiechui_protocol::ShellsView>();
                 d.visit::<tiechui_protocol::SubagentsView>();

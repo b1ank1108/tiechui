@@ -179,6 +179,10 @@ impl Terminal {
         Ok(())
     }
 
+    pub(crate) fn is_alive(&self) -> bool {
+        lock(&self.output).exit.is_none()
+    }
+
     pub(crate) fn kill(&self) {
         let mut child = lock(&self.child);
         if child.kill().is_ok() {

@@ -3,6 +3,7 @@
 
 mod fs;
 mod git;
+mod ports;
 mod search;
 mod terminal;
 mod watch;
@@ -14,7 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub use fs::{create, delete, list, mkdir, read, rename, tree, write};
 pub use git::{branches, compare, log, pull_request, run, show, status};
 pub use search::search;
-use tiechui_protocol::workspace::{TerminalAttached, TerminalCreateParams, TerminalResizeParams};
+use tiechui_protocol::workspace::{
+    PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
+};
 
 /// Receives a notification's method and params.
 pub type Sink = Arc<dyn Fn(&'static str, serde_json::Value) + Send + Sync>;
@@ -47,19 +50,22 @@ pub fn root(root: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The watchers and terminals of one server.
+/// The watchers, terminals and port monitor of one server.
 pub struct Workspace {
     sink: Sink,
     watches: Mutex<HashMap<PathBuf, watch::Watch>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Terminal>>>,
+    ports: Arc<ports::PortMonitor>,
 }
 
 impl Workspace {
     pub fn new(sink: Sink) -> Self {
+        let ports = ports::PortMonitor::new(sink.clone());
         Self {
             sink,
             watches: Mutex::default(),
             terminals: Mutex::default(),
+            ports,
         }
     }
 
@@ -114,8 +120,24 @@ impl Workspace {
         }
     }
 
+    pub fn alive_terminals(&self) -> usize {
+        lock(&self.terminals)
+            .values()
+            .filter(|terminal| terminal.is_alive())
+            .count()
+    }
+
+    pub fn list_ports(&self, roots: &[String]) -> Result<Vec<PortEntry>> {
+        self.ports.list(roots)
+    }
+
+    pub fn stop_port(&self, params: &PortStopParams) -> Result<()> {
+        self.ports.stop(params)
+    }
+
     /// Ends every terminal and watcher.
     pub fn close(&self) {
+        self.ports.close();
         lock(&self.watches).clear();
         for (_, terminal) in lock(&self.terminals).drain() {
             terminal.kill();

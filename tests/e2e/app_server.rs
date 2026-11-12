@@ -1521,3 +1521,457 @@ async fn hooks_are_saved_approved_and_deleted() {
     let hooks = client.ok("hooks/list", list()).await;
     assert_eq!(hooks["hooks"], json!([]));
 }
+
+#[test]
+#[ignore]
+fn e2e_tcp_listener_helper() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "LISTEN_PORT={port}").unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+
+    for stream in listener.incoming() {
+        let _ = stream;
+    }
+}
+
+#[cfg(unix)]
+impl Fixture {
+    fn connect_client(&self, sock: &Path) -> Client {
+        let mut child = support::command()
+            .env("TIECHUI_HOME", &self.home)
+            .env("HOME", self.root.path())
+            .env("TC_E2E_FAKE_KEY", "not-a-real-key")
+            .current_dir(&self.cwd)
+            .args(["app-server", "--connect"])
+            .arg(sock)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        Client {
+            _child: child,
+            stdin,
+            lines,
+            next: 0,
+            events: vec![],
+            notices: vec![],
+        }
+    }
+
+    fn spawn_daemon(&self, sock: &Path, idle_ms: Option<u64>) -> Child {
+        let mut cmd = support::command();
+        cmd.env("TIECHUI_HOME", &self.home)
+            .env("HOME", self.root.path())
+            .env("TC_E2E_FAKE_KEY", "not-a-real-key")
+            .current_dir(&self.cwd)
+            .args(["app-server", "--socket"])
+            .arg(sock)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(ms) = idle_ms {
+            cmd.env("CHUI_DAEMON_IDLE_MS", ms.to_string());
+        }
+        cmd.spawn().unwrap()
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_socket(sock: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if tokio::net::UnixStream::connect(sock).await.is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon socket {} never became ready",
+            sock.display()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn disconnect_bridge(client: Client) {
+    let Client {
+        mut _child, stdin, ..
+    } = client;
+    drop(stdin);
+    let status = tokio::time::timeout(Duration::from_secs(5), _child.wait())
+        .await
+        .expect("bridge process hung after stdin EOF")
+        .unwrap();
+    assert!(status.success(), "bridge exited with {status}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_daemon_serves_concurrent_clients_ports_and_reconnects_without_dropping_work() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = Fixture::new().await;
+    let short_dir = tempfile::Builder::new()
+        .prefix("tc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let sock = short_dir.path().join("run/sub/app.sock");
+
+    let missing = support::command()
+        .env("TIECHUI_HOME", &fixture.home)
+        .env("HOME", fixture.root.path())
+        .args(["app-server", "--connect"])
+        .arg(&sock)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains(&sock.display().to_string()),
+        "expected socket path in stderr: {stderr}"
+    );
+
+    let mut daemon = fixture.spawn_daemon(&sock, None);
+    let daemon_pid = daemon.id().unwrap();
+    wait_for_socket(&sock).await;
+
+    let parent_mode = std::fs::metadata(sock.parent().unwrap()).unwrap().mode() & 0o777;
+    let sock_mode = std::fs::symlink_metadata(&sock).unwrap().mode() & 0o777;
+    let sock_ino = std::fs::symlink_metadata(&sock).unwrap().ino();
+    assert_eq!(parent_mode, 0o700);
+    assert_eq!(sock_mode, 0o600);
+
+    let duplicate = support::command()
+        .env("TIECHUI_HOME", &fixture.home)
+        .env("HOME", fixture.root.path())
+        .args(["app-server", "--socket"])
+        .arg(&sock)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        duplicate.status.success(),
+        "duplicate daemon failed: {:?}",
+        duplicate
+    );
+    assert_eq!(std::fs::symlink_metadata(&sock).unwrap().ino(), sock_ino);
+    assert!(daemon.try_wait().unwrap().is_none());
+
+    let mut client_a = fixture.connect_client(&sock);
+    let mut client_b = fixture.connect_client(&sock);
+    let (init_a, init_b) = tokio::join!(
+        client_a.ok("initialize", json!({"protocol_version": 1})),
+        client_b.ok("initialize", json!({"protocol_version": 1})),
+    );
+    let expected_home = json!(fixture.home.display().to_string());
+    assert_eq!(init_a["home"], expected_home);
+    assert_eq!(init_b["home"], expected_home);
+
+    let cwd = fixture.cwd.display().to_string();
+    let initial_ports = client_a.ok("ports/list", json!({"roots": [cwd]})).await;
+    assert_eq!(initial_ports, json!([]));
+
+    let mut listener_proc = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .current_dir(&fixture.cwd)
+        .args(["--ignored", "--nocapture", "e2e_tcp_listener_helper"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let listener_pid = listener_proc.id().unwrap();
+    let mut port_lines = BufReader::new(listener_proc.stdout.take().unwrap()).lines();
+    let listener_port: u16 = loop {
+        let line = port_lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("helper exited without LISTEN_PORT");
+        if let Some(p) = line.trim().strip_prefix("LISTEN_PORT=") {
+            break p.parse().unwrap();
+        }
+    };
+
+    let matches_added = |method: &str, params: &Value| {
+        method == "ports/changed"
+            && params["ports"].as_array().is_some_and(|ports| {
+                ports.iter().any(|p| {
+                    p["root"] == cwd && p["pid"] == listener_pid && p["port"] == listener_port
+                })
+            })
+    };
+    tokio::join!(
+        client_a.notice(matches_added),
+        client_b.notice(matches_added),
+    );
+
+    let stop_started = std::time::Instant::now();
+    client_b
+        .ok(
+            "ports/stop",
+            json!({"root": cwd, "pid": listener_pid, "port": listener_port}),
+        )
+        .await;
+    let _ = listener_proc.wait().await;
+    let matches_removed = |method: &str, params: &Value| {
+        method == "ports/changed"
+            && params["ports"]
+                .as_array()
+                .is_some_and(|ports| ports.iter().all(|p| p["pid"] != listener_pid))
+    };
+    tokio::join!(
+        client_a.notice(matches_removed),
+        client_b.notice(matches_removed),
+    );
+    assert!(stop_started.elapsed() < Duration::from_secs(1));
+
+    let opened = snapshot(
+        client_a
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    let thread = json!(opened.thread_id);
+    client_a
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let (asked_a, asked_b) = tokio::join!(
+        client_a.until(|e| matches!(e, EventKind::ApprovalRequested { .. })),
+        client_b.until(|e| matches!(e, EventKind::ApprovalRequested { .. })),
+    );
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked_a.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+    assert!(matches!(
+        asked_b.last().unwrap().event.event,
+        EventKind::ApprovalRequested { .. }
+    ));
+
+    client_a
+        .ok(
+            "terminal/create",
+            json!({"id": "t-persist", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+    client_a
+        .ok(
+            "terminal/write",
+            json!({"id": "t-persist", "data": "echo before-drop; sleep 0.35; echo after-drop\n"}),
+        )
+        .await;
+    client_b
+        .notice(|m, p| {
+            m == "terminal/output"
+                && p["id"] == "t-persist"
+                && p["data"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("before-drop")
+        })
+        .await;
+
+    disconnect_bridge(client_a).await;
+    disconnect_bridge(client_b).await;
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert_eq!(daemon.id(), Some(daemon_pid));
+    assert!(daemon.try_wait().unwrap().is_none());
+
+    let mut client_c = fixture.connect_client(&sock);
+    client_c
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let attached = client_c
+        .ok("terminal/attach", json!({"id": "t-persist"}))
+        .await;
+    let buf = attached["buffer"].as_str().unwrap();
+    assert!(
+        buf.contains("before-drop") && buf.contains("after-drop"),
+        "buffer={buf:?}"
+    );
+    assert!(attached["seq"].as_u64().unwrap() > 0);
+    assert!(attached["exit"].is_null());
+
+    let resumed = snapshot(
+        client_c
+            .ok("session/open", json!({"path": opened.path}))
+            .await,
+    );
+    assert!(matches!(
+        resumed.events.last().unwrap().event,
+        EventKind::ApprovalRequested { .. }
+    ));
+    client_c
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    let completed = client_c
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    assert!(matches!(
+        completed.last().unwrap().event.event,
+        EventKind::TurnCompleted {
+            turn: tiechui_protocol::Turn {
+                status: TurnStatus::Completed,
+                ..
+            }
+        }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(fixture.cwd.join("hello.txt")).unwrap(),
+        "after\n"
+    );
+
+    client_c
+        .ok("terminal/kill", json!({"id": "t-persist"}))
+        .await;
+    disconnect_bridge(client_c).await;
+    let _ = daemon.kill().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_daemon_replaces_stale_socket_and_auto_exits_after_full_idle() {
+    let fixture = Fixture::new().await;
+    let short_dir = tempfile::Builder::new()
+        .prefix("tc-idle-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let sock = short_dir.path().join("app.sock");
+
+    {
+        let _stale = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    }
+    assert!(std::fs::symlink_metadata(&sock).is_ok());
+
+    let mut daemon = fixture.spawn_daemon(&sock, Some(400));
+    wait_for_socket(&sock).await;
+
+    let mut client_1 = fixture.connect_client(&sock);
+    client_1
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let cwd = fixture.cwd.display().to_string();
+    client_1
+        .ok(
+            "terminal/create",
+            json!({"id": "keepalive", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+    disconnect_bridge(client_1).await;
+
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(
+        daemon.try_wait().unwrap().is_none(),
+        "daemon exited while a PTY terminal was still alive"
+    );
+    assert!(std::fs::symlink_metadata(&sock).is_ok());
+
+    let mut client_2 = fixture.connect_client(&sock);
+    client_2
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    client_2
+        .ok("terminal/kill", json!({"id": "keepalive"}))
+        .await;
+    let opened = snapshot(
+        client_2
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    let thread = json!(opened.thread_id);
+    client_2
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let asked = client_2
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+    disconnect_bridge(client_2).await;
+
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(
+        daemon.try_wait().unwrap().is_none(),
+        "daemon exited while a session turn was still active"
+    );
+
+    let mut client_3 = fixture.connect_client(&sock);
+    client_3
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    client_3
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    client_3
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    disconnect_bridge(client_3).await;
+
+    let status = tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+        .await
+        .expect("daemon did not auto-exit after full idle timeout")
+        .unwrap();
+    assert!(status.success(), "daemon exited with {status}");
+    assert!(
+        std::fs::symlink_metadata(&sock).is_err(),
+        "daemon did not unlink socket on idle exit"
+    );
+}

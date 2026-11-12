@@ -24,7 +24,7 @@ pub struct InitializeResult {
     pub server_version: String,
     /// The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
     pub home: String,
-    /// Optional method groups: `workspace` for `fs/*`, `git/*` and `terminal/*`.
+    /// Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
     pub capabilities: Vec<String>,
 }
 

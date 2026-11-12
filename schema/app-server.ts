@@ -308,7 +308,7 @@ export type InitializeResult = { protocol_version: number, server_version: strin
  */
 home: string, 
 /**
- * Optional method groups: `workspace` for `fs/*`, `git/*` and `terminal/*`.
+ * Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
  */
 capabilities: Array<string>, };
 
@@ -414,6 +414,14 @@ export type PathParams = { path: string, };
 export type PluginPanel = { title: string, nodes: Array<PanelNode>, };
 
 export type PluginPrompt = { "kind": "select", title: string, text: string, options: Array<string>, } | { "kind": "confirm", title: string, text: string, } | { "kind": "input", title: string, text: string, } | { "kind": "panel", panel: PluginPanel, };
+
+export type PortEntry = { root: string, port: number, pid: number, process: string, address: string, };
+
+export type PortStopParams = { root: string, pid: number, port?: number, };
+
+export type PortsChanged = { ports: Array<PortEntry>, };
+
+export type PortsListParams = { roots: Array<string>, };
 
 export type PromptDeleteParams = { cwd: string | null, path: string, };
 

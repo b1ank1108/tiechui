@@ -168,7 +168,21 @@ pub fn run(name: &'static str) {
         )
         .subcommand(
             Command::new("app-server")
-                .about("Serve sessions to desktop clients over JSON-RPC on stdio"),
+                .about("Serve sessions to desktop clients over JSON-RPC on stdio or a Unix socket")
+                .arg(
+                    Arg::new("socket")
+                        .long("socket")
+                        .value_name("PATH")
+                        .conflicts_with("connect")
+                        .help("Run as a multi-client daemon listening on a Unix domain socket"),
+                )
+                .arg(
+                    Arg::new("connect")
+                        .long("connect")
+                        .value_name("PATH")
+                        .conflicts_with("socket")
+                        .help("Bridge stdio to a running app-server Unix domain socket"),
+                ),
         )
         .get_matches();
     if let Some(("doctor", args)) = matches.subcommand() {
@@ -242,7 +256,7 @@ pub fn run(name: &'static str) {
     let code = match matches.subcommand() {
         Some(("exec", args)) => runtime.block_on(exec::run(args)),
         Some(("setup", _)) => runtime.block_on(setup::command()),
-        Some(("app-server", _)) => runtime.block_on(app_server::run()),
+        Some(("app-server", args)) => runtime.block_on(app_server::run(args)),
         None => runtime.block_on(interactive::run(&matches)),
         Some(_) => return,
     };
