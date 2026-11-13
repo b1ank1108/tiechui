@@ -8,7 +8,7 @@ use serde_json::json;
 use tiechui_protocol::*;
 use tiechui_tui::mentions::Index;
 use tiechui_tui::palette::ColorLevel;
-use tiechui_tui::resume::{Loaded, Part, PartKind, Read, Summary};
+use tiechui_tui::resume::{Loaded, Part, Read, Summary};
 use tiechui_tui::theme::Theme;
 use tiechui_tui::{App, Exit, Options, Target, elapsed};
 
@@ -1816,16 +1816,11 @@ fn summary(id: &str, cwd: &str, first: &str, modified_ago: u64, created_ago: u64
     }
 }
 
-/// The picker's screen, with local clock times cut, since they depend on the time zone.
+/// The picker's screen, each row without trailing blanks.
 fn page(app: &mut App, rows: usize) -> Vec<String> {
     text(&app.pager_frame(rows).expect("the picker is open"))
         .into_iter()
-        .map(|line| match line.find(" ago · ") {
-            Some(at) if line.contains("│ Created:") || line.contains("│ Updated:") => {
-                line[..at + 4].to_owned()
-            }
-            _ => line,
-        })
+        .map(|line| line.trim_end().to_owned())
         .collect()
 }
 
@@ -1860,20 +1855,25 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
             sessions: Ok(listed),
         },
     );
-    let row = |rows: &[String], title: &str| {
+    // The list row that starts with `title`, not the preview beside it.
+    let at = |rows: &[String], title: &str| {
         rows.iter()
-            .find(|r| r.contains(title))
-            .cloned()
+            .position(|r| r.trim_start().trim_start_matches("› ").starts_with(title))
+    };
+    let row = |rows: &[String], title: &str| {
+        at(rows, title)
+            .map(|index| rows[index].clone())
             .unwrap_or_default()
     };
     let rows = page(&mut app, 20);
-    assert!(rows[0].starts_with("── Resume ") && rows[0].ends_with(" 2 ──"));
+    assert!(rows[0].starts_with("── Resume ") && rows[0].ends_with(" 2 sessions ──"));
     assert!(
-        rows[1].ends_with("This folder  All    Updated  Created"),
+        rows[1].ends_with("Scope ● This folder  ○ All    Sort ● Updated  ○ Created"),
         "{rows:#?}"
     );
-    let first = row(&rows, "fix the login form");
-    assert!(first.starts_with("  › fix the login form") && first.ends_with(" 5m ago"));
+    let first = at(&rows, "fix the login form").unwrap_or_default();
+    assert!(rows[first].starts_with("  › fix the login form"));
+    assert!(rows[first + 1].starts_with("    5m ago "), "{rows:#?}");
     assert!(row(&rows, "write release notes").starts_with("    write"));
     assert!(rows.iter().any(|r| r.ends_with("1 / 2")));
 
@@ -1889,10 +1889,9 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
     app.key(key(KeyCode::Tab));
     app.key(key(KeyCode::Right));
     let rows = page(&mut app, 20);
-    assert!(rows[1].ends_with("Updated  Created"));
-    let at = |title: &str| rows.iter().position(|r| r.contains(title));
+    assert!(rows[1].ends_with("Sort ○ Updated  ● Created"), "{rows:#?}");
     assert!(
-        at("write release notes") < at("fix the login form"),
+        at(&rows, "write release notes") < at(&rows, "fix the login form"),
         "newest created first"
     );
     assert!(
@@ -1927,9 +1926,10 @@ fn resume_picker_filters_sorts_and_switches_to_the_chosen_session() {
         },
     );
     let rows = page(&mut app, 20);
-    let chosen = row(&rows, "tune the build");
+    let chosen = at(&rows, "tune the build").unwrap_or_default();
     assert!(
-        chosen.starts_with("  › tune the build") && chosen.ends_with("/elsewhere  1m ago"),
+        rows[chosen].starts_with("  › tune the build")
+            && rows[chosen + 1].starts_with("    elsewhere · 1m ago "),
         "{rows:#?}"
     );
 
@@ -1993,46 +1993,43 @@ fn startup_picker_previews_read_only_and_leaving_starts_a_new_session() {
     let rows = page(&mut app, 20);
     assert!(rows.iter().any(|r| r.contains("esc start new")));
     assert!(
-        rows.contains(&"  │ Loading conversation…".to_owned()),
+        rows.contains(&"  Loading conversation…".to_owned()),
         "{rows:#?}"
     );
-    let part = |kind, text: &str| Part {
-        kind,
-        text: text.into(),
-    };
     app.loaded(
         generation,
         Loaded::Preview {
             path: "/sessions/a1.jsonl".into(),
             parts: Ok(vec![
-                part(PartKind::User, "fix the login form"),
-                part(PartKind::Assistant, "Done: **validated** the email."),
-                part(PartKind::Tool, "ok"),
+                Part::User("fix the login form".into()),
+                Part::Call {
+                    name: "read".into(),
+                    arguments: json!({"path": "src/login.rs"}),
+                },
+                Part::Output("ok".into()),
+                Part::Assistant("Done: **validated** the email.".into()),
             ]),
         },
     );
-    let tail = [
-        "  │ › fix the login form",
-        "  │ • Done: validated the email.",
-        "  │ • ok",
-    ];
-    let rows = page(&mut app, 30);
-    for expected in tail {
-        assert!(rows.contains(&expected.to_owned()), "{expected}: {rows:#?}");
-    }
-    app.key(with(KeyCode::Char('e'), KeyModifiers::CONTROL));
     let rows = page(&mut app, 30);
     for expected in [
-        "  │ Session:    a1",
-        "  │ Created:    3d ago",
-        "  │ Updated:    5m ago",
-        "  │ Directory:  /work/app",
-    ]
-    .into_iter()
-    .chain(tail)
-    {
+        "  › fix the login form",
+        "    ◦ Explored 1 file",
+        "  • Done: validated the email.",
+    ] {
         assert!(rows.contains(&expected.to_owned()), "{expected}: {rows:#?}");
     }
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("Preview") && r.ends_with("1 turn · created 3d ago ──")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.contains("src/login.rs") || r.ends_with(" ok")),
+        "tool arguments and output stay out of the preview: {rows:#?}"
+    );
     app.key(with(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(app.take_reads().is_none(), "the preview is reused");
     let rows = page(&mut app, 20);
@@ -2045,6 +2042,11 @@ fn startup_picker_previews_read_only_and_leaving_starts_a_new_session() {
         "{rows:#?}"
     );
     assert!(rows.contains(&"• Done: validated the email.".to_owned()));
+    assert!(
+        rows.contains(&"◦ Read src/login.rs".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(rows.contains(&"  ok".to_owned()), "{rows:#?}");
     app.key(key(KeyCode::Esc));
     app.key(key(KeyCode::Esc));
     assert!(app.pager_frame(20).is_none());
@@ -2189,8 +2191,20 @@ fn session_header_heads_each_opened_session() {
 #[test]
 fn resume_layouts() {
     let mut shots = Vec::new();
-    for (width, rows, details) in [(100, 16, false), (100, 12, true), (40, 9, false)] {
-        let listed = sessions();
+    for (width, rows, all) in [
+        (120, 16, false),
+        (120, 16, true),
+        (88, 16, false),
+        (40, 9, false),
+    ] {
+        let mut listed = sessions();
+        listed.push(summary(
+            "c3",
+            "/work/app",
+            "resume 界面还要美化一下，现在有点乱，标题很长的时候要按显示宽度截断",
+            300,
+            400,
+        ));
         let mut app = app_with(
             width,
             Options {
@@ -2206,7 +2220,7 @@ fn resume_layouts() {
             generation,
             Loaded::List {
                 all: false,
-                sessions: Ok(listed),
+                sessions: Ok(listed.clone()),
             },
         );
         app.loaded(
@@ -2214,22 +2228,33 @@ fn resume_layouts() {
             Loaded::Preview {
                 path: "/sessions/a1.jsonl".into(),
                 parts: Ok(vec![
-                    Part {
-                        kind: PartKind::User,
-                        text: "fix the login form".into(),
+                    Part::User("fix the login form".into()),
+                    Part::Call {
+                        name: "bash".into(),
+                        arguments: json!({"command": "npm test"}),
                     },
-                    Part {
-                        kind: PartKind::Assistant,
-                        text: "Done: the form now checks the email.".into(),
-                    },
+                    Part::Output("14 passed".into()),
+                    Part::Compaction("earlier work".into()),
+                    Part::Assistant("Done: the form now checks the email.".into()),
                 ]),
             },
         );
-        if details {
-            app.key(with(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        if all {
+            app.key(key(KeyCode::Right));
+            app.loaded(
+                generation,
+                Loaded::List {
+                    all: true,
+                    sessions: Ok(listed
+                        .iter()
+                        .cloned()
+                        .chain([summary("d4", "/elsewhere/site", "tune the build", 1, 1)])
+                        .collect()),
+                },
+            );
         }
         shots.push(format!(
-            "{width}x{rows}\n{}",
+            "{width}x{rows} all={all}\n{}",
             page(&mut app, rows).join("\n")
         ));
     }

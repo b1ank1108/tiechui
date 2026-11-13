@@ -255,6 +255,14 @@ impl Palette {
         )
     }
 
+    /// `alpha` of a tone over the background.
+    pub fn wash(&self, tone: Tone, alpha: f32) -> Option<Color> {
+        best_color(
+            blend(mist_rgb(tone, self.light()), self.background?, alpha),
+            self.level,
+        )
+    }
+
     /// Table borders: 20% foreground over background.
     pub fn border(&self) -> Option<Color> {
         best_color(blend(self.foreground?, self.background?, 0.2), self.level)

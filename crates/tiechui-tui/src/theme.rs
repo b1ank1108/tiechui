@@ -19,6 +19,7 @@ pub struct Theme {
     pub dim: Style,
     pub separator: Style,
     pub user_background: Option<Color>,
+    pub selection_background: Option<Color>,
     pub table_border: Style,
 }
 
@@ -46,6 +47,7 @@ impl Theme {
             dim: neutral(Tone::Tertiary),
             separator: neutral(Tone::Separator),
             user_background: palette.surface(0.05, 0.04),
+            selection_background: palette.wash(Tone::Accent, 0.14),
             table_border: palette.border().map_or_else(
                 || Style::default().add_modifier(Modifier::DIM),
                 |c| Style::default().fg(c),
@@ -75,6 +77,12 @@ impl Theme {
         } else {
             self.separator
         }
+    }
+
+    /// The selected row of a list.
+    pub fn selection(&self) -> Style {
+        self.selection_background
+            .map_or_else(Style::default, |bg| Style::default().bg(bg))
     }
 
     pub fn user(&self) -> Style {

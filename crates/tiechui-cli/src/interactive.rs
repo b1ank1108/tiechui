@@ -248,7 +248,7 @@ impl tiechui_tui::Services for Services {
         read: tiechui_tui::resume::Read,
         cancel: &CancellationToken,
     ) -> tiechui_tui::resume::Loaded {
-        use tiechui_tui::resume::{Loaded, Part, PartKind, Read, Summary};
+        use tiechui_tui::resume::{Loaded, Part, Read, Summary};
         match read {
             Read::List { all } => Loaded::List {
                 all,
@@ -275,14 +275,15 @@ impl tiechui_tui::Services for Services {
                     .map(|parts| {
                         parts
                             .into_iter()
-                            .map(|part| Part {
-                                kind: match part.kind {
-                                    tiechui_session::PartKind::User => PartKind::User,
-                                    tiechui_session::PartKind::Assistant => PartKind::Assistant,
-                                    tiechui_session::PartKind::Tool => PartKind::Tool,
-                                    tiechui_session::PartKind::Notice => PartKind::Notice,
-                                },
-                                text: part.text,
+                            .map(|part| match part {
+                                tiechui_session::Part::User(text) => Part::User(text),
+                                tiechui_session::Part::Assistant(text) => Part::Assistant(text),
+                                tiechui_session::Part::Call { name, arguments } => {
+                                    Part::Call { name, arguments }
+                                }
+                                tiechui_session::Part::Output(text) => Part::Output(text),
+                                tiechui_session::Part::Compaction(text) => Part::Compaction(text),
+                                tiechui_session::Part::Notice(text) => Part::Notice(text),
                             })
                             .collect()
                     })
