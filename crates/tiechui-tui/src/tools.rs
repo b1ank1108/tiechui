@@ -292,6 +292,20 @@ fn subject(tool: &Tool) -> String {
     single_line(&value.unwrap_or_else(|| tool.name.clone()))
 }
 
+/// How a finished call is counted when many are summed up: the verb, and the noun counted
+/// after it unless calls of that kind are not counted.
+pub(crate) fn tally(tool: &Tool) -> (&'static str, Option<&'static str>) {
+    if maintenance(tool).is_some() {
+        return ("Maintained context", None);
+    }
+    match Action::of(tool) {
+        Action::Read | Action::Search | Action::List => ("Explored", Some("file")),
+        Action::Ran | Action::Shell => ("Ran", Some("command")),
+        Action::Updated => ("Updated", Some("file")),
+        Action::Called => ("Called", Some("tool")),
+    }
+}
+
 pub(crate) fn summary(tool: &Tool) -> String {
     format!(
         "{} {}",
