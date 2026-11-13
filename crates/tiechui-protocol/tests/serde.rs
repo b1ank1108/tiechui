@@ -491,3 +491,28 @@ fn workspace_port_contracts_round_trip() {
         json!({"root": "/repo", "pid": 4242, "port": 5173})
     );
 }
+
+#[test]
+fn daemon_status_round_trips() {
+    use tiechui_protocol::app::{APP_PROTOCOL_VERSION, DaemonStatus};
+
+    let status = DaemonStatus {
+        pid: 12345,
+        server_version: "0.5.0".into(),
+        protocol_version: APP_PROTOCOL_VERSION,
+        connected_clients: 2,
+        busy_sessions: 1,
+        alive_terminals: 3,
+    };
+    assert_eq!(
+        round_trip(&status),
+        json!({
+            "pid": 12345,
+            "server_version": "0.5.0",
+            "protocol_version": APP_PROTOCOL_VERSION,
+            "connected_clients": 2,
+            "busy_sessions": 1,
+            "alive_terminals": 3,
+        })
+    );
+}
