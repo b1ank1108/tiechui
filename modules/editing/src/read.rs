@@ -1,5 +1,5 @@
-use std::fs::File;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Take};
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -10,7 +10,49 @@ use tiechui_plugin_api::tools::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{EditingState, check, read_path, state::version, string};
+use crate::{EditingState, check, mutation::open_nofollow, read_path, state::version, string};
+
+const ZERO_LEN_STREAM_CAP: u64 = 8 * 1024 * 1024;
+
+pub(crate) fn open_regular(path: &Path) -> Result<Take<File>, ToolError> {
+    let target = std::fs::canonicalize(path)?;
+    let reject = || {
+        ToolError(format!(
+            "Only regular files can be read: {}",
+            path.display()
+        ))
+    };
+    if !std::fs::symlink_metadata(&target)?.is_file() {
+        return Err(reject());
+    }
+    let file = open_nofollow(OpenOptions::new().read(true)).open(&target)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(reject());
+    }
+    let cap = if meta.len() == 0 {
+        ZERO_LEN_STREAM_CAP
+    } else {
+        u64::MAX
+    };
+    Ok(file.take(cap))
+}
+
+fn read_bytes(path: &Path, cancel: &CancellationToken) -> Result<Vec<u8>, ToolError> {
+    let mut file = open_regular(path)?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 65536];
+    loop {
+        check(cancel)?;
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    check(cancel)?;
+    Ok(bytes)
+}
 
 // Keep only incomplete UTF-8 between reads, matching Node's replacement decoder.
 pub(crate) fn scan(
@@ -18,7 +60,7 @@ pub(crate) fn scan(
     cancel: &CancellationToken,
     mut visit: impl FnMut(&str),
 ) -> Result<(), ToolError> {
-    let mut file = File::open(path)?;
+    let mut file = open_regular(path)?;
     let mut chunk = [0; 65536];
     let mut pending = Vec::new();
     loop {
@@ -83,16 +125,14 @@ pub(crate) fn run(
         return Err(ToolError("Character windows require a positive offset/column, maxChars between 1 and 8192, and limit omitted or 1.".into()));
     }
     let mut prefix = [0; 4100];
-    let n = File::open(&path)?.read(&mut prefix)?;
+    let n = open_regular(&path)?.read(&mut prefix)?;
     if let Some(mime) = crate::image::mime(&prefix[..n]) {
         if window {
             return Err(ToolError(
                 "Character windows apply only to text files.".into(),
             ));
         }
-        let mut bytes = Vec::new();
-        File::open(&path)?.read_to_end(&mut bytes)?;
-        check(&ctx.cancel)?;
+        let bytes = read_bytes(&path, &ctx.cancel)?;
         return crate::image::read(bytes, mime, &ctx.cancel, auto_resize_images);
     }
     let generation = state.generation();
@@ -323,5 +363,38 @@ mod tests {
         let error = scan(&path, &cancel, |_| cancel.cancel()).unwrap_err();
         assert_eq!(error.0, "Operation aborted");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_rejects_writerless_fifo_and_devices_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("pipe.fifo");
+        let c_fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let err = match open_regular(&fifo) {
+            Ok(_) => panic!("expected writerless FIFO to be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.0.contains("Only regular files can be read"),
+            "{}",
+            err.0
+        );
+        let dev = Path::new("/dev/null");
+        if dev.exists() {
+            let err = match open_regular(dev) {
+                Ok(_) => panic!("expected /dev/null to be rejected"),
+                Err(err) => err,
+            };
+            assert!(
+                err.0.contains("Only regular files can be read"),
+                "{}",
+                err.0
+            );
+        }
+    }
+
     use std::io::Write;
 }

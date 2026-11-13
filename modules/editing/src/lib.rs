@@ -121,11 +121,15 @@ impl Tool for FileTool {
             "read" => {
                 let state = self.state.clone();
                 let auto_resize_images = self.auto_resize_images;
-                tokio::task::spawn_blocking(move || {
+                let cancel = ctx.cancel.clone();
+                let task = tokio::task::spawn_blocking(move || {
                     read::run(call, ctx, &state, auto_resize_images)
-                })
-                .await
-                .map_err(|e| ToolError(e.to_string()))?
+                });
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(ToolError("Operation aborted".into())),
+                    result = task => result.map_err(|e| ToolError(e.to_string()))?,
+                }
             }
             _ => {
                 let path = resolve(string(&call.arguments, "path")?, &ctx.cwd)?;

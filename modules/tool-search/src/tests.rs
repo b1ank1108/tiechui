@@ -263,6 +263,35 @@ async fn bm25_matches_english_cjk_camel_case_prefix_and_parameter_names_stably()
 }
 
 #[tokio::test]
+async fn query_matching_visible_direct_tool_reports_call_directly_instead_of_no_matching_tools() {
+    let mut registry = registry();
+    registry
+        .register_tool(Arc::new(FixtureTool {
+            spec: ToolSpec {
+                name: "bash".into(),
+                description: "Execute shell commands.".into(),
+                input_schema: json!({"type":"object","properties":{"command":{"type":"string"}}}),
+            },
+            source: "Built-in".into(),
+            deferred: false,
+        }))
+        .unwrap();
+    present(&registry, 1, |_| 1);
+    let output = search(&registry, json!({"query":"bash"})).await;
+    assert_eq!(
+        output.details,
+        Some(json!({"found":[], "visible":["bash"], "not_found":[]}))
+    );
+    let rendered = text(&output);
+    assert!(!rendered.contains("No matching tools"));
+    assert!(rendered.contains("In your tool list, call directly: bash"));
+
+    let output = search(&registry, json!({"query":"read"})).await;
+    assert_eq!(output.details.as_ref().unwrap()["visible"], json!(["read"]));
+    assert!(text(&output).contains("In your tool list, call directly: read"));
+}
+
+#[tokio::test]
 async fn state_is_local_to_registration_and_restrictions_apply_to_catalog() {
     let mut first = registry();
     let second = registry();

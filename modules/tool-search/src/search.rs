@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use tiechui_plugin_api::{CancellationToken, ToolError, serde_json::Value};
-
-use super::Candidate;
+use tiechui_plugin_api::{CancellationToken, ToolError, model::ToolSpec, serde_json::Value};
 
 fn cjk(c: char) -> bool {
     matches!(c as u32, 0x3400..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x323af | 0x3040..=0x30ff | 0xac00..=0xd7af)
@@ -82,7 +80,7 @@ fn parameters(schema: &Value, text: &mut String) {
 }
 
 pub(super) fn rank(
-    candidates: &[Candidate],
+    specs: &[&ToolSpec],
     query: &str,
     limit: usize,
     cancel: &CancellationToken,
@@ -90,11 +88,10 @@ pub(super) fn rank(
     let query_terms = tokens(query);
     let mut documents = Vec::new();
     let mut frequency = BTreeMap::<String, usize>::new();
-    for candidate in candidates {
+    for spec in specs {
         if cancel.is_cancelled() {
             return Err(ToolError("Operation aborted".into()));
         }
-        let spec = candidate.tool.spec();
         let mut text = format!("{} {}", spec.name, spec.description);
         parameters(&spec.input_schema, &mut text);
         let words = tokens(&text);
@@ -110,11 +107,11 @@ pub(super) fn rank(
     let average =
         documents.iter().map(|(len, _)| *len).sum::<usize>() as f64 / documents.len().max(1) as f64;
     let mut scores = Vec::new();
-    for (candidate, (length, counts)) in candidates.iter().zip(documents) {
+    for (spec, (length, counts)) in specs.iter().zip(documents) {
         if cancel.is_cancelled() {
             return Err(ToolError("Operation aborted".into()));
         }
-        let name = &candidate.tool.spec().name;
+        let name = &spec.name;
         let mut score = if name.eq_ignore_ascii_case(query.trim()) {
             100.0
         } else {
@@ -130,7 +127,7 @@ pub(super) fn rank(
                 continue;
             }
             let frequency = *frequency.get(term).unwrap_or(&0) as f64;
-            let idf = (1.0 + (candidates.len() as f64 - frequency + 0.5) / (frequency + 0.5)).ln();
+            let idf = (1.0 + (specs.len() as f64 - frequency + 0.5) / (frequency + 0.5)).ln();
             score += idf * count * 2.2
                 / (count + 1.2 * (0.25 + 0.75 * length as f64 / average.max(1.0)));
         }

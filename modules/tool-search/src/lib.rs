@@ -43,7 +43,7 @@ struct Candidate {
 struct Snapshot {
     enabled: bool,
     candidates: Vec<Candidate>,
-    visible: Vec<String>,
+    visible: Vec<ToolSpec>,
 }
 
 #[derive(Default)]
@@ -88,7 +88,7 @@ impl ToolPresentation for State {
         *self.0.write().unwrap_or_else(|error| error.into_inner()) = Snapshot {
             enabled,
             candidates,
-            visible: visible.iter().map(|spec| spec.name.clone()).collect(),
+            visible: visible.clone(),
         };
         visible
     }
@@ -199,7 +199,7 @@ impl Tool for SearchTool {
                         if !found.contains(&candidate.tool.spec().name) {
                             found.push(name.to_owned());
                         }
-                    } else if snapshot.visible.iter().any(|visible| visible == name) {
+                    } else if snapshot.visible.iter().any(|visible| visible.name == name) {
                         visible.push(name.to_owned());
                     } else {
                         not_found.push(name.to_owned());
@@ -215,7 +215,18 @@ impl Tool for SearchTool {
                     .map_or(Some(5), Value::as_u64)
                     .filter(|limit| (1..=10).contains(limit))
                     .ok_or_else(|| ToolError("limit must be between 1 and 10".into()))?;
-                found = search::rank(&snapshot.candidates, query, limit as usize, &ctx.cancel)?;
+                let deferred: Vec<_> = snapshot
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.tool.spec())
+                    .collect();
+                let direct: Vec<_> = snapshot
+                    .visible
+                    .iter()
+                    .filter(|spec| !matches!(spec.name.as_str(), "tool_search" | "call_tool"))
+                    .collect();
+                found = search::rank(&deferred, query, limit as usize, &ctx.cancel)?;
+                visible = search::rank(&direct, query, limit as usize, &ctx.cancel)?;
             }
             _ => {
                 return Err(ToolError(
@@ -228,7 +239,7 @@ impl Tool for SearchTool {
             1 => "1 tool found; call it with call_tool.".to_owned(),
             count => format!("{count} tools found; call them with call_tool."),
         };
-        if found.is_empty() && call.arguments.get("query").is_some() {
+        if found.is_empty() && visible.is_empty() && call.arguments.get("query").is_some() {
             text.push_str("\nNo matching tools. Check the list in tool_search's description and try another query.");
         }
         for name in &found {

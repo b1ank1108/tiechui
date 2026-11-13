@@ -288,6 +288,11 @@ class Packaging(unittest.TestCase):
         shutil.copytree(npm / here, modules / "cli/node_modules/@tiechui" / f"cli-{here}")
         launched = subprocess.run([node, modules / "cli/bin/chui.js", "exec", "hi"], capture_output=True, text=True)
         self.assertEqual((launched.returncode, launched.stdout), (3, "npm exec hi\n"))
+        fallback = subprocess.run(
+            [node, "-e", "process.execve = undefined; require(process.argv[1]);",
+             str(modules / "cli/bin/chui.js"), "exec", "fallback"],
+            capture_output=True, text=True)
+        self.assertEqual((fallback.returncode, fallback.stdout), (3, "npm exec fallback\n"))
         shutil.rmtree(modules / "cli/node_modules")
         missing = subprocess.run([node, modules / "cli/bin/chui.js"], capture_output=True, text=True)
         self.assertEqual(missing.returncode, 1)

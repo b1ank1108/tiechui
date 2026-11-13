@@ -2,6 +2,7 @@
 "use strict";
 // Runs the native build that the matching optional dependency installed.
 const { spawn } = require("child_process");
+const os = require("os");
 const path = require("path");
 
 const PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"];
@@ -21,9 +22,20 @@ try {
   process.exit(1);
 }
 
+const env = { ...process.env, TIECHUI_INSTALL: "npm" };
+if (process.platform !== "win32" && typeof process.execve === "function") {
+  try {
+    process.on("SIGXFSZ", () => {});
+    process.execve(binary, [binary, ...process.argv.slice(2)], env);
+  } catch (error) {
+    console.error(`chui: ${binary}: ${error.message}`);
+    process.exit(1);
+  }
+}
+
 const child = spawn(binary, process.argv.slice(2), {
   stdio: "inherit",
-  env: { ...process.env, TIECHUI_INSTALL: "npm" },
+  env,
 });
 child.on("error", (error) => {
   console.error(`chui: ${binary}: ${error.message}`);
@@ -32,10 +44,20 @@ child.on("error", (error) => {
 // The terminal already sends Ctrl+C to chui, which reads a second one as "exit now".
 process.on("SIGINT", () => {});
 for (const signal of ["SIGTERM", "SIGHUP"]) {
-  process.on(signal, () => child.kill(signal));
+  process.on(signal, () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill(signal);
+      } catch {}
+    }
+  });
 }
 child.on("exit", (code, signal) => {
   if (signal) {
+    const num = os.constants.signals[signal];
+    if (typeof num === "number") {
+      process.exitCode = 128 + num;
+    }
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
   } else {
