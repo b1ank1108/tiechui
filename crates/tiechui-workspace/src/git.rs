@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -9,12 +9,13 @@ use tiechui_protocol::workspace::{
 
 use crate::{Error, Result, fail, fs};
 
-fn command(program: &str, root: &Path, args: &[&str]) -> Command {
+fn command(program: &str, root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Command {
     let mut command = Command::new(program);
     command
         .current_dir(root)
         .args(args)
         .stdin(Stdio::null())
+        .envs(env)
         // Nothing can answer a prompt or an editor.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
@@ -38,12 +39,17 @@ fn output(mut command: Command) -> Result<(String, String)> {
     Ok((stdout, stderr))
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<String> {
-    Ok(output(command("git", root, args))?.0)
+fn git(root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Result<String> {
+    Ok(output(command("git", root, args, env))?.0)
 }
 
-fn git_with(root: &Path, args: &[&str], paths: &[String]) -> Result<String> {
-    let mut command = command("git", root, args);
+fn git_with(
+    root: &Path,
+    args: &[&str],
+    paths: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut command = command("git", root, args, env);
     command.arg("--").args(paths);
     Ok(output(command)?.0)
 }
@@ -100,7 +106,7 @@ struct Repo {
 }
 
 /// None outside a Git work tree.
-fn repo(root: &Path) -> Result<Option<Repo>> {
+fn repo(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<Repo>> {
     let Ok(text) = git(
         root,
         &[
@@ -113,6 +119,7 @@ fn repo(root: &Path) -> Result<Option<Repo>> {
             "--git-path",
             "rebase-apply",
         ],
+        env,
     ) else {
         return Ok(None);
     };
@@ -136,7 +143,11 @@ fn repo(root: &Path) -> Result<Option<Repo>> {
 
 /// None outside a Git work tree.
 pub fn status(root: &Path) -> Result<Option<GitStatus>> {
-    let Some(repo) = repo(root)? else {
+    status_with_env(root, &BTreeMap::new())
+}
+
+pub fn status_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<GitStatus>> {
+    let Some(repo) = repo(root, env)? else {
         return Ok(None);
     };
     let text = git(
@@ -150,12 +161,14 @@ pub fn status(root: &Path) -> Result<Option<GitStatus>> {
             "--",
             ".",
         ],
+        env,
     )?;
     let index = numstat(&git(
         root,
         &["diff", "--cached", "--numstat", "-z", "--relative"],
+        env,
     )?);
-    let worktree = numstat(&git(root, &["diff", "--numstat", "-z", "--relative"])?);
+    let worktree = numstat(&git(root, &["diff", "--numstat", "-z", "--relative"], env)?);
     let mut status = GitStatus {
         branch: None,
         head: None,
@@ -251,7 +264,15 @@ fn files(name_status: &str, stats: &HashMap<String, (u32, u32)>) -> Vec<CommitFi
 }
 
 pub fn compare(root: &Path, base: &str) -> Result<Comparison> {
-    let Ok(merge_base) = git(root, &["merge-base", "HEAD", base]) else {
+    compare_with_env(root, base, &BTreeMap::new())
+}
+
+pub fn compare_with_env(
+    root: &Path,
+    base: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Comparison> {
+    let Ok(merge_base) = git(root, &["merge-base", "HEAD", base], env) else {
         return Ok(Comparison {
             merge_base: None,
             ahead: 0,
@@ -261,12 +282,13 @@ pub fn compare(root: &Path, base: &str) -> Result<Comparison> {
     };
     let merge_base = merge_base.trim().to_owned();
     let range = format!("HEAD...{base}");
-    let counts = git(root, &["rev-list", "--left-right", "--count", &range])?;
+    let counts = git(root, &["rev-list", "--left-right", "--count", &range], env)?;
     let (ahead, behind) = counts.split_once('\t').unwrap_or_default();
     let diff = |format: &str| {
         git(
             root,
             &["diff", format, "-z", "--relative", &merge_base, "HEAD"],
+            env,
         )
     };
     let files = files(&diff("--name-status")?, &numstat(&diff("--numstat")?));
@@ -279,7 +301,15 @@ pub fn compare(root: &Path, base: &str) -> Result<Comparison> {
 }
 
 pub fn log(root: &Path, limit: u32) -> Result<Vec<GitCommit>> {
-    if git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+    log_with_env(root, limit, &BTreeMap::new())
+}
+
+pub fn log_with_env(
+    root: &Path,
+    limit: u32,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<GitCommit>> {
+    if git(root, &["rev-parse", "--verify", "-q", "HEAD"], env).is_err() {
         return Ok(vec![]);
     }
     let limit = format!("-n{limit}");
@@ -295,6 +325,7 @@ pub fn log(root: &Path, limit: u32) -> Result<Vec<GitCommit>> {
             "-z",
             "--format=%x1e%H%x1f%P%x1f%s%x1f%an%x1f%ct%x1f%D%x1f",
         ],
+        env,
     )?;
     let mut commits = Vec::new();
     for record in text.split('\x1e').filter(|record| !record.is_empty()) {
@@ -335,8 +366,17 @@ pub fn log(root: &Path, limit: u32) -> Result<Vec<GitCommit>> {
 
 /// The file's text at `rev`; None when it is absent there or binary.
 pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+    show_with_env(root, rev, path, &BTreeMap::new())
+}
+
+pub fn show_with_env(
+    root: &Path,
+    rev: &str,
+    path: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
     fs::resolve(root, path)?;
-    let mut command = command("git", root, &["show", &format!("{rev}:./{path}")]);
+    let mut command = command("git", root, &["show", &format!("{rev}:./{path}")], env);
     let output = command.output()?;
     Ok(output
         .status
@@ -346,6 +386,10 @@ pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
 }
 
 pub fn branches(root: &Path) -> Result<Branches> {
+    branches_with_env(root, &BTreeMap::new())
+}
+
+pub fn branches_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Branches> {
     let text = git(
         root,
         &[
@@ -354,6 +398,7 @@ pub fn branches(root: &Path) -> Result<Branches> {
             "refs/heads",
             "refs/remotes",
         ],
+        env,
     )?;
     let mut branches = Branches {
         local: vec![],
@@ -373,10 +418,18 @@ pub fn branches(root: &Path) -> Result<Branches> {
 
 /// The current branch's pull request, when `gh` knows one.
 pub fn pull_request(root: &Path) -> Result<Option<PullRequest>> {
+    pull_request_with_env(root, &BTreeMap::new())
+}
+
+pub fn pull_request_with_env(
+    root: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<PullRequest>> {
     let Ok((text, _)) = output(command(
         "gh",
         root,
         &["pr", "view", "--json", "number,state,isDraft,url"],
+        env,
     )) else {
         return Ok(None);
     };
@@ -395,6 +448,10 @@ pub fn pull_request(root: &Path) -> Result<Option<PullRequest>> {
 }
 
 pub fn run(root: &Path, op: &GitOp) -> Result<String> {
+    run_with_env(root, op, &BTreeMap::new())
+}
+
+pub fn run_with_env(root: &Path, op: &GitOp, env: &BTreeMap<String, String>) -> Result<String> {
     let mut out = String::new();
     let mut step = |command: Command| -> Result<()> {
         let (stdout, stderr) = output(command)?;
@@ -403,15 +460,15 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
         }
         Ok(())
     };
-    let git = |args: &[&str]| command("git", root, args);
+    let git = |args: &[&str]| command("git", root, args, env);
     let operation = || -> Result<GitOperation> {
-        repo(root)?
+        repo(root, env)?
             .and_then(|repo| repo.operation)
             .ok_or_else(|| Error("No merge or rebase is in progress".into()))
     };
     match op {
         GitOp::Stage { paths } => {
-            git_with(root, &["add", "-A"], paths)?;
+            git_with(root, &["add", "-A"], paths, env)?;
         }
         GitOp::Unstage { paths } => {
             if git(&["rev-parse", "--verify", "-q", "HEAD"])
@@ -419,9 +476,9 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
                 .status
                 .success()
             {
-                git_with(root, &["restore", "--staged"], paths)?;
+                git_with(root, &["restore", "--staged"], paths, env)?;
             } else {
-                git_with(root, &["rm", "--cached", "-r", "-q"], paths)?;
+                git_with(root, &["rm", "--cached", "-r", "-q"], paths, env)?;
             }
         }
         GitOp::Discard { paths } => {
@@ -431,16 +488,16 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
                 .status
                 .success()
             {
-                git_with(root, &["reset", "-q"], paths)?;
+                git_with(root, &["reset", "-q"], paths, env)?;
             }
-            git_with(root, &["clean", "-f", "-q"], paths)?;
-            let tracked: Vec<String> = git_with(root, &["ls-files", "-z"], paths)?
+            git_with(root, &["clean", "-f", "-q"], paths, env)?;
+            let tracked: Vec<String> = git_with(root, &["ls-files", "-z"], paths, env)?
                 .split('\0')
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned)
                 .collect();
             if !tracked.is_empty() {
-                git_with(root, &["checkout", "-q"], &tracked)?;
+                git_with(root, &["checkout", "-q"], &tracked, env)?;
             }
         }
         GitOp::Commit { message } => step(git(&["commit", "-q", "-m", message]))?,
@@ -473,7 +530,7 @@ pub fn run(root: &Path, op: &GitOp) -> Result<String> {
             branch,
             create: false,
         } => step(git(&["switch", branch]))?,
-        GitOp::CreatePr => step(command("gh", root, &["pr", "create", "--fill"]))?,
+        GitOp::CreatePr => step(command("gh", root, &["pr", "create", "--fill"], env))?,
     }
     Ok(out.trim().to_owned())
 }

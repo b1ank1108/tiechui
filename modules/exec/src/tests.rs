@@ -449,3 +449,34 @@ async fn instant_failures_never_count_as_running() {
         "no task for a refused start"
     );
 }
+
+#[tokio::test]
+async fn foreground_and_background_exec_modules_inject_network_env() {
+    let mut cfg = ModuleConfig::default();
+    cfg.network.proxy = Some("socks5://127.0.0.1:1080".into());
+    cfg.network.ca_cert = Some(std::path::PathBuf::from("/etc/ssl/corp.pem"));
+    for background in [false, true] {
+        let registry = Registry::from_modules(&[&ExecModule { background }], &cfg).unwrap();
+        for runtime in registry.runtime_extensions() {
+            runtime
+                .event(&RuntimeEvent::Restore { navigation: false }, &branch())
+                .unwrap();
+        }
+        let tools = registry.tools();
+        let tool = tools.get("bash").unwrap();
+        let output = tool
+            .run(
+                call(json!({
+                    "command": "printf '%s|%s|<%s>' \"$HTTP_PROXY\" \"$SSL_CERT_FILE\" \"$NO_PROXY\""
+                })),
+                context(CancellationToken::new(), ToolOrigin::Model),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            text(&output),
+            "socks5://127.0.0.1:1080|/etc/ssl/corp.pem|<>",
+            "background={background}"
+        );
+    }
+}

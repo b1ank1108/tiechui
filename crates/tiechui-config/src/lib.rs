@@ -168,7 +168,7 @@ impl Default for RetryConfig {
 }
 
 /// HTTP settings for provider and MCP requests.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Proxy URL for every request; unset leaves the `*_PROXY` environment variables in effect.
@@ -179,14 +179,215 @@ pub struct NetworkConfig {
     pub ca_cert: Option<PathBuf>,
 }
 
+impl fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let proxy = self.proxy.as_deref().map(redact_proxy_secrets);
+        f.debug_struct("NetworkConfig")
+            .field("proxy", &proxy)
+            .field("no_proxy", &self.no_proxy)
+            .field("ca_cert", &self.ca_cert)
+            .finish()
+    }
+}
+
+pub fn normalize_proxy_url(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || "network.proxy: invalid proxy URL".to_owned();
+    let (candidate, bare) = match trimmed.split_once("://") {
+        Some((scheme, _)) => {
+            let lower = scheme.to_ascii_lowercase();
+            if !matches!(lower.as_str(), "http" | "https" | "socks5") {
+                if !scheme.is_empty()
+                    && scheme
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+                {
+                    return Err(format!("network.proxy: {lower} proxies are not supported"));
+                }
+                return Err(invalid());
+            }
+            (trimmed.to_owned(), false)
+        }
+        None => {
+            if trimmed.contains(char::is_whitespace) {
+                return Err(invalid());
+            }
+            (format!("http://{trimmed}"), true)
+        }
+    };
+
+    let rest = candidate
+        .split_once("://")
+        .map(|(_, r)| r)
+        .ok_or_else(invalid)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let (raw_host, raw_port) = if let Some(after_bracket) = host_port.strip_prefix('[') {
+        let (ipv6, tail) = after_bracket.split_once(']').ok_or_else(invalid)?;
+        if ipv6.is_empty() {
+            return Err(invalid());
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(p) => Some(p),
+            None if tail.is_empty() => None,
+            None => return Err(invalid()),
+        };
+        (&host_port[..=ipv6.len() + 1], port)
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (host_port, None),
+        }
+    };
+    if raw_host.is_empty() {
+        return Err(invalid());
+    }
+    match raw_port {
+        Some(port_str) => {
+            if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            let port: u16 = port_str.parse().map_err(|_| invalid())?;
+            if port == 0 {
+                return Err(invalid());
+            }
+        }
+        None if bare => return Err(invalid()),
+        None => {}
+    }
+
+    let parsed = url::Url::parse(&candidate).map_err(|_| invalid())?;
+    if parsed.host_str().is_none_or(str::is_empty)
+        || parsed.port() == Some(0)
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err(invalid());
+    }
+    reqwest::Proxy::all(parsed.as_str()).map_err(|_| invalid())?;
+
+    let mut normalized = parsed.to_string();
+    if parsed.path() == "/" && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(Some(normalized))
+}
+
+pub fn proxy_has_credentials(url: &str) -> bool {
+    let candidate = if url.contains("://") {
+        url.to_owned()
+    } else {
+        format!("http://{url}")
+    };
+    url::Url::parse(&candidate)
+        .map(|parsed| !parsed.username().is_empty() || parsed.password().is_some())
+        .unwrap_or(false)
+}
+
+pub fn redact_proxy_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("://") {
+        let head_end = pos + 3;
+        out.push_str(&rest[..head_end]);
+        let after = &rest[head_end..];
+        let authority_end = after
+            .find(['/', '?', '#', ' ', '\t', '\r', '\n', ')', '"', '\'', '>'])
+            .unwrap_or(after.len());
+        let authority = &after[..authority_end];
+        if let Some((userinfo, host_port)) = authority.rsplit_once('@')
+            && let Some((user, _)) = userinfo.split_once(':')
+        {
+            out.push_str(user);
+            out.push_str(":<redacted>@");
+            out.push_str(host_port);
+        } else {
+            out.push_str(authority);
+        }
+        rest = &after[authority_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl NetworkConfig {
+    pub fn normalize(&mut self) -> Result<(), String> {
+        if let Some(raw) = &self.proxy {
+            self.proxy = normalize_proxy_url(raw)?;
+        }
+        Ok(())
+    }
+
+    pub fn redact(&self, message: impl Into<String>) -> String {
+        let mut out = redact_proxy_secrets(&message.into());
+        if let Some(raw) = &self.proxy {
+            let candidate = if raw.contains("://") {
+                raw.clone()
+            } else {
+                format!("http://{raw}")
+            };
+            if let Ok(parsed) = url::Url::parse(&candidate)
+                && let Some(password) = parsed.password()
+                && !password.is_empty()
+            {
+                out = out.replace(password, "<redacted>");
+            }
+        }
+        out
+    }
+
+    pub fn subprocess_env(&self) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        if let Some(proxy) = self
+            .proxy
+            .as_deref()
+            .and_then(|raw| normalize_proxy_url(raw).ok().flatten())
+        {
+            let no_proxy = self.no_proxy.as_deref().unwrap_or("");
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                env.insert(key.into(), proxy.clone());
+            }
+            for key in ["NO_PROXY", "no_proxy"] {
+                env.insert(key.into(), no_proxy.to_owned());
+            }
+        }
+        if let Some(ca_cert) = &self.ca_cert
+            && !ca_cert.as_os_str().is_empty()
+        {
+            let path = ca_cert.display().to_string();
+            for key in [
+                "SSL_CERT_FILE",
+                "NODE_EXTRA_CA_CERTS",
+                "CURL_CA_BUNDLE",
+                "REQUESTS_CA_BUNDLE",
+                "GIT_SSL_CAINFO",
+            ] {
+                env.insert(key.into(), path.clone());
+            }
+        }
+        env
+    }
+
     /// `builder` with the proxy and the extra root certificates, read now.
     pub fn apply(
         &self,
         mut builder: reqwest::ClientBuilder,
     ) -> Result<reqwest::ClientBuilder, String> {
         if let Some(proxy) = self.proxy()? {
-            builder = builder.proxy(proxy);
+            builder = builder.no_proxy().proxy(proxy);
         }
         if let Some(path) = &self.ca_cert {
             let error = |e: &dyn fmt::Display| format!("network.ca_cert {}: {e}", path.display());
@@ -203,28 +404,24 @@ impl NetworkConfig {
     }
 
     pub(crate) fn proxy(&self) -> Result<Option<reqwest::Proxy>, String> {
-        let Some(url) = self.proxy.as_deref() else {
+        let Some(raw) = self.proxy.as_deref() else {
             return Ok(None);
         };
-        // reqwest takes these, then fails each request.
-        if let Some((scheme, _)) = url.split_once("://")
-            && !["http", "https"].contains(&scheme.to_ascii_lowercase().as_str())
-        {
-            return Err(format!("network.proxy: {scheme} proxies are not supported"));
-        }
+        let Some(url) = normalize_proxy_url(raw)? else {
+            return Ok(None);
+        };
         let no_proxy = self
             .no_proxy
             .as_deref()
             .and_then(reqwest::NoProxy::from_string);
-        match reqwest::Proxy::all(url) {
+        match reqwest::Proxy::all(&url) {
             Ok(proxy) => Ok(Some(proxy.no_proxy(no_proxy))),
             Err(e) => {
-                // reqwest wraps what is wrong with the URL in "builder error"s.
                 let mut cause: &dyn std::error::Error = &e;
                 while let Some(source) = cause.source() {
                     cause = source;
                 }
-                Err(format!("network.proxy: {cause}"))
+                Err(self.redact(format!("network.proxy: {cause}")))
             }
         }
     }

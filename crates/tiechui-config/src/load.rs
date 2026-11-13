@@ -170,9 +170,9 @@ pub fn load_with_mandatory_modules(
         &mut mcp_origins,
         &mut diagnostics,
     );
-    if let Some(network) = &merged.network {
+    if let Some(network) = &mut merged.network {
         network
-            .proxy()
+            .normalize()
             .map_err(|message| ConfigError::new(&paths.user, "network", message))?;
     }
     let config = Config {

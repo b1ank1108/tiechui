@@ -299,7 +299,7 @@ fn network_sessions_and_skills_are_user_only_and_validated() {
             "sessions.archive_after_days",
         ),
         ("[network]\nproxy='not a url'\n", "network"),
-        ("[network]\nproxy='socks5://127.0.0.1:1080'\n", "network"),
+        ("[network]\nproxy='ftp://127.0.0.1:21'\n", "network"),
     ] {
         fs::write(&paths.user, text).unwrap();
         assert_eq!(
@@ -1505,6 +1505,93 @@ fn provider_and_model_edits_keep_other_keys_and_reject_invalid_results() {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn proxy_schemes_normalization_redaction_and_credential_permissions() {
+    let temp = temp_dir();
+    let paths = ConfigPaths {
+        user: temp.path().join("config.toml"),
+        project: None,
+    };
+
+    for (input, expected) in [
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        (
+            "https://u:p@proxy.example.com:8443",
+            "https://u:p@proxy.example.com:8443",
+        ),
+        ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+        (
+            "socks5://u:s3cr3t@127.0.0.1:1080",
+            "socks5://u:s3cr3t@127.0.0.1:1080",
+        ),
+        ("127.0.0.1:7890", "http://127.0.0.1:7890"),
+        ("proxy.example.com:8080", "http://proxy.example.com:8080"),
+        ("[::1]:1080", "http://[::1]:1080"),
+    ] {
+        fs::write(&paths.user, format!("[network]\nproxy = '{input}'\n")).unwrap();
+        let loaded = load(&paths, false, &toml::Table::new()).unwrap();
+        assert_eq!(
+            loaded.config.network.proxy.as_deref(),
+            Some(expected),
+            "{input}"
+        );
+    }
+
+    fs::write(
+        &paths.user,
+        "[network]\nproxy = 'socks5://alice:super-secret-pass@127.0.0.1:1080'\n",
+    )
+    .unwrap();
+    let loaded = load(&paths, false, &toml::Table::new()).unwrap();
+    let debug_text = format!("{:?}", loaded.config.network);
+    assert!(
+        !debug_text.contains("super-secret-pass"),
+        "Debug leaked inline proxy password: {debug_text}"
+    );
+
+    for invalid in [
+        "ftp://127.0.0.1:21",
+        "socks4://127.0.0.1:1080",
+        "http://:8080",
+        ":8080",
+        "127.0.0.1:0",
+        "http://127.0.0.1:0",
+        "127.0.0.1:99999",
+        "localhost",
+        "u:leak-me-not@:99999",
+    ] {
+        fs::write(&paths.user, format!("[network]\nproxy = '{invalid}'\n")).unwrap();
+        let err = load(&paths, false, &toml::Table::new()).unwrap_err();
+        assert_eq!(err.key, "network", "{invalid}");
+        assert!(
+            !err.to_string().contains("leak-me-not"),
+            "error leaked password: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&paths.user, "model = 'local/small'\n").unwrap();
+        fs::set_permissions(&paths.user, fs::Permissions::from_mode(0o644)).unwrap();
+        save_preference(&paths.user, "network.no_proxy", "localhost".into()).unwrap();
+        assert_eq!(
+            fs::metadata(&paths.user).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        save_preference(
+            &paths.user,
+            "network.proxy",
+            "socks5://u:s3cr3t@127.0.0.1:1080".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&paths.user).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }

@@ -12,7 +12,7 @@ mod transport;
 pub mod testing;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::{StreamExt, stream::BoxStream};
 use tiechui_config::{NetworkConfig, ProviderConfig, Wire};
 use tiechui_model::{ModelCapabilities, ModelId, ModelRequest, ReasoningLevel, StreamEvent, Usage};
 use tokio_util::sync::CancellationToken;
@@ -72,16 +72,77 @@ pub fn from_config(
     config: &ProviderConfig,
     network: &NetworkConfig,
 ) -> Result<Box<dyn ModelProvider>, ProviderError> {
+    let redact = |mut err: ProviderError| {
+        err.message = network.redact(err.message);
+        err
+    };
     let key = api_key(config)?;
-    let client = client(network, client_builder())?;
-    match config.wire {
-        Wire::AnthropicMessages => Ok(Box::new(anthropic::Anthropic::new(
-            name, config, &key, client,
-        )?)),
-        Wire::OpenaiCompletions => Ok(Box::new(openai::Openai::new(name, config, &key, client)?)),
-        Wire::OpenaiResponses => Ok(Box::new(responses::Responses::new(
-            name, config, &key, client,
-        )?)),
+    let client = client(network, client_builder()).map_err(&redact)?;
+    let provider: Box<dyn ModelProvider> = match config.wire {
+        Wire::AnthropicMessages => {
+            Box::new(anthropic::Anthropic::new(name, config, &key, client).map_err(&redact)?)
+        }
+        Wire::OpenaiCompletions => {
+            Box::new(openai::Openai::new(name, config, &key, client).map_err(&redact)?)
+        }
+        Wire::OpenaiResponses => {
+            Box::new(responses::Responses::new(name, config, &key, client).map_err(&redact)?)
+        }
+    };
+    if network
+        .proxy
+        .as_deref()
+        .is_some_and(tiechui_config::proxy_has_credentials)
+    {
+        Ok(Box::new(RedactedProvider {
+            inner: provider,
+            network: network.clone(),
+        }))
+    } else {
+        Ok(provider)
+    }
+}
+
+struct RedactedProvider {
+    inner: Box<dyn ModelProvider>,
+    network: NetworkConfig,
+}
+
+#[async_trait]
+impl ModelProvider for RedactedProvider {
+    fn cost_nano_usd(&self, model: &ModelId, usage: Usage) -> Option<u64> {
+        self.inner.cost_nano_usd(model, usage)
+    }
+    fn capabilities(&self, model: &ModelId) -> ModelCapabilities {
+        self.inner.capabilities(model)
+    }
+    fn models(&self) -> Vec<ModelId> {
+        self.inner.models()
+    }
+    fn thinking_levels(&self, model: &ModelId) -> Vec<Option<ReasoningLevel>> {
+        self.inner.thinking_levels(model)
+    }
+    fn normalize_tool_call_id(&self, id: &str) -> String {
+        self.inner.normalize_tool_call_id(id)
+    }
+    fn error_tool_images(&self) -> bool {
+        self.inner.error_tool_images()
+    }
+    fn prompt_cache_ttl(&self, model: &ModelId) -> Option<std::time::Duration> {
+        self.inner.prompt_cache_ttl(model)
+    }
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        let network = self.network.clone();
+        let redact = move |mut err: ProviderError| {
+            err.message = network.redact(err.message);
+            err
+        };
+        let stream = self.inner.stream(request, cancel).await.map_err(&redact)?;
+        Ok(stream.map(move |item| item.map_err(&redact)).boxed())
     }
 }
 
@@ -91,11 +152,16 @@ pub async fn list_models(
     network: &NetworkConfig,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>, ProviderError> {
+    let redact = |mut err: ProviderError| {
+        err.message = network.redact(err.message);
+        err
+    };
     let key = api_key(config)?;
     let client = client(
         network,
         client_builder().timeout(std::time::Duration::from_secs(30)),
-    )?;
+    )
+    .map_err(&redact)?;
     let request = match config.wire {
         Wire::AnthropicMessages => {
             let transport = transport::Transport::new(
@@ -106,7 +172,8 @@ pub async fn list_models(
                 anthropic::ROOT,
                 "/models",
                 "",
-            )?;
+            )
+            .map_err(&redact)?;
             transport
                 .client
                 .get(transport.endpoint)
@@ -123,14 +190,15 @@ pub async fn list_models(
                 openai::ROOT,
                 "/models",
                 "Bearer ",
-            )?;
+            )
+            .map_err(&redact)?;
             transport
                 .client
                 .get(transport.endpoint)
                 .header("authorization", transport.key)
         }
     };
-    transport::list(request, cancel).await
+    transport::list(request, cancel).await.map_err(redact)
 }
 
 fn client(

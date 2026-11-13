@@ -324,6 +324,9 @@ pub struct TerminalCreateParams {
     pub cwd: String,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

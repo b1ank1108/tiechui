@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -15,22 +16,35 @@ use crate::{Concurrency, Tool, ToolContext, ToolError, ToolOutput, ToolUpdate};
 
 pub struct BashTool {
     spec: ToolSpec,
+    env: BTreeMap<String, String>,
+}
+
+impl BashTool {
+    pub fn with_env(env: BTreeMap<String, String>) -> Self {
+        Self {
+            env,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for BashTool {
     fn default() -> Self {
-        Self { spec: ToolSpec {
-            name: "bash".into(),
-            description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
-                },
-                "required": ["command"],
-            }),
-        } }
+        Self {
+            spec: ToolSpec {
+                name: "bash".into(),
+                description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to execute"},
+                        "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+                    },
+                    "required": ["command"],
+                }),
+            },
+            env: BTreeMap::new(),
+        }
     }
 }
 
@@ -158,10 +172,11 @@ impl Tool for BashTool {
         emit(ToolOutput::default());
         parse_timeout(input.timeout)?;
         let output = Mutex::new(OutputAccumulator::new());
-        run_bash(
+        run_bash_with_env(
             &input.command,
             input.timeout,
             &ctx.cwd,
+            &self.env,
             ctx.cancel.clone(),
             &output,
             || {},
@@ -178,6 +193,30 @@ pub async fn run_bash(
     command: &str,
     timeout: Option<f64>,
     cwd: &Path,
+    cancel: CancellationToken,
+    output: &Mutex<OutputAccumulator>,
+    on_spawn: impl FnOnce() + Send,
+    emit: impl Fn(ToolOutput) + Sync,
+) -> Outcome {
+    run_bash_with_env(
+        command,
+        timeout,
+        cwd,
+        &BTreeMap::new(),
+        cancel,
+        output,
+        on_spawn,
+        emit,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_bash_with_env(
+    command: &str,
+    timeout: Option<f64>,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
     cancel: CancellationToken,
     output: &Mutex<OutputAccumulator>,
     on_spawn: impl FnOnce() + Send,
@@ -202,29 +241,38 @@ pub async fn run_bash(
         Ok(shell) => shell,
         Err(error) => return ToolError(error.to_string()).into(),
     };
-    let execution = tiechui_exec::execute(&shell, command, cwd, limit, cancel, on_spawn, |data| {
-        let next = {
-            let mut throttle = throttle
-                .lock()
-                .map_err(|_| std::io::Error::other("output lock poisoned"))?;
-            let mut output = output
-                .lock()
-                .map_err(|_| std::io::Error::other("output lock poisoned"))?;
-            output.append(data)?;
-            throttle.dirty = true;
-            if throttle.last_update.elapsed() >= Duration::from_millis(100) {
-                throttle.dirty = false;
-                throttle.last_update = Instant::now();
-                Some(update(output.snapshot()))
-            } else {
-                None
+    let execution = tiechui_exec::execute_with_env(
+        &shell,
+        command,
+        cwd,
+        env,
+        limit,
+        cancel,
+        on_spawn,
+        |data| {
+            let next = {
+                let mut throttle = throttle
+                    .lock()
+                    .map_err(|_| std::io::Error::other("output lock poisoned"))?;
+                let mut output = output
+                    .lock()
+                    .map_err(|_| std::io::Error::other("output lock poisoned"))?;
+                output.append(data)?;
+                throttle.dirty = true;
+                if throttle.last_update.elapsed() >= Duration::from_millis(100) {
+                    throttle.dirty = false;
+                    throttle.last_update = Instant::now();
+                    Some(update(output.snapshot()))
+                } else {
+                    None
+                }
+            };
+            if let Some(output) = next {
+                emit(output);
             }
-        };
-        if let Some(output) = next {
-            emit(output);
-        }
-        Ok(())
-    });
+            Ok(())
+        },
+    );
     tokio::pin!(execution);
     let process = loop {
         let deadline = match lock(&throttle) {

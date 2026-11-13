@@ -62,6 +62,8 @@ struct Server {
     clients: Arc<Mutex<HashMap<u64, ClientOut>>>,
     next_client: AtomicU64,
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
+    reloading: tokio::sync::Mutex<()>,
+    config_gen: AtomicU64,
     schedules: tiechui_module_loop::Schedules,
     next: AtomicU64,
     /// Wakes the archiving of inactive sessions early.
@@ -471,6 +473,8 @@ impl Server {
             clients,
             next_client: AtomicU64::new(1),
             sessions: Mutex::default(),
+            reloading: tokio::sync::Mutex::new(()),
+            config_gen: AtomicU64::new(0),
             schedules: Default::default(),
             next: AtomicU64::new(1),
             sweep: Notify::new(),
@@ -650,7 +654,7 @@ impl Server {
             }
             #[cfg(feature = "workspace")]
             _ if workspace::handles(method) => {
-                workspace::dispatch(&self.workspace, client_id, method, params).await
+                workspace::dispatch(&self.home, &self.workspace, client_id, method, params).await
             }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
         };
@@ -952,6 +956,8 @@ impl Server {
 
     /// Starts the session again from its file, so configuration and modules reload.
     async fn reload(self: &Arc<Self>, thread: &ThreadId) -> Result<Arc<Live>, rpc::Error> {
+        let guard = self.reloading.lock().await;
+        let generation = self.config_gen.load(Ordering::SeqCst);
         let live = self.live(thread)?;
         let options = Options {
             mode: mode(&live),
@@ -959,7 +965,7 @@ impl Server {
         };
         let epoch = SessionEpoch(lock(&live.projection).epoch.0 + 1);
         self.close(thread).await;
-        Ok(self
+        let reloaded = self
             .start(
                 options,
                 Open::Path(live.path.clone()),
@@ -967,17 +973,24 @@ impl Server {
                 Some(live.projection.clone()),
             )
             .await?
-            .1)
+            .1;
+        drop(guard);
+        if self.config_gen.load(Ordering::SeqCst) != generation {
+            reloaded.stale.store(true, Ordering::SeqCst);
+            self.settle(thread, &reloaded);
+        }
+        Ok(reloaded)
     }
 
     /// Marks each open session stale so it reloads the changed configuration.
     fn refresh(self: &Arc<Self>) {
+        self.config_gen.fetch_add(1, Ordering::SeqCst);
         let open: Vec<_> = lock(&self.sessions)
             .iter()
             .map(|(thread, live)| (thread.clone(), live.clone()))
             .collect();
         for (thread, live) in open {
-            live.stale.store(true, Ordering::Relaxed);
+            live.stale.store(true, Ordering::SeqCst);
             self.settle(&thread, &live);
         }
     }
@@ -985,7 +998,7 @@ impl Server {
     /// Reloads a stale session, unless that would cut off a turn, an approval, a compaction
     /// or queued input; it is tried again as each ends.
     fn settle(self: &Arc<Self>, thread: &ThreadId, live: &Live) {
-        if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::Relaxed) {
+        if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::SeqCst) {
             return;
         }
         let server = self.clone();

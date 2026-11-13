@@ -89,7 +89,8 @@ impl ServerHandler for TestServer {
                 json!({"content":[{"type":"text","text":format!("{:?}",response.action)}]})
             }
             "environment" => {
-                json!({"content":[{"type":"text","text":json!({"cwd":std::env::current_dir().unwrap(),"explicit":std::env::var("MCP_EXPLICIT").ok(),"forwarded":std::env::var("CARGO").ok(),"unrequested":std::env::var("CARGO_MANIFEST_DIR").ok()}).to_string()}]})
+                let vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+                json!({"content":[{"type":"text","text":json!({"cwd":std::env::current_dir().unwrap(),"explicit":std::env::var("MCP_EXPLICIT").ok(),"forwarded":std::env::var("CARGO").ok(),"unrequested":std::env::var("CARGO_MANIFEST_DIR").ok(),"vars":vars}).to_string()}]})
             }
             "long" => json!({"content":[{"type":"text","text":"中".repeat(12_000)}]}),
             _ => {

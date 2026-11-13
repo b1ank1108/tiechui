@@ -34,11 +34,12 @@ impl Module for ExecModule {
         "exec"
     }
 
-    fn register(&self, registry: &mut Registry, _: &ModuleConfig) -> Result<(), ToolError> {
+    fn register(&self, registry: &mut Registry, config: &ModuleConfig) -> Result<(), ToolError> {
+        let env = config.network.subprocess_env();
         if !self.background {
-            return registry.register_tool(Arc::new(BashTool::default()));
+            return registry.register_tool(Arc::new(BashTool::with_env(env)));
         }
-        let shells = Arc::new(Shells::default());
+        let shells = Arc::new(Shells::with_env(env));
         registry.register_runtime(shells.clone());
         registry.register_background_work(shells.clone());
         registry.register_command(Arc::new(ShellsCommand(shells.clone())));

@@ -15,6 +15,19 @@ use crate::{
 /// Edit one dotted TOML key, retaining surrounding comments and unrelated formatting.
 /// Quoted key segments are supported. Configuration validation happens when loading.
 pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), ConfigError> {
+    let mut force_private = false;
+    if key == "network.proxy"
+        && let Some(raw) = value.as_str()
+    {
+        match crate::normalize_proxy_url(raw) {
+            Ok(Some(normalized)) => {
+                force_private = crate::proxy_has_credentials(&normalized);
+                value = Value::from(normalized);
+            }
+            Ok(None) => return remove_preference(path, key),
+            Err(message) => return Err(ConfigError::new(path, "network", message)),
+        }
+    }
     let original = read_optional(path)?;
     let text = original.as_deref().unwrap_or("");
     let document =
@@ -37,7 +50,7 @@ pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), C
             .map_err(|message| ConfigError::new(path, key, message))?;
         preserve_unchanged_text(text, &document.to_string())
     };
-    replace(path, key, original, &rendered)
+    replace_with_mode(path, key, original, &rendered, force_private)
 }
 
 /// Removes one dotted TOML key, retaining surrounding comments and unrelated formatting.
@@ -369,7 +382,25 @@ fn replace(
     original: Option<String>,
     rendered: &str,
 ) -> Result<(), ConfigError> {
+    replace_with_mode(path, key, original, rendered, false)
+}
+
+fn replace_with_mode(
+    path: &Path,
+    key: &str,
+    original: Option<String>,
+    rendered: &str,
+    force_private: bool,
+) -> Result<(), ConfigError> {
+    #[cfg(not(unix))]
+    let _ = force_private;
     if original.as_deref() == Some(rendered) {
+        #[cfg(unix)]
+        if force_private && original.is_some() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
+        }
         return Ok(());
     }
     let target = if original.is_some() {
@@ -397,6 +428,16 @@ fn replace(
         .write_all(rendered.as_bytes())
         .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
     if original.is_some() {
+        #[cfg(unix)]
+        let permissions = if force_private {
+            use std::os::unix::fs::PermissionsExt;
+            fs::Permissions::from_mode(0o600)
+        } else {
+            fs::metadata(&target)
+                .map_err(|error| ConfigError::new(path, key, error.to_string()))?
+                .permissions()
+        };
+        #[cfg(not(unix))]
         let permissions = fs::metadata(&target)
             .map_err(|error| ConfigError::new(path, key, error.to_string()))?
             .permissions();

@@ -671,7 +671,7 @@ seq: number,
  */
 exit: number | null, };
 
-export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, };
+export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, env?: { [key in string]: string }, };
 
 export type TerminalExit = { id: string, code: number, };
 
