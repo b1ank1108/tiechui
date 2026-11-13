@@ -1596,3 +1596,169 @@ fn proxy_schemes_normalization_redaction_and_credential_permissions() {
         );
     }
 }
+
+#[test]
+fn redact_replaces_percent_encoded_and_decoded_passwords() {
+    let network = NetworkConfig {
+        proxy: Some("http://u:p%40ss%3A1@127.0.0.1:8080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        network.redact(
+            "proxy auth failed for p@ss:1 (encoded p%40ss%3A1) via http://u:p%40ss%3A1@127.0.0.1:8080"
+        ),
+        "proxy auth failed for <redacted> (encoded <redacted>) via http://u:<redacted>@127.0.0.1:8080"
+    );
+
+    let utf8_network = NetworkConfig {
+        proxy: Some("socks5://u:p%C3%A4ss@127.0.0.1:1080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        utf8_network.redact("rejected päss and p%C3%A4ss"),
+        "rejected <redacted> and <redacted>"
+    );
+
+    let nested = NetworkConfig {
+        proxy: Some("http://u:%2525@127.0.0.1:8080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        nested.redact("raw %2525 decoded %25"),
+        "raw <redacted> decoded <redacted>"
+    );
+}
+
+const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBiTCCAS+gAwIBAgIUBDwBzNjrl7Y9XSWtm7HwM6AoUkUwCgYIKoZIzj0EAwIw\n\
+GjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMB4XDTI2MTExMzAzMTY1NFoXDTM2\n\
+MTExMDAzMTY1NFowGjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMFkwEwYHKoZI\n\
+zj0CAQYIKoZIzj0DAQcDQgAEPy7Wj3KSWZ4vTLtUs+Pnu5GXY9bpEZeZEEV8LZ54\n\
+McnNzeA6w5iNNxmUTXyYM8GoJuz+MNPcWDRhhHQqIgJaZ6NTMFEwHQYDVR0OBBYE\n\
+FJWXEH1vyX3Nl6RrUM+rO1K4dTBWMB8GA1UdIwQYMBaAFJWXEH1vyX3Nl6RrUM+r\n\
+O1K4dTBWMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIgDlvfQPnC\n\
+l5q45BA5LdLN/5mGPd1SIAX5cirDxtJZ+Y0CIQDHb3fpCGRXXUxoaB33gPyVU5hr\n\
+JmWK2Fp3hddwjKlRaQ==\n\
+-----END CERTIFICATE-----\n";
+
+fn assert_tilde_ca_cert_cases(home: &Path) {
+    let ca_only = |p: &str| NetworkConfig {
+        ca_cert: Some(PathBuf::from(p)),
+        ..Default::default()
+    };
+    for (configured, expected) in [
+        ("~/certs/corp-ca.pem", home.join("certs/corp-ca.pem")),
+        ("~\\root-ca.pem", home.join("root-ca.pem")),
+    ] {
+        let network = ca_only(configured);
+        let env = network.subprocess_env();
+        let expected_str = expected.display().to_string();
+        for key in [
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert_eq!(env.get(key), Some(&expected_str), "{configured} {key}");
+        }
+        network
+            .apply(reqwest::Client::builder())
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    let bare_tilde = ca_only("~");
+    let home_str = home.display().to_string();
+    assert_eq!(
+        bare_tilde.subprocess_env().get("SSL_CERT_FILE"),
+        Some(&home_str)
+    );
+    let err = bare_tilde.apply(reqwest::Client::builder()).unwrap_err();
+    assert!(err.contains(&home_str), "{err}");
+    assert_eq!(
+        ca_only("~other/ca.pem")
+            .subprocess_env()
+            .get("SSL_CERT_FILE")
+            .map(String::as_str),
+        Some("~other/ca.pem")
+    );
+}
+
+#[test]
+fn ca_cert_expands_leading_tilde_in_apply_and_subprocess_env() {
+    const CHILD_MARKER: &str = "TIECHUI_TEST_TILDE_HOME";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let fake_home = temp_dir();
+        write(fake_home.path(), "certs/corp-ca.pem", TEST_CA_PEM);
+        write(fake_home.path(), "root-ca.pem", TEST_CA_PEM);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::ca_cert_expands_leading_tilde_in_apply_and_subprocess_env",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("HOME", fake_home.path())
+            .env("USERPROFILE", fake_home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_tilde_ca_cert_cases(&user_home().unwrap());
+}
+
+#[test]
+fn no_proxy_normalizes_semicolons_and_wildcard_domains_in_proxy_and_subprocess_env() {
+    let raw_rules = "localhost; *.corp.internal, *.api.local:8443  10.0.0.0/8";
+    let expected_joined = "localhost,.corp.internal,.api.local:8443,10.0.0.0/8";
+    let network = NetworkConfig {
+        proxy: Some("http://127.0.0.1:8080".into()),
+        no_proxy: Some(raw_rules.into()),
+        ca_cert: None,
+    };
+    let env = network.subprocess_env();
+    for key in ["NO_PROXY", "no_proxy"] {
+        assert_eq!(env.get(key).map(String::as_str), Some(expected_joined));
+    }
+
+    let proxy_with = |rules: Option<&str>| {
+        reqwest::Proxy::all("http://127.0.0.1:8080")
+            .unwrap()
+            .no_proxy(rules.and_then(reqwest::NoProxy::from_string))
+    };
+    let actual_proxy = network.proxy().unwrap().unwrap();
+    let expected_proxy = proxy_with(Some(expected_joined));
+    assert_ne!(
+        format!("{expected_proxy:?}"),
+        format!("{:?}", proxy_with(Some(raw_rules)))
+    );
+    assert_eq!(format!("{actual_proxy:?}"), format!("{expected_proxy:?}"));
+
+    let blank_delims = NetworkConfig {
+        proxy: Some("http://127.0.0.1:8080".into()),
+        no_proxy: Some(" ; ,  ".into()),
+        ca_cert: None,
+    };
+    assert_eq!(
+        blank_delims
+            .subprocess_env()
+            .get("NO_PROXY")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(
+        format!("{:?}", blank_delims.proxy().unwrap().unwrap()),
+        format!("{:?}", proxy_with(None))
+    );
+}

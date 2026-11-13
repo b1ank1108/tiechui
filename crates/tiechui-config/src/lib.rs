@@ -316,6 +316,59 @@ pub fn redact_proxy_secrets(text: &str) -> String {
     out
 }
 
+fn decode_percent_utf8(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if raw == "~" {
+        return user_home().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))
+        && let Some(home) = user_home()
+    {
+        let rest = rest.trim_start_matches(['/', '\\']);
+        return if rest.is_empty() {
+            home
+        } else {
+            home.join(rest)
+        };
+    }
+    path.to_path_buf()
+}
+
+fn normalize_no_proxy(raw: &str) -> String {
+    raw.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';'))
+        .filter(|token| !token.is_empty())
+        .map(|token| match token.strip_prefix("*.") {
+            Some(rest) if !rest.is_empty() && !rest.starts_with(':') => &token[1..],
+            _ => token,
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl NetworkConfig {
     pub fn normalize(&mut self) -> Result<(), String> {
         if let Some(raw) = &self.proxy {
@@ -337,6 +390,10 @@ impl NetworkConfig {
                 && !password.is_empty()
             {
                 out = out.replace(password, "<redacted>");
+                let decoded = decode_percent_utf8(password);
+                if !decoded.is_empty() && decoded != password {
+                    out = out.replace(&decoded, "<redacted>");
+                }
             }
         }
         out
@@ -349,7 +406,11 @@ impl NetworkConfig {
             .as_deref()
             .and_then(|raw| normalize_proxy_url(raw).ok().flatten())
         {
-            let no_proxy = self.no_proxy.as_deref().unwrap_or("");
+            let no_proxy = self
+                .no_proxy
+                .as_deref()
+                .map(normalize_no_proxy)
+                .unwrap_or_default();
             for key in [
                 "HTTP_PROXY",
                 "HTTPS_PROXY",
@@ -361,13 +422,13 @@ impl NetworkConfig {
                 env.insert(key.into(), proxy.clone());
             }
             for key in ["NO_PROXY", "no_proxy"] {
-                env.insert(key.into(), no_proxy.to_owned());
+                env.insert(key.into(), no_proxy.clone());
             }
         }
         if let Some(ca_cert) = &self.ca_cert
             && !ca_cert.as_os_str().is_empty()
         {
-            let path = ca_cert.display().to_string();
+            let path = expand_tilde(ca_cert).display().to_string();
             for key in [
                 "SSL_CERT_FILE",
                 "NODE_EXTRA_CA_CERTS",
@@ -390,8 +451,9 @@ impl NetworkConfig {
             builder = builder.no_proxy().proxy(proxy);
         }
         if let Some(path) = &self.ca_cert {
+            let path = expand_tilde(path);
             let error = |e: &dyn fmt::Display| format!("network.ca_cert {}: {e}", path.display());
-            let pem = std::fs::read(path).map_err(|e| error(&e))?;
+            let pem = std::fs::read(&path).map_err(|e| error(&e))?;
             let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| error(&e))?;
             if certs.is_empty() {
                 return Err(error(&"no certificates"));
@@ -413,7 +475,9 @@ impl NetworkConfig {
         let no_proxy = self
             .no_proxy
             .as_deref()
-            .and_then(reqwest::NoProxy::from_string);
+            .map(normalize_no_proxy)
+            .filter(|normalized| !normalized.is_empty())
+            .and_then(|normalized| reqwest::NoProxy::from_string(&normalized));
         match reqwest::Proxy::all(&url) {
             Ok(proxy) => Ok(Some(proxy.no_proxy(no_proxy))),
             Err(e) => {

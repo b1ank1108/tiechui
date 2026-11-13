@@ -1993,14 +1993,25 @@ async fn socket_daemon_replaces_stale_socket_and_auto_exits_after_full_idle() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_and_terminal_env() {
+mod network_proxy_e2e {
+    use std::collections::BTreeMap;
+    use std::net::SocketAddr;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use tokio::io::AsyncReadExt;
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tiechui_protocol::{EventKind, ThreadId};
+    use tiechui_providers::testing::ScriptedServer;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Client, Fixture, snapshot};
 
     const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBiTCCAS+gAwIBAgIUBDwBzNjrl7Y9XSWtm7HwM6AoUkUwCgYIKoZIzj0EAwIw\n\
@@ -2014,490 +2025,607 @@ l5q45BA5LdLN/5mGPd1SIAX5cirDxtJZ+Y0CIQDHb3fpCGRXXUxoaB33gPyVU5hr\n\
 JmWK2Fp3hddwjKlRaQ==\n\
 -----END CERTIFICATE-----\n";
 
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let fixture = Fixture::new().await;
-        let ca_path = fixture.root.path().join("corp-ca.pem");
-        std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+    pub(super) struct Socks5Recorder {
+        pub(super) addr: SocketAddr,
+        hits: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
 
-        let socks_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let socks_addr = socks_listener.local_addr().unwrap();
-        let socks_hits = Arc::new(AtomicUsize::new(0));
-        let socks_hits_bg = socks_hits.clone();
-        let socks_task = tokio::spawn(async move {
-            while let Ok((mut client, _)) = socks_listener.accept().await {
-                let hits = socks_hits_bg.clone();
-                tokio::spawn(async move {
-                    let mut hdr = [0u8; 2];
-                    if client.read_exact(&mut hdr).await.is_err() || hdr[0] != 0x05 {
-                        return;
-                    }
-                    let mut methods = vec![0u8; hdr[1] as usize];
-                    if client.read_exact(&mut methods).await.is_err()
-                        || !methods.contains(&0x02)
-                        || client.write_all(&[0x05, 0x02]).await.is_err()
-                    {
-                        return;
-                    }
-                    let mut sub = [0u8; 2];
-                    if client.read_exact(&mut sub).await.is_err() || sub[0] != 0x01 {
-                        return;
-                    }
-                    let mut user = vec![0u8; sub[1] as usize];
-                    if client.read_exact(&mut user).await.is_err() {
-                        return;
-                    }
-                    let mut plen = [0u8; 1];
-                    if client.read_exact(&mut plen).await.is_err() {
-                        return;
-                    }
-                    let mut pass = vec![0u8; plen[0] as usize];
-                    if client.read_exact(&mut pass).await.is_err() {
-                        return;
-                    }
-                    if user != b"u" || pass != b"s3cr3t" {
-                        let _ = client.write_all(&[0x01, 0x01]).await;
-                        return;
-                    }
-                    if client.write_all(&[0x01, 0x00]).await.is_err() {
-                        return;
-                    }
-                    let mut req = [0u8; 4];
-                    if client.read_exact(&mut req).await.is_err() || req[0] != 0x05 || req[1] != 0x01
-                    {
-                        return;
-                    }
-                    let target = match req[3] {
-                        0x01 => {
-                            let mut ip = [0u8; 4];
-                            let mut port = [0u8; 2];
-                            if client.read_exact(&mut ip).await.is_err()
-                                || client.read_exact(&mut port).await.is_err()
-                            {
-                                return;
-                            }
-                            format!(
-                                "{}:{}",
-                                std::net::Ipv4Addr::from(ip),
-                                u16::from_be_bytes(port)
-                            )
-                        }
-                        0x03 => {
-                            let mut len = [0u8; 1];
-                            if client.read_exact(&mut len).await.is_err() {
-                                return;
-                            }
-                            let mut host = vec![0u8; len[0] as usize];
-                            let mut port = [0u8; 2];
-                            if client.read_exact(&mut host).await.is_err()
-                                || client.read_exact(&mut port).await.is_err()
-                            {
-                                return;
-                            }
-                            format!(
-                                "{}:{}",
-                                String::from_utf8_lossy(&host),
-                                u16::from_be_bytes(port)
-                            )
-                        }
-                        _ => return,
-                    };
-                    let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await else {
-                        return;
-                    };
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    if client
-                        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-                });
+    impl Socks5Recorder {
+        async fn start(user: &'static str, pass: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let hits_bg = hits.clone();
+            let task = tokio::spawn(async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    tokio::spawn(handle_socks5_client(client, user, pass, hits_bg.clone()));
+                }
+            });
+            Self { addr, hits, task }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Socks5Recorder {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn read_u8_vec(stream: &mut TcpStream) -> Option<Vec<u8>> {
+        let mut len = [0u8; 1];
+        stream.read_exact(&mut len).await.ok()?;
+        let mut buf = vec![0u8; len[0] as usize];
+        stream.read_exact(&mut buf).await.ok()?;
+        Some(buf)
+    }
+
+    async fn socks5_authenticate(
+        client: &mut TcpStream,
+        expected_user: &[u8],
+        expected_pass: &[u8],
+    ) -> bool {
+        let mut ver = [0u8; 1];
+        if client.read_exact(&mut ver).await.is_err() || ver[0] != 0x05 {
+            return false;
+        }
+        let Some(methods) = read_u8_vec(client).await else {
+            return false;
+        };
+        if !methods.contains(&0x02) || client.write_all(&[0x05, 0x02]).await.is_err() {
+            return false;
+        }
+        let mut sub_ver = [0u8; 1];
+        if client.read_exact(&mut sub_ver).await.is_err() || sub_ver[0] != 0x01 {
+            return false;
+        }
+        let Some(user) = read_u8_vec(client).await else {
+            return false;
+        };
+        let Some(pass) = read_u8_vec(client).await else {
+            return false;
+        };
+        if user != expected_user || pass != expected_pass {
+            let _ = client.write_all(&[0x01, 0x01]).await;
+            return false;
+        }
+        client.write_all(&[0x01, 0x00]).await.is_ok()
+    }
+
+    async fn socks5_read_target(client: &mut TcpStream) -> Option<String> {
+        let mut req = [0u8; 4];
+        client.read_exact(&mut req).await.ok()?;
+        if req[0] != 0x05 || req[1] != 0x01 {
+            return None;
+        }
+        let host = match req[3] {
+            0x01 => {
+                let mut ip = [0u8; 4];
+                client.read_exact(&mut ip).await.ok()?;
+                std::net::Ipv4Addr::from(ip).to_string()
             }
-        });
+            0x03 => {
+                let bytes = read_u8_vec(client).await?;
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            _ => return None,
+        };
+        let mut port = [0u8; 2];
+        client.read_exact(&mut port).await.ok()?;
+        Some(format!("{host}:{}", u16::from_be_bytes(port)))
+    }
 
-        let bash_before_file = fixture.root.path().join("bash-before.log");
-        let bash_after_file = fixture.root.path().join("bash-after.log");
+    async fn handle_socks5_client(
+        mut client: TcpStream,
+        user: &'static str,
+        pass: &'static str,
+        hits: Arc<AtomicUsize>,
+    ) {
+        if !socks5_authenticate(&mut client, user.as_bytes(), pass.as_bytes()).await {
+            return;
+        }
+        let Some(target) = socks5_read_target(&mut client).await else {
+            return;
+        };
+        let Ok(mut upstream) = TcpStream::connect(&target).await else {
+            return;
+        };
+        hits.fetch_add(1, Ordering::SeqCst);
+        if client
+            .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    }
+
+    fn write_bash_env_sse(sse_dir: &Path, name: &str, id: &str, out_path: &Path) -> PathBuf {
+        let path = sse_dir.join(name);
+        let args = json!({"command": format!("env > '{}'", out_path.display())}).to_string();
+        let line = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": id,
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": args}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        std::fs::write(
+            &path,
+            format!(
+                "data: {line}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    async fn start_proxy_script_server(
+        fixture: &Fixture,
+        bash_before: &Path,
+        bash_after: &Path,
+    ) -> ScriptedServer {
         let sse_dir = fixture.root.path().join("proxy-sse");
         std::fs::create_dir_all(&sse_dir).unwrap();
-        let write_bash_sse = |name: &str, id: &str, out_path: &Path| -> PathBuf {
-            let path = sse_dir.join(name);
-            let args = json!({"command": format!("env > '{}'", out_path.display())}).to_string();
-            let line = json!({
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [{
-                            "index": 0,
-                            "id": id,
-                            "type": "function",
-                            "function": {"name": "bash", "arguments": args}
-                        }]
-                    },
-                    "finish_reason": null
-                }]
-            });
-            std::fs::write(
-                &path,
-                format!(
-                    "data: {line}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
-                ),
-            )
-            .unwrap();
-            path
-        };
         let done_sse = sse_dir.join("done.sse");
         std::fs::write(
             &done_sse,
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
         )
         .unwrap();
-        let bash_1_sse = write_bash_sse("bash1.sse", "call_bash_1", &bash_before_file);
-        let bash_2_sse = write_bash_sse("bash2.sse", "call_bash_2", &bash_after_file);
+        let bash_1 = write_bash_env_sse(&sse_dir, "bash1.sse", "call_bash_1", bash_before);
+        let bash_2 = write_bash_env_sse(&sse_dir, "bash2.sse", "call_bash_2", bash_after);
         let script_path = sse_dir.join("script.json");
         std::fs::write(
             &script_path,
             json!([
-                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_1_sse, "body_contains": ["dump-before"]},
+                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_1, "body_contains": ["dump-before"]},
                 {"path": "/v1/chat/completions", "status": 200, "body_file": done_sse, "body_contains": ["call_bash_1"]},
-                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_2_sse, "body_contains": ["dump-after"]},
+                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_2, "body_contains": ["dump-after"]},
                 {"path": "/v1/chat/completions", "status": 200, "body_file": done_sse, "body_contains": ["call_bash_2"]},
             ])
             .to_string(),
         )
         .unwrap();
-        let proxy_script_server =
-            ScriptedServer::from_file(&script_path, CancellationToken::new())
-                .await
-                .unwrap();
+        let server = ScriptedServer::from_file(&script_path, CancellationToken::new())
+            .await
+            .unwrap();
         std::fs::write(
             fixture.home.join("providers.toml"),
             format!(
                 "[fixture]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key_env = \"TC_E2E_FAKE_KEY\"\nmodels = [{{ id = \"model\", context_window = 200000, max_output = 4096 }}]\n",
-                proxy_script_server.uri()
+                server.uri()
             ),
         )
         .unwrap();
+        server
+    }
 
-        let bin_dir = fixture.root.path().join("fake-bin");
+    struct GitAndGhShims {
+        bin_dir: PathBuf,
+        git_env_log: PathBuf,
+        gh_env_log: PathBuf,
+    }
+
+    fn install_git_and_gh_shims(root: &Path, cwd: &Path) -> GitAndGhShims {
+        let bin_dir = root.join("fake-bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        let real_git = {
-            let out = std::process::Command::new("/bin/sh")
+        let real_git = String::from_utf8(
+            std::process::Command::new("/bin/sh")
                 .args(["-c", "command -v git"])
                 .output()
-                .unwrap();
-            String::from_utf8(out.stdout).unwrap().trim().to_owned()
-        };
-        let gh_env_log = fixture.root.path().join("gh-env.log");
-        let git_env_log = fixture.root.path().join("git-env.log");
-
-        let fake_gh = bin_dir.join("gh");
-        std::fs::write(
-            &fake_gh,
-            format!(
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let gh_env_log = root.join("gh-env.log");
+        let git_env_log = root.join("git-env.log");
+        write_executable(
+            &bin_dir.join("gh"),
+            &format!(
                 "#!/bin/sh\nenv > '{}'\nprintf '{{\"number\":7,\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.invalid/pr/7\"}}\\n'\n",
                 gh_env_log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let fake_git = bin_dir.join("git");
-        std::fs::write(
-            &fake_git,
-            format!(
+        );
+        write_executable(
+            &bin_dir.join("git"),
+            &format!(
                 "#!/bin/sh\nif [ \"$1\" = \"fetch\" ]; then\n  env > '{}'\nfi\nexec '{}' \"$@\"\n",
                 git_env_log.display(),
                 real_git
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
+        init_git_repo_with_bare_remote(&real_git, root, cwd);
+        GitAndGhShims {
+            bin_dir,
+            git_env_log,
+            gh_env_log,
+        }
+    }
 
-        let remote_dir = fixture.root.path().join("remote.git");
+    fn write_executable(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn init_git_repo_with_bare_remote(real_git: &str, root: &Path, cwd: &Path) {
+        let remote_str = root.join("remote.git").display().to_string();
         assert!(
-            std::process::Command::new(&real_git)
-                .args(["init", "--bare", &remote_dir.display().to_string()])
+            std::process::Command::new(real_git)
+                .args(["init", "--bare", &remote_str])
                 .status()
                 .unwrap()
                 .success()
         );
         for args in [
-            vec!["init"],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-            vec!["add", "hello.txt"],
-            vec!["commit", "-m", "init"],
-            vec!["remote", "add", "origin", &remote_dir.display().to_string()],
+            &["init"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &["add", "hello.txt"],
+            &["commit", "-m", "init"],
+            &["remote", "add", "origin", &remote_str],
         ] {
             assert!(
-                std::process::Command::new(&real_git)
-                    .current_dir(&fixture.cwd)
-                    .args(&args)
+                std::process::Command::new(real_git)
+                    .current_dir(cwd)
+                    .args(args)
                     .status()
                     .unwrap()
                     .success()
             );
         }
+    }
 
-        let config_path = fixture.home.join("config.toml");
-        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    fn parse_env_file(path: &Path) -> BTreeMap<String, String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
+    }
 
-        let host_path = std::env::var("PATH").unwrap_or_default();
-        let combined_path = format!("{}:{host_path}", bin_dir.display());
-        let mut client = fixture
-            .client_with_env(&[
-                ("PATH", &combined_path),
-                ("HTTP_PROXY", "http://dirty-inherited:9999"),
-                ("NO_PROXY", "127.0.0.1,dirty.example"),
-                ("SSL_CERT_FILE", "/dirty/inherited.pem"),
-            ])
-            .await;
-        client
-            .ok("initialize", json!({"protocol_version": 1}))
-            .await;
+    pub(super) struct ProxyTestHarness {
+        fixture: Fixture,
+        ca_path: PathBuf,
+        pub(super) socks: Socks5Recorder,
+        pub(super) proxy_script_server: ScriptedServer,
+        shims: GitAndGhShims,
+        bash_before: PathBuf,
+        bash_after: PathBuf,
+        config_path: PathBuf,
+        client: Client,
+        cwd_str: String,
+    }
 
-        let parse_env_lines = |text: &str| -> std::collections::BTreeMap<String, String> {
-            text.lines()
-                .filter_map(|line| line.split_once('='))
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect()
-        };
-
-        let cwd_str = fixture.cwd.display().to_string();
-        client.ok("git/pr", json!({"root": cwd_str})).await;
-        let gh_before = parse_env_lines(&std::fs::read_to_string(&gh_env_log).unwrap());
-        assert_eq!(
-            gh_before.get("HTTP_PROXY").map(String::as_str),
-            Some("http://dirty-inherited:9999")
-        );
-        assert_eq!(
-            gh_before.get("NO_PROXY").map(String::as_str),
-            Some("127.0.0.1,dirty.example")
-        );
-
-        let opened = snapshot(
+    impl ProxyTestHarness {
+        pub(super) async fn setup() -> Self {
+            let fixture = Fixture::new().await;
+            let ca_path = fixture.root.path().join("corp-ca.pem");
+            std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+            let socks = Socks5Recorder::start("u", "s3cr3t").await;
+            let bash_before = fixture.root.path().join("bash-before.log");
+            let bash_after = fixture.root.path().join("bash-after.log");
+            let proxy_script_server =
+                start_proxy_script_server(&fixture, &bash_before, &bash_after).await;
+            let shims = install_git_and_gh_shims(fixture.root.path(), &fixture.cwd);
+            let config_path = fixture.home.join("config.toml");
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let host_path = std::env::var("PATH").unwrap_or_default();
+            let combined_path = format!("{}:{host_path}", shims.bin_dir.display());
+            let mut client = fixture
+                .client_with_env(&[
+                    ("PATH", &combined_path),
+                    ("HTTP_PROXY", "http://dirty-inherited:9999"),
+                    ("NO_PROXY", "127.0.0.1,dirty.example"),
+                    ("SSL_CERT_FILE", "/dirty/inherited.pem"),
+                ])
+                .await;
             client
-                .ok("session/open", json!({"cwd": cwd_str, "mode": "yolo"}))
-                .await,
-        );
-        let thread = opened.thread_id;
-        client
-            .ok(
-                "session/submit",
-                json!({
-                    "thread_id": thread,
-                    "op": {
-                        "kind": "user_input",
-                        "delivery": "follow_up",
-                        "content": [{"kind": "text", "text": "dump-before"}]
-                    }
-                }),
-            )
-            .await;
-        client
-            .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
-            .await;
-        assert_eq!(socks_hits.load(Ordering::SeqCst), 0);
-        let bash_before = parse_env_lines(&std::fs::read_to_string(&bash_before_file).unwrap());
-        assert_eq!(
-            bash_before.get("HTTP_PROXY").map(String::as_str),
-            Some("http://dirty-inherited:9999")
-        );
-        assert_eq!(
-            bash_before.get("NO_PROXY").map(String::as_str),
-            Some("127.0.0.1,dirty.example")
-        );
-        assert_eq!(
-            bash_before.get("SSL_CERT_FILE").map(String::as_str),
-            Some("/dirty/inherited.pem")
-        );
-
-        client
-            .ok(
-                "config/update",
-                json!({"key": "network.proxy", "value": "127.0.0.1:7890"}),
-            )
-            .await;
-        client
-            .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
-            .await;
-        assert_eq!(
-            client.ok("config/get", json!({})).await["proxy"],
-            json!("http://127.0.0.1:7890")
-        );
-        let saved_normalized = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            saved_normalized.contains("http://127.0.0.1:7890"),
-            "{saved_normalized}"
-        );
-        assert_eq!(
-            std::fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-
-        assert!(
-            client
-                .call(
-                    "config/update",
-                    json!({"key": "network.proxy", "value": "ftp://127.0.0.1:21"}),
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&config_path).unwrap(),
-            saved_normalized
-        );
-
-        let socks_url = format!("socks5://u:s3cr3t@{socks_addr}");
-        client
-            .ok(
-                "config/update",
-                json!({"key": "network.proxy", "value": socks_url}),
-            )
-            .await;
-        client
-            .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
-            .await;
-        assert_eq!(
-            std::fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-
-        client
-            .ok(
-                "config/update",
-                json!({"key": "network.ca_cert", "value": ca_path.display().to_string()}),
-            )
-            .await;
-        client
-            .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
-            .await;
-
-        client
-            .ok(
-                "session/submit",
-                json!({
-                    "thread_id": thread,
-                    "op": {
-                        "kind": "user_input",
-                        "delivery": "follow_up",
-                        "content": [{"kind": "text", "text": "dump-after"}]
-                    }
-                }),
-            )
-            .await;
-        client
-            .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
-            .await;
-        assert!(socks_hits.load(Ordering::SeqCst) >= 1);
-        let bash_after = parse_env_lines(&std::fs::read_to_string(&bash_after_file).unwrap());
-
-        client
-            .ok("git/run", json!({"root": cwd_str, "op": {"kind": "fetch"}}))
-            .await;
-        let git_after = parse_env_lines(&std::fs::read_to_string(&git_env_log).unwrap());
-
-        client.ok("git/pr", json!({"root": cwd_str})).await;
-        let gh_after = parse_env_lines(&std::fs::read_to_string(&gh_env_log).unwrap());
-
-        let ca_expected = ca_path.display().to_string();
-        for (label, env_map) in [("bash", &bash_after), ("git", &git_after), ("gh", &gh_after)] {
-            for key in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-            ] {
-                assert_eq!(
-                    env_map.get(key).map(String::as_str),
-                    Some(socks_url.as_str()),
-                    "{label} {key}"
-                );
+                .ok("initialize", json!({"protocol_version": 1}))
+                .await;
+            let cwd_str = fixture.cwd.display().to_string();
+            Self {
+                fixture,
+                ca_path,
+                socks,
+                proxy_script_server,
+                shims,
+                bash_before,
+                bash_after,
+                config_path,
+                client,
+                cwd_str,
             }
+        }
+
+        pub(super) async fn verify_inherited_env_before_proxy(&mut self) -> ThreadId {
+            self.client
+                .ok("git/pr", json!({"root": self.cwd_str}))
+                .await;
+            let gh_before = parse_env_file(&self.shims.gh_env_log);
             assert_eq!(
-                env_map.get("NO_PROXY").map(String::as_str),
-                Some(""),
-                "{label} NO_PROXY must be empty string to mask dirty host NO_PROXY"
+                gh_before.get("HTTP_PROXY").map(String::as_str),
+                Some("http://dirty-inherited:9999")
             );
             assert_eq!(
-                env_map.get("no_proxy").map(String::as_str),
-                Some(""),
-                "{label} no_proxy must be empty string"
+                gh_before.get("NO_PROXY").map(String::as_str),
+                Some("127.0.0.1,dirty.example")
             );
-            for key in [
-                "SSL_CERT_FILE",
-                "NODE_EXTRA_CA_CERTS",
-                "CURL_CA_BUNDLE",
-                "REQUESTS_CA_BUNDLE",
-                "GIT_SSL_CAINFO",
+
+            let opened = snapshot(
+                self.client
+                    .ok("session/open", json!({"cwd": self.cwd_str, "mode": "yolo"}))
+                    .await,
+            );
+            let thread = opened.thread_id;
+            submit_user_text(&mut self.client, &thread, "dump-before").await;
+            assert_eq!(self.socks.hits(), 0);
+            let bash_before = parse_env_file(&self.bash_before);
+            assert_eq!(
+                bash_before.get("HTTP_PROXY").map(String::as_str),
+                Some("http://dirty-inherited:9999")
+            );
+            assert_eq!(
+                bash_before.get("NO_PROXY").map(String::as_str),
+                Some("127.0.0.1,dirty.example")
+            );
+            assert_eq!(
+                bash_before.get("SSL_CERT_FILE").map(String::as_str),
+                Some("/dirty/inherited.pem")
+            );
+            thread
+        }
+
+        pub(super) async fn verify_proxy_normalization_and_permissions(&mut self, socks_url: &str) {
+            update_config_and_await_reload(&mut self.client, "network.proxy", "127.0.0.1:7890")
+                .await;
+            assert_eq!(
+                self.client.ok("config/get", json!({})).await["proxy"],
+                json!("http://127.0.0.1:7890")
+            );
+            let saved_normalized = std::fs::read_to_string(&self.config_path).unwrap();
+            assert!(
+                saved_normalized.contains("http://127.0.0.1:7890"),
+                "{saved_normalized}"
+            );
+            assert_eq!(
+                std::fs::metadata(&self.config_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644
+            );
+
+            assert!(
+                self.client
+                    .call(
+                        "config/update",
+                        json!({"key": "network.proxy", "value": "ftp://127.0.0.1:21"}),
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&self.config_path).unwrap(),
+                saved_normalized
+            );
+
+            update_config_and_await_reload(&mut self.client, "network.proxy", socks_url).await;
+            assert_eq!(
+                std::fs::metadata(&self.config_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            let ca_str = self.ca_path.display().to_string();
+            update_config_and_await_reload(&mut self.client, "network.ca_cert", &ca_str).await;
+        }
+
+        pub(super) async fn verify_proxied_turn_and_subprocess_env(
+            &mut self,
+            thread: &ThreadId,
+            socks_url: &str,
+        ) {
+            submit_user_text(&mut self.client, thread, "dump-after").await;
+            assert!(self.socks.hits() >= 1);
+            self.client
+                .ok(
+                    "git/run",
+                    json!({"root": self.cwd_str, "op": {"kind": "fetch"}}),
+                )
+                .await;
+            self.client
+                .ok("git/pr", json!({"root": self.cwd_str}))
+                .await;
+
+            let ca_expected = self.ca_path.display().to_string();
+            for (label, path) in [
+                ("bash", &self.bash_after),
+                ("git", &self.shims.git_env_log),
+                ("gh", &self.shims.gh_env_log),
             ] {
-                assert_eq!(
-                    env_map.get(key).map(String::as_str),
-                    Some(ca_expected.as_str()),
-                    "{label} {key}"
+                assert_subprocess_proxy_and_ca_env(
+                    label,
+                    &parse_env_file(path),
+                    socks_url,
+                    &ca_expected,
                 );
             }
         }
 
-        let term_env_file = fixture.root.path().join("term-env.log");
+        pub(super) async fn verify_terminal_env_injection(&mut self) {
+            let term_env_file = self.fixture.root.path().join("term-env.log");
+            self.client
+                .ok(
+                    "terminal/create",
+                    json!({
+                        "id": "term-proxy",
+                        "cwd": self.cwd_str,
+                        "cols": 80,
+                        "rows": 24,
+                        "env": {
+                            "HTTP_PROXY": "http://127.0.0.1:7890",
+                            "NO_PROXY": "",
+                            "TC_TERM_CUSTOM": "pty-injected"
+                        }
+                    }),
+                )
+                .await;
+            self.client
+                .ok(
+                    "terminal/write",
+                    json!({
+                        "id": "term-proxy",
+                        "data": format!(
+                            "printf 'CUSTOM=%s|PROXY=%s|NOPROXY=<%s>\\n' \"$TC_TERM_CUSTOM\" \"$HTTP_PROXY\" \"$NO_PROXY\" > '{}' && echo TERM_ENV_DONE\n",
+                            term_env_file.display()
+                        )
+                    }),
+                )
+                .await;
+            await_terminal_marker(
+                &mut self.client,
+                "term-proxy",
+                "TERM_ENV_DONE",
+                &term_env_file,
+            )
+            .await;
+            assert_eq!(
+                std::fs::read_to_string(&term_env_file).unwrap().trim(),
+                "CUSTOM=pty-injected|PROXY=http://127.0.0.1:7890|NOPROXY=<>"
+            );
+            self.client
+                .ok("terminal/kill", json!({"id": "term-proxy"}))
+                .await;
+        }
+    }
+
+    async fn submit_user_text(client: &mut Client, thread: &ThreadId, text: &str) {
         client
             .ok(
-                "terminal/create",
+                "session/submit",
                 json!({
-                    "id": "term-proxy",
-                    "cwd": cwd_str,
-                    "cols": 80,
-                    "rows": 24,
-                    "env": {
-                        "HTTP_PROXY": "http://127.0.0.1:7890",
-                        "NO_PROXY": "",
-                        "TC_TERM_CUSTOM": "pty-injected"
+                    "thread_id": thread,
+                    "op": {
+                        "kind": "user_input",
+                        "delivery": "follow_up",
+                        "content": [{"kind": "text", "text": text}]
                     }
                 }),
             )
             .await;
         client
-            .ok(
-                "terminal/write",
-                json!({
-                    "id": "term-proxy",
-                    "data": format!(
-                        "printf 'CUSTOM=%s|PROXY=%s|NOPROXY=<%s>\\n' \"$TC_TERM_CUSTOM\" \"$HTTP_PROXY\" \"$NO_PROXY\" > '{}' && echo TERM_ENV_DONE\n",
-                        term_env_file.display()
-                    )
-                }),
-            )
+            .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
             .await;
-        let pty_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    }
+
+    async fn update_config_and_await_reload(client: &mut Client, key: &str, value: &str) {
+        client
+            .ok("config/update", json!({"key": key, "value": value}))
+            .await;
+        client
+            .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+            .await;
+    }
+
+    fn assert_subprocess_proxy_and_ca_env(
+        label: &str,
+        env_map: &BTreeMap<String, String>,
+        expected_proxy: &str,
+        expected_ca: &str,
+    ) {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert_eq!(
+                env_map.get(key).map(String::as_str),
+                Some(expected_proxy),
+                "{label} {key}"
+            );
+        }
+        assert_eq!(
+            env_map.get("NO_PROXY").map(String::as_str),
+            Some(""),
+            "{label} NO_PROXY must be empty string to mask dirty host NO_PROXY"
+        );
+        assert_eq!(
+            env_map.get("no_proxy").map(String::as_str),
+            Some(""),
+            "{label} no_proxy must be empty string"
+        );
+        for key in [
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert_eq!(
+                env_map.get(key).map(String::as_str),
+                Some(expected_ca),
+                "{label} {key}"
+            );
+        }
+    }
+
+    async fn await_terminal_marker(
+        client: &mut Client,
+        id: &str,
+        marker: &str,
+        expected_file: &Path,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let attached = client
-                .ok("terminal/attach", json!({"id": "term-proxy"}))
-                .await;
+            let attached = client.ok("terminal/attach", json!({"id": id})).await;
             let buf = attached["buffer"].as_str().unwrap_or_default();
-            if buf.contains("TERM_ENV_DONE") && term_env_file.exists() {
-                break;
+            if buf.contains(marker) && expected_file.exists() {
+                return;
             }
             assert!(
-                tokio::time::Instant::now() < pty_deadline,
-                "term-proxy did not finish; attached={attached}"
+                tokio::time::Instant::now() < deadline,
+                "{id} did not finish; attached={attached}"
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let term_recorded = std::fs::read_to_string(&term_env_file).unwrap();
-        assert_eq!(
-            term_recorded.trim(),
-            "CUSTOM=pty-injected|PROXY=http://127.0.0.1:7890|NOPROXY=<>"
-        );
-        client
-            .ok("terminal/kill", json!({"id": "term-proxy"}))
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_and_terminal_env() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut h = network_proxy_e2e::ProxyTestHarness::setup().await;
+        let thread = h.verify_inherited_env_before_proxy().await;
+        let socks_url = format!("socks5://u:s3cr3t@{}", h.socks.addr);
+        h.verify_proxy_normalization_and_permissions(&socks_url)
             .await;
-        proxy_script_server.verify().unwrap();
-        socks_task.abort();
+        h.verify_proxied_turn_and_subprocess_env(&thread, &socks_url)
+            .await;
+        h.verify_terminal_env_injection().await;
+        h.proxy_script_server.verify().unwrap();
     })
     .await
     .expect("app_server network proxy e2e test timed out");
