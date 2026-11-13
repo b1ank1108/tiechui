@@ -1511,7 +1511,7 @@ fn provider_and_model_edits_keep_other_keys_and_reject_invalid_results() {
 }
 
 #[test]
-fn proxy_schemes_normalization_redaction_and_credential_permissions() {
+fn proxy_schemes_normalize_and_reject_invalid_urls() {
     let temp = temp_dir();
     let paths = ConfigPaths {
         user: temp.path().join("config.toml"),
@@ -1542,18 +1542,6 @@ fn proxy_schemes_normalization_redaction_and_credential_permissions() {
         );
     }
 
-    fs::write(
-        &paths.user,
-        "[network]\nproxy = 'socks5://alice:super-secret-pass@127.0.0.1:1080'\n",
-    )
-    .unwrap();
-    let loaded = load(&paths, false, &toml::Table::new()).unwrap();
-    let debug_text = format!("{:?}", loaded.config.network);
-    assert!(
-        !debug_text.contains("super-secret-pass"),
-        "Debug leaked inline proxy password: {debug_text}"
-    );
-
     for invalid in [
         "ftp://127.0.0.1:21",
         "socks4://127.0.0.1:1080",
@@ -1573,6 +1561,26 @@ fn proxy_schemes_normalization_redaction_and_credential_permissions() {
             "error leaked password: {err}"
         );
     }
+}
+
+#[test]
+fn proxy_credentials_redact_debug_and_secure_permissions() {
+    let temp = temp_dir();
+    let paths = ConfigPaths {
+        user: temp.path().join("config.toml"),
+        project: None,
+    };
+    fs::write(
+        &paths.user,
+        "[network]\nproxy = 'socks5://alice:super-secret-pass@127.0.0.1:1080'\n",
+    )
+    .unwrap();
+    let loaded = load(&paths, false, &toml::Table::new()).unwrap();
+    let debug_text = format!("{:?}", loaded.config.network);
+    assert!(
+        !debug_text.contains("super-secret-pass"),
+        "Debug leaked inline proxy password: {debug_text}"
+    );
 
     #[cfg(unix)]
     {
@@ -1632,17 +1640,7 @@ fn redact_replaces_percent_encoded_and_decoded_passwords() {
     );
 }
 
-const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBiTCCAS+gAwIBAgIUBDwBzNjrl7Y9XSWtm7HwM6AoUkUwCgYIKoZIzj0EAwIw\n\
-GjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMB4XDTI2MTExMzAzMTY1NFoXDTM2\n\
-MTExMDAzMTY1NFowGjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMFkwEwYHKoZI\n\
-zj0CAQYIKoZIzj0DAQcDQgAEPy7Wj3KSWZ4vTLtUs+Pnu5GXY9bpEZeZEEV8LZ54\n\
-McnNzeA6w5iNNxmUTXyYM8GoJuz+MNPcWDRhhHQqIgJaZ6NTMFEwHQYDVR0OBBYE\n\
-FJWXEH1vyX3Nl6RrUM+rO1K4dTBWMB8GA1UdIwQYMBaAFJWXEH1vyX3Nl6RrUM+r\n\
-O1K4dTBWMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIgDlvfQPnC\n\
-l5q45BA5LdLN/5mGPd1SIAX5cirDxtJZ+Y0CIQDHb3fpCGRXXUxoaB33gPyVU5hr\n\
-JmWK2Fp3hddwjKlRaQ==\n\
------END CERTIFICATE-----\n";
+use crate::test_support::TEST_CA_PEM;
 
 fn assert_tilde_ca_cert_cases(home: &Path) {
     let ca_only = |p: &str| NetworkConfig {

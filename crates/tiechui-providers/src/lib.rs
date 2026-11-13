@@ -72,22 +72,21 @@ pub fn from_config(
     config: &ProviderConfig,
     network: &NetworkConfig,
 ) -> Result<Box<dyn ModelProvider>, ProviderError> {
-    let redact = |mut err: ProviderError| {
-        err.message = network.redact(err.message);
-        err
-    };
     let key = api_key(config)?;
-    let client = client(network, client_builder()).map_err(&redact)?;
+    let client = client(network, client_builder()).map_err(|e| redact_error(network, e))?;
     let provider: Box<dyn ModelProvider> = match config.wire {
-        Wire::AnthropicMessages => {
-            Box::new(anthropic::Anthropic::new(name, config, &key, client).map_err(&redact)?)
-        }
-        Wire::OpenaiCompletions => {
-            Box::new(openai::Openai::new(name, config, &key, client).map_err(&redact)?)
-        }
-        Wire::OpenaiResponses => {
-            Box::new(responses::Responses::new(name, config, &key, client).map_err(&redact)?)
-        }
+        Wire::AnthropicMessages => Box::new(
+            anthropic::Anthropic::new(name, config, &key, client)
+                .map_err(|e| redact_error(network, e))?,
+        ),
+        Wire::OpenaiCompletions => Box::new(
+            openai::Openai::new(name, config, &key, client)
+                .map_err(|e| redact_error(network, e))?,
+        ),
+        Wire::OpenaiResponses => Box::new(
+            responses::Responses::new(name, config, &key, client)
+                .map_err(|e| redact_error(network, e))?,
+        ),
     };
     if network
         .proxy
@@ -137,12 +136,14 @@ impl ModelProvider for RedactedProvider {
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         let network = self.network.clone();
-        let redact = move |mut err: ProviderError| {
-            err.message = network.redact(err.message);
-            err
-        };
-        let stream = self.inner.stream(request, cancel).await.map_err(&redact)?;
-        Ok(stream.map(move |item| item.map_err(&redact)).boxed())
+        let stream = self
+            .inner
+            .stream(request, cancel)
+            .await
+            .map_err(|e| redact_error(&network, e))?;
+        Ok(stream
+            .map(move |item| item.map_err(|e| redact_error(&network, e)))
+            .boxed())
     }
 }
 
@@ -152,16 +153,9 @@ pub async fn list_models(
     network: &NetworkConfig,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>, ProviderError> {
-    let redact = |mut err: ProviderError| {
-        err.message = network.redact(err.message);
-        err
-    };
     let key = api_key(config)?;
-    let client = client(
-        network,
-        client_builder().timeout(std::time::Duration::from_secs(30)),
-    )
-    .map_err(&redact)?;
+    let builder = client_builder().timeout(std::time::Duration::from_secs(30));
+    let client = client(network, builder).map_err(|e| redact_error(network, e))?;
     let request = match config.wire {
         Wire::AnthropicMessages => {
             let transport = transport::Transport::new(
@@ -173,7 +167,7 @@ pub async fn list_models(
                 "/models",
                 "",
             )
-            .map_err(&redact)?;
+            .map_err(|e| redact_error(network, e))?;
             transport
                 .client
                 .get(transport.endpoint)
@@ -191,14 +185,21 @@ pub async fn list_models(
                 "/models",
                 "Bearer ",
             )
-            .map_err(&redact)?;
+            .map_err(|e| redact_error(network, e))?;
             transport
                 .client
                 .get(transport.endpoint)
                 .header("authorization", transport.key)
         }
     };
-    transport::list(request, cancel).await.map_err(redact)
+    transport::list(request, cancel)
+        .await
+        .map_err(|e| redact_error(network, e))
+}
+
+fn redact_error(network: &NetworkConfig, mut err: ProviderError) -> ProviderError {
+    err.message = network.redact(err.message);
+    err
 }
 
 fn client(

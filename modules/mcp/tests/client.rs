@@ -379,15 +379,18 @@ async fn project_sources_require_trust_and_disabled_never_start() {
     cancel.cancel();
 }
 
-#[tokio::test]
-async fn streamable_http_calls_cancellation_and_timeout_notify_the_server() {
+async fn spawn_http_mcp_server() -> (
+    std::net::SocketAddr,
+    support::TestServer,
+    tokio::task::JoinHandle<()>,
+) {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
     let handler = support::TestServer::default();
-    let cancelled = handler.cancelled.clone();
+    let clone = handler.clone();
     let service = StreamableHttpService::new(
-        move || Ok(handler.clone()),
+        move || Ok(clone.clone()),
         Arc::new(LocalSessionManager::default()),
         Default::default(),
     );
@@ -398,6 +401,13 @@ async fn streamable_http_calls_cancellation_and_timeout_notify_the_server() {
             .await
             .unwrap();
     });
+    (addr, handler, http)
+}
+
+#[tokio::test]
+async fn streamable_http_calls_cancellation_and_timeout_notify_the_server() {
+    let (addr, handler, http) = spawn_http_mcp_server().await;
+    let cancelled = handler.cancelled.clone();
     let mut definition = definition("http", 0);
     definition.config.command = None;
     definition.config.url = Some(format!("http://{addr}/mcp"));
@@ -519,223 +529,117 @@ async fn file_and_parsed_sources_preserve_environment_cwd_and_trust() {
     cancel.cancel();
 }
 
-async fn spawn_socks5_proxy(
-    expected_auth: Option<(&'static str, &'static str)>,
-) -> (
-    std::net::SocketAddr,
-    Arc<std::sync::atomic::AtomicUsize>,
-    tokio::task::JoinHandle<()>,
-) {
-    use std::sync::atomic::AtomicUsize;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+fn start_with_network(
+    def: McpServerDefinition,
+    cwd: &std::path::Path,
+    network: tiechui_plugin_api::NetworkConfig,
+) -> (McpModule, Registry, CancellationToken) {
+    let cfg = ModuleConfig {
+        network,
+        ..Default::default()
+    };
+    let mut registry = Registry::default();
+    registry.register_mcp_source(Arc::new(tiechui_module_mcp::FileMcpSource(vec![def])));
+    let cancel = CancellationToken::new();
+    let module = McpModule::from_config(
+        &cfg,
+        registry.mcp_sources(),
+        cwd,
+        None,
+        false,
+        cancel.clone(),
+        Arc::new(DeclineElicitation),
+        None,
+    );
+    module.register(&mut registry, &cfg).unwrap();
+    (module, registry, cancel)
+}
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_bg = hits.clone();
-    let task = tokio::spawn(async move {
-        while let Ok((mut client, _)) = listener.accept().await {
-            let hits = hits_bg.clone();
-            tokio::spawn(async move {
-                let mut hdr = [0u8; 2];
-                if client.read_exact(&mut hdr).await.is_err() || hdr[0] != 0x05 {
-                    return;
-                }
-                let mut methods = vec![0u8; hdr[1] as usize];
-                if client.read_exact(&mut methods).await.is_err() {
-                    return;
-                }
-                if let Some((exp_user, exp_pass)) = expected_auth {
-                    if !methods.contains(&0x02) || client.write_all(&[0x05, 0x02]).await.is_err() {
-                        return;
-                    }
-                    let mut sub = [0u8; 2];
-                    if client.read_exact(&mut sub).await.is_err() || sub[0] != 0x01 {
-                        return;
-                    }
-                    let mut user = vec![0u8; sub[1] as usize];
-                    if client.read_exact(&mut user).await.is_err() {
-                        return;
-                    }
-                    let mut plen = [0u8; 1];
-                    if client.read_exact(&mut plen).await.is_err() {
-                        return;
-                    }
-                    let mut pass = vec![0u8; plen[0] as usize];
-                    if client.read_exact(&mut pass).await.is_err() {
-                        return;
-                    }
-                    if user != exp_user.as_bytes() || pass != exp_pass.as_bytes() {
-                        let _ = client.write_all(&[0x01, 0x01]).await;
-                        return;
-                    }
-                    if client.write_all(&[0x01, 0x00]).await.is_err() {
-                        return;
-                    }
-                } else if client.write_all(&[0x05, 0x00]).await.is_err() {
-                    return;
-                }
-                let mut req = [0u8; 4];
-                if client.read_exact(&mut req).await.is_err() || req[0] != 0x05 || req[1] != 0x01 {
-                    return;
-                }
-                let target = match req[3] {
-                    0x01 => {
-                        let mut ip = [0u8; 4];
-                        let mut port = [0u8; 2];
-                        if client.read_exact(&mut ip).await.is_err()
-                            || client.read_exact(&mut port).await.is_err()
-                        {
-                            return;
-                        }
-                        format!(
-                            "{}:{}",
-                            std::net::Ipv4Addr::from(ip),
-                            u16::from_be_bytes(port)
-                        )
-                    }
-                    0x03 => {
-                        let mut len = [0u8; 1];
-                        if client.read_exact(&mut len).await.is_err() {
-                            return;
-                        }
-                        let mut host = vec![0u8; len[0] as usize];
-                        let mut port = [0u8; 2];
-                        if client.read_exact(&mut host).await.is_err()
-                            || client.read_exact(&mut port).await.is_err()
-                        {
-                            return;
-                        }
-                        format!(
-                            "{}:{}",
-                            String::from_utf8_lossy(&host),
-                            u16::from_be_bytes(port)
-                        )
-                    }
-                    _ => return,
-                };
-                let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await else {
-                    return;
-                };
-                hits.fetch_add(1, Ordering::SeqCst);
-                if client
-                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-            });
-        }
-    });
-    (addr, hits, task)
+async fn assert_http_mcp_fails_closed(
+    def: McpServerDefinition,
+    proxy_url: String,
+    secret: &str,
+    calls: &std::sync::atomic::AtomicUsize,
+) {
+    let calls_before = calls.load(Ordering::SeqCst);
+    let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (failed_mod, _, failed_cancel) = start_with_network(
+        def,
+        cwd,
+        tiechui_plugin_api::NetworkConfig {
+            proxy: Some(proxy_url),
+            no_proxy: None,
+            ca_cert: None,
+        },
+    );
+    ready(&failed_mod).await;
+    let status = &failed_mod.statuses()[0];
+    assert_eq!(status.state, ServerState::Failed);
+    let err_msg = status.error.as_deref().unwrap_or_default();
+    assert!(!err_msg.contains(secret), "{err_msg}");
+    assert_eq!(calls.load(Ordering::SeqCst), calls_before);
+    failed_cancel.cancel();
+}
+
+async fn assert_http_mcp_echo_via_proxy(def: McpServerDefinition, proxy_url: String) {
+    let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (module, registry, cancel) = start_with_network(
+        def,
+        cwd,
+        tiechui_plugin_api::NetworkConfig {
+            proxy: Some(proxy_url),
+            no_proxy: None,
+            ca_cert: None,
+        },
+    );
+    ready(&module).await;
+    assert_eq!(module.statuses()[0].state, ServerState::Ready);
+    let out = call(
+        &registry,
+        "mcp__http__echo",
+        json!({"value": "via-socks"}),
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(&out.content[0], Content::Text { text, .. } if text == "via-socks"));
+    cancel.cancel();
 }
 
 #[tokio::test]
 async fn streamable_http_mcp_routes_through_socks5_fails_closed_and_redacts_password() {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
-    };
-    use tiechui_module_mcp::FileMcpSource;
+    use tiechui_config::test_support::Socks5TestProxy;
 
     tokio::time::timeout(Duration::from_secs(20), async {
-        let handler = support::TestServer::default();
-        let calls = handler.calls.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(handler.clone()),
-            Arc::new(LocalSessionManager::default()),
-            Default::default(),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let http = tokio::spawn(async move {
-            axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
-                .await
-                .unwrap();
-        });
-
-        let (socks_addr, socks_hits, socks_task) =
-            spawn_socks5_proxy(Some(("mcpuser", "mcp-secret-pw"))).await;
+        let (addr, handler, http) = spawn_http_mcp_server().await;
+        let mut socks = Socks5TestProxy::start(Some(("mcpuser", "mcp-secret-pw")));
+        let proxy_url = format!("socks5://mcpuser:mcp-secret-pw@{}", socks.addr());
 
         let mut def = definition("http", 0);
         def.config.command = None;
         def.config.url = Some(format!("http://{addr}/mcp"));
 
-        let run_with_network = |network: tiechui_plugin_api::NetworkConfig,
-                                def: McpServerDefinition| {
-            let cfg = ModuleConfig {
-                network,
-                ..Default::default()
-            };
-            let mut registry = Registry::default();
-            registry.register_mcp_source(Arc::new(FileMcpSource(vec![def])));
-            let cancel = CancellationToken::new();
-            let module = McpModule::from_config(
-                &cfg,
-                registry.mcp_sources(),
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-                None,
-                false,
-                cancel.clone(),
-                Arc::new(DeclineElicitation),
-                None,
-            );
-            module.register(&mut registry, &cfg).unwrap();
-            (module, registry, cancel)
-        };
+        assert_http_mcp_echo_via_proxy(def.clone(), proxy_url.clone()).await;
+        assert!(socks.hits() >= 1);
 
-        let (module, registry, cancel) = run_with_network(
-            tiechui_plugin_api::NetworkConfig {
-                proxy: Some(format!("socks5://mcpuser:mcp-secret-pw@{socks_addr}")),
-                no_proxy: None,
-                ca_cert: None,
-            },
+        socks.shutdown();
+        assert_http_mcp_fails_closed(
             def.clone(),
-        );
-        ready(&module).await;
-        assert_eq!(module.statuses()[0].state, ServerState::Ready);
-        assert!(socks_hits.load(Ordering::SeqCst) >= 1);
-        let out = call(
-            &registry,
-            "mcp__http__echo",
-            json!({"value": "via-socks"}),
-            cancel.clone(),
+            proxy_url.clone(),
+            "mcp-secret-pw",
+            &handler.calls,
         )
-        .await
-        .unwrap();
-        assert!(matches!(&out.content[0], Content::Text { text, .. } if text == "via-socks"));
-        cancel.cancel();
+        .await;
 
-        socks_task.abort();
-        let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let closed_addr = closed_listener.local_addr().unwrap();
-        drop(closed_listener);
-
-        let calls_before = calls.load(Ordering::SeqCst);
-        let (failed_mod, _, failed_cancel) = run_with_network(
+        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (bypass_mod, _, bypass_cancel) = start_with_network(
+            def,
+            cwd,
             tiechui_plugin_api::NetworkConfig {
-                proxy: Some(format!("socks5://mcpuser:mcp-secret-pw@{closed_addr}")),
-                no_proxy: None,
-                ca_cert: None,
-            },
-            def.clone(),
-        );
-        ready(&failed_mod).await;
-        let status = &failed_mod.statuses()[0];
-        assert_eq!(status.state, ServerState::Failed);
-        let err_msg = status.error.as_deref().unwrap_or_default();
-        assert!(!err_msg.contains("mcp-secret-pw"), "{err_msg}");
-        assert_eq!(calls.load(Ordering::SeqCst), calls_before);
-        failed_cancel.cancel();
-
-        let (bypass_mod, _, bypass_cancel) = run_with_network(
-            tiechui_plugin_api::NetworkConfig {
-                proxy: Some(format!("socks5://mcpuser:mcp-secret-pw@{closed_addr}")),
+                proxy: Some(proxy_url),
                 no_proxy: Some("127.0.0.1".into()),
                 ca_cert: None,
             },
-            def,
         );
         ready(&bypass_mod).await;
         assert_eq!(bypass_mod.statuses()[0].state, ServerState::Ready);
@@ -746,10 +650,35 @@ async fn streamable_http_mcp_routes_through_socks5_fails_closed_and_redacts_pass
     .expect("streamable HTTP MCP proxy test timed out");
 }
 
+async fn fetch_stdio_mcp_env(
+    cwd: &std::path::Path,
+    network: tiechui_plugin_api::NetworkConfig,
+) -> Value {
+    let mut def = definition("stdioenv", 0);
+    def.config.env_vars = vec!["PATH".into()];
+    let cwd_str = cwd.display().to_string();
+    def.config.env.insert("HOME".into(), cwd_str.clone());
+    def.config.env.insert("TIECHUI_HOME".into(), cwd_str);
+    let (module, registry, cancel) = start_with_network(def, cwd, network);
+    ready(&module).await;
+    let out = call(
+        &registry,
+        "mcp__stdioenv__environment",
+        json!({}),
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    cancel.cancel();
+    let Content::Text { text, .. } = &out.content[0] else {
+        panic!("expected text");
+    };
+    let parsed: Value = tiechui_plugin_api::serde_json::from_str(text).unwrap();
+    parsed["vars"].clone()
+}
+
 #[tokio::test]
 async fn stdio_mcp_injects_proxy_and_ca_env_and_preserves_unconfigured_env() {
-    use tiechui_module_mcp::FileMcpSource;
-
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/mcp-tests");
         std::fs::create_dir_all(&root).unwrap();
@@ -757,55 +686,15 @@ async fn stdio_mcp_injects_proxy_and_ca_env_and_preserves_unconfigured_env() {
         let ca_path = temp.path().join("corp-ca.pem");
         std::fs::write(&ca_path, "dummy-pem\n").unwrap();
 
-        let inspect_vars = |network: tiechui_plugin_api::NetworkConfig| {
-            let mut def = definition("stdioenv", 0);
-            def.config.env_vars = vec!["PATH".into()];
-            def.config
-                .env
-                .insert("HOME".into(), temp.path().display().to_string());
-            def.config
-                .env
-                .insert("TIECHUI_HOME".into(), temp.path().display().to_string());
-            let cfg = ModuleConfig {
-                network,
-                ..Default::default()
-            };
-            let mut registry = Registry::default();
-            registry.register_mcp_source(Arc::new(FileMcpSource(vec![def])));
-            let cancel = CancellationToken::new();
-            let module = McpModule::from_config(
-                &cfg,
-                registry.mcp_sources(),
-                temp.path(),
-                None,
-                false,
-                cancel.clone(),
-                Arc::new(DeclineElicitation),
-                None,
-            );
-            module.register(&mut registry, &cfg).unwrap();
-            (module, registry, cancel)
-        };
-
-        let (module, registry, cancel) = inspect_vars(tiechui_plugin_api::NetworkConfig {
-            proxy: Some("http://127.0.0.1:7890".into()),
-            no_proxy: None,
-            ca_cert: Some(ca_path.clone()),
-        });
-        ready(&module).await;
-        let out = call(
-            &registry,
-            "mcp__stdioenv__environment",
-            json!({}),
-            cancel.clone(),
+        let vars = fetch_stdio_mcp_env(
+            temp.path(),
+            tiechui_plugin_api::NetworkConfig {
+                proxy: Some("http://127.0.0.1:7890".into()),
+                no_proxy: None,
+                ca_cert: Some(ca_path.clone()),
+            },
         )
-        .await
-        .unwrap();
-        let Content::Text { text, .. } = &out.content[0] else {
-            panic!("expected text");
-        };
-        let parsed: Value = tiechui_plugin_api::serde_json::from_str(text).unwrap();
-        let vars = &parsed["vars"];
+        .await;
         for key in [
             "HTTP_PROXY",
             "HTTPS_PROXY",
@@ -828,28 +717,12 @@ async fn stdio_mcp_injects_proxy_and_ca_env_and_preserves_unconfigured_env() {
         ] {
             assert_eq!(vars[key], ca_str, "{key}");
         }
-        cancel.cancel();
 
-        let (unconf_mod, unconf_reg, unconf_cancel) =
-            inspect_vars(tiechui_plugin_api::NetworkConfig::default());
-        ready(&unconf_mod).await;
-        let out = call(
-            &unconf_reg,
-            "mcp__stdioenv__environment",
-            json!({}),
-            unconf_cancel.clone(),
-        )
-        .await
-        .unwrap();
-        let Content::Text { text, .. } = &out.content[0] else {
-            panic!("expected text");
-        };
-        let parsed: Value = tiechui_plugin_api::serde_json::from_str(text).unwrap();
-        let vars = &parsed["vars"];
-        assert_eq!(vars["NO_PROXY"], Value::Null);
-        assert_eq!(vars["HTTP_PROXY"], Value::Null);
-        assert_eq!(vars["SSL_CERT_FILE"], Value::Null);
-        unconf_cancel.cancel();
+        let unconfigured =
+            fetch_stdio_mcp_env(temp.path(), tiechui_plugin_api::NetworkConfig::default()).await;
+        assert_eq!(unconfigured["NO_PROXY"], Value::Null);
+        assert_eq!(unconfigured["HTTP_PROXY"], Value::Null);
+        assert_eq!(unconfigured["SSL_CERT_FILE"], Value::Null);
     })
     .await
     .expect("stdio MCP env injection test timed out");

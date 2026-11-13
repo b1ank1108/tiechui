@@ -1995,155 +1995,17 @@ async fn socket_daemon_replaces_stale_socket_and_auto_exits_after_full_idle() {
 #[cfg(unix)]
 mod network_proxy_e2e {
     use std::collections::BTreeMap;
-    use std::net::SocketAddr;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     use std::time::Duration;
 
     use serde_json::json;
+    use tiechui_config::test_support::{Socks5TestProxy, TEST_CA_PEM};
     use tiechui_protocol::{EventKind, ThreadId};
     use tiechui_providers::testing::ScriptedServer;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
     use tokio_util::sync::CancellationToken;
 
     use super::{Client, Fixture, snapshot};
-
-    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBiTCCAS+gAwIBAgIUBDwBzNjrl7Y9XSWtm7HwM6AoUkUwCgYIKoZIzj0EAwIw\n\
-GjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMB4XDTI2MTExMzAzMTY1NFoXDTM2\n\
-MTExMDAzMTY1NFowGjEYMBYGA1UEAwwPdGllY2h1aS10ZXN0LWNhMFkwEwYHKoZI\n\
-zj0CAQYIKoZIzj0DAQcDQgAEPy7Wj3KSWZ4vTLtUs+Pnu5GXY9bpEZeZEEV8LZ54\n\
-McnNzeA6w5iNNxmUTXyYM8GoJuz+MNPcWDRhhHQqIgJaZ6NTMFEwHQYDVR0OBBYE\n\
-FJWXEH1vyX3Nl6RrUM+rO1K4dTBWMB8GA1UdIwQYMBaAFJWXEH1vyX3Nl6RrUM+r\n\
-O1K4dTBWMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIgDlvfQPnC\n\
-l5q45BA5LdLN/5mGPd1SIAX5cirDxtJZ+Y0CIQDHb3fpCGRXXUxoaB33gPyVU5hr\n\
-JmWK2Fp3hddwjKlRaQ==\n\
------END CERTIFICATE-----\n";
-
-    pub(super) struct Socks5Recorder {
-        pub(super) addr: SocketAddr,
-        hits: Arc<AtomicUsize>,
-        task: tokio::task::JoinHandle<()>,
-    }
-
-    impl Socks5Recorder {
-        async fn start(user: &'static str, pass: &'static str) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let hits = Arc::new(AtomicUsize::new(0));
-            let hits_bg = hits.clone();
-            let task = tokio::spawn(async move {
-                while let Ok((client, _)) = listener.accept().await {
-                    tokio::spawn(handle_socks5_client(client, user, pass, hits_bg.clone()));
-                }
-            });
-            Self { addr, hits, task }
-        }
-
-        fn hits(&self) -> usize {
-            self.hits.load(Ordering::SeqCst)
-        }
-    }
-
-    impl Drop for Socks5Recorder {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
-    }
-
-    async fn read_u8_vec(stream: &mut TcpStream) -> Option<Vec<u8>> {
-        let mut len = [0u8; 1];
-        stream.read_exact(&mut len).await.ok()?;
-        let mut buf = vec![0u8; len[0] as usize];
-        stream.read_exact(&mut buf).await.ok()?;
-        Some(buf)
-    }
-
-    async fn socks5_authenticate(
-        client: &mut TcpStream,
-        expected_user: &[u8],
-        expected_pass: &[u8],
-    ) -> bool {
-        let mut ver = [0u8; 1];
-        if client.read_exact(&mut ver).await.is_err() || ver[0] != 0x05 {
-            return false;
-        }
-        let Some(methods) = read_u8_vec(client).await else {
-            return false;
-        };
-        if !methods.contains(&0x02) || client.write_all(&[0x05, 0x02]).await.is_err() {
-            return false;
-        }
-        let mut sub_ver = [0u8; 1];
-        if client.read_exact(&mut sub_ver).await.is_err() || sub_ver[0] != 0x01 {
-            return false;
-        }
-        let Some(user) = read_u8_vec(client).await else {
-            return false;
-        };
-        let Some(pass) = read_u8_vec(client).await else {
-            return false;
-        };
-        if user != expected_user || pass != expected_pass {
-            let _ = client.write_all(&[0x01, 0x01]).await;
-            return false;
-        }
-        client.write_all(&[0x01, 0x00]).await.is_ok()
-    }
-
-    async fn socks5_read_target(client: &mut TcpStream) -> Option<String> {
-        let mut req = [0u8; 4];
-        client.read_exact(&mut req).await.ok()?;
-        if req[0] != 0x05 || req[1] != 0x01 {
-            return None;
-        }
-        let host = match req[3] {
-            0x01 => {
-                let mut ip = [0u8; 4];
-                client.read_exact(&mut ip).await.ok()?;
-                std::net::Ipv4Addr::from(ip).to_string()
-            }
-            0x03 => {
-                let bytes = read_u8_vec(client).await?;
-                String::from_utf8_lossy(&bytes).into_owned()
-            }
-            _ => return None,
-        };
-        let mut port = [0u8; 2];
-        client.read_exact(&mut port).await.ok()?;
-        Some(format!("{host}:{}", u16::from_be_bytes(port)))
-    }
-
-    async fn handle_socks5_client(
-        mut client: TcpStream,
-        user: &'static str,
-        pass: &'static str,
-        hits: Arc<AtomicUsize>,
-    ) {
-        if !socks5_authenticate(&mut client, user.as_bytes(), pass.as_bytes()).await {
-            return;
-        }
-        let Some(target) = socks5_read_target(&mut client).await else {
-            return;
-        };
-        let Ok(mut upstream) = TcpStream::connect(&target).await else {
-            return;
-        };
-        hits.fetch_add(1, Ordering::SeqCst);
-        if client
-            .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-    }
 
     fn write_bash_env_sse(sse_dir: &Path, name: &str, id: &str, out_path: &Path) -> PathBuf {
         let path = sse_dir.join(name);
@@ -2302,7 +2164,7 @@ JmWK2Fp3hddwjKlRaQ==\n\
     pub(super) struct ProxyTestHarness {
         fixture: Fixture,
         ca_path: PathBuf,
-        pub(super) socks: Socks5Recorder,
+        pub(super) socks: Socks5TestProxy,
         pub(super) proxy_script_server: ScriptedServer,
         shims: GitAndGhShims,
         bash_before: PathBuf,
@@ -2317,7 +2179,7 @@ JmWK2Fp3hddwjKlRaQ==\n\
             let fixture = Fixture::new().await;
             let ca_path = fixture.root.path().join("corp-ca.pem");
             std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
-            let socks = Socks5Recorder::start("u", "s3cr3t").await;
+            let socks = Socks5TestProxy::start(Some(("u", "s3cr3t")));
             let bash_before = fixture.root.path().join("bash-before.log");
             let bash_after = fixture.root.path().join("bash-after.log");
             let proxy_script_server =
@@ -2619,7 +2481,7 @@ async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_an
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut h = network_proxy_e2e::ProxyTestHarness::setup().await;
         let thread = h.verify_inherited_env_before_proxy().await;
-        let socks_url = format!("socks5://u:s3cr3t@{}", h.socks.addr);
+        let socks_url = format!("socks5://u:s3cr3t@{}", h.socks.addr());
         h.verify_proxy_normalization_and_permissions(&socks_url)
             .await;
         h.verify_proxied_turn_and_subprocess_env(&thread, &socks_url)

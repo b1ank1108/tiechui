@@ -515,264 +515,121 @@ async fn requests_go_through_the_configured_proxy() {
     assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
 }
 
-async fn spawn_socks5_proxy(
-    expected_auth: Option<(&'static str, &'static str)>,
-) -> (
-    std::net::SocketAddr,
-    std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    tokio::task::JoinHandle<()>,
-) {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+async fn assert_proxy_forwards_models(config: &ProviderConfig, proxy_url: String) {
+    let network = tiechui_config::NetworkConfig {
+        proxy: Some(proxy_url),
+        ..Default::default()
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        crate::list_models(config, &network, &cancel).await.unwrap(),
+        ["m1"]
+    );
+}
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_bg = hits.clone();
-    let task = tokio::spawn(async move {
-        while let Ok((mut client, _)) = listener.accept().await {
-            let hits = hits_bg.clone();
-            tokio::spawn(async move {
-                let mut hdr = [0u8; 2];
-                if client.read_exact(&mut hdr).await.is_err() || hdr[0] != 0x05 {
-                    return;
-                }
-                let mut methods = vec![0u8; hdr[1] as usize];
-                if client.read_exact(&mut methods).await.is_err() {
-                    return;
-                }
-                if let Some((exp_user, exp_pass)) = expected_auth {
-                    if !methods.contains(&0x02) {
-                        let _ = client.write_all(&[0x05, 0xff]).await;
-                        return;
-                    }
-                    if client.write_all(&[0x05, 0x02]).await.is_err() {
-                        return;
-                    }
-                    let mut sub = [0u8; 2];
-                    if client.read_exact(&mut sub).await.is_err() || sub[0] != 0x01 {
-                        return;
-                    }
-                    let mut user = vec![0u8; sub[1] as usize];
-                    if client.read_exact(&mut user).await.is_err() {
-                        return;
-                    }
-                    let mut plen = [0u8; 1];
-                    if client.read_exact(&mut plen).await.is_err() {
-                        return;
-                    }
-                    let mut pass = vec![0u8; plen[0] as usize];
-                    if client.read_exact(&mut pass).await.is_err() {
-                        return;
-                    }
-                    if user != exp_user.as_bytes() || pass != exp_pass.as_bytes() {
-                        let _ = client.write_all(&[0x01, 0x01]).await;
-                        return;
-                    }
-                    if client.write_all(&[0x01, 0x00]).await.is_err() {
-                        return;
-                    }
-                } else if client.write_all(&[0x05, 0x00]).await.is_err() {
-                    return;
-                }
+async fn assert_proxy_fails_closed(
+    config: &ProviderConfig,
+    upstream: &MockServer,
+    proxy_url: String,
+    secret: &str,
+) {
+    let before = upstream.received_requests().await.unwrap().len();
+    let network = tiechui_config::NetworkConfig {
+        proxy: Some(proxy_url),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let err = crate::list_models(config, &network, &cancel)
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().contains(secret), "{err}");
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before,
+        "failed proxy request must fail closed and never fall back to direct"
+    );
+}
 
-                let mut req = [0u8; 4];
-                if client.read_exact(&mut req).await.is_err() || req[0] != 0x05 || req[1] != 0x01 {
-                    return;
-                }
-                let target = match req[3] {
-                    0x01 => {
-                        let mut ip = [0u8; 4];
-                        let mut port = [0u8; 2];
-                        if client.read_exact(&mut ip).await.is_err()
-                            || client.read_exact(&mut port).await.is_err()
-                        {
-                            return;
-                        }
-                        format!(
-                            "{}:{}",
-                            std::net::Ipv4Addr::from(ip),
-                            u16::from_be_bytes(port)
-                        )
-                    }
-                    0x03 => {
-                        let mut len = [0u8; 1];
-                        if client.read_exact(&mut len).await.is_err() {
-                            return;
-                        }
-                        let mut host = vec![0u8; len[0] as usize];
-                        let mut port = [0u8; 2];
-                        if client.read_exact(&mut host).await.is_err()
-                            || client.read_exact(&mut port).await.is_err()
-                        {
-                            return;
-                        }
-                        format!(
-                            "{}:{}",
-                            String::from_utf8_lossy(&host),
-                            u16::from_be_bytes(port)
-                        )
-                    }
-                    0x04 => {
-                        let mut ip = [0u8; 16];
-                        let mut port = [0u8; 2];
-                        if client.read_exact(&mut ip).await.is_err()
-                            || client.read_exact(&mut port).await.is_err()
-                        {
-                            return;
-                        }
-                        format!(
-                            "[{}]:{}",
-                            std::net::Ipv6Addr::from(ip),
-                            u16::from_be_bytes(port)
-                        )
-                    }
-                    _ => return,
-                };
-                let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await else {
-                    let _ = client
-                        .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                        .await;
-                    return;
-                };
-                hits.fetch_add(1, Ordering::SeqCst);
-                if client
-                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-            });
-        }
-    });
-    (addr, hits, task)
+async fn start_models_upstream() -> (MockServer, ProviderConfig) {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "m1"}]})))
+        .mount(&upstream)
+        .await;
+    let config = ProviderConfig {
+        wire: Wire::OpenaiCompletions,
+        api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
+        models: vec![],
+        ..super::config(&upstream.uri())
+    };
+    (upstream, config)
 }
 
 #[tokio::test]
 async fn socks5_and_http_proxies_forward_fail_closed_and_redact_credentials() {
-    use std::sync::atomic::Ordering;
+    use tiechui_config::test_support::Socks5TestProxy;
 
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/models"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "m1"}]})))
-            .mount(&upstream)
+        let (upstream, config) = start_models_upstream().await;
+        let mut socks_noauth = Socks5TestProxy::start(None);
+        assert_proxy_forwards_models(&config, format!("socks5://{}", socks_noauth.addr())).await;
+        assert_eq!(socks_noauth.hits(), 1);
+
+        let mut socks_auth = Socks5TestProxy::start(Some(("alice", "s3cr3t-pass")));
+        let auth_addr = socks_auth.addr();
+        assert_proxy_forwards_models(&config, format!("socks5://alice:s3cr3t-pass@{auth_addr}"))
             .await;
+        assert_eq!(socks_auth.hits(), 1);
 
-        let config = ProviderConfig {
-            wire: Wire::OpenaiCompletions,
-            api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
-            models: vec![],
-            ..super::config(&upstream.uri())
-        };
-        let cancel = CancellationToken::new();
+        let wrong_url = format!("socks5://alice:wrong-pass@{auth_addr}");
+        assert_proxy_fails_closed(&config, &upstream, wrong_url, "wrong-pass").await;
 
-        let (socks_noauth, noauth_hits, noauth_task) = spawn_socks5_proxy(None).await;
-        let network = tiechui_config::NetworkConfig {
-            proxy: Some(format!("socks5://{socks_noauth}")),
-            ..Default::default()
-        };
-        assert_eq!(
-            crate::list_models(&config, &network, &cancel)
-                .await
-                .unwrap(),
-            ["m1"]
-        );
-        assert_eq!(noauth_hits.load(Ordering::SeqCst), 1);
-
-        let (socks_auth, auth_hits, auth_task) =
-            spawn_socks5_proxy(Some(("alice", "s3cr3t-pass"))).await;
-        let network = tiechui_config::NetworkConfig {
-            proxy: Some(format!("socks5://alice:s3cr3t-pass@{socks_auth}")),
-            ..Default::default()
-        };
-        assert_eq!(
-            crate::list_models(&config, &network, &cancel)
-                .await
-                .unwrap(),
-            ["m1"]
-        );
-        assert_eq!(auth_hits.load(Ordering::SeqCst), 1);
-
-        let received_before = upstream.received_requests().await.unwrap().len();
-
-        let bad_auth = tiechui_config::NetworkConfig {
-            proxy: Some(format!("socks5://alice:wrong-pass@{socks_auth}")),
-            ..Default::default()
-        };
-        let err = crate::list_models(&config, &bad_auth, &cancel)
-            .await
-            .unwrap_err();
-        assert!(!err.to_string().contains("wrong-pass"), "{err}");
-        assert_eq!(
-            upstream.received_requests().await.unwrap().len(),
-            received_before,
-            "failed SOCKS5 auth must fail closed and never fall back to direct"
-        );
-
-        noauth_task.abort();
-        auth_task.abort();
-        let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let closed_addr = closed_listener.local_addr().unwrap();
-        drop(closed_listener);
-
-        let unreachable = tiechui_config::NetworkConfig {
-            proxy: Some(format!("socks5://alice:s3cr3t-pass@{closed_addr}")),
-            ..Default::default()
-        };
-        let err = crate::list_models(&config, &unreachable, &cancel)
-            .await
-            .unwrap_err();
-        assert!(!err.to_string().contains("s3cr3t-pass"), "{err}");
-        assert_eq!(
-            upstream.received_requests().await.unwrap().len(),
-            received_before,
-            "unreachable proxy must fail closed even when upstream is directly reachable"
-        );
-
-        let proxy_407 = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(407))
-            .mount(&proxy_407)
-            .await;
-        let http_407 = tiechui_config::NetworkConfig {
-            proxy: Some(format!("http://alice:s3cr3t-pass@{}", proxy_407.address())),
-            ..Default::default()
-        };
-        let err = crate::list_models(&config, &http_407, &cancel)
-            .await
-            .unwrap_err();
-        assert!(!err.to_string().contains("s3cr3t-pass"), "{err}");
-        assert_eq!(
-            upstream.received_requests().await.unwrap().len(),
-            received_before,
-            "HTTP 407 must fail closed and never fall back to direct"
-        );
-
-        let bypassed = tiechui_config::NetworkConfig {
-            proxy: Some(format!("socks5://alice:s3cr3t-pass@{closed_addr}")),
-            no_proxy: Some("127.0.0.1".into()),
-            ca_cert: None,
-        };
-        assert_eq!(
-            crate::list_models(&config, &bypassed, &cancel)
-                .await
-                .unwrap(),
-            ["m1"]
-        );
-        assert_eq!(
-            upstream.received_requests().await.unwrap().len(),
-            received_before + 1
-        );
+        socks_noauth.shutdown();
+        socks_auth.shutdown();
+        let closed_url = format!("socks5://alice:s3cr3t-pass@{auth_addr}");
+        assert_proxy_fails_closed(&config, &upstream, closed_url, "s3cr3t-pass").await;
+        assert_http_407_and_bypass(&config, &upstream, auth_addr).await;
     })
     .await
     .expect("socks5/http proxy test timed out");
+}
+
+async fn assert_http_407_and_bypass(
+    config: &ProviderConfig,
+    upstream: &MockServer,
+    closed_addr: std::net::SocketAddr,
+) {
+    let proxy_407 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(407))
+        .mount(&proxy_407)
+        .await;
+    assert_proxy_fails_closed(
+        config,
+        upstream,
+        format!("http://alice:s3cr3t-pass@{}", proxy_407.address()),
+        "s3cr3t-pass",
+    )
+    .await;
+
+    let before = upstream.received_requests().await.unwrap().len();
+    let bypassed = tiechui_config::NetworkConfig {
+        proxy: Some(format!("socks5://alice:s3cr3t-pass@{closed_addr}")),
+        no_proxy: Some("127.0.0.1".into()),
+        ca_cert: None,
+    };
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        crate::list_models(config, &bypassed, &cancel)
+            .await
+            .unwrap(),
+        ["m1"]
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
 }
 
 #[test]

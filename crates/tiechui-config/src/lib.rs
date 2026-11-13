@@ -8,6 +8,9 @@ mod paths;
 mod permissions;
 pub mod private;
 mod save;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
 mod trust;
 
 use std::collections::BTreeMap;
@@ -190,93 +193,121 @@ impl fmt::Debug for NetworkConfig {
     }
 }
 
+const INVALID_PROXY_URL: &str = "network.proxy: invalid proxy URL";
+
 pub fn normalize_proxy_url(raw: &str) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let invalid = || "network.proxy: invalid proxy URL".to_owned();
-    let (candidate, bare) = match trimmed.split_once("://") {
-        Some((scheme, _)) => {
-            let lower = scheme.to_ascii_lowercase();
-            if !matches!(lower.as_str(), "http" | "https" | "socks5") {
-                if !scheme.is_empty()
-                    && scheme
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-                {
-                    return Err(format!("network.proxy: {lower} proxies are not supported"));
-                }
-                return Err(invalid());
-            }
-            (trimmed.to_owned(), false)
-        }
-        None => {
-            if trimmed.contains(char::is_whitespace) {
-                return Err(invalid());
-            }
-            (format!("http://{trimmed}"), true)
-        }
-    };
+    let (candidate, bare) = split_proxy_scheme(trimmed)?;
+    let (raw_host, raw_port) = extract_host_and_port(&candidate)?;
+    validate_host_and_port(raw_host, raw_port, bare)?;
+    validate_parsed_proxy_url(&candidate).map(Some)
+}
 
-    let rest = candidate
+fn is_scheme_token(scheme: &str) -> bool {
+    !scheme.is_empty()
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+fn split_proxy_scheme(trimmed: &str) -> Result<(String, bool), String> {
+    let Some((scheme, _)) = trimmed.split_once("://") else {
+        if trimmed.contains(char::is_whitespace) {
+            return Err(INVALID_PROXY_URL.to_owned());
+        }
+        return Ok((format!("http://{trimmed}"), true));
+    };
+    let lower = scheme.to_ascii_lowercase();
+    if ["http", "https", "socks5"].contains(&lower.as_str()) {
+        return Ok((trimmed.to_owned(), false));
+    }
+    if is_scheme_token(scheme) {
+        return Err(format!("network.proxy: {lower} proxies are not supported"));
+    }
+    Err(INVALID_PROXY_URL.to_owned())
+}
+
+fn extract_host_and_port(candidate: &str) -> Result<(&str, Option<&str>), String> {
+    let (_, rest) = candidate
         .split_once("://")
-        .map(|(_, r)| r)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| INVALID_PROXY_URL.to_owned())?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let (raw_host, raw_port) = if let Some(after_bracket) = host_port.strip_prefix('[') {
-        let (ipv6, tail) = after_bracket.split_once(']').ok_or_else(invalid)?;
-        if ipv6.is_empty() {
-            return Err(invalid());
-        }
-        let port = match tail.strip_prefix(':') {
-            Some(p) => Some(p),
-            None if tail.is_empty() => None,
-            None => return Err(invalid()),
-        };
-        (&host_port[..=ipv6.len() + 1], port)
-    } else {
-        match host_port.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (host_port, None),
-        }
-    };
-    if raw_host.is_empty() {
-        return Err(invalid());
+    if let Some(after_bracket) = host_port.strip_prefix('[') {
+        return split_bracketed_host_port(host_port, after_bracket);
     }
-    match raw_port {
-        Some(port_str) => {
-            if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(invalid());
-            }
-            let port: u16 = port_str.parse().map_err(|_| invalid())?;
-            if port == 0 {
-                return Err(invalid());
-            }
-        }
-        None if bare => return Err(invalid()),
-        None => {}
-    }
+    Ok(match host_port.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (host_port, None),
+    })
+}
 
-    let parsed = url::Url::parse(&candidate).map_err(|_| invalid())?;
-    if parsed.host_str().is_none_or(str::is_empty)
-        || parsed.port() == Some(0)
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(invalid());
+fn split_bracketed_host_port<'a>(
+    host_port: &'a str,
+    after_bracket: &'a str,
+) -> Result<(&'a str, Option<&'a str>), String> {
+    let (ipv6, tail) = after_bracket
+        .split_once(']')
+        .ok_or_else(|| INVALID_PROXY_URL.to_owned())?;
+    if ipv6.is_empty() {
+        return Err(INVALID_PROXY_URL.to_owned());
     }
-    if parsed.path() != "/" && !parsed.path().is_empty() {
+    let port = match tail.strip_prefix(':') {
+        Some(p) => Some(p),
+        None if tail.is_empty() => None,
+        None => return Err(INVALID_PROXY_URL.to_owned()),
+    };
+    Ok((&host_port[..=ipv6.len() + 1], port))
+}
+
+fn validate_host_and_port(
+    raw_host: &str,
+    raw_port: Option<&str>,
+    bare: bool,
+) -> Result<(), String> {
+    if raw_host.is_empty() {
+        return Err(INVALID_PROXY_URL.to_owned());
+    }
+    let Some(port_str) = raw_port else {
+        return if bare {
+            Err(INVALID_PROXY_URL.to_owned())
+        } else {
+            Ok(())
+        };
+    };
+    let valid_digits = !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit());
+    let port = valid_digits
+        .then(|| port_str.parse::<u16>().ok())
+        .flatten()
+        .filter(|&port| port > 0);
+    port.map(|_| ()).ok_or_else(|| INVALID_PROXY_URL.to_owned())
+}
+
+fn is_acceptable_proxy_url(parsed: &url::Url) -> bool {
+    let has_host = parsed.host_str().is_some_and(|host| !host.is_empty());
+    let empty_path = parsed.path().is_empty() || parsed.path() == "/";
+    has_host
+        && empty_path
+        && parsed.port() != Some(0)
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+}
+
+fn validate_parsed_proxy_url(candidate: &str) -> Result<String, String> {
+    let invalid = || INVALID_PROXY_URL.to_owned();
+    let parsed = url::Url::parse(candidate).map_err(|_| invalid())?;
+    if !is_acceptable_proxy_url(&parsed) {
         return Err(invalid());
     }
     reqwest::Proxy::all(parsed.as_str()).map_err(|_| invalid())?;
-
     let mut normalized = parsed.to_string();
     if parsed.path() == "/" && normalized.ends_with('/') {
         normalized.pop();
     }
-    Ok(Some(normalized))
+    Ok(normalized)
 }
 
 pub fn proxy_has_credentials(url: &str) -> bool {

@@ -61,6 +61,7 @@ workspace = ["dep:tiechui-workspace"]
 
 [dev-dependencies]
 tempfile.workspace = true
+tiechui-config = { workspace = true, features = ["test-support"] }
 tiechui-providers = { workspace = true, features = ["testing"] }
 wiremock.workspace = true
 

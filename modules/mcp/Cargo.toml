@@ -23,6 +23,7 @@ toml.workspace = true
 [dev-dependencies]
 axum.workspace = true
 rmcp = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server"] }
+tiechui-config = { workspace = true, features = ["test-support"] }
 
 [[bin]]
 name = "mcp-test-server"

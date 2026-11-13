@@ -6,6 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 tokio-util.workspace = true
 reqwest.workspace = true
