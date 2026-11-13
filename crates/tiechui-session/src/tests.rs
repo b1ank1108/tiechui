@@ -1101,24 +1101,18 @@ fn browsing_reads_the_current_branch_without_touching_the_file() {
     let bytes = fs::read(&path).unwrap();
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
 
-    let part = |kind, text: &str| Part {
-        kind,
-        text: text.into(),
-    };
     assert_eq!(
         preview(&path, &fixture.cancel).unwrap(),
         vec![
-            part(PartKind::User, "first question"),
-            part(
-                PartKind::Assistant,
-                "Looking.\n\nCalled read\n{\n  \"path\": \"a.txt\"\n}"
-            ),
-            part(
-                PartKind::Tool,
-                "contents\n\n[image: image/png; data omitted]"
-            ),
-            part(PartKind::Notice, "earlier work"),
-            part(PartKind::User, "kept"),
+            Part::User("first question".into()),
+            Part::Assistant("Looking.".into()),
+            Part::Call {
+                name: "read".into(),
+                arguments: json!({"path": "a.txt"}),
+            },
+            Part::Output("contents\n\n[image: image/png; data omitted]".into()),
+            Part::Compaction("earlier work".into()),
+            Part::User("kept".into()),
         ]
     );
     let (listed, diagnostics) =

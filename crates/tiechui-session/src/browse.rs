@@ -1,9 +1,10 @@
 //! Read-only views for choosing a session, as the resume picker reads them: summaries to
-//! list and search, and the current branch as plain conversation parts. Files are opened
+//! list and search, and the current branch as conversation parts. Files are opened
 //! without the writer lock and never written.
 
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
 use tiechui_model::{Content, Message, Role};
 use tokio_util::sync::CancellationToken;
 
@@ -22,18 +23,20 @@ pub struct Summary {
     pub meta: Meta,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PartKind {
-    User,
-    Assistant,
-    Tool,
-    Notice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Part {
-    pub kind: PartKind,
-    pub text: String,
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    User(String),
+    Assistant(String),
+    /// A tool the assistant called.
+    Call {
+        name: String,
+        arguments: Value,
+    },
+    /// What a tool returned.
+    Output(String),
+    /// A compaction's summary of the messages it replaced.
+    Compaction(String),
+    Notice(String),
 }
 
 /// Sessions with a conversation in `cwd`'s directory or, given none, in every directory.
@@ -114,20 +117,35 @@ pub fn preview(path: &Path, cancel: &CancellationToken) -> Result<Vec<Part>, Ses
     let leaf = store.current_leaf().unwrap_or(&store.header().id);
     let mut parts = Vec::new();
     for entry in store.path_to_root(leaf)? {
-        let (kind, text) = match &entry.kind {
-            EntryKind::Message { message, .. } => match message.role {
-                Role::System => continue,
-                Role::User => (PartKind::User, contents(&message.content)),
-                Role::Assistant => (PartKind::Assistant, contents(&message.content)),
-                Role::Tool => (PartKind::Tool, contents(&message.content)),
-            },
-            EntryKind::Compaction { summary, .. } => (PartKind::Notice, summary.clone()),
-            EntryKind::CustomMessage { hidden: true, .. } => continue,
-            EntryKind::CustomMessage { text, .. } => (PartKind::Notice, text.clone()),
-            _ => continue,
-        };
-        if !text.is_empty() {
-            parts.push(Part { kind, text });
+        match &entry.kind {
+            EntryKind::Message { message, .. } => {
+                let part = match message.role {
+                    Role::System => continue,
+                    Role::User => Part::User,
+                    Role::Assistant => Part::Assistant,
+                    Role::Tool => Part::Output,
+                };
+                let text = contents(&message.content);
+                if !text.is_empty() {
+                    parts.push(part(text));
+                }
+                parts.extend(message.content.iter().filter_map(|content| match content {
+                    Content::ToolCall(call) => Some(Part::Call {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    }),
+                    _ => None,
+                }));
+            }
+            EntryKind::Compaction { summary, .. } if !summary.is_empty() => {
+                parts.push(Part::Compaction(summary.clone()));
+            }
+            EntryKind::CustomMessage {
+                hidden: false,
+                text,
+                ..
+            } if !text.is_empty() => parts.push(Part::Notice(text.clone())),
+            _ => {}
         }
     }
     Ok(parts)
@@ -139,15 +157,10 @@ fn contents(parts: &[Content]) -> String {
         .filter_map(|content| match content {
             Content::Text { text, .. } => Some(text.clone()),
             Content::Image { mime_type, .. } => Some(format!("[image: {mime_type}; data omitted]")),
-            Content::ToolCall(call) => Some(format!(
-                "Called {}\n{}",
-                call.name,
-                serde_json::to_string_pretty(&call.arguments).unwrap_or_default()
-            )),
             Content::ToolResult(result) => {
                 Some(contents(&result.content)).filter(|text| !text.is_empty())
             }
-            Content::Thinking { .. } => None,
+            Content::ToolCall(_) | Content::Thinking { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")

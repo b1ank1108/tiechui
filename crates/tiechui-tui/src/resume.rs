@@ -1,7 +1,7 @@
 //! The resume picker on the alternate screen: search, This folder/All and Updated/Created,
-//! one row per session over the selected one's recent conversation, and the read-only full
-//! conversation. Its reads run in the host loop and are tagged with the picker's generation,
-//! so a closed or replaced picker never sees late results.
+//! the sessions beside the selected one's turns (above them on narrow terminals), and the
+//! read-only full conversation. Its reads run in the host loop and are tagged with the
+//! picker's generation, so a closed or replaced picker never sees late results.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -16,12 +17,14 @@ use crate::prompt::Input;
 use crate::sheet;
 use crate::status::compact_path;
 use crate::theme::Theme;
-use crate::tools::plain;
+use crate::tools::{self, Tool, plain};
 use crate::{markdown, wrap};
 
-/// Conversation rows under the list, and the rows its details add.
-const TAIL: usize = 8;
-const DETAILS: usize = 5;
+/// The narrowest terminal that shows the sessions beside the conversation.
+const SPLIT: usize = 100;
+/// Rows of a user message and of a reply in the preview.
+const ASKED: usize = 3;
+const REPLY: usize = 8;
 
 pub enum Outcome {
     Open,
@@ -58,18 +61,20 @@ pub struct Summary {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PartKind {
-    User,
-    Assistant,
-    Tool,
-    Notice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Part {
-    pub kind: PartKind,
-    pub text: String,
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    User(String),
+    Assistant(String),
+    /// A tool the assistant called.
+    Call {
+        name: String,
+        arguments: Value,
+    },
+    /// What a tool returned.
+    Output(String),
+    /// A compaction's summary of the messages it replaced.
+    Compaction(String),
+    Notice(String),
 }
 
 pub enum Loaded {
@@ -109,7 +114,6 @@ pub struct Resume {
     all: bool,
     created: bool,
     sort_focused: bool,
-    details: bool,
     lists: [Option<Vec<Summary>>; 2],
     loading: [bool; 2],
     previews: HashMap<PathBuf, Preview>,
@@ -153,7 +157,6 @@ impl Resume {
             all: false,
             created: false,
             sort_focused: false,
-            details: false,
             lists: [None, None],
             loading: [true, false],
             previews: HashMap::new(),
@@ -361,7 +364,6 @@ impl Resume {
                     self.scroll = 0;
                 }
             }
-            KeyCode::Char('e') if control => self.details = !self.details,
             KeyCode::Up => self.select(self.selected.saturating_sub(1)),
             KeyCode::Down => self.select(self.selected + 1),
             KeyCode::PageUp => self.select(self.selected.saturating_sub(step)),
@@ -471,9 +473,10 @@ impl Resume {
         } else {
             compact_path(&self.cwd, self.home.as_deref())
         };
-        let count = self.lists[usize::from(self.all)]
-            .is_some()
-            .then(|| self.filtered.len().to_string());
+        let count = self.lists[usize::from(self.all)].is_some().then(|| {
+            let count = self.filtered.len();
+            format!("{count} {}", plural(count, "session"))
+        });
         let meta = [Some(folder).filter(|f| !f.is_empty()), count]
             .into_iter()
             .flatten()
@@ -509,10 +512,9 @@ impl Resume {
             theme,
             &[
                 ("enter", "resume"),
-                ("tab", "filter/sort"),
-                ("←→", "change"),
+                ("tab", "scope/sort"),
+                ("←→", "toggle"),
                 ("ctrl+t", "transcript"),
-                ("ctrl+e", "details"),
                 ("esc", back),
             ],
             position.as_deref(),
@@ -520,8 +522,16 @@ impl Resume {
         )
     }
 
-    /// `Search` and the query with a block cursor, which stays visible.
+    /// `Search` and the query with a block cursor, which stays visible; a hint while empty.
     fn search(&self, width: usize, theme: &Theme) -> Vec<Span<'static>> {
+        if self.query.text().is_empty() {
+            return vec![
+                Span::raw("  "),
+                Span::styled("Search  ", theme.dim),
+                Span::styled("t", Style::default().add_modifier(Modifier::REVERSED)),
+                Span::styled("ype to filter…", theme.dim.add_modifier(Modifier::ITALIC)),
+            ];
+        }
         let room = width.saturating_sub(10);
         let (before, after) = self.query.text().split_at(self.query.cursor());
         let mut after = after.graphemes(true);
@@ -543,51 +553,65 @@ impl Resume {
         ]
     }
 
-    /// The current value bold, in the accent where focused; the others dim.
+    /// `Scope ● This folder ○ All    Sort ● Updated ○ Created`, the focused group's label in
+    /// the accent.
     fn toolbar(&self, theme: &Theme) -> Vec<Span<'static>> {
-        let value = |name: &'static str, active: bool, focused: bool| match (active, focused) {
-            (true, true) => Span::styled(name, theme.accent.add_modifier(Modifier::BOLD)),
-            (true, false) => Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
-            (false, _) => Span::styled(name, theme.dim),
+        let group = |label: &str, options: [&'static str; 2], active: bool, focused: bool| {
+            let mut spans = vec![Span::styled(
+                format!("{label} "),
+                if focused {
+                    theme.accent.add_modifier(Modifier::BOLD)
+                } else {
+                    theme.dim
+                },
+            )];
+            for (index, option) in options.into_iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                if (index == 1) == active {
+                    let dot = if focused {
+                        theme.accent
+                    } else {
+                        Style::default()
+                    };
+                    spans.push(Span::styled("● ", dot));
+                    spans.push(Span::styled(
+                        option,
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled("○ ", theme.dim));
+                    spans.push(Span::styled(option, theme.dim));
+                }
+            }
+            spans
         };
-        vec![
-            value("This folder", !self.all, !self.sort_focused),
-            Span::raw("  "),
-            value("All", self.all, !self.sort_focused),
-            Span::raw("    "),
-            value("Updated", !self.created, self.sort_focused),
-            Span::raw("  "),
-            value("Created", self.created, self.sort_focused),
-        ]
+        let mut spans = group(
+            "Scope",
+            ["This folder", "All"],
+            self.all,
+            !self.sort_focused,
+        );
+        spans.push(Span::raw("    "));
+        spans.extend(group(
+            "Sort",
+            ["Updated", "Created"],
+            self.created,
+            self.sort_focused,
+        ));
+        spans
     }
 
-    /// One row per session around the selection, then the selected one's conversation when
-    /// there is room or its details are asked for.
+    /// The list beside the selected session on wide terminals, above its turns otherwise.
     fn sessions(&mut self, height: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let cap = TAIL + if self.details { DETAILS } else { 0 };
-        let pane = height >= 9 || self.details && height >= 5;
-        let reserve = if pane {
-            (height / 3).clamp(3, cap) + 1
-        } else {
-            0
-        };
-        let shown = self
-            .filtered
-            .len()
-            .min(height.saturating_sub(reserve))
-            .max(1);
-        self.height = shown;
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + shown {
-            self.top = self.selected + 1 - shown;
+        if width >= SPLIT && height >= 6 {
+            return self.columns(height, width, theme);
         }
-        self.top = self.top.min(self.filtered.len().saturating_sub(shown));
-        let list = self.list();
-        let visible: Vec<&Summary> = self.filtered[self.top..self.top + shown]
-            .iter()
-            .map(|index| &list[*index])
-            .collect();
+        let pane = height >= 9;
+        let reserve = if pane { height / 2 } else { 0 };
+        let shown = self.scroll_to(height.saturating_sub(reserve), 1);
+        let visible = self.visible(shown);
         let home = self.home.as_deref();
         let folders: Vec<String> = visible
             .iter()
@@ -603,98 +627,206 @@ impl Resume {
             .max()
             .unwrap_or(0)
             .min(28);
-        let dates: Vec<String> = visible
+        let dates: Vec<String> = visible.iter().map(|s| self.when(s)).collect();
+        let date_width = dates
             .iter()
-            .map(|session| {
-                let time = if self.created {
-                    session.created_at
-                } else {
-                    session.modified
-                };
-                relative(time, self.reference)
-            })
-            .collect();
-        let date_width = dates.iter().map(|date| date.len()).max().unwrap_or(0);
-        let accent = theme.accent.add_modifier(Modifier::BOLD);
+            .map(|date| wrap::width(date))
+            .max()
+            .unwrap_or(0);
         let mut lines = Vec::new();
         for (offset, session) in visible.iter().enumerate() {
             let selected = self.top + offset == self.selected;
-            let left = vec![
-                Span::raw("  "),
-                if selected {
-                    Span::styled("› ", accent)
-                } else {
-                    Span::raw("  ")
-                },
-                Span::styled(
-                    title(session),
-                    if selected { accent } else { Style::default() },
-                ),
-            ];
+            let tone = if selected { theme.secondary } else { theme.dim };
             let mut right = Vec::new();
             if let Some(folder) = folders.get(offset) {
-                let cell = wrap::fit(
-                    vec![Span::styled(folder.clone(), theme.dim)],
-                    folder_width,
-                    true,
-                );
+                let cell = wrap::fit(vec![Span::styled(folder.clone(), tone)], folder_width, true);
                 let used = wrap::line_width(&cell);
                 right.extend(cell.spans);
                 right.push(Span::raw(" ".repeat(folder_width - used + 2)));
             }
             right.push(Span::styled(
                 format!("{:>date_width$}", dates[offset]),
-                theme.dim,
+                tone,
             ));
-            lines.push(sheet::split(left, right, width));
+            right.push(Span::raw("  "));
+            let line = sheet::split(heading(session, selected, theme), right, width);
+            lines.push(if selected {
+                pad(line, width, theme.selection())
+            } else {
+                line
+            });
         }
         if pane {
             lines.push(Line::default());
-            let rows = height.saturating_sub(shown + 1).min(cap);
-            lines.extend(self.preview(rows, width, theme));
+            if let Some(session) = self.current() {
+                let mut meta = self.turn_count(&session.path);
+                meta.push(format!(
+                    "created {}",
+                    relative(session.created_at, self.reference)
+                ));
+                let mut line = vec![Span::raw("  ")];
+                line.extend(
+                    sheet::rule(
+                        theme.separator,
+                        &[vec![Span::styled(
+                            "Preview",
+                            theme.secondary.add_modifier(Modifier::BOLD),
+                        )]],
+                        &[vec![Span::styled(meta.join(" · "), theme.dim)]],
+                        width.saturating_sub(2),
+                    )
+                    .spans,
+                );
+                lines.push(Line::from(line));
+                let path = session.path.clone();
+                let rows = height.saturating_sub(shown + 2);
+                let inner = width.saturating_sub(2).max(1);
+                lines.extend(
+                    self.digest(&path, inner, rows, theme)
+                        .into_iter()
+                        .map(|line| {
+                            let mut spans = vec![Span::raw("  ")];
+                            spans.extend(line.spans);
+                            Line::from(spans)
+                        }),
+                );
+            }
         }
         lines
     }
 
-    /// The selected session's details when asked for, then its conversation's last rows.
-    fn preview(&self, rows: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    /// Two rows per session on the left; the selected one's title, details and turns on the
+    /// right.
+    fn columns(&mut self, height: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let left = width * 12 / 25;
+        let right = width - left - 3;
+        let shown = self.scroll_to(height, 2);
+        let mut rows = Vec::new();
+        for (offset, session) in self.visible(shown).into_iter().enumerate() {
+            let selected = self.top + offset == self.selected;
+            let when = self.when(session);
+            let meta = match session.cwd.file_name().filter(|_| self.all) {
+                Some(folder) => format!("{} · {when}", folder.to_string_lossy()),
+                None => when,
+            };
+            let base = if selected {
+                theme.selection()
+            } else {
+                Style::default()
+            };
+            let tone = if selected { theme.secondary } else { theme.dim };
+            rows.push(pad(
+                wrap::fit(heading(session, selected, theme), left - 1, true),
+                left,
+                base,
+            ));
+            rows.push(pad(
+                wrap::fit(
+                    vec![Span::raw("    "), Span::styled(meta, tone)],
+                    left - 1,
+                    true,
+                ),
+                left,
+                base,
+            ));
+        }
+        let detail = self.detail(right, height, theme);
+        (0..height)
+            .map(|index| {
+                let mut line = rows
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| Line::from(" ".repeat(left)));
+                line.spans.push(Span::styled(" │ ", theme.separator));
+                if let Some(row) = detail.get(index) {
+                    line.spans
+                        .extend(wrap::fit(row.spans.clone(), right, true).spans);
+                }
+                line
+            })
+            .collect()
+    }
+
+    /// Keeps the selection among `rows / per` visible sessions; returns how many there are.
+    fn scroll_to(&mut self, rows: usize, per: usize) -> usize {
+        let shown = self.filtered.len().min(rows / per).max(1);
+        self.height = shown;
+        if self.selected < self.top {
+            self.top = self.selected;
+        } else if self.selected >= self.top + shown {
+            self.top = self.selected + 1 - shown;
+        }
+        self.top = self.top.min(self.filtered.len().saturating_sub(shown));
+        shown
+    }
+
+    fn visible(&self, shown: usize) -> Vec<&Summary> {
+        let list = self.list();
+        let end = (self.top + shown).min(self.filtered.len());
+        self.filtered[self.top..end]
+            .iter()
+            .map(|index| &list[*index])
+            .collect()
+    }
+
+    fn when(&self, session: &Summary) -> String {
+        let time = if self.created {
+            session.created_at
+        } else {
+            session.modified
+        };
+        relative(time, self.reference)
+    }
+
+    /// `N turns`, once the conversation is read.
+    fn turn_count(&self, path: &Path) -> Vec<String> {
+        match self.previews.get(path) {
+            Some(Preview::Ready(parts)) => {
+                let count = turns(parts).len();
+                vec![format!("{count} {}", plural(count, "turn"))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The selected session's title, where and when, then its turns.
+    fn detail(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let Some(session) = self.current() else {
             return Vec::new();
         };
-        let quote = |spans: Vec<Span<'static>>| {
-            let mut line = vec![Span::raw("  "), Span::styled("│ ", theme.separator)];
-            line.extend(spans);
-            wrap::fit(line, width, true)
-        };
-        let mut lines = Vec::new();
-        if self.details {
-            let metadata = [
-                ("Session", session.id.clone()),
-                ("Created", date_time(session.created_at, self.reference)),
-                ("Updated", date_time(session.modified, self.reference)),
-                (
-                    "Directory",
-                    compact_path(&session.cwd, self.home.as_deref()),
-                ),
-            ];
-            for (key, value) in metadata {
-                lines.push(quote(vec![
-                    Span::styled(format!("{:<12}", format!("{key}:")), theme.dim),
-                    Span::raw(single_line(&value)),
-                ]));
-            }
-            lines.push(quote(Vec::new()));
-        }
+        let title = wrap::wrap(
+            &[Span::styled(
+                title(session),
+                Style::default().add_modifier(Modifier::BOLD),
+            )],
+            width,
+            &[],
+            &[],
+        );
+        let mut lines = clip(title, 2, width);
+        let mut meta = vec![compact_path(&session.cwd, self.home.as_deref())];
+        meta.extend(self.turn_count(&session.path));
+        meta.push(format!(
+            "updated {}",
+            relative(session.modified, self.reference)
+        ));
+        meta.push(format!(
+            "created {}",
+            relative(session.created_at, self.reference)
+        ));
+        lines.push(wrap::fit(
+            vec![Span::styled(meta.join(" · "), theme.dim)],
+            width,
+            true,
+        ));
+        lines.push(Line::from(Span::styled("─".repeat(width), theme.separator)));
         let room = rows.saturating_sub(lines.len());
-        let tail = self.tail(&session.path, room, width.saturating_sub(4).max(1), theme);
-        lines.extend(tail.into_iter().map(|line| quote(line.spans)));
-        lines.truncate(rows);
+        lines.extend(self.digest(&session.path, width, room, theme));
         lines
     }
 
-    /// The conversation's last `rows` rows: the user's words in the secondary tone, the rest
-    /// dim.
-    fn tail(&self, path: &Path, rows: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    /// The newest turns that fit in `rows`, oldest first, under a count of the earlier ones.
+    fn digest(&self, path: &Path, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let notice = |text: String, style: Style| vec![Line::from(Span::styled(text, style))];
         let parts = match self.previews.get(path) {
             None | Some(Preview::Loading) => {
@@ -705,45 +837,45 @@ impl Resume {
             }
             Some(Preview::Ready(parts)) => parts,
         };
-        let inner = width.saturating_sub(2).max(1);
-        let mut lines = Vec::new();
-        for part in parts.iter().rev() {
-            if lines.len() >= rows {
+        let mut blocks: Vec<Vec<Line<'static>>> = turns(parts)
+            .iter()
+            .map(|turn| turn.render(width, theme))
+            .collect();
+        let Some(newest) = blocks.last() else {
+            return notice("No conversation messages yet.".into(), theme.dim);
+        };
+        let mut start = blocks.len();
+        let mut used = 0;
+        while start > 0 {
+            let need = blocks[start - 1].len() + usize::from(start < blocks.len());
+            let header = if start > 1 { 2 } else { 0 };
+            if used + need + header > rows {
                 break;
             }
-            let (marker, style) = if part.kind == PartKind::User {
-                (
-                    Span::styled("› ", theme.secondary),
-                    theme.secondary.add_modifier(Modifier::ITALIC),
-                )
-            } else {
-                (Span::styled("• ", theme.dim), theme.dim)
-            };
-            let rows: Vec<Line<'static>> = layout(part, inner, theme)
-                .into_iter()
-                .enumerate()
-                .map(|(index, line)| {
-                    let mut spans = vec![if index == 0 {
-                        marker.clone()
-                    } else {
-                        Span::raw("  ")
-                    }];
-                    spans.extend(
-                        line.spans
-                            .into_iter()
-                            .map(|span| Span::styled(span.content, span.style.patch(style))),
-                    );
-                    Line::from(spans)
-                })
-                .collect();
-            lines.splice(0..0, rows);
+            used += need;
+            start -= 1;
         }
-        if lines.is_empty() {
-            return notice("No conversation messages yet.".into(), theme.dim);
+        if start == blocks.len() {
+            return newest.iter().take(rows).cloned().collect();
         }
-        lines.split_off(lines.len().saturating_sub(rows))
+        let mut lines = Vec::new();
+        if start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("↑ {start} earlier {}", plural(start, "turn")),
+                theme.dim,
+            )));
+            lines.push(Line::default());
+        }
+        for (index, block) in blocks.drain(start..).enumerate() {
+            if index > 0 {
+                lines.push(Line::default());
+            }
+            lines.extend(block);
+        }
+        lines
     }
 
+    /// The whole conversation; tool calls as one row each.
     fn conversation(&self, path: &Path, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let Some(Preview::Ready(parts)) = self.previews.get(path) else {
             return Vec::new();
@@ -754,16 +886,33 @@ impl Resume {
             if !lines.is_empty() {
                 lines.push(Line::default());
             }
-            let marker = match part.kind {
-                PartKind::User => Span::styled(
-                    "› ",
-                    Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+            let (marker, rows, user, quiet) = match part {
+                Part::User(text) => (
+                    Span::styled(
+                        "› ",
+                        Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+                    ),
+                    plain_rows(text, inner),
+                    true,
+                    false,
                 ),
-                PartKind::Assistant => Span::styled("• ", theme.dim),
-                PartKind::Tool | PartKind::Notice => Span::raw("  "),
+                Part::Assistant(text) => (
+                    Span::styled("• ", theme.dim),
+                    markdown_rows(text, inner, theme),
+                    false,
+                    false,
+                ),
+                Part::Call { name, arguments } => (
+                    Span::styled("◦ ", theme.dim),
+                    vec![Line::from(tools::summary(&call(name, arguments)))],
+                    false,
+                    true,
+                ),
+                Part::Output(text) | Part::Compaction(text) | Part::Notice(text) => {
+                    (Span::raw("  "), plain_rows(text, inner), false, true)
+                }
             };
-            let quiet = matches!(part.kind, PartKind::Tool | PartKind::Notice);
-            for (index, line) in layout(part, inner, theme).into_iter().enumerate() {
+            for (index, line) in rows.into_iter().enumerate() {
                 let mut spans = vec![if index == 0 {
                     marker.clone()
                 } else {
@@ -777,7 +926,7 @@ impl Resume {
                     }
                 }));
                 let line = wrap::fit(spans, width, true);
-                lines.push(if part.kind == PartKind::User {
+                lines.push(if user {
                     pad(line, width, theme.user())
                 } else {
                     line
@@ -794,6 +943,179 @@ impl Resume {
     }
 }
 
+/// What the user asked, the tools that ran for it and the last reply.
+#[derive(Default)]
+struct Turn<'a> {
+    user: Option<&'a str>,
+    calls: Vec<Tool>,
+    compacted: bool,
+    notices: Vec<&'a str>,
+    reply: Option<&'a str>,
+}
+
+impl Turn<'_> {
+    fn is_empty(&self) -> bool {
+        self.user.is_none()
+            && self.calls.is_empty()
+            && !self.compacted
+            && self.notices.is_empty()
+            && self.reply.is_none()
+    }
+
+    /// `Explored 3 files · Ran 1 command · Context compacted`, in the order they first ran.
+    fn activity(&self) -> String {
+        let mut counts: Vec<((&str, Option<&str>), usize)> = Vec::new();
+        for call in &self.calls {
+            let group = tools::tally(call);
+            match counts.iter_mut().find(|(seen, _)| *seen == group) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((group, 1)),
+            }
+        }
+        let mut items: Vec<String> = counts
+            .into_iter()
+            .map(|((verb, noun), count)| match noun {
+                Some(noun) => format!("{verb} {count} {}", plural(count, noun)),
+                None => verb.to_owned(),
+            })
+            .collect();
+        if self.compacted {
+            items.push("Context compacted".into());
+        }
+        items.join(" · ")
+    }
+
+    fn render(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(user) = self.user {
+            let rows = wrap::wrap(
+                &[Span::raw(single_line(user))],
+                width,
+                &[Span::styled(
+                    "› ",
+                    theme.accent.add_modifier(Modifier::BOLD),
+                )],
+                &[Span::raw("  ")],
+            );
+            lines.extend(
+                clip(rows, ASKED, width)
+                    .into_iter()
+                    .map(|line| pad(line, width, theme.user())),
+            );
+        }
+        let quiet = |text: String| {
+            wrap::fit(
+                vec![
+                    Span::raw("  "),
+                    Span::styled("◦ ", theme.dim),
+                    Span::styled(text, theme.dim),
+                ],
+                width,
+                true,
+            )
+        };
+        let activity = self.activity();
+        if !activity.is_empty() {
+            lines.push(quiet(activity));
+        }
+        lines.extend(self.notices.iter().map(|notice| quiet(single_line(notice))));
+        if let Some(reply) = self.reply {
+            let rows = markdown_rows(reply, width.saturating_sub(2).max(1), theme);
+            let more = rows.len().saturating_sub(REPLY);
+            for (index, row) in rows.into_iter().take(REPLY).enumerate() {
+                let marker = if index == 0 {
+                    Span::styled("• ", theme.dim)
+                } else {
+                    Span::raw("  ")
+                };
+                let mut spans = vec![marker];
+                spans.extend(row.spans);
+                lines.push(Line::from(spans));
+            }
+            if more > 0 {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("… {more} more {}", plural(more, "line")),
+                        theme.dim.add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+        }
+        lines
+    }
+}
+
+/// The conversation as turns, each opened by the user's message.
+fn turns(parts: &[Part]) -> Vec<Turn<'_>> {
+    let mut turns = Vec::new();
+    let mut turn = Turn::default();
+    for part in parts {
+        match part {
+            Part::User(text) => turns.push(std::mem::replace(
+                &mut turn,
+                Turn {
+                    user: Some(text),
+                    ..Turn::default()
+                },
+            )),
+            Part::Assistant(text) => turn.reply = Some(text),
+            Part::Call { name, arguments } => turn.calls.push(call(name, arguments)),
+            Part::Compaction(_) => turn.compacted = true,
+            Part::Notice(text) => turn.notices.push(text),
+            Part::Output(_) => {}
+        }
+    }
+    turns.push(turn);
+    turns.retain(|turn| !turn.is_empty());
+    turns
+}
+
+/// A finished call, as the tool cells describe one.
+fn call(name: &str, arguments: &Value) -> Tool {
+    let mut tool = Tool::new(String::new(), name.to_owned(), arguments.clone());
+    tool.output = Some(Value::Null);
+    tool
+}
+
+/// `›` and the title, bold when selected.
+fn heading(session: &Summary, selected: bool, theme: &Theme) -> Vec<Span<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    vec![
+        Span::raw("  "),
+        if selected {
+            Span::styled("› ", theme.accent.add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("  ")
+        },
+        Span::styled(
+            title(session),
+            if selected { bold } else { Style::default() },
+        ),
+    ]
+}
+
+/// At most `rows` lines, the last one ending in `…` when more were cut.
+fn clip(mut lines: Vec<Line<'static>>, rows: usize, width: usize) -> Vec<Line<'static>> {
+    if lines.len() > rows {
+        lines.truncate(rows);
+        if let Some(last) = lines.pop() {
+            let mut spans = last.spans;
+            spans.push(Span::raw("…"));
+            lines.push(wrap::fit(spans, width, true));
+        }
+    }
+    lines
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        noun.to_owned()
+    } else {
+        format!("{noun}s")
+    }
+}
+
 fn pad(mut line: Line<'static>, width: usize, base: Style) -> Line<'static> {
     let used = wrap::line_width(&line);
     line.spans
@@ -804,17 +1126,17 @@ fn pad(mut line: Line<'static>, width: usize, base: Style) -> Line<'static> {
     line
 }
 
-/// A part's rows: Markdown for the assistant, plain wrapped text for the rest.
-fn layout(part: &Part, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let text = plain(&part.text);
-    if part.kind == PartKind::Assistant {
-        let mut lines = markdown::render(&text, width, theme);
-        while lines.last().is_some_and(|line| wrap::line_width(line) == 0) {
-            lines.pop();
-        }
-        return lines;
+fn markdown_rows(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = markdown::render(&plain(text), width, theme);
+    while lines.last().is_some_and(|line| wrap::line_width(line) == 0) {
+        lines.pop();
     }
-    text.split('\n')
+    lines
+}
+
+fn plain_rows(text: &str, width: usize) -> Vec<Line<'static>> {
+    plain(text)
+        .split('\n')
         .flat_map(|line| wrap::wrap(&[Span::raw(line.to_owned())], width, &[], &[]))
         .collect()
 }
@@ -896,7 +1218,8 @@ pub(crate) fn hint_line(text: &str, width: usize, theme: &Theme) -> Line<'static
     wrap::fit(spans, width, true)
 }
 
-/// `now`, minutes, hours or days ago, then the date after 30 days.
+/// `now`, minutes, hours or days ago, then `Oct 09` after 30 days, with the year when it
+/// differs.
 pub fn relative(time: u64, reference: u64) -> String {
     if time == 0 {
         return "unknown".into();
@@ -909,16 +1232,17 @@ pub fn relative(time: u64, reference: u64) -> String {
         1440..43200 => format!("{}d ago", minutes / 1440),
         _ => {
             let (year, month, day) = civil(time);
-            format!("{year:04}-{month:02}-{day:02}")
+            if year == civil(reference).0 {
+                const MONTHS: [&str; 12] = [
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                    "Dec",
+                ];
+                format!("{} {day:02}", MONTHS[month as usize - 1])
+            } else {
+                format!("{year:04}-{month:02}-{day:02}")
+            }
         }
     }
-}
-
-fn date_time(time: u64, reference: u64) -> String {
-    if time == 0 {
-        return "unknown".into();
-    }
-    format!("{} · {}", relative(time, reference), local(time))
 }
 
 /// The UTC calendar date of a Unix millisecond time.
@@ -938,38 +1262,6 @@ fn civil(time: u64) -> (i64, u32, u32) {
     } as u32;
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
-}
-
-/// `YYYY-MM-DD HH:MM:SS` in local time.
-fn local(time: u64) -> String {
-    {
-        let seconds = libc::time_t::try_from(time / 1000).unwrap_or_default();
-        // SAFETY: `tm` is plain data that the converter fills; both pointers outlive the call.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        #[cfg(unix)]
-        let converted = !unsafe { libc::localtime_r(&seconds, &mut tm) }.is_null();
-        #[cfg(windows)]
-        let converted = unsafe { libc::localtime_s(&mut tm, &seconds) } == 0;
-        if converted {
-            return format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                tm.tm_year + 1900,
-                tm.tm_mon + 1,
-                tm.tm_mday,
-                tm.tm_hour,
-                tm.tm_min,
-                tm.tm_sec
-            );
-        }
-    }
-    let (year, month, day) = civil(time);
-    let seconds = time / 1000 % 86_400;
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
-        seconds / 3600,
-        seconds / 60 % 60,
-        seconds % 60
-    )
 }
 
 #[cfg(test)]
