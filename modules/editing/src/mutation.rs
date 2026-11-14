@@ -42,7 +42,10 @@ fn changed(path: &Path) -> ToolError {
         path.display()
     ))
 }
-fn read_all(file: &mut File, cancel: &CancellationToken) -> Result<Vec<u8>, ToolError> {
+pub(crate) fn read_all(
+    file: &mut impl Read,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, ToolError> {
     let mut bytes = Vec::new();
     let mut chunk = [0; 65536];
     loop {

@@ -10,7 +10,13 @@ use tiechui_plugin_api::tools::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{EditingState, check, mutation::open_nofollow, read_path, state::version, string};
+use crate::{
+    EditingState, check,
+    mutation::{open_nofollow, read_all},
+    read_path,
+    state::version,
+    string,
+};
 
 const ZERO_LEN_STREAM_CAP: u64 = 8 * 1024 * 1024;
 
@@ -39,19 +45,7 @@ pub(crate) fn open_regular(path: &Path) -> Result<Take<File>, ToolError> {
 }
 
 fn read_bytes(path: &Path, cancel: &CancellationToken) -> Result<Vec<u8>, ToolError> {
-    let mut file = open_regular(path)?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 65536];
-    loop {
-        check(cancel)?;
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-    }
-    check(cancel)?;
-    Ok(bytes)
+    read_all(&mut open_regular(path)?, cancel)
 }
 
 // Keep only incomplete UTF-8 between reads, matching Node's replacement decoder.

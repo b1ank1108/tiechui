@@ -364,6 +364,12 @@ mod tests {
     use tiechui_session::ModelRef;
     use tokio_util::sync::CancellationToken;
 
+    fn store() -> (tempfile::TempDir, SessionStore) {
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let store =
+            SessionStore::create(temp.path(), temp.path(), &CancellationToken::new()).unwrap();
+        (temp, store)
+    }
     fn append(store: &mut SessionStore, role: Role, content: Vec<Content>) -> String {
         store
             .append(
@@ -397,9 +403,7 @@ mod tests {
 
     #[test]
     fn cuts_keep_tool_pairs_and_images_and_track_file_operations() {
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let mut store =
-            SessionStore::create(temp.path(), temp.path(), &CancellationToken::new()).unwrap();
+        let (_temp, mut store) = store();
         append(&mut store, Role::User, vec![text("old request")]);
         append(
             &mut store,
@@ -500,9 +504,7 @@ mod tests {
 
     #[test]
     fn trailing_unanswered_user_message_is_never_summarized() {
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let mut store =
-            SessionStore::create(temp.path(), temp.path(), &CancellationToken::new()).unwrap();
+        let (_temp, mut store) = store();
         append(&mut store, Role::User, vec![text("old request")]);
         append(&mut store, Role::Assistant, vec![text("old answer")]);
         let pending = "unanswered request ".repeat(200);

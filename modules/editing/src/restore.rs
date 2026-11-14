@@ -197,17 +197,8 @@ fn fit(
         .map(|(index, _)| index + 1)
         .chain((!body.ends_with('\n')).then_some(body.len()))
         .collect();
-    let fits = |count: usize| estimate(&render(ends[count - 1])) <= limit;
-    let (mut low, mut high) = (0, ends.len());
-    while low < high {
-        let middle = (low + high).div_ceil(2);
-        if fits(middle) {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-    (low > 0).then(|| render(ends[low - 1]))
+    let count = ends.partition_point(|&end| estimate(&render(end)) <= limit);
+    (count > 0).then(|| render(ends[count - 1]))
 }
 
 fn escape(value: &str) -> String {
