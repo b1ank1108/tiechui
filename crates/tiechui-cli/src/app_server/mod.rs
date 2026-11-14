@@ -62,6 +62,8 @@ struct Server {
     clients: Arc<Mutex<HashMap<u64, ClientOut>>>,
     next_client: AtomicU64,
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
+    reloading: tokio::sync::Mutex<()>,
+    config_gen: AtomicU64,
     schedules: tiechui_module_loop::Schedules,
     next: AtomicU64,
     /// Wakes the archiving of inactive sessions early.
@@ -471,6 +473,8 @@ impl Server {
             clients,
             next_client: AtomicU64::new(1),
             sessions: Mutex::default(),
+            reloading: tokio::sync::Mutex::new(()),
+            config_gen: AtomicU64::new(0),
             schedules: Default::default(),
             next: AtomicU64::new(1),
             sweep: Notify::new(),
@@ -502,22 +506,38 @@ impl Server {
         }
     }
 
+    fn busy_sessions(&self) -> usize {
+        lock(&self.sessions)
+            .values()
+            .filter(|live| lock(&live.projection).busy())
+            .count()
+    }
+
+    fn alive_terminals(&self) -> usize {
+        #[cfg(feature = "workspace")]
+        {
+            self.workspace.alive_terminals()
+        }
+        #[cfg(not(feature = "workspace"))]
+        {
+            0
+        }
+    }
+
+    fn daemon_status(&self) -> DaemonStatus {
+        DaemonStatus {
+            pid: std::process::id(),
+            server_version: env!("CARGO_PKG_VERSION").into(),
+            protocol_version: APP_PROTOCOL_VERSION,
+            connected_clients: lock(&self.clients).len(),
+            busy_sessions: self.busy_sessions(),
+            alive_terminals: self.alive_terminals(),
+        }
+    }
+
     #[cfg(unix)]
     fn is_idle(&self) -> bool {
-        if !lock(&self.clients).is_empty() {
-            return false;
-        }
-        if lock(&self.sessions)
-            .values()
-            .any(|live| lock(&live.projection).busy())
-        {
-            return false;
-        }
-        #[cfg(feature = "workspace")]
-        if self.workspace.alive_terminals() > 0 {
-            return false;
-        }
-        true
+        lock(&self.clients).is_empty() && self.busy_sessions() == 0 && self.alive_terminals() == 0
     }
 
     async fn shutdown_all(&self) {
@@ -564,6 +584,7 @@ impl Server {
     ) {
         let reply = match method {
             "initialize" => self.initialize(params),
+            "daemon/status" => value(self.daemon_status()),
             "session/list" => self.list(params).await,
             "session/open" | "session/fork" | "session/reload" | "session/snapshot" => {
                 let opened = match method {
@@ -650,7 +671,7 @@ impl Server {
             }
             #[cfg(feature = "workspace")]
             _ if workspace::handles(method) => {
-                workspace::dispatch(&self.workspace, client_id, method, params).await
+                workspace::dispatch(&self.home, &self.workspace, client_id, method, params).await
             }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
         };
@@ -952,6 +973,8 @@ impl Server {
 
     /// Starts the session again from its file, so configuration and modules reload.
     async fn reload(self: &Arc<Self>, thread: &ThreadId) -> Result<Arc<Live>, rpc::Error> {
+        let guard = self.reloading.lock().await;
+        let generation = self.config_gen.load(Ordering::SeqCst);
         let live = self.live(thread)?;
         let options = Options {
             mode: mode(&live),
@@ -959,7 +982,7 @@ impl Server {
         };
         let epoch = SessionEpoch(lock(&live.projection).epoch.0 + 1);
         self.close(thread).await;
-        Ok(self
+        let reloaded = self
             .start(
                 options,
                 Open::Path(live.path.clone()),
@@ -967,17 +990,24 @@ impl Server {
                 Some(live.projection.clone()),
             )
             .await?
-            .1)
+            .1;
+        drop(guard);
+        if self.config_gen.load(Ordering::SeqCst) != generation {
+            reloaded.stale.store(true, Ordering::SeqCst);
+            self.settle(thread, &reloaded);
+        }
+        Ok(reloaded)
     }
 
     /// Marks each open session stale so it reloads the changed configuration.
     fn refresh(self: &Arc<Self>) {
+        self.config_gen.fetch_add(1, Ordering::SeqCst);
         let open: Vec<_> = lock(&self.sessions)
             .iter()
             .map(|(thread, live)| (thread.clone(), live.clone()))
             .collect();
         for (thread, live) in open {
-            live.stale.store(true, Ordering::Relaxed);
+            live.stale.store(true, Ordering::SeqCst);
             self.settle(&thread, &live);
         }
     }
@@ -985,7 +1015,7 @@ impl Server {
     /// Reloads a stale session, unless that would cut off a turn, an approval, a compaction
     /// or queued input; it is tried again as each ends.
     fn settle(self: &Arc<Self>, thread: &ThreadId, live: &Live) {
-        if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::Relaxed) {
+        if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::SeqCst) {
             return;
         }
         let server = self.clone();
@@ -1239,4 +1269,160 @@ fn turn_end(store: &SessionStore, item: &str) -> Result<String, String> {
 /// As replayed threads divide turns.
 fn starts_turn(entry: &Entry) -> bool {
     matches!(&entry.kind, EntryKind::Message { message, .. } if message.role == Role::User)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tiechui_protocol::{Turn, TurnId, TurnStatus};
+
+    async fn rpc_status(
+        server: &Arc<Server>,
+        client_id: u64,
+        out: &ClientOut,
+        lines: &mut mpsc::UnboundedReceiver<String>,
+    ) -> DaemonStatus {
+        server
+            .dispatch(client_id, out, Id::Number(1), "daemon/status", json!({}))
+            .await;
+        loop {
+            let raw = lines.recv().await.expect("missing daemon/status reply");
+            let reply: Value = serde_json::from_str(&raw).unwrap();
+            if reply.get("id") != Some(&json!(1)) {
+                continue;
+            }
+            assert!(
+                reply.get("error").is_none(),
+                "unexpected rpc error: {reply}"
+            );
+            return serde_json::from_value(reply["result"].clone()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_status_counts_clients_busy_sessions_and_terminals() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::new(dir.path().join("home"));
+
+        let (c1, out1, mut lines1) = server.add_client();
+        let initial = rpc_status(&server, c1, &out1, &mut lines1).await;
+        assert_eq!(initial.pid, std::process::id());
+        assert_eq!(initial.server_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(initial.protocol_version, APP_PROTOCOL_VERSION);
+        assert_eq!(initial.connected_clients, 1);
+        assert_eq!(initial.busy_sessions, 0);
+        assert_eq!(initial.alive_terminals, 0);
+
+        let (c2, _out2, _lines2) = server.add_client();
+        assert_eq!(
+            rpc_status(&server, c1, &out1, &mut lines1)
+                .await
+                .connected_clients,
+            2
+        );
+
+        let projection = Arc::new(Mutex::new(Projection::default()));
+        let (submissions, _rx) = mpsc::channel(1);
+        let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
+        let thread = ThreadId("t-unit".into());
+        lock(&server.sessions).insert(
+            thread.clone(),
+            Arc::new(Live {
+                path: dir.path().join("session.jsonl"),
+                cwd: dir.path().to_path_buf(),
+                submissions,
+                shutdown: CancellationToken::new(),
+                projection: projection.clone(),
+                started,
+                pump: Mutex::new(None),
+                stale: AtomicBool::new(false),
+            }),
+        );
+        assert_eq!(
+            rpc_status(&server, c1, &out1, &mut lines1)
+                .await
+                .busy_sessions,
+            0
+        );
+
+        lock(&projection).apply(&Event {
+            submission_id: None,
+            thread_id: thread.clone(),
+            epoch: SessionEpoch(1),
+            event: EventKind::TurnStarted {
+                turn: Turn {
+                    id: TurnId("turn-1".into()),
+                    status: TurnStatus::InProgress,
+                    items: vec![],
+                    started_at: 1,
+                    ended_at: None,
+                },
+            },
+        });
+        assert_eq!(
+            rpc_status(&server, c1, &out1, &mut lines1)
+                .await
+                .busy_sessions,
+            1
+        );
+
+        lock(&projection).apply(&Event {
+            submission_id: None,
+            thread_id: thread.clone(),
+            epoch: SessionEpoch(1),
+            event: EventKind::TurnCompleted {
+                turn: Turn {
+                    id: TurnId("turn-1".into()),
+                    status: TurnStatus::Completed,
+                    items: vec![],
+                    started_at: 1,
+                    ended_at: Some(2),
+                },
+            },
+        });
+        assert_eq!(
+            rpc_status(&server, c1, &out1, &mut lines1)
+                .await
+                .busy_sessions,
+            0
+        );
+
+        #[cfg(feature = "workspace")]
+        {
+            server
+                .workspace
+                .create_terminal(tiechui_protocol::workspace::TerminalCreateParams {
+                    id: "unit-term".into(),
+                    cwd: dir.path().display().to_string(),
+                    cols: 80,
+                    rows: 24,
+                    env: None,
+                })
+                .unwrap();
+            assert_eq!(
+                rpc_status(&server, c1, &out1, &mut lines1)
+                    .await
+                    .alive_terminals,
+                1
+            );
+            server.workspace.kill_terminal("unit-term");
+            assert_eq!(
+                rpc_status(&server, c1, &out1, &mut lines1)
+                    .await
+                    .alive_terminals,
+                0
+            );
+        }
+
+        server.remove_client(c2);
+        assert_eq!(
+            rpc_status(&server, c1, &out1, &mut lines1)
+                .await
+                .connected_clients,
+            1
+        );
+        server.remove_client(c1);
+        server.shutdown_all().await;
+    }
 }

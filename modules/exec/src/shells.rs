@@ -1,5 +1,6 @@
 //! Session-owned shell tasks: one supervisor per process group, foreground or background.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,7 +10,7 @@ use tiechui_plugin_api::{
     serde_json::{Value, json},
     tools::{
         ToolOrigin, ToolUpdate,
-        bash::{Outcome, run_bash, sanitize_binary_output},
+        bash::{Outcome, run_bash_with_env, sanitize_binary_output},
         exec::StopReason,
         output::OutputAccumulator,
     },
@@ -165,6 +166,7 @@ pub(crate) struct Read {
 pub(crate) struct Shells {
     state: Mutex<State>,
     changes: watch::Sender<u64>,
+    env: BTreeMap<String, String>,
 }
 
 pub(crate) fn now() -> i64 {
@@ -187,6 +189,13 @@ pub(crate) fn summary(task: &ShellTask) -> String {
 }
 
 impl Shells {
+    pub fn with_env(env: BTreeMap<String, String>) -> Self {
+        Self {
+            env,
+            ..Self::default()
+        }
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, State>, ToolError> {
         self.state.lock().map_err(|e| ToolError(e.to_string()))
     }
@@ -588,10 +597,11 @@ async fn supervise(
     cancel: CancellationToken,
     output: Arc<Mutex<OutputAccumulator>>,
 ) {
-    let outcome = run_bash(
+    let outcome = run_bash_with_env(
         &command,
         timeout,
         &cwd,
+        &shells.env,
         cancel,
         &output,
         || {

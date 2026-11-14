@@ -30,6 +30,17 @@ pub struct InitializeResult {
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonStatus {
+    pub pid: u32,
+    pub server_version: String,
+    pub protocol_version: u32,
+    pub connected_clients: usize,
+    pub busy_sessions: usize,
+    pub alive_terminals: usize,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionListParams {
     pub cwd: String,
     /// Include archived sessions.

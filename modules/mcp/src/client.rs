@@ -90,12 +90,16 @@ async fn connect(
     }
     match (&config.command, &config.url) {
         (Some(command), None) => {
+            let mut env = network.subprocess_env();
+            for (key, value) in &config.env {
+                env.insert(key.clone(), value.clone());
+            }
             let mut group = ProcessGroup::spawn(
                 std::path::Path::new(command),
                 &config.args,
                 &config.cwd.as_ref().map_or(cwd.clone(), |p| cwd.join(p)),
                 &config.env_vars,
-                &config.env,
+                &env,
             )?;
             let stdout = group
                 .child
@@ -258,12 +262,12 @@ pub(super) async fn run_server(
         } else {
             ServerState::Failed
         };
-        server.status.error = result.err().map(|e| e.0);
+        server.status.error = result.err().map(|e| inner.network.redact(e.0));
     }
 }
 
 fn error(error: impl std::fmt::Display) -> ToolError {
-    ToolError(error.to_string())
+    ToolError(tiechui_plugin_api::redact_proxy_secrets(&error.to_string()))
 }
 
 pub(super) async fn request(

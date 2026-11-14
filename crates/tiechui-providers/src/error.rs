@@ -28,7 +28,7 @@ impl ProviderError {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
-            message: message.into(),
+            message: tiechui_config::redact_proxy_secrets(&message.into()),
             retry_after: None,
         }
     }
@@ -117,7 +117,10 @@ pub(crate) fn classify(
     };
     ProviderError {
         kind,
-        message: message.chars().take(2048).collect(),
+        message: tiechui_config::redact_proxy_secrets(&message)
+            .chars()
+            .take(2048)
+            .collect(),
         retry_after,
     }
 }

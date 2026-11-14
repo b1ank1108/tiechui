@@ -515,6 +515,123 @@ async fn requests_go_through_the_configured_proxy() {
     assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
 }
 
+async fn assert_proxy_forwards_models(config: &ProviderConfig, proxy_url: String) {
+    let network = tiechui_config::NetworkConfig {
+        proxy: Some(proxy_url),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        crate::list_models(config, &network, &cancel).await.unwrap(),
+        ["m1"]
+    );
+}
+
+async fn assert_proxy_fails_closed(
+    config: &ProviderConfig,
+    upstream: &MockServer,
+    proxy_url: String,
+    secret: &str,
+) {
+    let before = upstream.received_requests().await.unwrap().len();
+    let network = tiechui_config::NetworkConfig {
+        proxy: Some(proxy_url),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let err = crate::list_models(config, &network, &cancel)
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().contains(secret), "{err}");
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before,
+        "failed proxy request must fail closed and never fall back to direct"
+    );
+}
+
+async fn start_models_upstream() -> (MockServer, ProviderConfig) {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "m1"}]})))
+        .mount(&upstream)
+        .await;
+    let config = ProviderConfig {
+        wire: Wire::OpenaiCompletions,
+        api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
+        models: vec![],
+        ..super::config(&upstream.uri())
+    };
+    (upstream, config)
+}
+
+#[tokio::test]
+async fn socks5_and_http_proxies_forward_fail_closed_and_redact_credentials() {
+    use tiechui_config::test_support::Socks5TestProxy;
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let (upstream, config) = start_models_upstream().await;
+        let mut socks_noauth = Socks5TestProxy::start(None);
+        assert_proxy_forwards_models(&config, format!("socks5://{}", socks_noauth.addr())).await;
+        assert_eq!(socks_noauth.hits(), 1);
+
+        let mut socks_auth = Socks5TestProxy::start(Some(("alice", "s3cr3t-pass")));
+        let auth_addr = socks_auth.addr();
+        assert_proxy_forwards_models(&config, format!("socks5://alice:s3cr3t-pass@{auth_addr}"))
+            .await;
+        assert_eq!(socks_auth.hits(), 1);
+
+        let wrong_url = format!("socks5://alice:wrong-pass@{auth_addr}");
+        assert_proxy_fails_closed(&config, &upstream, wrong_url, "wrong-pass").await;
+
+        socks_noauth.shutdown();
+        socks_auth.shutdown();
+        let closed_url = format!("socks5://alice:s3cr3t-pass@{auth_addr}");
+        assert_proxy_fails_closed(&config, &upstream, closed_url, "s3cr3t-pass").await;
+        assert_http_407_and_bypass(&config, &upstream, auth_addr).await;
+    })
+    .await
+    .expect("socks5/http proxy test timed out");
+}
+
+async fn assert_http_407_and_bypass(
+    config: &ProviderConfig,
+    upstream: &MockServer,
+    closed_addr: std::net::SocketAddr,
+) {
+    let proxy_407 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(407))
+        .mount(&proxy_407)
+        .await;
+    assert_proxy_fails_closed(
+        config,
+        upstream,
+        format!("http://alice:s3cr3t-pass@{}", proxy_407.address()),
+        "s3cr3t-pass",
+    )
+    .await;
+
+    let before = upstream.received_requests().await.unwrap().len();
+    let bypassed = tiechui_config::NetworkConfig {
+        proxy: Some(format!("socks5://alice:s3cr3t-pass@{closed_addr}")),
+        no_proxy: Some("127.0.0.1".into()),
+        ca_cert: None,
+    };
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        crate::list_models(config, &bypassed, &cancel)
+            .await
+            .unwrap(),
+        ["m1"]
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
+}
+
 #[test]
 fn tool_results_and_images_request() {
     let mut request = request();

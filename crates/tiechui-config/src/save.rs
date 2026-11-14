@@ -15,6 +15,19 @@ use crate::{
 /// Edit one dotted TOML key, retaining surrounding comments and unrelated formatting.
 /// Quoted key segments are supported. Configuration validation happens when loading.
 pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), ConfigError> {
+    let mut force_private = false;
+    if key == "network.proxy"
+        && let Some(raw) = value.as_str()
+    {
+        match crate::normalize_proxy_url(raw) {
+            Ok(Some(normalized)) => {
+                force_private = crate::proxy_has_credentials(&normalized);
+                value = Value::from(normalized);
+            }
+            Ok(None) => return remove_preference(path, key),
+            Err(message) => return Err(ConfigError::new(path, "network", message)),
+        }
+    }
     let original = read_optional(path)?;
     let text = original.as_deref().unwrap_or("");
     let document =
@@ -37,7 +50,7 @@ pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), C
             .map_err(|message| ConfigError::new(path, key, message))?;
         preserve_unchanged_text(text, &document.to_string())
     };
-    replace(path, key, original, &rendered)
+    replace_with_mode(path, key, original, &rendered, force_private)
 }
 
 /// Removes one dotted TOML key, retaining surrounding comments and unrelated formatting.
@@ -369,18 +382,54 @@ fn replace(
     original: Option<String>,
     rendered: &str,
 ) -> Result<(), ConfigError> {
+    replace_with_mode(path, key, original, rendered, false)
+}
+
+fn replace_with_mode(
+    path: &Path,
+    key: &str,
+    original: Option<String>,
+    rendered: &str,
+    force_private: bool,
+) -> Result<(), ConfigError> {
     if original.as_deref() == Some(rendered) {
-        return Ok(());
+        return if force_private {
+            set_private_permissions(path, key)
+        } else {
+            Ok(())
+        };
     }
-    let target = if original.is_some() {
-        fs::canonicalize(path).map_err(|error| ConfigError::new(path, key, error.to_string()))?
-    } else {
-        path.to_owned()
+    let target = match &original {
+        Some(_) => fs::canonicalize(path)
+            .map_err(|error| ConfigError::new(path, key, error.to_string()))?,
+        None => path.to_owned(),
     };
     let parent = target
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
+        .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    create_parent_dir(parent, path, key)?;
+    let permissions = original
+        .is_some()
+        .then(|| target_permissions(&target, path, key, force_private))
+        .transpose()?;
+    let temporary = stage_temp_file(parent, path, key, rendered, permissions)?;
+    persist_if_unchanged(temporary, path, &target, key, &original)
+}
+
+fn set_private_permissions(path: &Path, key: &str) -> Result<(), ConfigError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, key);
+    Ok(())
+}
+
+fn create_parent_dir(parent: &Path, err_path: &Path, key: &str) -> Result<(), ConfigError> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -390,28 +439,56 @@ fn replace(
     }
     builder
         .create(parent)
-        .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
-    temporary
-        .write_all(rendered.as_bytes())
-        .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
-    if original.is_some() {
-        let permissions = fs::metadata(&target)
-            .map_err(|error| ConfigError::new(path, key, error.to_string()))?
-            .permissions();
+        .map_err(|error| ConfigError::new(err_path, key, error.to_string()))
+}
+
+fn target_permissions(
+    target: &Path,
+    err_path: &Path,
+    key: &str,
+    force_private: bool,
+) -> Result<fs::Permissions, ConfigError> {
+    #[cfg(unix)]
+    if force_private {
+        use std::os::unix::fs::PermissionsExt;
+        return Ok(fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = force_private;
+    fs::metadata(target)
+        .map(|meta| meta.permissions())
+        .map_err(|error| ConfigError::new(err_path, key, error.to_string()))
+}
+
+fn stage_temp_file(
+    parent: &Path,
+    err_path: &Path,
+    key: &str,
+    rendered: &str,
+    permissions: Option<fs::Permissions>,
+) -> Result<tempfile::NamedTempFile, ConfigError> {
+    let io_err = |error: std::io::Error| ConfigError::new(err_path, key, error.to_string());
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io_err)?;
+    temporary.write_all(rendered.as_bytes()).map_err(io_err)?;
+    if let Some(permissions) = permissions {
         temporary
             .as_file()
             .set_permissions(permissions)
-            .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
+            .map_err(io_err)?;
     }
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| ConfigError::new(path, key, error.to_string()))?;
-    if read_optional(path)? != original
-        || (original.is_some() && fs::canonicalize(path).ok().as_ref() != Some(&target))
-    {
+    temporary.as_file().sync_all().map_err(io_err)?;
+    Ok(temporary)
+}
+
+fn persist_if_unchanged(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    target: &Path,
+    key: &str,
+    original: &Option<String>,
+) -> Result<(), ConfigError> {
+    let target_moved = original.is_some() && fs::canonicalize(path).ok().as_deref() != Some(target);
+    if read_optional(path)?.as_ref() != original.as_ref() || target_moved {
         return Err(ConfigError::new(
             path,
             key,
@@ -419,9 +496,9 @@ fn replace(
         ));
     }
     temporary
-        .persist(&target)
-        .map_err(|error| ConfigError::new(path, key, error.error.to_string()))?;
-    Ok(())
+        .persist(target)
+        .map(|_| ())
+        .map_err(|error| ConfigError::new(path, key, error.error.to_string()))
 }
 
 fn preserve_unchanged_text(original: &str, rendered: &str) -> String {

@@ -26,6 +26,7 @@ wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta.workspace = true
+tiechui-config = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
 wiremock.workspace = true
 

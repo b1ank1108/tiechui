@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <b>简体中文</b> · <a href="https://b1ank1108.github.io/tiechui/">界面一览</a>
+  <a href="README.md">English</a> · <b>简体中文</b> · <a href="https://tiechui-f0d.pages.dev/">官网</a>
 </p>
 
 <p align="center">
@@ -323,9 +323,9 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 
 ## 界面一览
 
-[界面一览](https://b1ank1108.github.io/tiechui/)逐屏展示终端界面，覆盖深色和浅色主题、
-80 和 40 列以及三种色彩级别，由 TUI 快照测试逐格渲染。源码在 [`site/`](site/)；快照变化后
-运行 `python3 scripts/ui_gallery.py` 刷新数据，`.github/workflows/pages.yml` 从 `main` 发布。
+[官网](https://tiechui-f0d.pages.dev/)文档里的
+[界面一览](https://tiechui-f0d.pages.dev/docs.html#ui-transcript)逐屏展示终端界面，
+覆盖深色和浅色主题、80 和 40 列以及三种色彩级别，由 TUI 快照测试逐格渲染。官网不在本仓库维护。
 
 ## 权限与信任
 
@@ -504,7 +504,6 @@ just plugins-check                          # 存在 ../tiechui-plugins 时校�
 | `crates/tiechui-plugin-api`、`tiechui-plugin-sdk`、`sdk/typescript` | 模块 API、插件 SDK |
 | `modules/` | editing、exec、permissions、ask、hooks、context-files、skills、prompts、mcp、plugins、context、rewind、btw、goal、loop、compaction、subagents、tool-search、ptc |
 | `xtask/`、`scripts/`、`tests/` | 维护任务、打包、PTY 测试 |
-| `site/` | 由 TUI 快照渲染的界面一览 |
 
 功能都以模块形式放在 `tiechui-plugin-api` 之后。内核不携带功能策略，TUI 只依赖协议。
 会话 actor 见 [crates/tiechui-core](crates/tiechui-core/README.md)。

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
@@ -59,6 +60,30 @@ pub async fn execute(
     timeout: Option<Duration>,
     cancel: CancellationToken,
     on_spawn: impl FnOnce() + Send,
+    on_data: impl FnMut(&[u8]) -> io::Result<()> + Send,
+) -> io::Result<ProcessResult> {
+    execute_with_env(
+        shell,
+        command_text,
+        cwd,
+        &BTreeMap::new(),
+        timeout,
+        cancel,
+        on_spawn,
+        on_data,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_with_env(
+    shell: &Path,
+    command_text: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    timeout: Option<Duration>,
+    cancel: CancellationToken,
+    on_spawn: impl FnOnce() + Send,
     mut on_data: impl FnMut(&[u8]) -> io::Result<()> + Send,
 ) -> io::Result<ProcessResult> {
     if cancel.is_cancelled() {
@@ -74,6 +99,7 @@ pub async fn execute(
         .arg("-c")
         .arg(command_text)
         .current_dir(cwd)
+        .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(writer.try_clone()?))
         .stderr(Stdio::from(writer));

@@ -324,7 +324,7 @@ fn network_sessions_and_skills_are_user_only_and_validated() {
             "sessions.archive_after_days",
         ),
         ("[network]\nproxy='not a url'\n", "network"),
-        ("[network]\nproxy='socks5://127.0.0.1:1080'\n", "network"),
+        ("[network]\nproxy='ftp://127.0.0.1:21'\n", "network"),
     ] {
         fs::write(&paths.user, text).unwrap();
         assert_eq!(
@@ -1537,4 +1537,255 @@ fn provider_and_model_edits_keep_other_keys_and_reject_invalid_results() {
             0o600
         );
     }
+}
+
+#[test]
+fn proxy_schemes_normalize_and_reject_invalid_urls() {
+    let temp = temp_dir();
+    let paths = ConfigPaths {
+        user: temp.path().join("config.toml"),
+        project: None,
+    };
+
+    for (input, expected) in [
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        (
+            "https://u:p@proxy.example.com:8443",
+            "https://u:p@proxy.example.com:8443",
+        ),
+        ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+        (
+            "socks5://u:s3cr3t@127.0.0.1:1080",
+            "socks5://u:s3cr3t@127.0.0.1:1080",
+        ),
+        ("127.0.0.1:7890", "http://127.0.0.1:7890"),
+        ("proxy.example.com:8080", "http://proxy.example.com:8080"),
+        ("[::1]:1080", "http://[::1]:1080"),
+    ] {
+        fs::write(&paths.user, format!("[network]\nproxy = '{input}'\n")).unwrap();
+        let loaded = load(&paths, false, &toml::Table::new()).unwrap();
+        assert_eq!(
+            loaded.config.network.proxy.as_deref(),
+            Some(expected),
+            "{input}"
+        );
+    }
+
+    for invalid in [
+        "ftp://127.0.0.1:21",
+        "socks4://127.0.0.1:1080",
+        "http://:8080",
+        ":8080",
+        "127.0.0.1:0",
+        "http://127.0.0.1:0",
+        "127.0.0.1:99999",
+        "localhost",
+        "u:leak-me-not@:99999",
+    ] {
+        fs::write(&paths.user, format!("[network]\nproxy = '{invalid}'\n")).unwrap();
+        let err = load(&paths, false, &toml::Table::new()).unwrap_err();
+        assert_eq!(err.key, "network", "{invalid}");
+        assert!(
+            !err.to_string().contains("leak-me-not"),
+            "error leaked password: {err}"
+        );
+    }
+}
+
+#[test]
+fn proxy_credentials_redact_debug_and_secure_permissions() {
+    let temp = temp_dir();
+    let paths = ConfigPaths {
+        user: temp.path().join("config.toml"),
+        project: None,
+    };
+    fs::write(
+        &paths.user,
+        "[network]\nproxy = 'socks5://alice:super-secret-pass@127.0.0.1:1080'\n",
+    )
+    .unwrap();
+    let loaded = load(&paths, false, &toml::Table::new()).unwrap();
+    let debug_text = format!("{:?}", loaded.config.network);
+    assert!(
+        !debug_text.contains("super-secret-pass"),
+        "Debug leaked inline proxy password: {debug_text}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&paths.user, "model = 'local/small'\n").unwrap();
+        fs::set_permissions(&paths.user, fs::Permissions::from_mode(0o644)).unwrap();
+        save_preference(&paths.user, "network.no_proxy", "localhost".into()).unwrap();
+        assert_eq!(
+            fs::metadata(&paths.user).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        save_preference(
+            &paths.user,
+            "network.proxy",
+            "socks5://u:s3cr3t@127.0.0.1:1080".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&paths.user).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn redact_replaces_percent_encoded_and_decoded_passwords() {
+    let network = NetworkConfig {
+        proxy: Some("http://u:p%40ss%3A1@127.0.0.1:8080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        network.redact(
+            "proxy auth failed for p@ss:1 (encoded p%40ss%3A1) via http://u:p%40ss%3A1@127.0.0.1:8080"
+        ),
+        "proxy auth failed for <redacted> (encoded <redacted>) via http://u:<redacted>@127.0.0.1:8080"
+    );
+
+    let utf8_network = NetworkConfig {
+        proxy: Some("socks5://u:p%C3%A4ss@127.0.0.1:1080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        utf8_network.redact("rejected päss and p%C3%A4ss"),
+        "rejected <redacted> and <redacted>"
+    );
+
+    let nested = NetworkConfig {
+        proxy: Some("http://u:%2525@127.0.0.1:8080".into()),
+        no_proxy: None,
+        ca_cert: None,
+    };
+    assert_eq!(
+        nested.redact("raw %2525 decoded %25"),
+        "raw <redacted> decoded <redacted>"
+    );
+}
+
+use crate::test_support::TEST_CA_PEM;
+
+fn assert_tilde_ca_cert_cases(home: &Path) {
+    let ca_only = |p: &str| NetworkConfig {
+        ca_cert: Some(PathBuf::from(p)),
+        ..Default::default()
+    };
+    for (configured, expected) in [
+        ("~/certs/corp-ca.pem", home.join("certs/corp-ca.pem")),
+        ("~\\root-ca.pem", home.join("root-ca.pem")),
+    ] {
+        let network = ca_only(configured);
+        let env = network.subprocess_env();
+        let expected_str = expected.display().to_string();
+        for key in [
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert_eq!(env.get(key), Some(&expected_str), "{configured} {key}");
+        }
+        network
+            .apply(reqwest::Client::builder())
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    let bare_tilde = ca_only("~");
+    let home_str = home.display().to_string();
+    assert_eq!(
+        bare_tilde.subprocess_env().get("SSL_CERT_FILE"),
+        Some(&home_str)
+    );
+    let err = bare_tilde.apply(reqwest::Client::builder()).unwrap_err();
+    assert!(err.contains(&home_str), "{err}");
+    assert_eq!(
+        ca_only("~other/ca.pem")
+            .subprocess_env()
+            .get("SSL_CERT_FILE")
+            .map(String::as_str),
+        Some("~other/ca.pem")
+    );
+}
+
+#[test]
+fn ca_cert_expands_leading_tilde_in_apply_and_subprocess_env() {
+    const CHILD_MARKER: &str = "TIECHUI_TEST_TILDE_HOME";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let fake_home = temp_dir();
+        write(fake_home.path(), "certs/corp-ca.pem", TEST_CA_PEM);
+        write(fake_home.path(), "root-ca.pem", TEST_CA_PEM);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::ca_cert_expands_leading_tilde_in_apply_and_subprocess_env",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("HOME", fake_home.path())
+            .env("USERPROFILE", fake_home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_tilde_ca_cert_cases(&user_home().unwrap());
+}
+
+#[test]
+fn no_proxy_normalizes_semicolons_and_wildcard_domains_in_proxy_and_subprocess_env() {
+    let raw_rules = "localhost; *.corp.internal, *.api.local:8443  10.0.0.0/8";
+    let expected_joined = "localhost,.corp.internal,.api.local:8443,10.0.0.0/8";
+    let network = NetworkConfig {
+        proxy: Some("http://127.0.0.1:8080".into()),
+        no_proxy: Some(raw_rules.into()),
+        ca_cert: None,
+    };
+    let env = network.subprocess_env();
+    for key in ["NO_PROXY", "no_proxy"] {
+        assert_eq!(env.get(key).map(String::as_str), Some(expected_joined));
+    }
+
+    let proxy_with = |rules: Option<&str>| {
+        reqwest::Proxy::all("http://127.0.0.1:8080")
+            .unwrap()
+            .no_proxy(rules.and_then(reqwest::NoProxy::from_string))
+    };
+    let actual_proxy = network.proxy().unwrap().unwrap();
+    let expected_proxy = proxy_with(Some(expected_joined));
+    assert_ne!(
+        format!("{expected_proxy:?}"),
+        format!("{:?}", proxy_with(Some(raw_rules)))
+    );
+    assert_eq!(format!("{actual_proxy:?}"), format!("{expected_proxy:?}"));
+
+    let blank_delims = NetworkConfig {
+        proxy: Some("http://127.0.0.1:8080".into()),
+        no_proxy: Some(" ; ,  ".into()),
+        ca_cert: None,
+    };
+    assert_eq!(
+        blank_delims
+            .subprocess_env()
+            .get("NO_PROXY")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(
+        format!("{:?}", blank_delims.proxy().unwrap().unwrap()),
+        format!("{:?}", proxy_with(None))
+    );
 }

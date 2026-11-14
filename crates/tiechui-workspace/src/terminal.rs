@@ -69,6 +69,11 @@ impl Terminal {
         command.cwd(&params.cwd);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
+        if let Some(env) = &params.env {
+            for (key, value) in env {
+                command.env(key, value);
+            }
+        }
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader()?;

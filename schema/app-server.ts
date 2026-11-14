@@ -128,6 +128,8 @@ window: number, input_tokens: number, provider_usage: TokenUsage | null, total: 
 
 export type ContextView = "overview" | "system" | "tools" | "injections" | "messages" | "cache";
 
+export type DaemonStatus = { pid: number, server_version: string, protocol_version: number, connected_clients: number, busy_sessions: number, alive_terminals: number, };
+
 export type Error = { code: number, message: string, data?: JsonValue | null, };
 
 export type Event = { submission_id?: SubmissionId | null, thread_id: ThreadId, epoch: SessionEpoch, event: EventKind, };
@@ -675,7 +677,7 @@ seq: number,
  */
 exit: number | null, };
 
-export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, };
+export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, env?: { [key in string]: string }, };
 
 export type TerminalExit = { id: string, code: number, };
 

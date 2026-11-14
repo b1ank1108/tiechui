@@ -305,6 +305,7 @@ fn terminals_replay_output_after_attach() {
         cwd: dir.path().display().to_string(),
         cols: 80,
         rows: 24,
+        env: None,
     };
     workspace.create_terminal(create.clone()).unwrap();
     assert!(workspace.create_terminal(create).is_err());

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -19,14 +21,16 @@ pub(super) fn handles(method: &str) -> bool {
 }
 
 pub(super) async fn dispatch(
+    home: &Path,
     workspace: &Arc<Workspace>,
     client_id: u64,
     method: &str,
     params: Value,
 ) -> Reply {
+    let home = home.to_owned();
     let workspace = workspace.clone();
     let method = method.to_owned();
-    tokio::task::spawn_blocking(move || handle(&workspace, client_id, &method, params))
+    tokio::task::spawn_blocking(move || handle(&home, &workspace, client_id, &method, params))
         .await
         .map_err(internal)?
 }
@@ -40,7 +44,19 @@ fn call<P: DeserializeOwned, R: Serialize>(
         .and_then(value)
 }
 
-fn handle(workspace: &Workspace, client_id: u64, method: &str, params: Value) -> Reply {
+fn git_env(home: &Path) -> BTreeMap<String, String> {
+    crate::setup::user_config(&home.join("config.toml"))
+        .map(|config| config.network.subprocess_env())
+        .unwrap_or_default()
+}
+
+fn handle(
+    home: &Path,
+    workspace: &Workspace,
+    client_id: u64,
+    method: &str,
+    params: Value,
+) -> Reply {
     match method {
         "fs/tree" => call(params, |p: RootParams| ws::tree(&ws::root(&p.root)?)),
         "fs/list" => call(params, |p: FileParams| {
@@ -72,20 +88,27 @@ fn handle(workspace: &Workspace, client_id: u64, method: &str, params: Value) ->
             workspace.unwatch(&ws::root(&p.root)?);
             Ok(())
         }),
-        "git/status" => call(params, |p: RootParams| ws::status(&ws::root(&p.root)?)),
+        "git/status" => call(params, |p: RootParams| {
+            ws::status_with_env(&ws::root(&p.root)?, &git_env(home))
+        }),
         "git/compare" => call(params, |p: CompareParams| {
-            ws::compare(&ws::root(&p.root)?, &p.base)
+            ws::compare_with_env(&ws::root(&p.root)?, &p.base, &git_env(home))
         }),
-        "git/log" => call(params, |p: LogParams| ws::log(&ws::root(&p.root)?, p.limit)),
+        "git/log" => call(params, |p: LogParams| {
+            ws::log_with_env(&ws::root(&p.root)?, p.limit, &git_env(home))
+        }),
         "git/show" => call(params, |p: ShowParams| {
-            ws::show(&ws::root(&p.root)?, &p.rev, &p.path)
+            ws::show_with_env(&ws::root(&p.root)?, &p.rev, &p.path, &git_env(home))
         }),
-        "git/branches" => call(params, |p: RootParams| ws::branches(&ws::root(&p.root)?)),
+        "git/branches" => call(params, |p: RootParams| {
+            ws::branches_with_env(&ws::root(&p.root)?, &git_env(home))
+        }),
         "git/pr" => call(params, |p: RootParams| {
-            ws::pull_request(&ws::root(&p.root)?)
+            ws::pull_request_with_env(&ws::root(&p.root)?, &git_env(home))
         }),
         "git/run" => call(params, |p: GitRunParams| {
-            ws::run(&ws::root(&p.root)?, &p.op).map(|output| GitRunResult { output })
+            ws::run_with_env(&ws::root(&p.root)?, &p.op, &git_env(home))
+                .map(|output| GitRunResult { output })
         }),
         "terminal/create" => call(params, |p: TerminalCreateParams| {
             workspace.create_terminal(p)

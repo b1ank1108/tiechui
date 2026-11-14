@@ -157,7 +157,12 @@ impl Fixture {
     }
 
     async fn client(&self) -> Client {
-        let mut child = support::command()
+        self.client_with_env(&[]).await
+    }
+
+    async fn client_with_env(&self, extra_env: &[(&str, &str)]) -> Client {
+        let mut command = support::command();
+        command
             .env("TIECHUI_HOME", &self.home)
             .env("HOME", self.root.path())
             .env("TC_E2E_FAKE_KEY", "not-a-real-key")
@@ -165,9 +170,11 @@ impl Fixture {
             .arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .kill_on_drop(true);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
         Client {
@@ -1983,4 +1990,727 @@ async fn socket_daemon_replaces_stale_socket_and_auto_exits_after_full_idle() {
         std::fs::symlink_metadata(&sock).is_err(),
         "daemon did not unlink socket on idle exit"
     );
+}
+
+#[cfg(unix)]
+mod network_proxy_e2e {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tiechui_config::test_support::{Socks5TestProxy, TEST_CA_PEM};
+    use tiechui_protocol::{EventKind, ThreadId};
+    use tiechui_providers::testing::ScriptedServer;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Client, Fixture, snapshot};
+
+    fn write_bash_env_sse(sse_dir: &Path, name: &str, id: &str, out_path: &Path) -> PathBuf {
+        let path = sse_dir.join(name);
+        let args = json!({"command": format!("env > '{}'", out_path.display())}).to_string();
+        let line = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": id,
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": args}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        std::fs::write(
+            &path,
+            format!(
+                "data: {line}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    async fn start_proxy_script_server(
+        fixture: &Fixture,
+        bash_before: &Path,
+        bash_after: &Path,
+    ) -> ScriptedServer {
+        let sse_dir = fixture.root.path().join("proxy-sse");
+        std::fs::create_dir_all(&sse_dir).unwrap();
+        let done_sse = sse_dir.join("done.sse");
+        std::fs::write(
+            &done_sse,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        )
+        .unwrap();
+        let bash_1 = write_bash_env_sse(&sse_dir, "bash1.sse", "call_bash_1", bash_before);
+        let bash_2 = write_bash_env_sse(&sse_dir, "bash2.sse", "call_bash_2", bash_after);
+        let script_path = sse_dir.join("script.json");
+        std::fs::write(
+            &script_path,
+            json!([
+                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_1, "body_contains": ["dump-before"]},
+                {"path": "/v1/chat/completions", "status": 200, "body_file": done_sse, "body_contains": ["call_bash_1"]},
+                {"path": "/v1/chat/completions", "status": 200, "body_file": bash_2, "body_contains": ["dump-after"]},
+                {"path": "/v1/chat/completions", "status": 200, "body_file": done_sse, "body_contains": ["call_bash_2"]},
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let server = ScriptedServer::from_file(&script_path, CancellationToken::new())
+            .await
+            .unwrap();
+        std::fs::write(
+            fixture.home.join("providers.toml"),
+            format!(
+                "[fixture]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key_env = \"TC_E2E_FAKE_KEY\"\nmodels = [{{ id = \"model\", context_window = 200000, max_output = 4096 }}]\n",
+                server.uri()
+            ),
+        )
+        .unwrap();
+        server
+    }
+
+    struct GitAndGhShims {
+        bin_dir: PathBuf,
+        git_env_log: PathBuf,
+        gh_env_log: PathBuf,
+    }
+
+    fn install_git_and_gh_shims(root: &Path, cwd: &Path) -> GitAndGhShims {
+        let bin_dir = root.join("fake-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let real_git = String::from_utf8(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let gh_env_log = root.join("gh-env.log");
+        let git_env_log = root.join("git-env.log");
+        write_executable(
+            &bin_dir.join("gh"),
+            &format!(
+                "#!/bin/sh\nenv > '{}'\nprintf '{{\"number\":7,\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.invalid/pr/7\"}}\\n'\n",
+                gh_env_log.display()
+            ),
+        );
+        write_executable(
+            &bin_dir.join("git"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"fetch\" ]; then\n  env > '{}'\nfi\nexec '{}' \"$@\"\n",
+                git_env_log.display(),
+                real_git
+            ),
+        );
+        init_git_repo_with_bare_remote(&real_git, root, cwd);
+        GitAndGhShims {
+            bin_dir,
+            git_env_log,
+            gh_env_log,
+        }
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn init_git_repo_with_bare_remote(real_git: &str, root: &Path, cwd: &Path) {
+        let remote_str = root.join("remote.git").display().to_string();
+        assert!(
+            std::process::Command::new(real_git)
+                .args(["init", "--bare", &remote_str])
+                .status()
+                .unwrap()
+                .success()
+        );
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &["add", "hello.txt"],
+            &["commit", "-m", "init"],
+            &["remote", "add", "origin", &remote_str],
+        ] {
+            assert!(
+                std::process::Command::new(real_git)
+                    .current_dir(cwd)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    fn parse_env_file(path: &Path) -> BTreeMap<String, String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
+    }
+
+    pub(super) struct ProxyTestHarness {
+        fixture: Fixture,
+        ca_path: PathBuf,
+        pub(super) socks: Socks5TestProxy,
+        pub(super) proxy_script_server: ScriptedServer,
+        shims: GitAndGhShims,
+        bash_before: PathBuf,
+        bash_after: PathBuf,
+        config_path: PathBuf,
+        client: Client,
+        cwd_str: String,
+    }
+
+    impl ProxyTestHarness {
+        pub(super) async fn setup() -> Self {
+            let fixture = Fixture::new().await;
+            let ca_path = fixture.root.path().join("corp-ca.pem");
+            std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+            let socks = Socks5TestProxy::start(Some(("u", "s3cr3t")));
+            let bash_before = fixture.root.path().join("bash-before.log");
+            let bash_after = fixture.root.path().join("bash-after.log");
+            let proxy_script_server =
+                start_proxy_script_server(&fixture, &bash_before, &bash_after).await;
+            let shims = install_git_and_gh_shims(fixture.root.path(), &fixture.cwd);
+            let config_path = fixture.home.join("config.toml");
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let host_path = std::env::var("PATH").unwrap_or_default();
+            let combined_path = format!("{}:{host_path}", shims.bin_dir.display());
+            let mut client = fixture
+                .client_with_env(&[
+                    ("PATH", &combined_path),
+                    ("HTTP_PROXY", "http://dirty-inherited:9999"),
+                    ("NO_PROXY", "127.0.0.1,dirty.example"),
+                    ("SSL_CERT_FILE", "/dirty/inherited.pem"),
+                ])
+                .await;
+            client
+                .ok("initialize", json!({"protocol_version": 1}))
+                .await;
+            let cwd_str = fixture.cwd.display().to_string();
+            Self {
+                fixture,
+                ca_path,
+                socks,
+                proxy_script_server,
+                shims,
+                bash_before,
+                bash_after,
+                config_path,
+                client,
+                cwd_str,
+            }
+        }
+
+        pub(super) async fn verify_inherited_env_before_proxy(&mut self) -> ThreadId {
+            self.client
+                .ok("git/pr", json!({"root": self.cwd_str}))
+                .await;
+            let gh_before = parse_env_file(&self.shims.gh_env_log);
+            assert_eq!(
+                gh_before.get("HTTP_PROXY").map(String::as_str),
+                Some("http://dirty-inherited:9999")
+            );
+            assert_eq!(
+                gh_before.get("NO_PROXY").map(String::as_str),
+                Some("127.0.0.1,dirty.example")
+            );
+
+            let opened = snapshot(
+                self.client
+                    .ok("session/open", json!({"cwd": self.cwd_str, "mode": "yolo"}))
+                    .await,
+            );
+            let thread = opened.thread_id;
+            submit_user_text(&mut self.client, &thread, "dump-before").await;
+            assert_eq!(self.socks.hits(), 0);
+            let bash_before = parse_env_file(&self.bash_before);
+            assert_eq!(
+                bash_before.get("HTTP_PROXY").map(String::as_str),
+                Some("http://dirty-inherited:9999")
+            );
+            assert_eq!(
+                bash_before.get("NO_PROXY").map(String::as_str),
+                Some("127.0.0.1,dirty.example")
+            );
+            assert_eq!(
+                bash_before.get("SSL_CERT_FILE").map(String::as_str),
+                Some("/dirty/inherited.pem")
+            );
+            thread
+        }
+
+        pub(super) async fn verify_proxy_normalization_and_permissions(&mut self, socks_url: &str) {
+            update_config_and_await_reload(&mut self.client, "network.proxy", "127.0.0.1:7890")
+                .await;
+            assert_eq!(
+                self.client.ok("config/get", json!({})).await["proxy"],
+                json!("http://127.0.0.1:7890")
+            );
+            let saved_normalized = std::fs::read_to_string(&self.config_path).unwrap();
+            assert!(
+                saved_normalized.contains("http://127.0.0.1:7890"),
+                "{saved_normalized}"
+            );
+            assert_eq!(
+                std::fs::metadata(&self.config_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644
+            );
+
+            assert!(
+                self.client
+                    .call(
+                        "config/update",
+                        json!({"key": "network.proxy", "value": "ftp://127.0.0.1:21"}),
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&self.config_path).unwrap(),
+                saved_normalized
+            );
+
+            update_config_and_await_reload(&mut self.client, "network.proxy", socks_url).await;
+            assert_eq!(
+                std::fs::metadata(&self.config_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            let ca_str = self.ca_path.display().to_string();
+            update_config_and_await_reload(&mut self.client, "network.ca_cert", &ca_str).await;
+        }
+
+        pub(super) async fn verify_proxied_turn_and_subprocess_env(
+            &mut self,
+            thread: &ThreadId,
+            socks_url: &str,
+        ) {
+            submit_user_text(&mut self.client, thread, "dump-after").await;
+            assert!(self.socks.hits() >= 1);
+            self.client
+                .ok(
+                    "git/run",
+                    json!({"root": self.cwd_str, "op": {"kind": "fetch"}}),
+                )
+                .await;
+            self.client
+                .ok("git/pr", json!({"root": self.cwd_str}))
+                .await;
+
+            let ca_expected = self.ca_path.display().to_string();
+            for (label, path) in [
+                ("bash", &self.bash_after),
+                ("git", &self.shims.git_env_log),
+                ("gh", &self.shims.gh_env_log),
+            ] {
+                assert_subprocess_proxy_and_ca_env(
+                    label,
+                    &parse_env_file(path),
+                    socks_url,
+                    &ca_expected,
+                );
+            }
+        }
+
+        pub(super) async fn verify_terminal_env_injection(&mut self) {
+            let term_env_file = self.fixture.root.path().join("term-env.log");
+            self.client
+                .ok(
+                    "terminal/create",
+                    json!({
+                        "id": "term-proxy",
+                        "cwd": self.cwd_str,
+                        "cols": 80,
+                        "rows": 24,
+                        "env": {
+                            "HTTP_PROXY": "http://127.0.0.1:7890",
+                            "NO_PROXY": "",
+                            "TC_TERM_CUSTOM": "pty-injected"
+                        }
+                    }),
+                )
+                .await;
+            self.client
+                .ok(
+                    "terminal/write",
+                    json!({
+                        "id": "term-proxy",
+                        "data": format!(
+                            "printf 'CUSTOM=%s|PROXY=%s|NOPROXY=<%s>\\n' \"$TC_TERM_CUSTOM\" \"$HTTP_PROXY\" \"$NO_PROXY\" > '{}' && echo TERM_ENV_DONE\n",
+                            term_env_file.display()
+                        )
+                    }),
+                )
+                .await;
+            await_terminal_marker(
+                &mut self.client,
+                "term-proxy",
+                "TERM_ENV_DONE",
+                &term_env_file,
+            )
+            .await;
+            assert_eq!(
+                std::fs::read_to_string(&term_env_file).unwrap().trim(),
+                "CUSTOM=pty-injected|PROXY=http://127.0.0.1:7890|NOPROXY=<>"
+            );
+            self.client
+                .ok("terminal/kill", json!({"id": "term-proxy"}))
+                .await;
+        }
+    }
+
+    async fn submit_user_text(client: &mut Client, thread: &ThreadId, text: &str) {
+        client
+            .ok(
+                "session/submit",
+                json!({
+                    "thread_id": thread,
+                    "op": {
+                        "kind": "user_input",
+                        "delivery": "follow_up",
+                        "content": [{"kind": "text", "text": text}]
+                    }
+                }),
+            )
+            .await;
+        client
+            .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+            .await;
+    }
+
+    async fn update_config_and_await_reload(client: &mut Client, key: &str, value: &str) {
+        client
+            .ok("config/update", json!({"key": key, "value": value}))
+            .await;
+        client
+            .until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+            .await;
+    }
+
+    fn assert_subprocess_proxy_and_ca_env(
+        label: &str,
+        env_map: &BTreeMap<String, String>,
+        expected_proxy: &str,
+        expected_ca: &str,
+    ) {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert_eq!(
+                env_map.get(key).map(String::as_str),
+                Some(expected_proxy),
+                "{label} {key}"
+            );
+        }
+        assert_eq!(
+            env_map.get("NO_PROXY").map(String::as_str),
+            Some(""),
+            "{label} NO_PROXY must be empty string to mask dirty host NO_PROXY"
+        );
+        assert_eq!(
+            env_map.get("no_proxy").map(String::as_str),
+            Some(""),
+            "{label} no_proxy must be empty string"
+        );
+        for key in [
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert_eq!(
+                env_map.get(key).map(String::as_str),
+                Some(expected_ca),
+                "{label} {key}"
+            );
+        }
+    }
+
+    async fn await_terminal_marker(
+        client: &mut Client,
+        id: &str,
+        marker: &str,
+        expected_file: &Path,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let attached = client.ok("terminal/attach", json!({"id": id})).await;
+            let buf = attached["buffer"].as_str().unwrap_or_default();
+            if buf.contains(marker) && expected_file.exists() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{id} did not finish; attached={attached}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn daemon_status_tracks_busy_turns_and_terminals_over_stdio() {
+    use tiechui_protocol::app::{APP_PROTOCOL_VERSION, DaemonStatus};
+
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    client
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+
+    let status_of = |value: Value| serde_json::from_value::<DaemonStatus>(value).unwrap();
+    let initial = status_of(client.ok("daemon/status", json!({})).await);
+    assert!(initial.pid > 0);
+    assert_eq!(initial.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(initial.protocol_version, APP_PROTOCOL_VERSION);
+    assert_eq!(initial.connected_clients, 1);
+    assert_eq!(initial.busy_sessions, 0);
+    assert_eq!(initial.alive_terminals, 0);
+
+    let cwd = fixture.cwd.display().to_string();
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    assert_eq!(
+        status_of(client.ok("daemon/status", json!({})).await).busy_sessions,
+        0
+    );
+
+    let thread = json!(opened.thread_id);
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let asked = client
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+
+    client
+        .ok(
+            "terminal/create",
+            json!({"id": "status-term", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+    let busy = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(busy.connected_clients, 1);
+    assert_eq!(busy.busy_sessions, 1);
+    assert_eq!(busy.alive_terminals, 1);
+
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let after_turn = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(after_turn.busy_sessions, 0);
+    assert_eq!(after_turn.alive_terminals, 1);
+
+    client
+        .ok(
+            "terminal/write",
+            json!({"id": "status-term", "data": "exit\r\n"}),
+        )
+        .await;
+    client
+        .notice(|m, p| m == "terminal/exit" && p["id"] == "status-term")
+        .await;
+    let after_exit = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(after_exit.busy_sessions, 0);
+    assert_eq!(after_exit.alive_terminals, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_and_terminal_env() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut h = network_proxy_e2e::ProxyTestHarness::setup().await;
+        let thread = h.verify_inherited_env_before_proxy().await;
+        let socks_url = format!("socks5://u:s3cr3t@{}", h.socks.addr());
+        h.verify_proxy_normalization_and_permissions(&socks_url)
+            .await;
+        h.verify_proxied_turn_and_subprocess_env(&thread, &socks_url)
+            .await;
+        h.verify_terminal_env_injection().await;
+        h.proxy_script_server.verify().unwrap();
+    })
+    .await
+    .expect("app_server network proxy e2e test timed out");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_daemon_status_tracks_multiple_clients_busy_sessions_and_terminals() {
+    use tiechui_protocol::app::{APP_PROTOCOL_VERSION, DaemonStatus};
+
+    let fixture = Fixture::new().await;
+    let short_dir = tempfile::Builder::new()
+        .prefix("tc-status-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let sock = short_dir.path().join("app.sock");
+    let mut daemon = fixture.spawn_daemon(&sock, None);
+    let daemon_pid = daemon.id().unwrap();
+    wait_for_socket(&sock).await;
+
+    let status_of = |value: Value| serde_json::from_value::<DaemonStatus>(value).unwrap();
+
+    let mut client_a = fixture.connect_client(&sock);
+    client_a
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let s1 = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(s1.pid, daemon_pid);
+    assert_eq!(s1.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(s1.protocol_version, APP_PROTOCOL_VERSION);
+    assert_eq!(s1.connected_clients, 1);
+    assert_eq!(s1.busy_sessions, 0);
+    assert_eq!(s1.alive_terminals, 0);
+
+    let mut client_b = fixture.connect_client(&sock);
+    client_b
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let s2 = status_of(client_b.ok("daemon/status", json!({})).await);
+    assert_eq!(s2.pid, daemon_pid);
+    assert_eq!(s2.connected_clients, 2);
+
+    let cwd = fixture.cwd.display().to_string();
+    let opened = snapshot(
+        client_a
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    let thread = json!(opened.thread_id);
+    client_a
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let asked = client_a
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+
+    client_b
+        .ok(
+            "terminal/create",
+            json!({"id": "sock-term", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+    let busy = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(busy.connected_clients, 2);
+    assert_eq!(busy.busy_sessions, 1);
+    assert_eq!(busy.alive_terminals, 1);
+
+    disconnect_bridge(client_b).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let now = status_of(client_a.ok("daemon/status", json!({})).await);
+        if now.connected_clients == 1 {
+            assert_eq!(now.busy_sessions, 1);
+            assert_eq!(now.alive_terminals, 1);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connected_clients did not drop to 1: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    client_a
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    client_a
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    client_a
+        .ok("terminal/kill", json!({"id": "sock-term"}))
+        .await;
+
+    let idle = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(idle.connected_clients, 1);
+    assert_eq!(idle.busy_sessions, 0);
+    assert_eq!(idle.alive_terminals, 0);
+
+    disconnect_bridge(client_a).await;
+    let _ = daemon.kill().await;
 }
