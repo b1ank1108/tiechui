@@ -2071,6 +2071,7 @@ impl SessionActor {
                     .providers
                     .get(&self.model.provider)
                     .map(|provider| (self.model.model.clone(), provider.clone())),
+                providers: self.config.providers.clone(),
             })),
             branch: Arc::new(self.branch_entries()?),
             parent_session: self.store()?.header().parent_session.clone(),

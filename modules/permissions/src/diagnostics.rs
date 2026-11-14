@@ -21,6 +21,13 @@ impl Diagnostics {
                 "Classifier blocks: {} in a row, {} total",
                 denials.consecutive, denials.total
             ));
+            lines.push(format!(
+                "Classifier model: {}",
+                self.0
+                    .classifier_model
+                    .as_deref()
+                    .unwrap_or("the turn's model")
+            ));
         }
         let sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
         lines.extend([

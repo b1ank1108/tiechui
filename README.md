@@ -376,7 +376,7 @@ The **mode** decides what happens to a call the rules would ask about:
 | Mode | Behavior |
 | --- | --- |
 | `rules` (default) | You are asked |
-| `auto` | Edits inside the workspace pass. Anything else is reviewed by a one-off request to the session's model: allowed calls run, blocked calls return the reason to the model. After 3 blocks in a row or 20 in a session, or without model access, you are asked. Broad `bash` allows (`*`, interpreters, `npm run`, …) are ignored, so those commands are reviewed too |
+| `auto` | Edits inside the workspace and MCP tools their server marks `readOnlyHint` pass. Anything else is reviewed by a one-off request to the session's model, or to the user-level `permissions.classifier_model` (`<provider>/<id>`) when set; the reviewer sees your messages and the session's recent calls, not their output. Allowed calls run, blocked calls return the reason to the model. After 3 blocks in a row or 20 in a session, or without model access, you are asked. Broad `bash` allows (`*`, interpreters, `npm run`, …) are ignored, so those commands are reviewed too |
 | `yolo` | Approves asks (including protected-path writes and explicit `ask` rules), denies fail-closed rules without prompting and declines MCP elicitations |
 
 Set the mode with `permissions.mode` in the user config (project config cannot
@@ -387,8 +387,8 @@ saves the mode to `permissions.mode`, so a saved `yolo` applies to every later
 session until you switch back.
 Explicit `deny` rules apply in every mode. Writes to **protected paths** ask in
 `rules` and `auto` unless a user `protected_path` rule allows them: `.git`,
-`.agents`, `.claude`, `.tiechui`, `.vscode`, `.idea`, shell profiles,
-`.gitconfig`, `.mcp.json` and `.env` files. `yolo` approves those writes and
+`.husky`, `.agents`, `.claude`, `.tiechui`, `.vscode`, `.idea`, `~/.config/git`,
+shell profiles, `.gitconfig`, `.mcp.json` and `.env` files. `yolo` approves those writes and
 explicit `ask` rules, declines MCP elicitations, and keeps `request_user_input`
 and folder, hook and plugin trust prompts. Invalid project permission rules fail
 closed. They ask in `rules` and `auto`, and `yolo` denies them immediately

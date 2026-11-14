@@ -266,6 +266,31 @@ fn permission_mode_is_user_only() {
 }
 
 #[test]
+fn classifier_model_is_user_only_and_names_a_provider_model() {
+    let temp = temp_dir();
+    let valid = paths(
+        temp.path(),
+        "[permissions]\nclassifier_model='fast/reviewer'\n",
+        "[permissions]\nclassifier_model='project/model'\n",
+    );
+    let loaded = load(&valid, true, &toml::Table::new()).unwrap();
+    assert_eq!(
+        loaded.config.permissions.classifier_model.as_deref(),
+        Some("fast/reviewer")
+    );
+    assert_eq!(loaded.diagnostics[0].key, "permissions.classifier_model");
+    assert_eq!(loaded.diagnostics[0].reason, IgnoredReason::UserOnly);
+    let temp = temp_dir();
+    let invalid = paths(
+        temp.path(),
+        "[permissions]\nclassifier_model='reviewer'\n",
+        "",
+    );
+    let error = load(&invalid, true, &toml::Table::new()).unwrap_err();
+    assert_eq!(error.key, "permissions.classifier_model");
+}
+
+#[test]
 fn network_sessions_and_skills_are_user_only_and_validated() {
     let temp = temp_dir();
     let paths = paths(

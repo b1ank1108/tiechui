@@ -1117,12 +1117,39 @@ async fn diagnostics_show_rules_mode_session_grants_and_only_instance_decisions(
 struct Model {
     answers: Mutex<Vec<&'static str>>,
     requests: Mutex<Vec<String>>,
+    /// The `<provider>/<id>` of each `model_stream_on` request.
+    routed: Mutex<Vec<String>>,
+    read_only: Option<Arc<dyn tiechui_plugin_api::Tool>>,
+}
+
+struct ReadOnly(tiechui_plugin_api::model::ToolSpec);
+
+#[async_trait]
+impl tiechui_plugin_api::Tool for ReadOnly {
+    fn spec(&self) -> &tiechui_plugin_api::model::ToolSpec {
+        &self.0
+    }
+    fn read_only(&self) -> bool {
+        true
+    }
+    fn concurrency(&self, _: &Value) -> tiechui_plugin_api::Concurrency {
+        tiechui_plugin_api::Concurrency::Shared
+    }
+    async fn run(
+        &self,
+        _: ToolCall,
+        _: ToolContext,
+    ) -> Result<tiechui_plugin_api::ToolOutput, ToolError> {
+        unreachable!()
+    }
 }
 
 #[async_trait]
 impl tiechui_plugin_api::ToolInvoker for Model {
-    fn get(&self, _: &str) -> Option<Arc<dyn tiechui_plugin_api::Tool>> {
-        None
+    fn get(&self, name: &str) -> Option<Arc<dyn tiechui_plugin_api::Tool>> {
+        self.read_only
+            .clone()
+            .filter(|tool| tool.spec().name == name)
     }
     async fn invoke(&self, _: ToolCall, _: ToolContext) -> tiechui_plugin_api::ToolOutput {
         unreachable!()
@@ -1152,6 +1179,16 @@ impl tiechui_plugin_api::ToolInvoker for Model {
             event,
         )])))
     }
+    async fn model_stream_on(
+        &self,
+        model: &str,
+        request: tiechui_plugin_api::model::ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<tiechui_plugin_api::ModelStream, ToolError> {
+        assert_eq!(Some(request.model.0.as_str()), model.split('/').nth(1));
+        self.routed.lock().unwrap().push(model.into());
+        self.model_stream(request, cancel).await
+    }
 }
 
 impl Fixture {
@@ -1168,6 +1205,8 @@ impl Fixture {
         let model = Arc::new(Model {
             answers: Mutex::new(answers),
             requests: Mutex::default(),
+            routed: Mutex::default(),
+            read_only: None,
         });
         let mut ctx = self.context();
         ctx.invoker = Some(model.clone());
@@ -1768,4 +1807,104 @@ fn the_main_session_reports_its_mode_on_restore_and_change_but_children_stay_qui
         )
         .unwrap();
     assert!(child.runtime_extensions().is_empty());
+}
+
+#[tokio::test]
+async fn auto_reviews_on_the_configured_classifier_model_with_recent_actions_but_no_outputs() {
+    let mut f = Fixture::new(None);
+    let mut config = ModuleConfig::default();
+    config.permissions.classifier_model = Some("fast/reviewer".into());
+    f.mode(PermissionMode::Auto, config);
+    let (ctx, model) = f.reviewed(vec!["<block>no</block>", "<block>no</block>"]);
+    let interceptor = &f.registry.interceptors()[0].interceptor;
+    let earlier = ToolCall {
+        id: "earlier".into(),
+        name: "bash".into(),
+        arguments: json!({"command": "touch build/tmp.txt"}),
+        opaque: None,
+    };
+    let output = tiechui_plugin_api::ToolOutput {
+        content: vec![tiechui_plugin_api::model::Content::Text {
+            text: "OUTPUT-MUST-NOT-REACH-THE-REVIEWER".into(),
+            opaque: None,
+        }],
+        is_error: false,
+        details: None,
+        structured_content: None,
+    };
+    assert!(
+        interceptor
+            .after(&earlier, &output, ctx.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        f.call_ctx("bash", json!({"command":"rm build/tmp.txt"}), ctx.clone())
+            .await,
+        BeforeToolCall::Allow
+    );
+    assert_eq!(*model.routed.lock().unwrap(), ["fast/reviewer"]);
+    {
+        let requests = model.requests.lock().unwrap();
+        let request = &requests[0];
+        assert!(request.contains("<recent_actions>"), "{request}");
+        assert!(request.contains("touch build/tmp.txt"), "{request}");
+        assert!(request.contains("-> ok"), "{request}");
+        assert!(!request.contains("OUTPUT-MUST-NOT-REACH"), "{request}");
+    }
+    // Another session starts with no recent actions.
+    let mut other = ctx.clone();
+    other.scope.thread_id = ThreadId("other".into());
+    assert_eq!(
+        f.call_ctx("bash", json!({"command":"cargo test"}), other)
+            .await,
+        BeforeToolCall::Allow
+    );
+    assert!(
+        model.requests.lock().unwrap()[1].contains("<recent_actions>\\n(none)\\n</recent_actions>")
+    );
+    let text = diagnostics_text(&f).await;
+    assert!(text.contains("Classifier model: fast/reviewer"), "{text}");
+}
+
+async fn diagnostics_text(f: &Fixture) -> String {
+    f.registry.commands()[0]
+        .run("", CancellationToken::new())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn auto_passes_read_only_mcp_tools_without_review_but_not_in_rules_mode() {
+    let spec = tiechui_plugin_api::model::ToolSpec {
+        name: "mcp__docs__search".into(),
+        description: String::new(),
+        input_schema: json!({"type": "object"}),
+    };
+    let mut config = ModuleConfig::default();
+    config.mcp_servers.insert(
+        "docs".into(),
+        tiechui_plugin_api::McpServerConfig::default(),
+    );
+    for (mode, asks) in [(PermissionMode::Auto, 0), (PermissionMode::Rules, 1)] {
+        let mut f = Fixture::new(None);
+        f.mode(mode, config.clone());
+        let (mut ctx, _) = f.reviewed(vec![]);
+        let model = Arc::new(Model {
+            answers: Mutex::default(),
+            requests: Mutex::default(),
+            routed: Mutex::default(),
+            read_only: Some(Arc::new(ReadOnly(spec.clone()))),
+        });
+        ctx.invoker = Some(model.clone());
+        *f.prompter.decision.lock().unwrap() = Some(ApprovalDecision::AllowOnce);
+        assert_eq!(
+            f.call_ctx("mcp__docs__search", json!({"query": "x"}), ctx)
+                .await,
+            BeforeToolCall::Allow
+        );
+        assert!(model.requests.lock().unwrap().is_empty(), "{mode:?}");
+        assert_eq!(f.asks(), asks, "{mode:?}");
+    }
 }

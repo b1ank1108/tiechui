@@ -74,6 +74,7 @@ impl CommandHost for Host {
                 registry: self.registry.clone(),
                 scheduler: self.scheduler.clone(),
                 model: None,
+                providers: Default::default(),
             })),
             branch: Arc::new(self.branch.entries.clone()),
             parent_session: self.branch.parent_session.clone(),

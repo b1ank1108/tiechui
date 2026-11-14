@@ -127,6 +127,10 @@ pub fn load_with_mandatory_modules(
                     if permissions.mode.is_some() {
                         user_only.push("permissions.mode");
                     }
+                    // A project could otherwise send every reviewed action to a model it picks.
+                    if permissions.classifier_model.is_some() {
+                        user_only.push("permissions.classifier_model");
+                    }
                     project_rules = permissions.rules.unwrap_or_default();
                 }
                 // A project could otherwise route requests, keys included, through its own proxy.
@@ -354,14 +358,30 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             "token settings must be non-negative safe integers",
         ));
     }
-    if let Some(model) = &layer.model
-        && !model
+    let model_ref = |model: &str| {
+        model
             .split_once('/')
             .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
+    };
+    if layer
+        .model
+        .as_deref()
+        .is_some_and(|model| !model_ref(model))
     {
         return Err(ConfigError::new(path, "model", "expected <provider>/<id>"));
     }
     if let Some(permissions) = &layer.permissions {
+        if permissions
+            .classifier_model
+            .as_deref()
+            .is_some_and(|model| !model_ref(model))
+        {
+            return Err(ConfigError::new(
+                path,
+                "permissions.classifier_model",
+                "expected <provider>/<id>",
+            ));
+        }
         for (index, rule) in permissions.rules.iter().flatten().enumerate() {
             rule.validate().map_err(|error| {
                 ConfigError::new(path, format!("permissions.rules[{index}]"), error)

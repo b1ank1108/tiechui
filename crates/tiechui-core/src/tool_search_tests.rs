@@ -92,6 +92,7 @@ fn context(registry: Arc<Registry>, scheduler: Arc<ToolScheduler>) -> ToolContex
             registry,
             scheduler,
             model: None,
+            providers: Default::default(),
         })),
         branch: Default::default(),
         parent_session: None,

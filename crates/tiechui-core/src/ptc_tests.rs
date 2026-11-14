@@ -469,6 +469,8 @@ async fn mcp_annotations_select_shared_only_for_explicit_read_only() {
             .unwrap();
         assert!(tool.programmatic());
         assert_eq!(tool.concurrency(&json!({})), expected);
+        // Auto mode skips the classifier only for the same explicit hint.
+        assert_eq!(tool.read_only(), expected == Concurrency::Shared);
     }
 }
 

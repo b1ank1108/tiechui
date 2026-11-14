@@ -10,6 +10,10 @@ pub struct PermissionsConfig {
     /// Omission uses the built-in defaults; an explicit empty list asks for everything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<PermissionRule>>,
+    /// Auto mode's reviewer as `<provider>/<id>`, accepted only in user configuration.
+    /// Omission reviews with the turn's model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classifier_model: Option<String>,
     #[serde(skip)]
     #[schemars(skip)]
     pub project_rules: Vec<PermissionRule>,

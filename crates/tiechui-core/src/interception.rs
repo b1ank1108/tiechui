@@ -1,4 +1,5 @@
 use futures::FutureExt;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -19,6 +20,22 @@ pub(crate) struct Invoker {
     pub registry: Arc<Registry>,
     pub scheduler: Arc<ToolScheduler>,
     pub model: Option<(ModelId, Arc<dyn ModelProvider>)>,
+    pub providers: BTreeMap<String, Arc<dyn ModelProvider>>,
+}
+
+async fn stream_on(
+    provider: &Arc<dyn ModelProvider>,
+    request: ModelRequest,
+    cancel: CancellationToken,
+) -> Result<ModelStream, ToolError> {
+    let stream = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ToolError("Operation aborted".into())),
+        result = provider.stream(request, cancel.clone()) => result.map_err(|error| ToolError(error.to_string()))?,
+    };
+    Ok(stream
+        .map(|event| event.map_err(|error| ToolError(error.to_string())))
+        .boxed())
 }
 
 #[async_trait]
@@ -41,14 +58,23 @@ impl ToolInvoker for Invoker {
             .model
             .as_ref()
             .ok_or_else(|| ToolError("Model access is unavailable".into()))?;
-        let stream = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(ToolError("Operation aborted".into())),
-            result = provider.stream(request, cancel.clone()) => result.map_err(|error| ToolError(error.to_string()))?,
-        };
-        Ok(stream
-            .map(|event| event.map_err(|error| ToolError(error.to_string())))
-            .boxed())
+        stream_on(provider, request, cancel).await
+    }
+    async fn model_stream_on(
+        &self,
+        model: &str,
+        mut request: ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<ModelStream, ToolError> {
+        let (provider, id) = model
+            .split_once('/')
+            .ok_or_else(|| ToolError(format!("Expected <provider>/<id>, got {model}")))?;
+        let provider = self
+            .providers
+            .get(provider)
+            .ok_or_else(|| ToolError(format!("Provider {provider} is not loaded")))?;
+        request.model = ModelId(id.into());
+        stream_on(provider, request, cancel).await
     }
 }
 

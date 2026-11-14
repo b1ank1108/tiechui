@@ -210,6 +210,8 @@ impl Module for PermissionsModule {
             headless: self.headless,
             mode: self.mode.clone(),
             denials: Arc::new(Mutex::new(classifier::Denials::default())),
+            classifier_model: config.permissions.classifier_model.clone(),
+            actions: Arc::new(Mutex::new(classifier::Actions::default())),
             servers: config.mcp_servers.keys().cloned().collect(),
             sessions: Arc::new(Mutex::new(SessionGrants::default())),
             recent: self.recent.clone(),
@@ -273,6 +275,10 @@ struct Permissions {
     headless: Option<HeadlessPolicy>,
     mode: SharedPermissionMode,
     denials: Arc<Mutex<classifier::Denials>>,
+    /// `<provider>/<id>` reviewing auto mode asks; `None` uses the turn's model.
+    classifier_model: Option<String>,
+    /// Completed calls of the current session, shown to the classifier.
+    actions: Arc<Mutex<classifier::Actions>>,
     servers: Vec<String>,
     sessions: Arc<Mutex<SessionGrants>>,
 }
@@ -523,15 +529,22 @@ impl Permissions {
         }
         let mode = self.mode.get();
         if mode == PermissionMode::Auto {
+            let read_only = ctx
+                .invoker
+                .as_ref()
+                .and_then(|invoker| invoker.get(&call.name))
+                .is_some_and(|tool| tool.read_only());
             for gate in &mut gates {
+                let default_ask = gate.rule.surface == "*"
+                    && gate.rule.action == Action::Ask
+                    && gate.rule.origin != "fail-closed";
                 if gate.surface == "bash" && protected::broad_bash_allow(&gate.rule) {
                     gate.rule = Rule::new("bash", "*", Action::Ask, "builtin");
-                } else if matches!(gate.surface.as_str(), "write" | "edit")
-                    && gate.rule.surface == "*"
-                    && gate.rule.action == Action::Ask
-                    && gate.rule.origin != "fail-closed"
-                {
+                } else if matches!(gate.surface.as_str(), "write" | "edit") && default_ask {
                     gate.rule = Rule::new(&gate.surface, "<auto-edit>", Action::Allow, "builtin");
+                } else if gate.surface == "mcp" && read_only && default_ask {
+                    // Path arguments keep their own gates, so a write path still gets reviewed.
+                    gate.rule = Rule::new("mcp", "<read-only>", Action::Allow, "builtin");
                 }
             }
         }
@@ -665,7 +678,7 @@ impl Permissions {
                         review = Some(tokio::select! {
                             biased;
                             _ = ctx.cancel.cancelled() => return Err(ToolError("Permission request cancelled.".into())),
-                            review = classifier::review(call, ctx, &self.cwd) => review,
+                            review = classifier::review(call, ctx, &self.cwd, self.classifier_model.as_deref(), &self.actions) => review,
                         });
                     }
                     let mut denials = self
@@ -794,6 +807,18 @@ impl ToolInterceptor for Permissions {
         }
         audit.finished = true;
         result
+    }
+    async fn after(
+        &self,
+        call: &ToolCall,
+        output: &tiechui_plugin_api::ToolOutput,
+        ctx: ToolContext,
+    ) -> Result<Option<tiechui_plugin_api::ToolOutput>, ToolError> {
+        self.actions
+            .lock()
+            .map_err(|_| ToolError("Permission classifier unavailable".into()))?
+            .record(&ctx, call, output.is_error);
+        Ok(None)
     }
 }
 

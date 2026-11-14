@@ -297,6 +297,9 @@ impl Tool for McpTool {
     fn deferrable(&self) -> bool {
         true
     }
+    fn read_only(&self) -> bool {
+        self.read_only
+    }
     fn source(&self) -> Option<String> {
         Some(format!("MCP server: {}", self.server))
     }

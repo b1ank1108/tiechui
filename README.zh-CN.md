@@ -345,7 +345,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | 模式 | 行为 |
 | --- | --- |
 | `rules`（默认） | 询问你 |
-| `auto` | 工作区内的编辑直接放行。其余调用由会话模型的一次性请求审查：通过的调用运行，被拦的调用把原因返回给模型。连续拦截 3 次或本会话累计 20 次，或没有模型可用时，改为询问你。宽泛的 `bash` 放行（`*`、解释器、`npm run` 等）会被忽略，这些命令同样要审查 |
+| `auto` | 工作区内的编辑，以及服务端标注了 `readOnlyHint` 的 MCP 工具直接放行。其余调用由会话模型的一次性请求审查；如果在用户级配置里设置了 `permissions.classifier_model`（`<provider>/<id>`），改由该模型审查。审查方能看到你的消息和本会话最近的调用，看不到调用输出。通过的调用运行，被拦的调用把原因返回给模型。连续拦截 3 次或本会话累计 20 次，或没有模型可用时，改为询问你。宽泛的 `bash` 放行（`*`、解释器、`npm run` 等）会被忽略，这些命令同样要审查 |
 | `yolo` | 批准询问（含受保护路径写入和显式 `ask` 规则），对失效关闭规则不弹框直接拒绝，并自动拒绝 MCP elicitation |
 
 模式可以在用户配置的 `permissions.mode` 中设置（项目配置不能设置），也可以用 `--mode`
@@ -353,8 +353,8 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 `chui exec` 中还与显式传入的 `--approval` 互斥）。`/permissions <mode>` 切换当前会话，
 并把模式保存到 `permissions.mode`，保存的 `yolo` 会对之后的每个会话生效，直到再切换回来。
 显式 `deny` 规则在任何模式下都生效。写入**受保护路径**在 `rules` 和 `auto` 下会询问，
-除非有用户 `protected_path` 规则放行：`.git`、`.agents`、`.claude`、`.tiechui`、
-`.vscode`、`.idea`、shell 配置文件、`.gitconfig`、`.mcp.json` 和 `.env` 文件。
+除非有用户 `protected_path` 规则放行：`.git`、`.husky`、`.agents`、`.claude`、`.tiechui`、
+`.vscode`、`.idea`、`~/.config/git`、shell 配置文件、`.gitconfig`、`.mcp.json` 和 `.env` 文件。
 `yolo` 会批准受保护路径写入和显式 `ask` 规则，自动拒绝 MCP elicitation，同时保留
 `request_user_input` 以及目录、hooks 和插件的信任确认。无效的项目权限规则会失效关闭，
 在 `rules` 和 `auto` 下询问你，在 `yolo` 下不弹框立即拒绝。

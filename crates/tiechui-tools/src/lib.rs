@@ -130,6 +130,15 @@ pub trait ToolInvoker: Send + Sync {
     ) -> Result<ModelStream, ToolError> {
         Err(ToolError("Model access is unavailable".into()))
     }
+    /// Streams a one-off request on `<provider>/<id>`, any provider the session has loaded.
+    async fn model_stream_on(
+        &self,
+        _model: &str,
+        _request: ModelRequest,
+        _cancel: CancellationToken,
+    ) -> Result<ModelStream, ToolError> {
+        Err(ToolError("Model access is unavailable".into()))
+    }
 }
 
 #[async_trait]
@@ -144,6 +153,10 @@ pub trait Tool: Send + Sync {
     /// Known declaration provenance for read-only inspectors; never inferred from names.
     fn source(&self) -> Option<String> {
         None
+    }
+    /// Declared by the tool's provider as having no side effects, such as MCP `readOnlyHint`.
+    fn read_only(&self) -> bool {
+        false
     }
     fn concurrency(&self, input: &Value) -> Concurrency;
     async fn run(&self, call: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError>;
