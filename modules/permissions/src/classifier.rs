@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use tiechui_plugin_api::{
-    ToolContext, ToolError,
+    ModelStream, ToolContext, ToolError,
     futures::StreamExt,
     model::{Content, Message, ModelRequest, Role, StreamEvent, ToolCall},
     protocol::InputContent,
@@ -146,7 +146,7 @@ async fn request(
         max_output: Some(256),
         reasoning: None,
     };
-    let mut stream = match reviewer {
+    let stream = match reviewer {
         Some(model) => {
             invoker
                 .model_stream_on(model, request, ctx.cancel.clone())
@@ -154,6 +154,11 @@ async fn request(
         }
         None => invoker.model_stream(request, ctx.cancel.clone()).await?,
     };
+    answer(stream).await
+}
+
+/// The reviewer's text up to the end of its turn.
+async fn answer(mut stream: ModelStream) -> Result<String, ToolError> {
     let mut answer = String::new();
     while let Some(event) = stream.next().await {
         match event? {

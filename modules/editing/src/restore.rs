@@ -30,21 +30,6 @@ impl Compactor for EditingModule {
         let Ok(root) = std::fs::canonicalize(cwd) else {
             return Ok(Vec::new());
         };
-        let mut order: Vec<(PathBuf, bool)> = Vec::new();
-        for (path, name) in accesses(&context.summarized, cwd).into_iter().rev() {
-            let modified = name != "read";
-            match order.iter_mut().find(|(seen, _)| *seen == path) {
-                Some(entry) => entry.1 |= modified,
-                None => order.push((path, modified)),
-            }
-        }
-        order.sort_by_key(|(_, modified)| !modified);
-        for item in context.previous.iter().filter(|item| item.source == SOURCE) {
-            let path = PathBuf::from(&item.key);
-            if !order.iter().any(|(seen, _)| *seen == path) {
-                order.push((path, false));
-            }
-        }
         let retained: HashSet<_> = accesses(&context.retained, cwd)
             .into_iter()
             .filter(|(_, name)| *name != "edit")
@@ -52,7 +37,7 @@ impl Compactor for EditingModule {
             .collect();
         let mut budget = context.total_tokens / 2;
         let mut items = Vec::new();
-        for (path, modified) in order {
+        for (path, modified) in candidates(context, cwd) {
             check(&cancel)?;
             if items.len() == MAX_FILES {
                 break;
@@ -81,6 +66,27 @@ impl Compactor for EditingModule {
         }
         Ok(items)
     }
+}
+
+/// Files the summarized history touched, modified first, then latest access first, followed
+/// by the files the previous checkpoint restored. True marks a modified file.
+fn candidates(context: &RestoreContext, cwd: &Path) -> Vec<(PathBuf, bool)> {
+    let mut order: Vec<(PathBuf, bool)> = Vec::new();
+    for (path, name) in accesses(&context.summarized, cwd).into_iter().rev() {
+        let modified = name != "read";
+        match order.iter_mut().find(|(seen, _)| *seen == path) {
+            Some(entry) => entry.1 |= modified,
+            None => order.push((path, modified)),
+        }
+    }
+    order.sort_by_key(|(_, modified)| !modified);
+    for item in context.previous.iter().filter(|item| item.source == SOURCE) {
+        let path = PathBuf::from(&item.key);
+        if !order.iter().any(|(seen, _)| *seen == path) {
+            order.push((path, false));
+        }
+    }
+    order
 }
 
 /// Successful `read`, `write` and `edit` calls as resolved path and tool name, oldest first.
@@ -112,13 +118,19 @@ fn accesses<'a>(messages: &'a [Message], cwd: &Path) -> Vec<(PathBuf, &'a str)> 
 /// Current UTF-8 content of a regular, non-secret file inside the workspace.
 fn text_file(path: &Path, root: &Path) -> Option<String> {
     let real = std::fs::canonicalize(path).ok()?;
-    let relative = real.strip_prefix(root).ok()?;
-    let metadata = std::fs::metadata(&real).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_BYTES || secret(relative) {
+    if !eligible(&real, root) {
         return None;
     }
     let text = String::from_utf8(std::fs::read(&real).ok()?).ok()?;
     (!text.trim().is_empty() && !text.contains('\0')).then_some(text)
+}
+
+/// A regular, non-secret file inside `root`, small enough to restore.
+fn eligible(real: &Path, root: &Path) -> bool {
+    real.strip_prefix(root)
+        .is_ok_and(|relative| !secret(relative))
+        && std::fs::metadata(real)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_BYTES)
 }
 
 /// Credentials stay out of automatic restores even when the model read them.
