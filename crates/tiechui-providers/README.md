@@ -13,7 +13,7 @@ root without `/v1`: Anthropic defaults to `https://api.anthropic.com` and append
 without a trailing `#` appends `/v1` followed by the wire suffix (preserving any
 proxy path prefix). Ending `base_url` with `#` (such as
 `https://gateway.example/chat/custom#`) strips the `#` and uses the exact URL as
-the request endpoint without appending `/v1` or the wire suffix. Redirects and automatic HTTP retries are disabled. TLS
+the request endpoint without appending `/v1` or the wire suffix; model listing then replaces the wire's own suffix (`/messages`, `/chat/completions`, `/responses`) with `/models`, and fails when the URL does not end with it. Redirects and automatic HTTP retries are disabled. TLS
 uses native trust roots plus the `[network]` `ca_cert` file; `[network]` `proxy`
 replaces the `*_PROXY` environment variables. A 300-second read timeout bounds silent connections.
 

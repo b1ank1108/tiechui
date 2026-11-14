@@ -54,8 +54,13 @@ impl Transport {
                 "provider name must be non-empty and contain no slash",
             ));
         }
-        let mut endpoint = Url::parse(config.base_url.as_deref().unwrap_or(default_root))
-            .map_err(|_| invalid("invalid provider base URL"))?;
+        let configured = config.base_url.as_deref().unwrap_or(default_root);
+        let (configured, exact) = match configured.strip_suffix('#') {
+            Some(url) => (url, true),
+            None => (configured, false),
+        };
+        let mut endpoint =
+            Url::parse(configured).map_err(|_| invalid("invalid provider base URL"))?;
         if !matches!(endpoint.scheme(), "http" | "https")
             || endpoint.host_str().is_none()
             || !endpoint.username().is_empty()
@@ -64,21 +69,13 @@ impl Transport {
             || endpoint.fragment().is_some()
         {
             return Err(invalid(
-                "base URL must be HTTP(S) without credentials, query, or fragment",
+                "base URL must be HTTP(S) without credentials or query, and may only end with a # fragment marker",
             ));
         }
-        // The API version is optional: a root with a version segment (`/v1`, `/api/paas/v4`,
-        // `/v1beta/openai`) keeps its own; any other root gets `/v1`.
-        let root = endpoint.path().trim_end_matches('/').to_owned();
-        let versioned = root.split('/').any(|segment| {
-            segment
-                .strip_prefix('v')
-                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-        });
-        endpoint.set_path(&format!(
-            "{root}{}{suffix}",
-            if versioned { "" } else { "/v1" }
-        ));
+        if !exact {
+            let root = endpoint.path().trim_end_matches('/').to_owned();
+            endpoint.set_path(&format!("{root}/v1{suffix}"));
+        }
         if key.is_empty() {
             return Err(ProviderError::new(ErrorKind::Auth, "empty API key"));
         }

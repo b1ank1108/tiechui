@@ -153,6 +153,7 @@ pub async fn list_models(
     network: &NetworkConfig,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>, ProviderError> {
+    let config = &models_config(config)?;
     let key = api_key(config)?;
     let builder = client_builder().timeout(std::time::Duration::from_secs(30));
     let client = client(network, builder).map_err(|e| redact_error(network, e))?;
@@ -195,6 +196,27 @@ pub async fn list_models(
     transport::list(request, cancel)
         .await
         .map_err(|e| redact_error(network, e))
+}
+
+fn models_config(config: &ProviderConfig) -> Result<ProviderConfig, ProviderError> {
+    let mut config = config.clone();
+    if let Some(exact) = config.base_url.as_deref().and_then(|u| u.strip_suffix('#')) {
+        let wire_suffix = match config.wire {
+            Wire::AnthropicMessages => "/messages",
+            Wire::OpenaiCompletions => "/chat/completions",
+            Wire::OpenaiResponses => "/responses",
+        };
+        let root = exact.strip_suffix(wire_suffix).ok_or_else(|| {
+            ProviderError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "cannot derive the models endpoint from a custom # URL that does not end with {wire_suffix}"
+                ),
+            )
+        })?;
+        config.base_url = Some(format!("{root}/models#"));
+    }
+    Ok(config)
 }
 
 fn redact_error(network: &NetworkConfig, mut err: ProviderError) -> ProviderError {
