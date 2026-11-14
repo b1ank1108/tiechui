@@ -112,6 +112,9 @@ full = false
 # "rules" asks for unmatched actions, "auto" lets a model classifier review them,
 # "yolo" approves them. User config only; CLI --mode overrides it.
 # mode = "rules"
+# Auto-mode reviews run on this <provider>/<id> instead of the session model.
+# User config only; omission reviews on the session model.
+# classifier_model = "example/model"
 # Omission keeps the built-in policy. An explicit empty rules array asks for all
 # unmatched actions. Rules are ordered; CLI --approval also governs headless calls.
 # To ask for everything, set permissions.rules to an empty array instead of
