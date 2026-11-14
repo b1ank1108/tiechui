@@ -66,14 +66,15 @@ impl ToolInvoker for Invoker {
         mut request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ToolError> {
-        let (provider, id) = model
+        let (provider, _) = model
             .split_once('/')
             .ok_or_else(|| ToolError(format!("Expected <provider>/<id>, got {model}")))?;
         let provider = self
             .providers
             .get(provider)
             .ok_or_else(|| ToolError(format!("Provider {provider} is not loaded")))?;
-        request.model = ModelId(id.into());
+        // Providers key their models by the full `<provider>/<id>`.
+        request.model = ModelId(model.into());
         stream_on(provider, request, cancel).await
     }
 }
@@ -217,4 +218,81 @@ async fn execute_inner(
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiechui_config::{ModelConfig, ProviderConfig, Wire};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    #[tokio::test]
+    async fn model_stream_on_reaches_another_loaded_provider() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                include_str!(
+                    "../../tiechui-providers/tests/fixtures/openai-completions/plain_text.sse"
+                ),
+                "text/event-stream",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = tiechui_providers::testing::provider(
+            "beta",
+            &ProviderConfig {
+                wire: Wire::OpenaiCompletions,
+                base_url: Some(server.uri()),
+                api_key: None,
+                api_key_env: None,
+                compat: Default::default(),
+                models: vec![
+                    serde_json::from_value::<ModelConfig>(
+                        serde_json::json!({"id":"fast","context_window":200_000,"max_output":4096}),
+                    )
+                    .unwrap(),
+                ],
+            },
+        )
+        .unwrap();
+        let invoker = Invoker {
+            registry: Arc::new(Registry::default()),
+            scheduler: Arc::new(ToolScheduler::default()),
+            model: None,
+            providers: BTreeMap::from([("beta".into(), Arc::from(provider))]),
+        };
+        let request = || ModelRequest {
+            disable_cache: true,
+            short_cache: false,
+            cache_key: None,
+            model: ModelId("alpha/heavy".into()),
+            messages: vec![tiechui_model::Message {
+                role: tiechui_model::Role::User,
+                content: vec![tiechui_model::Content::Text {
+                    text: "review".into(),
+                    opaque: None,
+                }],
+                opaque: None,
+            }],
+            input_tokens: None,
+            tools: vec![],
+            max_output: Some(16),
+            reasoning: None,
+        };
+        let stream = invoker
+            .model_stream_on("beta/fast", request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(stream.collect::<Vec<_>>().await.iter().all(Result::is_ok));
+        let received = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["model"], "fast");
+        assert!(matches!(
+            invoker
+                .model_stream_on("gamma/fast", request(), CancellationToken::new())
+                .await,
+            Err(ToolError(message)) if message == "Provider gamma is not loaded"
+        ));
+    }
 }

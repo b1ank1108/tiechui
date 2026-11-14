@@ -1185,7 +1185,7 @@ impl tiechui_plugin_api::ToolInvoker for Model {
         request: tiechui_plugin_api::model::ModelRequest,
         cancel: CancellationToken,
     ) -> Result<tiechui_plugin_api::ModelStream, ToolError> {
-        assert_eq!(Some(request.model.0.as_str()), model.split('/').nth(1));
+        assert_eq!(request.model.0, model);
         self.routed.lock().unwrap().push(model.into());
         self.model_stream(request, cancel).await
     }

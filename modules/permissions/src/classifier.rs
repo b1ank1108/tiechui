@@ -114,8 +114,8 @@ async fn request(
         .invoker
         .as_ref()
         .ok_or_else(|| ToolError("Model access is unavailable".into()))?;
-    let model = match reviewer.and_then(|reviewer| reviewer.split_once('/')) {
-        Some((_, id)) => tiechui_plugin_api::model::ModelId(id.into()),
+    let model = match reviewer {
+        Some(reviewer) => tiechui_plugin_api::model::ModelId(reviewer.into()),
         None => invoker
             .model()
             .ok_or_else(|| ToolError("Model access is unavailable".into()))?,
