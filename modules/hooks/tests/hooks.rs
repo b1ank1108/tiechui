@@ -911,12 +911,20 @@ async fn shell_free_args_bypass_shell_expansion_and_keep_provider_keys() {
     trust(&f.cwd, &f.home, &CancellationToken::new()).unwrap();
     let initial_hash = f.load(true).hooks()[0].hash.clone();
     // Review shows the arguments too, or approving `python3` would hide what it runs.
+    // Windows temp paths contain `\` and `?`, which the display quotes.
+    let shown = |path: &std::path::Path| {
+        if cfg!(windows) {
+            format!("'{}'", path.display())
+        } else {
+            path.display().to_string()
+        }
+    };
     assert_eq!(
         f.load(true).hooks()[0].display_command(),
         format!(
             r#"python3 -B {} {} '$(touch pwned); `echo bad` $OPENAI_API_KEY '\''quotes'\'''"#,
-            script.display(),
-            out.display()
+            shown(&script),
+            shown(&out)
         )
     );
 

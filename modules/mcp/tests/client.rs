@@ -695,18 +695,26 @@ async fn stdio_mcp_injects_proxy_and_ca_env_and_preserves_unconfigured_env() {
             },
         )
         .await;
-        for key in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
+        // Windows environment names are case-insensitive, so the lowercase copies merge into the uppercase ones.
+        let proxy_keys: &[&str] = if cfg!(windows) {
+            &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+        } else {
+            &[
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ]
+        };
+        for key in proxy_keys {
             assert_eq!(vars[key], "http://127.0.0.1:7890", "{key}");
         }
         assert_eq!(vars["NO_PROXY"], "");
-        assert_eq!(vars["no_proxy"], "");
+        if !cfg!(windows) {
+            assert_eq!(vars["no_proxy"], "");
+        }
         let ca_str = ca_path.display().to_string();
         for key in [
             "SSL_CERT_FILE",
