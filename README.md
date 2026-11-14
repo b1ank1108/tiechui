@@ -196,8 +196,9 @@ theme = "automatic"                    # follows the terminal background
 ```
 
 - If `base_url` is omitted, the default is `https://api.anthropic.com` or
-  `https://api.openai.com`, depending on the wire. A URL without a version
-  segment gets `/v1`; one that has its own, such as `/api/paas/v4`, is kept.
+  `https://api.openai.com`, depending on the wire. `/v1` and the wire's path are
+  always appended; end the URL with `#` to request it exactly, as in
+  `https://open.bigmodel.cn/api/paas/v4/chat/completions#`.
 - The `compat` table adapts the request to services such as DeepSeek-style
   reasoning gateways. A model's own `compat` table overrides single members, for
   gateways that mix model families.

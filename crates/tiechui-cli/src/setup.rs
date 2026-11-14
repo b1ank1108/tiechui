@@ -80,7 +80,7 @@ pub(crate) async fn run(paths: &ConfigPaths) -> Result<Option<String>, String> {
         };
         let Some(url) = text(
             "API address",
-            vec!["/v1 is added unless the address has a version, as in /api/paas/v4.".into()],
+            vec!["/v1 and the API path are added; end with # to use the address exactly.".into()],
             "",
             false,
             |url| {
