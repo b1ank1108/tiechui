@@ -839,6 +839,48 @@ fn edits_keep_approvals_and_approve_the_written_handler() {
     assert_eq!(error.0, "The command is empty");
 }
 
+#[test]
+fn moves_keep_the_handlers_other_fields() {
+    let f = Fixture::new();
+    let user = f.home.join("hooks.json");
+    let project = f.cwd.join(".agents/hooks.json");
+    let original = json!({"type": "command", "command": "guard", "args": ["--deny", "rm -rf"],
+        "onFailure": "block", "statusMessage": "Guarding"});
+    f.write(&user, Event::PreToolUse, json!([original]), Some("Bash"));
+    let mut expected = original.clone();
+    expected["command"] = json!("guarded");
+    expected["timeout"] = json!(5);
+    let cancel = CancellationToken::new();
+    for (in_project, event, matcher, path) in [
+        (false, Event::PreToolUse, "Write", &user),
+        (false, Event::PostToolUse, "Write", &user),
+        (true, Event::PostToolUse, "Write", &project),
+    ] {
+        let key = f.load(true).hooks()[0].key.clone();
+        let handler = Handler {
+            project: in_project,
+            event,
+            matcher: Some(matcher.into()),
+            command: "guarded".into(),
+            timeout: 5,
+        };
+        edit(&f.cwd, &f.home, Some(&key), Some(handler), &cancel).unwrap();
+        let file: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            file["hooks"],
+            json!({event.wire(): [{"matcher": matcher, "hooks": [expected]}]})
+        );
+    }
+    let hooks = f.load(true);
+    let [hook] = hooks.hooks() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (hook.source(), hook.on_failure, hook.trust.as_str()),
+        ("project", OnFailure::Block, "trusted")
+    );
+}
+
 #[tokio::test]
 async fn shell_free_args_bypass_shell_expansion_and_keep_provider_keys() {
     let f = Fixture::new();

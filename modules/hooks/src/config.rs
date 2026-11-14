@@ -449,10 +449,10 @@ pub struct Handler {
     pub timeout: u64,
 }
 
-/// Removes the handler named `previous`, adds `handler`, or replaces one with the other: in
-/// place when the scope, event and matcher stay, keeping the handler's other fields. Files are
-/// rewritten with sorted keys. Project handlers approved before stay approved, and the written
-/// one is approved: its author has just reviewed it.
+/// Removes the handler named `previous`, adds `handler`, or replaces one with the other,
+/// keeping the handler's other fields: in place when the scope, event and matcher stay, moved
+/// to a new group otherwise. Files are rewritten with sorted keys. Project handlers approved
+/// before stay approved, and the written one is approved: its author has just reviewed it.
 pub fn edit(
     cwd: &Path,
     home: &Path,
@@ -492,13 +492,15 @@ pub fn edit(
                     == pattern(new.event, new.matcher.as_deref())
         });
         let mut files = Vec::new();
+        let mut moved = None;
         if let Some(hook) = previous {
             let document = document(&mut files, &hook.path)?;
-            match &handler {
-                Some(new) if in_place => replace(document, hook, new),
-                _ => remove(document, hook),
+            if let Some(new) = &handler {
+                replace(document, hook, new).ok_or_else(|| invalid(&hook.path))?;
             }
-            .ok_or_else(|| invalid(&hook.path))?;
+            if !in_place {
+                moved = Some(remove(document, hook).ok_or_else(|| invalid(&hook.path))?);
+            }
         }
         let written = match (handler, previous) {
             (Some(_), Some(hook)) if in_place => Some((
@@ -513,8 +515,10 @@ pub fn edit(
                     _ if new.project => cwd.join(".agents/hooks.json"),
                     _ => home.join("hooks.json"),
                 };
-                let mut group = json!({"hooks": [{"type": "command", "command": new.command.trim(),
-                    "timeout": new.timeout}]});
+                let handler = moved.unwrap_or_else(|| {
+                    json!({"type": "command", "command": new.command.trim(), "timeout": new.timeout})
+                });
+                let mut group = json!({"hooks": [handler]});
                 if let Some(matcher) = pattern(new.event, new.matcher.as_deref()) {
                     group["matcher"] = json!(matcher);
                 }
@@ -594,8 +598,8 @@ fn replace(document: &mut serde_json::Value, hook: &Hook, new: &Handler) -> Opti
     Some(())
 }
 
-/// Drops the handler, and its group and event when they are left empty.
-fn remove(document: &mut serde_json::Value, hook: &Hook) -> Option<()> {
+/// Takes the handler out, dropping its group and event when they are left empty.
+fn remove(document: &mut serde_json::Value, hook: &Hook) -> Option<serde_json::Value> {
     let events = document.get_mut("hooks")?.as_object_mut()?;
     let groups = events.get_mut(hook.event.wire())?.as_array_mut()?;
     let handlers = groups
@@ -605,14 +609,14 @@ fn remove(document: &mut serde_json::Value, hook: &Hook) -> Option<()> {
     if hook.handler_index >= handlers.len() {
         return None;
     }
-    handlers.remove(hook.handler_index);
+    let handler = handlers.remove(hook.handler_index);
     if handlers.is_empty() {
         groups.remove(hook.group_index);
         if groups.is_empty() {
             events.remove(hook.event.wire());
         }
     }
-    Some(())
+    Some(handler)
 }
 
 /// Appends a group to the event, returning its index.
