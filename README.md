@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="https://b1ank1108.github.io/tiechui/">UI gallery</a>
+  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="https://tiechui-f0d.pages.dev/">Website</a>
 </p>
 
 <p align="center">
@@ -348,11 +348,11 @@ Disabling a module removes its commands. Plugins and [prompt templates](#skills-
 
 ## UI gallery
 
-The [UI gallery](https://b1ank1108.github.io/tiechui/) shows the terminal UI
-screen by screen, in dark and light themes, at 80 and 40 columns and at three
-color levels, rendered cell by cell from the TUI snapshot tests. Its source is
-[`site/`](site/); `python3 scripts/ui_gallery.py` refreshes its data after
-snapshot changes, and `.github/workflows/pages.yml` publishes it from `main`.
+The [UI gallery](https://tiechui-f0d.pages.dev/docs.html#ui-transcript) on the
+[website](https://tiechui-f0d.pages.dev/) shows the terminal UI screen by
+screen, in dark and light themes, at 80 and 40 columns and at three color
+levels, rendered cell by cell from the TUI snapshot tests. The website is
+maintained outside this repository.
 
 ## Permissions and trust
 
@@ -554,7 +554,6 @@ the workspace version:
 | `crates/tiechui-plugin-api`, `tiechui-plugin-sdk`, `sdk/typescript` | Module API, plugin SDKs |
 | `modules/` | editing, exec, permissions, ask, hooks, context-files, skills, prompts, mcp, plugins, context, rewind, btw, goal, loop, compaction, subagents, tool-search, ptc |
 | `xtask/`, `scripts/`, `tests/` | Maintenance tasks, packaging, PTY tests |
-| `site/` | UI gallery rendered from the TUI snapshots |
 
 Features live in modules behind `tiechui-plugin-api`. The kernel carries no
 feature policy and the TUI depends only on the protocol. The session actor is
