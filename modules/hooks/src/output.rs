@@ -4,7 +4,7 @@ use tiechui_plugin_api::{
     serde_json::{self, Value},
 };
 
-use crate::Event;
+use crate::{Event, config::OnFailure};
 
 #[derive(Debug, Default)]
 pub struct Outcome {
@@ -40,7 +40,37 @@ fn nonempty(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) fn parse(event: Event, output: std::process::Output) -> Outcome {
+/// A failed `onFailure: "block"` hook denies what it guards. Stop and PreCompact are left alone:
+/// blocking them would force endless continuations or prevent compaction.
+pub(crate) fn fail_closed(
+    event: Event,
+    on_failure: OnFailure,
+    result: &mut Outcome,
+    reason: String,
+) {
+    if on_failure != OnFailure::Block {
+        return;
+    }
+    match event {
+        Event::PermissionRequest => {
+            if result.approval.is_none() {
+                result.approval = Some(ApprovalVerdict::Deny(reason));
+            }
+        }
+        Event::PreToolUse | Event::UserPromptSubmit => {
+            if result.block.is_none() {
+                result.block = Some(reason);
+            }
+        }
+        Event::Stop
+        | Event::PreCompact
+        | Event::SessionStart
+        | Event::PostToolUse
+        | Event::SessionEnd => {}
+    }
+}
+
+pub(crate) fn parse(event: Event, on_failure: OnFailure, output: std::process::Output) -> Outcome {
     let mut result = Outcome::default();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -61,20 +91,22 @@ pub(crate) fn parse(event: Event, output: std::process::Output) -> Outcome {
                     result.block = Some(reason);
                 }
             } else {
-                result
-                    .diagnostics
-                    .push("hook exited with code 2 without a reason on stderr".into());
+                let msg = "hook exited with code 2 without a reason on stderr".to_owned();
+                result.diagnostics.push(msg.clone());
+                fail_closed(event, on_failure, &mut result, msg);
             }
         } else if output.status.code() == Some(2) && event == Event::PostToolUse {
             if let Some(reason) = nonempty(Some(&stderr)) {
                 result.context.push(reason);
             }
         } else {
-            result.diagnostics.push(format!(
+            let msg = format!(
                 "hook exited with {:?}: {}",
                 output.status.code(),
                 stderr.trim()
-            ));
+            );
+            result.diagnostics.push(msg.clone());
+            fail_closed(event, on_failure, &mut result, msg);
         }
         return result;
     }
@@ -88,12 +120,15 @@ pub(crate) fn parse(event: Event, output: std::process::Output) -> Outcome {
     {
         Some(wire) => wire,
         None => {
-            if stdout.trim_start().starts_with(['{', '[']) {
-                result
-                    .diagnostics
-                    .push("hook returned invalid JSON output".into());
-            } else if matches!(event, Event::SessionStart | Event::UserPromptSubmit) {
+            if matches!(event, Event::SessionStart | Event::UserPromptSubmit)
+                && !stdout.trim_start().starts_with(['{', '['])
+            {
                 result.context.push(stdout.trim().into());
+            } else if stdout.trim_start().starts_with(['{', '[']) || on_failure == OnFailure::Block
+            {
+                let msg = "hook returned invalid JSON output".to_owned();
+                result.diagnostics.push(msg.clone());
+                fail_closed(event, on_failure, &mut result, msg);
             }
             return result;
         }
@@ -107,7 +142,9 @@ pub(crate) fn parse(event: Event, output: std::process::Output) -> Outcome {
         result.updated_input = None;
         result.approval = None;
         result.context.clear();
-        result.diagnostics.push(error.into());
+        let msg = error.to_owned();
+        result.diagnostics.push(msg.clone());
+        fail_closed(event, on_failure, &mut result, msg);
     }
     result
 }

@@ -416,7 +416,7 @@ chui plugin add ./path/to/package # 本地包
 
 **提示模板**是放在 profile 的 `prompts/` 以及已信任项目 `.agents/prompts` 和 `.claude/commands` 中的 Markdown 模板。每个文件注册为同名命令；`/name text` 会把正文中的 `$ARGUMENTS` 替换后作为用户消息发送。见 [modules/prompts](modules/prompts/README.md)。
 
-**Hooks：** `chui hooks list` 列出，`chui hooks trust` 批准命令 hooks。桌面客户端只编辑 `hooks.json` 文件；保存在其中的处理器即视为已批准，之前已批准的处理器也保持批准状态。
+**Hooks：** `chui hooks list` 列出，`chui hooks trust` 批准命令 hooks。桌面客户端只编辑 `hooks.json` 文件；保存在其中的处理器即视为已批准，之前已批准的处理器也保持批准状态。带 `args` 的处理器直接用这些参数执行 `command`，不经过 `$SHELL -lc`。设置 `"onFailure": "block"` 后，`PreToolUse`、`UserPromptSubmit` 或 `PermissionRequest` 处理器启动失败、超时、非零退出或输出非法时按阻断或拒绝处理；`Stop` 与 `PreCompact` 处理器出错从不阻断。
 
 ### MCP
 

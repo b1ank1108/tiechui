@@ -5,14 +5,19 @@ use tiechui_plugin_api::PermissionAction as Action;
 use crate::path::Access;
 use crate::policy::Rule;
 
-const DIRECTORIES: [&str; 6] = [".git", ".agents", ".claude", ".tiechui", ".vscode", ".idea"];
-const FILES: [&str; 10] = [
+const DIRECTORIES: [&str; 7] = [
+    ".git", ".agents", ".claude", ".tiechui", ".husky", ".vscode", ".idea",
+];
+const FILES: [&str; 13] = [
     ".gitconfig",
     ".gitmodules",
     ".bashrc",
     ".bash_profile",
+    ".bash_login",
     ".zshrc",
     ".zprofile",
+    ".zshenv",
+    ".zlogin",
     ".profile",
     ".mcp.json",
     ".ripgreprc",
@@ -69,11 +74,18 @@ fn strip_suffix(path: &Path, suffix: &Path) -> Option<PathBuf> {
     Some(parts.as_path().to_owned())
 }
 
+fn config_git_dir(parts: &[String]) -> bool {
+    parts
+        .windows(2)
+        .any(|pair| pair[0] == ".config" && pair[1] == "git")
+}
+
 fn isolatable(root: &Path) -> bool {
     let parts = normal_parts(root);
     !parts
         .iter()
-        .any(|part| matches!(part.as_str(), ".git" | ".vscode" | ".idea"))
+        .any(|part| matches!(part.as_str(), ".git" | ".husky" | ".vscode" | ".idea"))
+        && !config_git_dir(&parts)
         && !parts
             .last()
             .is_some_and(|last| DIRECTORIES.contains(&last.as_str()))
@@ -104,7 +116,7 @@ fn matches(path: &Path) -> bool {
     let directory = parts.iter().enumerate().any(|(at, part)| {
         DIRECTORIES.contains(&part.as_str()) && !exempted(part, parts.get(at + 1))
     });
-    directory || parts.last().is_some_and(|name| sensitive_file(name))
+    directory || config_git_dir(&parts) || parts.last().is_some_and(|name| sensitive_file(name))
 }
 
 /// An allow rule that would let auto mode run arbitrary code without review.
@@ -130,8 +142,14 @@ mod tests {
         for path in [
             "/w/.git/hooks/pre-commit",
             "/w/.GIT/config",
+            "/w/.husky/pre-commit",
             "/w/.claude/settings.json",
             "/home/u/.bashrc",
+            "/home/u/.bash_login",
+            "/home/u/.zshenv",
+            "/home/u/.zlogin",
+            "/home/u/.config/git/config",
+            "/home/u/.config/git/ignore",
             "/w/.env",
             "/w/.env.local",
             "/w/.vscode",
@@ -140,6 +158,7 @@ mod tests {
         }
         for path in [
             "/w/src/main.rs",
+            "/home/u/.config/nvim/init.lua",
             "/w/.claude/worktrees/feature/src/lib.rs",
             "/w/.claude/plans/plan.md",
             "/w/.claude/state/cache.json",

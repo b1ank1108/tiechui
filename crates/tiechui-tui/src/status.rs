@@ -698,6 +698,9 @@ pub async fn git(cwd: PathBuf, fields: GitFields) -> Git {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        for name in tiechui_config::scrubbed_secret_env_vars() {
+            command.env_remove(name);
+        }
         async move {
             let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
                 .await

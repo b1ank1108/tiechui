@@ -246,6 +246,10 @@ export type HookEntry = {
  */
 key: string, event: string, matcher: string | null, command: string, 
 /**
+ * Arguments `command` runs with directly, without a shell; absent for shell commands.
+ */
+args: Array<string> | null, 
+/**
  * Seconds.
  */
 timeout: number, path: string, 

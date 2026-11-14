@@ -254,6 +254,7 @@ pub(crate) fn parse_providers(
     for (name, provider) in &providers {
         if let Some(env) = &provider.api_key_env {
             validate_env_name(path, &format!("{name}.api_key_env"), env)?;
+            crate::register_secret_env_var(env);
         }
         let invalid_key = match (&provider.api_key, &provider.api_key_env) {
             (Some(_), Some(_)) => Some("set api_key or api_key_env, not both"),

@@ -515,6 +515,10 @@ fn providers_are_only_read_from_the_user_providers_file() {
         loaded.config.providers["local"].api_key_env.as_deref(),
         Some("FIXTURE_API_KEY")
     );
+    // Internal helper processes drop declared provider keys along with the well-known ones.
+    let scrubbed = scrubbed_secret_env_vars();
+    assert!(scrubbed.iter().any(|name| name == "FIXTURE_API_KEY"));
+    assert!(scrubbed.iter().any(|name| name == "OPENAI_API_KEY"));
 }
 
 fn write(root: &Path, name: &str, contents: &str) -> PathBuf {

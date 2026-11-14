@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tiechui_module_hooks::{Event, Handler, HooksModule, approve, edit, trust};
+use tiechui_module_hooks::{Event, Handler, HooksModule, OnFailure, approve, edit, trust};
 use tiechui_plugin_api::{
     ApprovalVerdict, BeforeToolCall, CancellationToken, LifecycleContext, LifecycleEvent, Module,
     ModuleConfig, Registry, ToolContext,
@@ -837,4 +837,141 @@ fn edits_keep_approvals_and_approve_the_written_handler() {
     )
     .unwrap_err();
     assert_eq!(error.0, "The command is empty");
+}
+
+#[tokio::test]
+async fn shell_free_args_bypass_shell_expansion_and_keep_provider_keys() {
+    let f = Fixture::new();
+    let script = f.cwd.join("dump.py");
+    std::fs::write(
+        &script,
+        "import json, os, sys\nopen(sys.argv[1], 'w').write(json.dumps({'args': sys.argv[2:], 'openai': os.environ.get('OPENAI_API_KEY'), 'internal': os.environ.get('NODE_REPL_AUTH_TOKEN')}))\n",
+    )
+    .unwrap();
+    // Hooks are user-authored and reviewed, so they keep provider keys like the bash tool does.
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "sk-test-openai");
+        std::env::set_var("NODE_REPL_AUTH_TOKEN", "internal-token");
+    }
+    let out = f.cwd.join("captured.json");
+    let literal = "$(touch pwned); `echo bad` $OPENAI_API_KEY 'quotes'";
+    let project_hooks = f.cwd.join(".agents/hooks.json");
+    f.write(
+        &project_hooks,
+        Event::PreToolUse,
+        json!([{
+            "type": "command",
+            "command": "python3",
+            "args": ["-B", script.to_str().unwrap(), out.to_str().unwrap(), literal]
+        }]),
+        Some("Bash"),
+    );
+    trust(&f.cwd, &f.home, &CancellationToken::new()).unwrap();
+    let initial_hash = f.load(true).hooks()[0].hash.clone();
+    // Review shows the arguments too, or approving `python3` would hide what it runs.
+    assert_eq!(
+        f.load(true).hooks()[0].display_command(),
+        format!(
+            r#"python3 -B {} {} '$(touch pwned); `echo bad` $OPENAI_API_KEY '\''quotes'\'''"#,
+            script.display(),
+            out.display()
+        )
+    );
+
+    let hooks = f.load(true);
+    let mut registry = Registry::default();
+    hooks
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    let verdict = registry.interceptors()[0]
+        .interceptor
+        .before(&call(), f.ctx())
+        .await
+        .unwrap();
+    assert_eq!(verdict, BeforeToolCall::Allow);
+    assert!(!f.cwd.join("pwned").exists());
+    let captured: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(captured["args"], json!([literal]));
+    assert_eq!(captured["openai"], "sk-test-openai");
+    assert!(captured["internal"].is_null());
+
+    f.write(
+        &project_hooks,
+        Event::PreToolUse,
+        json!([{
+            "type": "command",
+            "command": "python3",
+            "args": ["-B", script.to_str().unwrap(), out.to_str().unwrap(), "changed"]
+        }]),
+        Some("Bash"),
+    );
+    let reloaded = f.load(true);
+    assert_ne!(reloaded.hooks()[0].hash, initial_hash);
+    assert_eq!(reloaded.hooks()[0].trust, "changed");
+}
+
+#[tokio::test]
+async fn on_failure_block_denies_guarded_events_but_never_forces_stop_or_compaction() {
+    let f = Fixture::new();
+    let project_hooks = f.cwd.join(".agents/hooks.json");
+    f.write(
+        &project_hooks,
+        Event::PreToolUse,
+        json!([{"type": "command", "command": "python3", "args": ["-c", "import sys; sys.stderr.write('boom'); sys.exit(1)"], "onFailure": "block"}]),
+        Some("Bash"),
+    );
+    trust(&f.cwd, &f.home, &CancellationToken::new()).unwrap();
+    let hooks = f.load(true);
+    assert_eq!(hooks.hooks()[0].on_failure, OnFailure::Block);
+    let mut registry = Registry::default();
+    hooks
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    let verdict = registry.interceptors()[0]
+        .interceptor
+        .before(&call(), f.ctx())
+        .await
+        .unwrap();
+    assert!(
+        matches!(verdict, BeforeToolCall::Deny(ref msg) if msg.contains("boom")),
+        "{verdict:?}"
+    );
+
+    f.write(
+        &f.home.join("hooks.json"),
+        Event::PermissionRequest,
+        json!([{"type": "command", "command": "nonexistent_hook_binary_xyz", "args": [], "onFailure": "block"}]),
+        Some("Bash"),
+    );
+    let hooks = f.load(false);
+    let mut registry = Registry::default();
+    hooks
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    let approval = registry.approval_interceptors()[0]
+        .review(&call(), f.ctx())
+        .await
+        .unwrap();
+    assert!(matches!(approval, Some(ApprovalVerdict::Deny(_))));
+
+    for (event, blocked) in [
+        (Event::UserPromptSubmit, true),
+        (Event::Stop, false),
+        (Event::PreCompact, false),
+    ] {
+        f.write(
+            &f.home.join("hooks.json"),
+            event,
+            json!([{"type": "command", "command": "python3", "args": ["-c", "print('{broken')"], "onFailure": "block"}]),
+            None,
+        );
+        let outcome = f
+            .load(false)
+            .dispatch(event, json!({}), None, &f.cwd, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome.block.is_some(), blocked, "{event:?}");
+        assert!(outcome.stop.is_none(), "{event:?}");
+        assert!(!outcome.diagnostics.is_empty(), "{event:?}");
+    }
 }

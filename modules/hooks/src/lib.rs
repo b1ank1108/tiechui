@@ -4,7 +4,7 @@ mod config;
 mod output;
 mod runner;
 
-pub use config::{Handler, Hook, approve, edit, trust, trust_with_sources};
+pub use config::{Handler, Hook, OnFailure, approve, edit, trust, trust_with_sources};
 pub use output::Outcome;
 
 use std::path::Path;
@@ -193,7 +193,7 @@ impl Command for ListCommand {
                 format!(
                     "{}{matcher} · {state}\n  {}\n  {}",
                     hook.event.wire(),
-                    hook.command,
+                    hook.display_command(),
                     hook.path.display()
                 )
             })
@@ -326,11 +326,16 @@ impl Runtime {
 
 async fn execute(hook: &Hook, input: &str, cwd: &Path, cancel: CancellationToken) -> Outcome {
     match runner::run(hook, input, cwd, cancel).await {
-        Ok(output) => output::parse(hook.event, output),
-        Err(error) => Outcome {
-            diagnostics: vec![format!("{}: {error}", hook.path.display())],
-            ..Outcome::default()
-        },
+        Ok(output) => output::parse(hook.event, hook.on_failure, output),
+        Err(error) => {
+            let msg = format!("{}: {error}", hook.path.display());
+            let mut outcome = Outcome {
+                diagnostics: vec![msg.clone()],
+                ..Outcome::default()
+            };
+            output::fail_closed(hook.event, hook.on_failure, &mut outcome, msg);
+            outcome
+        }
     }
 }
 

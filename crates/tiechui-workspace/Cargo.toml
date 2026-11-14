@@ -13,6 +13,7 @@ portable-pty.workspace = true
 regex.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tiechui-config.workspace = true
 tiechui-protocol.workspace = true
 trash.workspace = true
 

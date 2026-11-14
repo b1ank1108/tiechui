@@ -67,7 +67,7 @@ pub(crate) fn run(command: &str, args: &ArgMatches) -> Result<(), String> {
                     if hook.enabled { "enabled" } else { "disabled" },
                     hook.trust,
                     hook.path.display(),
-                    hook.command
+                    hook.display_command()
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -136,7 +136,7 @@ fn question(pending: &[Hook]) -> Question {
         format!(
             "{}: {} ({})",
             hook.event.wire(),
-            hook.command,
+            hook.display_command(),
             hook.path.display()
         )
     }));

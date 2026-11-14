@@ -36,6 +36,62 @@ pub fn user_home() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+const BUILTIN_SECRET_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "AZURE_OPENAI_API_KEY",
+    "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+    "CODEX_GUARDIAN_DECISIONS_API_KEY",
+    "COHERE_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "FIREWORKS_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY",
+    "NODE_REPL_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_FEDERATION_RULE_ID",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
+    "XAI_API_KEY",
+    "ZHIPU_API_KEY",
+];
+
+fn custom_secret_env_vars() -> &'static std::sync::RwLock<std::collections::BTreeSet<String>> {
+    static VARS: std::sync::OnceLock<std::sync::RwLock<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    VARS.get_or_init(|| std::sync::RwLock::new(std::collections::BTreeSet::new()))
+}
+
+pub fn register_secret_env_var(name: &str) {
+    if !name.is_empty() {
+        custom_secret_env_vars()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_owned());
+    }
+}
+
+pub fn scrubbed_secret_env_vars() -> Vec<String> {
+    let mut names: std::collections::BTreeSet<String> = BUILTIN_SECRET_ENV_VARS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    names.extend(
+        custom_secret_env_vars()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned(),
+    );
+    names.into_iter().collect()
+}
+
 /// Built-in defaults leave model selection and providers unset. Providers come from
 /// `providers.toml` beside the user config, never from a project or the command line.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -661,6 +717,7 @@ impl ProviderConfig {
             return Ok(None);
         };
         validate_env_name(Path::new("<environment>"), name, name)?;
+        register_secret_env_var(name);
         match lookup(name) {
             Ok(value) if !value.is_empty() => Ok(Some(value)),
             Ok(_) => Err(ConfigError::new("<environment>", name, "variable is empty")),

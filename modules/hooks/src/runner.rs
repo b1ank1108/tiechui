@@ -56,15 +56,21 @@ async fn execute(
             ));
         }
     }
-    #[cfg(unix)]
-    let shell =
-        std::env::var_os("SHELL").map_or_else(|| "/bin/sh".into(), std::path::PathBuf::from);
-    #[cfg(windows)]
-    let shell = exec::resolve_shell().map_err(|e| ToolError(e.to_string()))?;
-    let mut command = Command::new(shell);
+    let mut command = if let Some(args) = &hook.args {
+        let mut command = Command::new(&hook.command);
+        command.args(args);
+        command
+    } else {
+        #[cfg(unix)]
+        let shell =
+            std::env::var_os("SHELL").map_or_else(|| "/bin/sh".into(), std::path::PathBuf::from);
+        #[cfg(windows)]
+        let shell = exec::resolve_shell().map_err(|e| ToolError(e.to_string()))?;
+        let mut command = Command::new(shell);
+        command.arg("-lc").arg(&hook.command);
+        command
+    };
     command
-        .arg("-lc")
-        .arg(&hook.command)
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

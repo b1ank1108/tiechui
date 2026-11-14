@@ -461,7 +461,11 @@ See [modules/prompts](modules/prompts/README.md).
 
 **Hooks:** `chui hooks list` lists them and `chui hooks trust` approves command
 hooks. Desktop clients edit only `hooks.json` files; a handler saved there is
-approved, and handlers approved before stay so.
+approved, and handlers approved before stay so. A handler with `args` runs
+`command` directly with those arguments instead of through `$SHELL -lc`. With
+`"onFailure": "block"`, a `PreToolUse`, `UserPromptSubmit` or `PermissionRequest`
+handler that fails to start, times out, exits non-zero or prints invalid output
+blocks or denies; `Stop` and `PreCompact` handlers never block on failure.
 
 ### MCP
 

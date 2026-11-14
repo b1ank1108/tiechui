@@ -90,6 +90,9 @@ async fn scan_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for name in tiechui_plugin_api::scrubbed_secret_env_vars() {
+        command.env_remove(name);
+    }
     let (mut child, tree) = exec::Tree::spawn(command)?;
     let mut stdout = child
         .stdout

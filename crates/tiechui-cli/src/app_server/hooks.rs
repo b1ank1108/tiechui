@@ -84,6 +84,7 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
                     event: hook.event.wire().into(),
                     matcher: hook.matcher.clone(),
                     command: hook.command.clone(),
+                    args: hook.args.clone(),
                     timeout: hook.timeout,
                     path: hook.path.display().to_string(),
                     source: hook.source().into(),

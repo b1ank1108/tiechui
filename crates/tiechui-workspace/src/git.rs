@@ -19,6 +19,9 @@ fn command(program: &str, root: &Path, args: &[&str]) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0");
+    for name in tiechui_config::scrubbed_secret_env_vars() {
+        command.env_remove(name);
+    }
     command
 }
 

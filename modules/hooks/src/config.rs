@@ -25,15 +25,31 @@ struct Group {
     hooks: Vec<CommandHook>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFailure {
+    #[default]
+    Ignore,
+    Block,
+}
+
+fn is_ignore(mode: &OnFailure) -> bool {
+    *mode == OnFailure::Ignore
+}
+
 #[derive(Deserialize)]
 struct CommandHook {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     command: String,
+    #[serde(default)]
+    args: Option<Vec<String>>,
     timeout: Option<u64>,
     #[serde(default, rename = "async")]
     asynchronous: bool,
+    #[serde(default, rename = "onFailure")]
+    on_failure: OnFailure,
     #[serde(rename = "statusMessage")]
     status_message: Option<String>,
     #[serde(rename = "additionalContextLimit")]
@@ -47,8 +63,12 @@ pub struct Hook {
     pub path: PathBuf,
     pub matcher: Option<String>,
     pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
     pub timeout: u64,
     pub asynchronous: bool,
+    #[serde(rename = "onFailure", skip_serializing_if = "is_ignore")]
+    pub on_failure: OnFailure,
     pub enabled: bool,
     pub trust: String,
     pub hash: String,
@@ -84,6 +104,30 @@ impl Hook {
             && self.path.file_name() == Some("hooks.json".as_ref())
     }
 
+    /// What runs, for review: `command` alone for shell handlers, otherwise the program and its
+    /// `args` quoted as a POSIX shell would need them.
+    pub fn display_command(&self) -> String {
+        let Some(args) = &self.args else {
+            return self.command.clone();
+        };
+        let quote = |word: &str| {
+            if !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+            {
+                word.to_owned()
+            } else {
+                format!("'{}'", word.replace('\'', r"'\''"))
+            }
+        };
+        std::iter::once(self.command.as_str())
+            .chain(args.iter().map(String::as_str))
+            .map(quote)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     pub(crate) fn matches(&self, input: Option<&str>) -> bool {
         if matches!(self.event, Event::UserPromptSubmit | Event::Stop) {
             return true;
@@ -105,6 +149,12 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
 fn identity(event: Event, matcher: Option<&str>, command: &CommandHook) -> String {
     let mut handler = serde_json::json!({"type": "command", "command": command.command,
         "timeout": timeout(event, command.timeout), "async": command.asynchronous});
+    if let Some(args) = &command.args {
+        handler["args"] = serde_json::json!(args);
+    }
+    if command.on_failure == OnFailure::Block {
+        handler["onFailure"] = serde_json::json!("block");
+    }
     if let Some(status) = &command.status_message {
         handler["statusMessage"] = serde_json::json!(status);
     }
@@ -328,8 +378,10 @@ pub(crate) fn discover(
                         path: path.clone(),
                         matcher: pattern.map(str::to_owned),
                         command: command.command.clone(),
+                        args: command.args.clone(),
                         timeout: timeout(event, command.timeout),
                         asynchronous: command.asynchronous && event != Event::SessionEnd,
+                        on_failure: command.on_failure,
                         enabled: matches!(trust, "trusted" | "user"),
                         trust: trust.into(),
                         hash: current_hash.clone(),

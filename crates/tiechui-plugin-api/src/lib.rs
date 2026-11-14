@@ -10,7 +10,7 @@ mod session;
 pub use compaction::*;
 pub use session::*;
 pub use tiechui_config::{CompactionConfig, NetworkConfig, PressureBenefit};
-pub use tiechui_config::{private, user_home};
+pub use tiechui_config::{private, register_secret_env_var, scrubbed_secret_env_vars, user_home};
 mod runtime;
 pub use runtime::*;
 mod paths;

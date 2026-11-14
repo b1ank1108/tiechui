@@ -524,6 +524,8 @@ pub struct HookEntry {
     pub event: String,
     pub matcher: Option<String>,
     pub command: String,
+    /// Arguments `command` runs with directly, without a shell; absent for shell commands.
+    pub args: Option<Vec<String>>,
     /// Seconds.
     pub timeout: u64,
     pub path: String,
