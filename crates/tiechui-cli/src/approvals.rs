@@ -184,6 +184,7 @@ mod tests {
                     }),
                     interactions: Some(inbox),
                     epoch: SessionEpoch(0),
+                    short_cache: false,
                 },
                 shutdown.clone(),
             );

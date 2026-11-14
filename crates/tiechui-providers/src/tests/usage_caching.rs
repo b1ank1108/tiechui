@@ -50,6 +50,23 @@ fn cache_retention_requests_preserve_default_and_completions_payloads() {
         crate::anthropic::request::encode(&request, model).unwrap(),
         default
     );
+    request.short_cache = true;
+    for retention in [CacheRetention::Short, CacheRetention::Long] {
+        model.cache_retention = retention;
+        assert_eq!(
+            crate::anthropic::request::encode(&request, model).unwrap(),
+            default
+        );
+    }
+    model.cache_retention = CacheRetention::None;
+    assert!(
+        !crate::anthropic::request::encode(&request, model)
+            .unwrap()
+            .to_string()
+            .contains("cache_control")
+    );
+    model.cache_retention = CacheRetention::Short;
+    request.short_cache = false;
     request.disable_cache = true;
     assert!(
         !crate::anthropic::request::encode(&request, model)

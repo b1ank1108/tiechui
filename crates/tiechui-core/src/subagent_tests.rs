@@ -288,6 +288,7 @@ async fn records_recover_after_actor_restart_and_follow_selected_branch() {
             retry: Arc::new(BoundedRetry::default()),
             interactions: None,
             epoch: h.epoch,
+            short_cache: false,
         },
         h.shutdown.clone(),
     );
@@ -683,6 +684,7 @@ impl MultiProviderFixture {
                 }),
                 interactions: None,
                 epoch,
+                short_cache: false,
             },
             shutdown.clone(),
         );
@@ -925,6 +927,7 @@ async fn cross_provider_child_executes_and_preflight_rejects_invalid_or_unavaila
     assert_eq!(beta_first.model.0, "beta/judge");
     assert_eq!(beta_second.model.0, "beta/org/nested");
     assert!(f.beta_rx.try_recv().is_err());
+    assert!(beta_first.short_cache && beta_second.short_cache);
 
     let mut alpha_requests = Vec::new();
     while let Ok(req) = f.alpha_rx.try_recv() {
@@ -932,6 +935,11 @@ async fn cross_provider_child_executes_and_preflight_rejects_invalid_or_unavaila
     }
     assert_eq!(alpha_requests.len(), 9);
     assert!(alpha_requests.iter().all(|r| r.model.0 == "alpha/fast"));
+    // Only the inherited-model child caps its cache; the parent keeps the configured retention.
+    let (child, parent): (Vec<_>, Vec<_>) = alpha_requests.iter().partition(|r| r.short_cache);
+    assert_eq!((child.len(), parent.len()), (1, 8));
+    assert!(parent.iter().all(|r| r.cache_key == parent[0].cache_key));
+    assert_ne!(child[0].cache_key, parent[0].cache_key);
 
     let tool_results = f.tool_results();
     assert_eq!(tool_results.len(), 7);

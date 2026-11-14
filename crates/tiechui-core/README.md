@@ -113,7 +113,11 @@ opening request, keeping the last round; at most two reductions per operation,
 sharing the retry budget. Such a checkpoint records `degraded` and the omitted
 entry range, says so in its summary and renders as degraded. Three consecutive
 automatic failures, or a checkpoint that leaves the context above the threshold,
-pause automatic compaction until a new model-visible entry or `/compact`.
+pause automatic compaction until a new model-visible entry or `/compact`. Without a
+usage anchor (a new session, the first request after a checkpoint, or a provider
+that reports no usage) the threshold estimate covers the whole next request,
+including the system prompt and visible tools. When those alone exceed the
+threshold no checkpoint can help, so only overflow recovery and `/compact` run.
 
 Ordered `Compactor` contributors can cancel or supply a checkpoint, once per
 operation, and restore context it loses. Restored items are budgeted against the

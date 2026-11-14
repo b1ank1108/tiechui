@@ -69,8 +69,21 @@ impl SessionActor {
 
     fn context_tokens(&self) -> Result<u64, String> {
         let store = self.store()?;
-        let messages = store.build_context_excluding(&self.excluded);
-        estimate::input(store, &self.excluded, &messages, &[])
+        if let Some(tokens) = estimate::anchored(store, &self.excluded)? {
+            return Ok(tokens);
+        }
+        // Without usage, estimate the whole next request: system prompt and tools included.
+        let mut messages = store.build_context_excluding(&self.excluded);
+        messages.splice(0..0, self.system_message());
+        Ok(tiechui_providers::estimate::input(
+            &messages,
+            &self.visible_tools(),
+        ))
+    }
+
+    /// The system prompt and tools, which no checkpoint can shrink.
+    fn prefix_tokens(&self) -> u64 {
+        tiechui_providers::estimate::input(self.system_message().as_slice(), &self.visible_tools())
     }
 
     /// Maintenance entries such as usage, recovery and checkpoints leave the source unchanged.
@@ -101,7 +114,12 @@ impl SessionActor {
             return Ok(());
         }
         let window = self.model_info(&self.model).context_window;
-        if should_compact(self.context_tokens()?, window, &self.compaction_settings()) {
+        let settings = self.compaction_settings();
+        // When the prefix alone crosses the threshold every checkpoint would stall; only
+        // overflow recovery and `/compact` remain.
+        if should_compact(self.context_tokens()?, window, &settings)
+            && !should_compact(self.prefix_tokens(), window, &settings)
+        {
             self.compact(CompactionReason::Threshold, None, false)
                 .await?;
         }
@@ -628,6 +646,7 @@ impl SessionActor {
     fn summary_request(&self, prompt: String) -> ModelRequest {
         ModelRequest {
             disable_cache: true,
+            short_cache: false,
             cache_key: None,
             model: self.model.model.clone(),
             messages: vec![

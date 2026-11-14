@@ -499,6 +499,25 @@ mod tests {
     }
 
     #[test]
+    fn trailing_unanswered_user_message_is_never_summarized() {
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut store =
+            SessionStore::create(temp.path(), temp.path(), &CancellationToken::new()).unwrap();
+        append(&mut store, Role::User, vec![text("old request")]);
+        append(&mut store, Role::Assistant, vec![text("old answer")]);
+        let pending = "unanswered request ".repeat(200);
+        let user = append(&mut store, Role::User, vec![text(&pending)]);
+        let is_pending = |message: &Message| message.content == [text(&pending)];
+        // The last message alone exceeds `keep`, yet the cut never moves past it.
+        let prepared = prepare(&store, &HashSet::new(), 10, 100).unwrap();
+        assert_eq!(prepared.preparation.first_kept_entry_id, user);
+        assert!(prepared.retained.iter().any(is_pending));
+        assert!(!prepared.preparation.messages.iter().any(is_pending));
+        assert!(prepared.preparation.turn_prefix.is_empty());
+        assert!(prepare(&store, &HashSet::new(), 1_000_000, 100).is_none());
+    }
+
+    #[test]
     fn threshold_is_strict_with_zero_and_oversized_reserves() {
         let mut config = tiechui_plugin_api::CompactionConfig {
             enabled: true,

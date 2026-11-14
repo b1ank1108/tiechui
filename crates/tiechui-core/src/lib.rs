@@ -54,6 +54,8 @@ pub struct SessionConfig {
     /// The first epoch. A host that replaces a client's session continues the count, so the
     /// client can tell the old session's events from the new one's.
     pub epoch: SessionEpoch,
+    /// Caps prompt-cache writes at the short retention; set for short-lived child sessions.
+    pub short_cache: bool,
 }
 
 pub struct SessionHandle {
@@ -1638,26 +1640,9 @@ impl SessionActor {
             provider.error_tool_images(),
             |id| provider.normalize_tool_call_id(id),
         );
-        let system = assemble_system_prompt(
-            &self
-                .session_context
-                .iter()
-                .chain(&self.turn_context)
-                .cloned()
-                .chain(std::iter::once(self.system.clone()))
-                .collect::<Vec<_>>(),
-        );
-        let assembled_system = !system.is_empty();
-        if assembled_system {
-            messages.insert(
-                0,
-                Message {
-                    role: Role::System,
-                    content: vec![text_content(system)],
-                    opaque: None,
-                },
-            );
-        }
+        let system = self.system_message();
+        let assembled_system = system.is_some();
+        messages.splice(0..0, system);
         for extension in self.registry.runtime_extensions() {
             messages.extend(extension.messages());
         }
@@ -1674,6 +1659,7 @@ impl SessionActor {
         )?);
         let request = ModelRequest {
             disable_cache: false,
+            short_cache: self.config.short_cache,
             cache_key: Some(self.thread.0.clone()),
             input_tokens: Some(input_tokens),
             model: self.model.model.clone(),
@@ -2034,6 +2020,24 @@ impl SessionActor {
             self.tool_result(call, output).await?;
         }
         Ok(())
+    }
+
+    /// The next request's system message, absent when every fragment is empty.
+    fn system_message(&self) -> Option<Message> {
+        let system = assemble_system_prompt(
+            &self
+                .session_context
+                .iter()
+                .chain(&self.turn_context)
+                .cloned()
+                .chain(std::iter::once(self.system.clone()))
+                .collect::<Vec<_>>(),
+        );
+        (!system.is_empty()).then(|| Message {
+            role: Role::System,
+            content: vec![text_content(system)],
+            opaque: None,
+        })
     }
 
     fn visible_tools(&self) -> Vec<tiechui_model::ToolSpec> {

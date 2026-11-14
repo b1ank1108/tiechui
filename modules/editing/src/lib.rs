@@ -5,6 +5,7 @@ mod image;
 mod list;
 mod mutation;
 mod read;
+mod restore;
 mod search;
 mod state;
 
@@ -52,6 +53,7 @@ impl tiechui_plugin_api::Module for EditingModule {
         let state = register_tools(|tool| registry.register_tool(tool), true)?;
         registry.register_turn_observer(state.clone());
         registry.register_session_observer(state);
+        registry.register_compactor(Arc::new(EditingModule));
         Ok(())
     }
 }

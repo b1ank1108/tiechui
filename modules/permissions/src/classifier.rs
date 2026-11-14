@@ -127,6 +127,7 @@ async fn request(
     };
     let request = ModelRequest {
         disable_cache: true,
+        short_cache: false,
         cache_key: None,
         model,
         messages: vec![

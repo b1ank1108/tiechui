@@ -42,10 +42,10 @@ fn text_or_image(content: &Content, images: bool) -> Result<Option<Value>, Provi
 }
 
 pub(crate) fn encode(request: &ModelRequest, model: &ModelConfig) -> Result<Value, ProviderError> {
-    let cache = cache(if request.disable_cache {
-        CacheRetention::None
-    } else {
-        model.cache_retention
+    let cache = cache(match model.cache_retention {
+        _ if request.disable_cache => CacheRetention::None,
+        CacheRetention::Long if request.short_cache => CacheRetention::Short,
+        retention => retention,
     });
     let mut max_output = request.max_output.unwrap_or(model.max_output);
     if max_output == 0 || max_output > model.max_output {

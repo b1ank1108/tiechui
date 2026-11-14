@@ -292,6 +292,7 @@ async fn fork_before_goal_creation_inherits_current_parent_and_defers() {
             retry: Arc::new(BoundedRetry::default()),
             interactions: None,
             epoch: SessionEpoch(0),
+            short_cache: false,
         },
         shutdown.clone(),
     );

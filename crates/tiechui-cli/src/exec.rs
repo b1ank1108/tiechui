@@ -628,6 +628,7 @@ pub(crate) async fn prepare(
             }),
             interactions: interactive.then_some(inbox),
             epoch,
+            short_cache: false,
         },
         cancel,
     );

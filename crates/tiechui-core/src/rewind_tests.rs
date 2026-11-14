@@ -30,6 +30,7 @@ async fn restart(h: &mut Harness, directory: PathBuf) {
             retry: Arc::new(BoundedRetry::default()),
             interactions: Some(inbox),
             epoch: h.epoch,
+            short_cache: false,
         },
         h.shutdown.clone(),
     );

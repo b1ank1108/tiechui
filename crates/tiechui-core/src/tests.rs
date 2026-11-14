@@ -292,6 +292,7 @@ impl Harness {
             retry,
             interactions: Some(inbox),
             epoch: SessionEpoch(0),
+            short_cache: false,
         };
         let shutdown = CancellationToken::new();
         let handle = SessionActor::spawn(store, config, shutdown.clone());
@@ -1824,6 +1825,7 @@ async fn model_and_thinking_changes_survive_reload_and_resume_without_changing_o
         retry: Arc::new(BoundedRetry::default()),
         interactions: None,
         epoch: SessionEpoch(4),
+        short_cache: false,
     };
     let shutdown = CancellationToken::new();
     let mut resumed = SessionActor::spawn(store, config, shutdown.clone());
@@ -2334,6 +2336,7 @@ async fn interceptors_stream_one_off_requests_on_the_turn_model() {
             let invoker = ctx.invoker.clone().unwrap();
             let request = ModelRequest {
                 disable_cache: true,
+                short_cache: false,
                 cache_key: None,
                 model: invoker.model().unwrap(),
                 messages: vec![],

@@ -987,6 +987,131 @@ async fn checkpoint_without_progress_pauses_until_new_input() {
     h.stop().await;
 }
 
+/// A 10000-token window whose system prompt and probe schema each add `half` tokens.
+async fn prefixed(scripts: Vec<Script>, half: usize) -> Harness {
+    Harness::with_compaction(
+        scripts,
+        Arc::new(BoundedRetry {
+            max_retries: 2,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        }),
+        json!({"type":"object", "description": "schema ".repeat(half / 2)}),
+        |registry| {
+            registry.register_context_provider(Arc::new(tiechui_plugin_api::StaticContext(vec![
+                "policy ".repeat(half / 2),
+            ])))
+        },
+        CompactionConfig {
+            enabled: true,
+            reserve_tokens: 1000,
+            keep_recent_tokens: 10,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A provider that reports no usage leaves every estimate unanchored.
+fn unmetered(content: Content) -> Script {
+    let reason = if matches!(content, Content::ToolCall(_)) {
+        StopReason::ToolUse
+    } else {
+        StopReason::EndTurn
+    };
+    Script::events(vec![
+        StreamEvent::ContentComplete { index: 0, content },
+        StreamEvent::Finish {
+            reason,
+            usage: Usage::default(),
+        },
+    ])
+}
+
+fn compactions(seen: &[Event]) -> usize {
+    seen.iter()
+        .filter(|event| {
+            matches!(
+                event.event,
+                EventKind::CompactionStarted {
+                    reason: CompactionReason::Threshold
+                }
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn threshold_without_usage_counts_the_system_prompt_and_tools() {
+    // History alone (~2500 tokens) stays far below the 9000 threshold; the 7000-token prefix
+    // tips it over before the second request, and the checkpoint brings it back under.
+    let mut h = prefixed(
+        ["first", "SUMMARY", "second"]
+            .map(|text| unmetered(text_content(text.into())))
+            .into(),
+        3500,
+    )
+    .await;
+    h.input(&"old history ".repeat(400), InputDelivery::FollowUp)
+        .await;
+    assert!(text(&h.request().await).contains("old history"));
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(compactions(&h.seen), 0);
+    h.input(&"recent input ".repeat(300), InputDelivery::FollowUp)
+        .await;
+    assert!(h.request().await.tools.is_empty());
+    let after = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(compactions(&h.seen), 1);
+    assert!(paused(&h.seen).is_empty());
+    assert!(text(&after).contains("SUMMARY") && !text(&after).contains("old history"));
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn prefix_above_threshold_leaves_compaction_to_overflow_recovery() {
+    // The prefix alone (~19200 tokens) exceeds the threshold: no checkpoint could get below
+    // it, so tool rounds run without summary requests until the user compacts.
+    let mut h = prefixed(
+        vec![
+            unmetered(text_content("first".into())),
+            unmetered(call("CALL_A")),
+            unmetered(text_content("second".into())),
+            unmetered(text_content("SUMMARY".into())),
+            unmetered(text_content("TURN_SUMMARY".into())),
+        ],
+        9600,
+    )
+    .await;
+    for input in ["old history ".repeat(40), "recent input ".repeat(10)] {
+        h.input(&input, InputDelivery::FollowUp).await;
+        h.end(TurnStatus::Completed).await;
+    }
+    let mut requests = vec![];
+    while let Ok(request) = h.requests.try_recv() {
+        requests.push(request);
+    }
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| !request.tools.is_empty()));
+    assert_eq!(compactions(&h.seen), 0);
+    h.send(Op::Compact { instructions: None }).await;
+    let ended = h
+        .until(|event| matches!(event, EventKind::CompactionEnded { .. }))
+        .await;
+    assert!(matches!(
+        ended.event,
+        EventKind::CompactionEnded {
+            reason: CompactionReason::Manual,
+            error: None,
+            ..
+        }
+    ));
+    while let Ok(request) = h.requests.try_recv() {
+        assert!(request.tools.is_empty());
+    }
+    h.stop().await;
+}
+
 type RestoreCall = (String, String, Vec<RestoredContext>, u64, u64);
 
 #[derive(Default)]

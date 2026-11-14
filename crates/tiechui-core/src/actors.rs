@@ -201,6 +201,7 @@ impl ChildRunner for Runner {
                 retry: self.retry.clone(),
                 interactions: None,
                 epoch: SessionEpoch(0),
+                short_cache: true,
             },
             shutdown.clone(),
         );

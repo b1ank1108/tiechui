@@ -219,6 +219,7 @@ async fn encode(wire: Wire, messages: Vec<Message>) -> serde_json::Value {
         .stream(
             ModelRequest {
                 disable_cache: false,
+                short_cache: false,
                 cache_key: None,
                 input_tokens: None,
                 model: fixture_model().model,
@@ -421,6 +422,7 @@ fn config(adapter: Arc<dyn ModelProvider>) -> SessionConfig {
         }),
         interactions: None,
         epoch: SessionEpoch(0),
+        short_cache: false,
     }
 }
 

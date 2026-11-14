@@ -341,6 +341,7 @@ fn request(thread: &Thread) -> ModelRequest {
     messages.extend(thread.history.clone());
     ModelRequest {
         disable_cache: false,
+        short_cache: false,
         cache_key: None,
         model: ModelId(format!(
             "{}/{}",

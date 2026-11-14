@@ -263,6 +263,7 @@ pub(crate) async fn check(
     let cancel = CancellationToken::new();
     let request = ModelRequest {
         disable_cache: true,
+        short_cache: false,
         cache_key: None,
         model: ModelId(format!("{name}/{}", model.id)),
         messages: vec![Message {

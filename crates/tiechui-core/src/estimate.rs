@@ -10,6 +10,14 @@ pub(super) fn input(
     messages: &[Message],
     tools: &[ToolSpec],
 ) -> Result<u64, String> {
+    Ok(anchored(store, excluded)?.unwrap_or_else(|| estimate::input(messages, tools)))
+}
+
+/// The latest usage plus estimated trailing messages; `None` before any usage on this prefix.
+pub(super) fn anchored(
+    store: &SessionStore,
+    excluded: &HashSet<String>,
+) -> Result<Option<u64>, String> {
     let path = store
         .path_to_root(store.current_leaf().unwrap_or(&store.header().id))
         .map_err(|error| error.to_string())?;
@@ -43,7 +51,7 @@ pub(super) fn input(
         }
     }
     let Some((index, usage)) = anchor else {
-        return Ok(estimate::input(messages, tools));
+        return Ok(None);
     };
     let trailing = path[index + 1..]
         .iter()
@@ -59,10 +67,12 @@ pub(super) fn input(
             }
             _ => None,
         });
-    Ok(usage
-        .input
-        .saturating_add(usage.output)
-        .saturating_add(usage.cache_read)
-        .saturating_add(usage.cache_write)
-        .saturating_add(estimate::messages(trailing)))
+    Ok(Some(
+        usage
+            .input
+            .saturating_add(usage.output)
+            .saturating_add(usage.cache_read)
+            .saturating_add(usage.cache_write)
+            .saturating_add(estimate::messages(trailing)),
+    ))
 }
