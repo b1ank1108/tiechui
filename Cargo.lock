@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "futures",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-config"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "reqwest",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-exec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-model"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "insta",
  "schemars 0.8.22",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-ask"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tiechui-plugin-api",
  "tokio",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-btw"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tiechui-plugin-api",
  "tokio",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-compaction"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3212,14 +3212,14 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-context"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tiechui-plugin-api",
 ]
 
 [[package]]
 name = "tiechui-module-context-files"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tempfile",
  "tiechui-plugin-api",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-editing"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-exec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "tiechui-plugin-api",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-goal"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-hooks"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "libc",
@@ -3285,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-loop"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-permissions"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "saphyr",
  "tempfile",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-plugins"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "rmcp",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-prompts"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tempfile",
  "tiechui-plugin-api",
@@ -3360,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-ptc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rquickjs",
  "tiechui-plugin-api",
@@ -3369,7 +3369,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-rewind"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-skills"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ignore",
  "saphyr",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-subagents"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "saphyr",
  "serde",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-module-tool-search"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tiechui-plugin-api",
  "tokio",
@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-plugin-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -3435,7 +3435,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-plugin-sdk"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -3447,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "insta",
  "schemars 0.8.22",
@@ -3458,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-providers"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-session"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-tools"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "crossterm",
@@ -3534,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "tiechui-workspace"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ignore",
  "notify",
@@ -4421,7 +4421,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "schemars 0.8.22",
