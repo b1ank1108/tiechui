@@ -2475,6 +2475,105 @@ mod network_proxy_e2e {
     }
 }
 
+#[tokio::test]
+async fn daemon_status_tracks_busy_turns_and_terminals_over_stdio() {
+    use tiechui_protocol::app::{APP_PROTOCOL_VERSION, DaemonStatus};
+
+    let fixture = Fixture::new().await;
+    let mut client = fixture.client().await;
+    client
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+
+    let status_of = |value: Value| serde_json::from_value::<DaemonStatus>(value).unwrap();
+    let initial = status_of(client.ok("daemon/status", json!({})).await);
+    assert!(initial.pid > 0);
+    assert_eq!(initial.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(initial.protocol_version, APP_PROTOCOL_VERSION);
+    assert_eq!(initial.connected_clients, 1);
+    assert_eq!(initial.busy_sessions, 0);
+    assert_eq!(initial.alive_terminals, 0);
+
+    let cwd = fixture.cwd.display().to_string();
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    assert_eq!(
+        status_of(client.ok("daemon/status", json!({})).await).busy_sessions,
+        0
+    );
+
+    let thread = json!(opened.thread_id);
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let asked = client
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+
+    client
+        .ok(
+            "terminal/create",
+            json!({"id": "status-term", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+    let busy = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(busy.connected_clients, 1);
+    assert_eq!(busy.busy_sessions, 1);
+    assert_eq!(busy.alive_terminals, 1);
+
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let after_turn = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(after_turn.busy_sessions, 0);
+    assert_eq!(after_turn.alive_terminals, 1);
+
+    client
+        .ok(
+            "terminal/write",
+            json!({"id": "status-term", "data": "exit\r\n"}),
+        )
+        .await;
+    client
+        .notice(|m, p| m == "terminal/exit" && p["id"] == "status-term")
+        .await;
+    let after_exit = status_of(client.ok("daemon/status", json!({})).await);
+    assert_eq!(after_exit.busy_sessions, 0);
+    assert_eq!(after_exit.alive_terminals, 0);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_and_terminal_env() {
@@ -2491,4 +2590,127 @@ async fn network_proxy_normalizes_secures_permissions_and_injects_bash_git_gh_an
     })
     .await
     .expect("app_server network proxy e2e test timed out");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_daemon_status_tracks_multiple_clients_busy_sessions_and_terminals() {
+    use tiechui_protocol::app::{APP_PROTOCOL_VERSION, DaemonStatus};
+
+    let fixture = Fixture::new().await;
+    let short_dir = tempfile::Builder::new()
+        .prefix("tc-status-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let sock = short_dir.path().join("app.sock");
+    let mut daemon = fixture.spawn_daemon(&sock, None);
+    let daemon_pid = daemon.id().unwrap();
+    wait_for_socket(&sock).await;
+
+    let status_of = |value: Value| serde_json::from_value::<DaemonStatus>(value).unwrap();
+
+    let mut client_a = fixture.connect_client(&sock);
+    client_a
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let s1 = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(s1.pid, daemon_pid);
+    assert_eq!(s1.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(s1.protocol_version, APP_PROTOCOL_VERSION);
+    assert_eq!(s1.connected_clients, 1);
+    assert_eq!(s1.busy_sessions, 0);
+    assert_eq!(s1.alive_terminals, 0);
+
+    let mut client_b = fixture.connect_client(&sock);
+    client_b
+        .ok("initialize", json!({"protocol_version": 1}))
+        .await;
+    let s2 = status_of(client_b.ok("daemon/status", json!({})).await);
+    assert_eq!(s2.pid, daemon_pid);
+    assert_eq!(s2.connected_clients, 2);
+
+    let cwd = fixture.cwd.display().to_string();
+    let opened = snapshot(
+        client_a
+            .ok("session/open", json!({"cwd": cwd, "mode": "rules"}))
+            .await,
+    );
+    let thread = json!(opened.thread_id);
+    client_a
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "user_input",
+                    "delivery": "follow_up",
+                    "content": [{"kind": "text", "text": "Change hello.txt to after"}]
+                }
+            }),
+        )
+        .await;
+    let asked = client_a
+        .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested { approval_id, .. } = &asked.last().unwrap().event.event
+    else {
+        panic!("expected approval request");
+    };
+    let approval_id = approval_id.clone();
+
+    client_b
+        .ok(
+            "terminal/create",
+            json!({"id": "sock-term", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+    let busy = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(busy.connected_clients, 2);
+    assert_eq!(busy.busy_sessions, 1);
+    assert_eq!(busy.alive_terminals, 1);
+
+    disconnect_bridge(client_b).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let now = status_of(client_a.ok("daemon/status", json!({})).await);
+        if now.connected_clients == 1 {
+            assert_eq!(now.busy_sessions, 1);
+            assert_eq!(now.alive_terminals, 1);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connected_clients did not drop to 1: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    client_a
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread,
+                "op": {
+                    "kind": "approval_response",
+                    "approval_id": approval_id,
+                    "decision": {"kind": "allow_once"}
+                }
+            }),
+        )
+        .await;
+    client_a
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    client_a
+        .ok("terminal/kill", json!({"id": "sock-term"}))
+        .await;
+
+    let idle = status_of(client_a.ok("daemon/status", json!({})).await);
+    assert_eq!(idle.connected_clients, 1);
+    assert_eq!(idle.busy_sessions, 0);
+    assert_eq!(idle.alive_terminals, 0);
+
+    disconnect_bridge(client_a).await;
+    let _ = daemon.kill().await;
 }

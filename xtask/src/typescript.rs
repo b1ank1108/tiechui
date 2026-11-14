@@ -54,6 +54,7 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<tiechui_protocol::ProtocolMessage>();
                 d.visit::<app::InitializeParams>();
                 d.visit::<app::InitializeResult>();
+                d.visit::<app::DaemonStatus>();
                 d.visit::<app::SessionListParams>();
                 d.visit::<app::SessionSummary>();
                 d.visit::<app::SessionOpenParams>();
