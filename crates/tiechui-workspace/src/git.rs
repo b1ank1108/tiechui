@@ -9,8 +9,13 @@ use tiechui_protocol::workspace::{
 
 use crate::{Error, Result, fail, fs};
 
-fn command(program: &str, root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Command {
-    let mut command = Command::new(program);
+pub(crate) fn command(
+    program: &str,
+    root: &Path,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+) -> Command {
+    let mut command = Command::new(resolve_program(program, env));
     command
         .current_dir(root)
         .args(args)
@@ -26,15 +31,51 @@ fn command(program: &str, root: &Path, args: &[&str], env: &BTreeMap<String, Str
     command
 }
 
+fn resolve_program(program: &str, env: &BTreeMap<String, String>) -> std::path::PathBuf {
+    let Some(path_var) = env
+        .get("PATH")
+        .filter(|_| Path::new(program).components().count() == 1)
+    else {
+        return program.into();
+    };
+    std::env::split_paths(path_var)
+        .flat_map(|dir| program_candidates(&dir, program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| program.into())
+}
+
+#[cfg(unix)]
+fn program_candidates(dir: &Path, program: &str) -> [std::path::PathBuf; 1] {
+    [dir.join(program)]
+}
+
+#[cfg(windows)]
+fn program_candidates(dir: &Path, program: &str) -> [std::path::PathBuf; 4] {
+    [
+        dir.join(format!("{program}.exe")),
+        dir.join(format!("{program}.cmd")),
+        dir.join(format!("{program}.bat")),
+        dir.join(program),
+    ]
+}
+
 /// Stdout and stderr of a successful run.
 fn output(mut command: Command) -> Result<(String, String)> {
     decode_output(command.output()?)
 }
 
 fn decode_output(output: std::process::Output) -> Result<(String, String)> {
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if !output.status.success() {
+    decode_status_output(output.status, &output.stdout, &output.stderr)
+}
+
+pub(crate) fn decode_status_output(
+    status: std::process::ExitStatus,
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+) -> Result<(String, String)> {
+    let stdout = String::from_utf8_lossy(stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(stderr_bytes).into_owned();
+    if !status.success() {
         let message = if stderr.trim().is_empty() {
             &stdout
         } else {

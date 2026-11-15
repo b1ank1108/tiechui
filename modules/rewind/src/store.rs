@@ -22,6 +22,13 @@ pub struct Version {
     pub hash: String,
     pub mode: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SnapshotRecord {
+    Ready { reference: String, tree: String },
+    Missing { reason: String },
+}
 type Files = BTreeMap<String, Option<Version>>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -32,6 +39,8 @@ struct Manifest {
     /// The versions an undone turn had left, by its first anchor.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     undone: BTreeMap<String, Files>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    snapshots: BTreeMap<String, SnapshotRecord>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
@@ -211,6 +220,7 @@ impl Store {
                 checkpoints: BTreeMap::new(),
                 head: BTreeMap::new(),
                 undone: BTreeMap::new(),
+                snapshots: BTreeMap::new(),
             }),
             Err(error) => Err(error),
         }
@@ -235,6 +245,28 @@ impl Store {
     }
     pub fn pending(&self) -> Result<bool> {
         Ok(self.directory.join("transaction.json").try_exists()?)
+    }
+    pub fn record_snapshot(
+        &self,
+        anchor: &str,
+        record: SnapshotRecord,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _lock = self.lock(cancel)?;
+        if self.pending()? {
+            return Err(ToolError(
+                "An incomplete rewind needs recovery; run /rewind.".into(),
+            ));
+        }
+        let mut data = self.load()?;
+        data.snapshots.entry(anchor.into()).or_insert(record);
+        self.atomic("manifest.json", &data)
+    }
+    pub fn snapshot(&self, anchor: &str) -> Result<Option<SnapshotRecord>> {
+        Ok(self.load()?.snapshots.get(anchor).cloned())
+    }
+    pub fn snapshots(&self) -> Result<BTreeMap<String, SnapshotRecord>> {
+        Ok(self.load()?.snapshots)
     }
     pub fn file_key(&self, path: &Path, cwd: &Path) -> Result<String> {
         // A session's cwd may itself be an alias. Keep checking links below it.
@@ -575,38 +607,65 @@ impl Store {
             ));
         }
         let mut data = self.load()?;
-        if !data.checkpoints.is_empty() {
+        if !data.checkpoints.is_empty() || !data.snapshots.is_empty() {
             return Ok(());
         }
         let parent = source.load()?;
         for id in ids {
             check(cancel)?;
-            if let Some(checkpoint) = parent.checkpoints.get(id) {
-                for (file, before) in checkpoint {
-                    self.safe_path(file)?;
-                    if let Some(head) = parent.head.get(file) {
-                        data.head.insert(file.clone(), head.clone());
-                    }
-                    for version in [Some(before), parent.head.get(file)]
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                    {
-                        let bytes = source.bytes(&Some(version.clone()))?;
-                        private_dir(&self.directory.join("blobs"))?;
-                        let path = self.directory.join("blobs").join(&version.hash);
-                        if !path.try_exists()? {
-                            let mut blob = create_private(&path)?;
-                            blob.write_all(&bytes)?;
-                            blob.sync_all()?;
-                        }
-                        self.bytes(&Some(version.clone()))?;
-                    }
-                }
-                data.checkpoints.insert(id.clone(), checkpoint.clone());
-            }
+            self.inherit_anchor(source, &parent, &mut data, id)?;
         }
         self.atomic("manifest.json", &data)
+    }
+    fn inherit_anchor(
+        &self,
+        source: &Self,
+        parent: &Manifest,
+        data: &mut Manifest,
+        id: &str,
+    ) -> Result<()> {
+        if let Some(snapshot) = parent.snapshots.get(id) {
+            data.snapshots.insert(id.to_owned(), snapshot.clone());
+        }
+        if let Some(checkpoint) = parent.checkpoints.get(id) {
+            self.inherit_checkpoint(source, parent, data, checkpoint)?;
+            data.checkpoints.insert(id.to_owned(), checkpoint.clone());
+        }
+        Ok(())
+    }
+    fn inherit_checkpoint(
+        &self,
+        source: &Self,
+        parent: &Manifest,
+        data: &mut Manifest,
+        checkpoint: &Files,
+    ) -> Result<()> {
+        for (file, before) in checkpoint {
+            self.safe_path(file)?;
+            if let Some(head) = parent.head.get(file) {
+                data.head.insert(file.clone(), head.clone());
+            }
+            for version in [Some(before), parent.head.get(file)]
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                self.copy_blob(source, version)?;
+            }
+        }
+        Ok(())
+    }
+    fn copy_blob(&self, source: &Self, version: &Version) -> Result<()> {
+        let bytes = source.bytes(&Some(version.clone()))?;
+        private_dir(&self.directory.join("blobs"))?;
+        let path = self.directory.join("blobs").join(&version.hash);
+        if !path.try_exists()? {
+            let mut blob = create_private(&path)?;
+            blob.write_all(&bytes)?;
+            blob.sync_all()?;
+        }
+        self.bytes(&Some(version.clone()))?;
+        Ok(())
     }
     /// The files tracked under a turn's own anchors, after it as an undo recorded them,
     /// else as the next of the `later` anchors found them, else as last written.

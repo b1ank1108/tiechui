@@ -1,6 +1,9 @@
 //! File checkpoints and rewind policy, registered only through plugin-api.
 
+mod snapshot;
 pub mod store;
+
+pub use snapshot::{SnapshotOptions, tiechui_home_from_rewind_dir};
 
 use std::{
     collections::BTreeMap,
@@ -24,6 +27,24 @@ pub struct RewindModule {
     pub directory: PathBuf,
 }
 impl RewindModule {
+    pub fn register_with_options(
+        &self,
+        registry: &mut Registry,
+        _: &ModuleConfig,
+        options: SnapshotOptions,
+    ) -> Result<(), ToolError> {
+        let rewind = Arc::new(Rewind {
+            directory: self.directory.clone(),
+            pending: Mutex::new(BTreeMap::new()),
+            parent: None,
+            snapshot_options: options,
+        });
+        registry.register_lifecycle_interceptor(rewind.clone());
+        registry.register_tool_interceptor(rewind.clone(), Duration::from_secs(10));
+        registry.register_command(rewind);
+        Ok(())
+    }
+
     /// A fresh tracker whose writes belong to the dispatching parent's checkpoint.
     pub fn register_child(&self, registry: &mut Registry, parent: ToolContext) {
         registry.register_tool_interceptor(
@@ -31,6 +52,7 @@ impl RewindModule {
                 directory: self.directory.clone(),
                 pending: Mutex::new(BTreeMap::new()),
                 parent: Some(parent),
+                snapshot_options: SnapshotOptions::default(),
             }),
             Duration::from_secs(10),
         );
@@ -40,15 +62,8 @@ impl Module for RewindModule {
     fn id(&self) -> &str {
         "rewind"
     }
-    fn register(&self, registry: &mut Registry, _: &ModuleConfig) -> Result<(), ToolError> {
-        let rewind = Arc::new(Rewind {
-            directory: self.directory.clone(),
-            pending: Mutex::new(BTreeMap::new()),
-            parent: None,
-        });
-        registry.register_tool_interceptor(rewind.clone(), Duration::from_secs(10));
-        registry.register_command(rewind);
-        Ok(())
+    fn register(&self, registry: &mut Registry, config: &ModuleConfig) -> Result<(), ToolError> {
+        self.register_with_options(registry, config, SnapshotOptions::default())
     }
 }
 
@@ -56,6 +71,23 @@ struct Rewind {
     parent: Option<ToolContext>,
     directory: PathBuf,
     pending: Mutex<BTreeMap<(String, String), (Store, String)>>,
+    snapshot_options: SnapshotOptions,
+}
+
+#[async_trait]
+impl LifecycleInterceptor for Rewind {
+    async fn on_event(
+        &self,
+        event: &LifecycleEvent,
+        ctx: &LifecycleContext,
+        cancel: CancellationToken,
+    ) -> Result<LifecycleOutcome, ToolError> {
+        if matches!(event, LifecycleEvent::BeforeRequest) && self.parent.is_none() {
+            snapshot::capture_before_request(&self.directory, &self.snapshot_options, ctx, cancel)
+                .await;
+        }
+        Ok(LifecycleOutcome::default())
+    }
 }
 
 pub fn prompts(entries: &[BranchEntry]) -> Vec<(BranchEntry, Vec<InputContent>)> {

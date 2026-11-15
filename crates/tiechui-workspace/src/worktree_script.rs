@@ -121,17 +121,29 @@ fn shell_command(script: &str, wt_path: &Path, env: &BTreeMap<String, String>) -
     cmd
 }
 
-enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Exited(ExitStatus),
     TimedOut,
+    Cancelled,
     Failed(std::io::Error),
 }
 
 fn wait_for_child(child: &mut Child, timeout: Duration) -> WaitOutcome {
-    let deadline = Instant::now() + timeout;
+    wait_for_child_until(child, Instant::now() + timeout, None)
+}
+
+pub(crate) fn wait_for_child_until(
+    child: &mut Child,
+    deadline: Instant,
+    is_cancelled: Option<&dyn Fn() -> bool>,
+) -> WaitOutcome {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return WaitOutcome::Exited(status),
+            Ok(None) if is_cancelled.is_some_and(|cancelled| cancelled()) => {
+                terminate_process_group(child);
+                return WaitOutcome::Cancelled;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 terminate_process_group(child);
                 return WaitOutcome::TimedOut;
@@ -205,7 +217,7 @@ fn build_script_result(
                 truncated,
             }
         }
-        WaitOutcome::TimedOut => PostCreateResult {
+        WaitOutcome::TimedOut | WaitOutcome::Cancelled => PostCreateResult {
             status: PostCreateStatus::Failed,
             command,
             exit_code: None,

@@ -409,3 +409,62 @@ fn allows_working_subdirectories_under_agent_dirs_while_blocking_metadata() {
         assert!(store.before("two", blocked, &cancel).is_err(), "{blocked}");
     }
 }
+
+#[test]
+fn snapshot_records_persist_and_inherit_across_forked_sessions_without_file_checkpoints() {
+    use tiechui_module_rewind::store::SnapshotRecord;
+
+    let (root, parent, cancel) = fixture();
+    let ready = SnapshotRecord::Ready {
+        reference: "refs/tiechui/checkpoints/session/turn-1".into(),
+        tree: "0123456789abcdef0123456789abcdef01234567".into(),
+    };
+    let missing = SnapshotRecord::Missing {
+        reason: "git snapshot timed out after 100ms".into(),
+    };
+    parent
+        .record_snapshot("turn-1", ready.clone(), &cancel)
+        .unwrap();
+    parent
+        .record_snapshot("turn-2", missing.clone(), &cancel)
+        .unwrap();
+
+    let reloaded = Store::new(&root.path().join("state"), &parent.root, "session").unwrap();
+    assert_eq!(reloaded.snapshot("turn-1").unwrap(), Some(ready.clone()));
+    assert_eq!(reloaded.snapshot("turn-2").unwrap(), Some(missing));
+    assert_eq!(reloaded.snapshot("turn-3").unwrap(), None);
+    assert_eq!(reloaded.snapshots().unwrap().len(), 2);
+
+    let child = Store::new(&root.path().join("state"), &parent.root, "forked").unwrap();
+    child
+        .inherit(&reloaded, &["turn-1".into()], &cancel)
+        .unwrap();
+    assert_eq!(child.snapshot("turn-1").unwrap(), Some(ready));
+    assert_eq!(child.snapshot("turn-2").unwrap(), None);
+}
+
+#[test]
+fn tiechui_home_resolution_handles_production_and_test_rewind_directories() {
+    use tiechui_module_rewind::tiechui_home_from_rewind_dir;
+
+    let temp = tempfile::tempdir().unwrap();
+    let prod_home = temp.path().join("prod-home");
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&prod_home.join("state/rewind")),
+        Some(prod_home)
+    );
+
+    let test_home = temp.path().join("test-home");
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&test_home.join("rewind")),
+        Some(test_home)
+    );
+
+    let state_named_home = temp.path().join("state");
+    fs::create_dir_all(state_named_home.join("worktrees")).unwrap();
+    fs::write(state_named_home.join("worktrees/registry.json"), "{}").unwrap();
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&state_named_home.join("rewind")),
+        Some(state_named_home)
+    );
+}

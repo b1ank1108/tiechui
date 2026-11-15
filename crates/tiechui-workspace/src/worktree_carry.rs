@@ -16,12 +16,12 @@ pub(crate) struct CarriedSnapshot {
     non_deleted: Vec<String>,
 }
 
-struct TempIndexDir {
-    path: PathBuf,
+pub(crate) struct TempIndexDir {
+    pub(crate) path: PathBuf,
 }
 
 impl TempIndexDir {
-    fn create() -> Result<Self> {
+    pub(crate) fn create() -> Result<Self> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir();
         let pid = std::process::id();
@@ -67,7 +67,7 @@ pub(crate) fn capture_uncommitted(
         ],
         &idx_env,
     )?;
-    let (deleted, non_deleted) = collect_changed_paths(&toplevel, &porcelain)?;
+    let (deleted, non_deleted) = collect_status_paths(&toplevel, &porcelain, true)?;
     let tree_oid = stage_carried_tree(&toplevel, &idx_env, &deleted, &non_deleted)?;
     Ok(CarriedSnapshot {
         temp_dir,
@@ -134,7 +134,7 @@ fn git_toplevel(project_root: &Path, env: &BTreeMap<String, String>) -> Result<P
     Ok(PathBuf::from(trimmed))
 }
 
-fn env_with_index(
+pub(crate) fn env_with_index(
     base: &BTreeMap<String, String>,
     index_path: &Path,
 ) -> Result<BTreeMap<String, String>> {
@@ -176,33 +176,59 @@ fn check_carry_limits(file_count: usize, total_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn collect_changed_paths(toplevel: &Path, porcelain: &str) -> Result<(Vec<String>, Vec<String>)> {
+pub(crate) fn collect_status_paths(
+    toplevel: &Path,
+    porcelain: &str,
+    enforce_limits: bool,
+) -> Result<(Vec<String>, Vec<String>)> {
     let mut deleted = Vec::new();
     let mut non_deleted = Vec::new();
-    let mut file_count = 0_usize;
-    let mut total_bytes = 0_u64;
+    let mut counts = (0_usize, 0_u64);
     for record in porcelain.split('\0').filter(|r| r.len() > 3) {
-        let status = &record[..2];
-        let rel = &record[3..];
-        match classify_entry(toplevel, status, rel)? {
-            EntryState::Skip => {}
-            EntryState::Deleted => {
-                file_count += 1;
-                check_carry_limits(file_count, total_bytes)?;
-                deleted.push(rel.to_owned());
-            }
-            EntryState::Present(len) => {
-                file_count += 1;
-                total_bytes = total_bytes.saturating_add(len);
-                check_carry_limits(file_count, total_bytes)?;
-                non_deleted.push(rel.to_owned());
-            }
-        }
+        record_status_entry(
+            toplevel,
+            &record[..2],
+            &record[3..],
+            enforce_limits,
+            &mut counts,
+            &mut deleted,
+            &mut non_deleted,
+        )?;
     }
     Ok((deleted, non_deleted))
 }
 
-fn encode_nul_paths(first: &[String], second: &[String]) -> Vec<u8> {
+fn record_status_entry(
+    toplevel: &Path,
+    status: &str,
+    rel: &str,
+    enforce_limits: bool,
+    counts: &mut (usize, u64),
+    deleted: &mut Vec<String>,
+    non_deleted: &mut Vec<String>,
+) -> Result<()> {
+    match classify_entry(toplevel, status, rel)? {
+        EntryState::Skip => {}
+        EntryState::Deleted => {
+            counts.0 += 1;
+            if enforce_limits {
+                check_carry_limits(counts.0, counts.1)?;
+            }
+            deleted.push(rel.to_owned());
+        }
+        EntryState::Present(len) => {
+            counts.0 += 1;
+            counts.1 = counts.1.saturating_add(len);
+            if enforce_limits {
+                check_carry_limits(counts.0, counts.1)?;
+            }
+            non_deleted.push(rel.to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_nul_paths(first: &[String], second: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
     for path in first.iter().chain(second.iter()) {
         out.extend_from_slice(path.as_bytes());

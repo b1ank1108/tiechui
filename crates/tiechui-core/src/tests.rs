@@ -246,6 +246,46 @@ impl Harness {
         let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
         let home = root.path().join("home");
         let cwd = root.path().to_path_buf();
+        Self::with_workspace_inner(
+            root, home, cwd, scripts, retry, schema, configure, compaction,
+        )
+        .await
+    }
+
+    async fn with_workspace(
+        root: TempDir,
+        home: PathBuf,
+        cwd: PathBuf,
+        scripts: Vec<Script>,
+        configure: impl FnOnce(&mut Registry),
+    ) -> Self {
+        Self::with_workspace_inner(
+            root,
+            home,
+            cwd,
+            scripts,
+            Arc::new(BoundedRetry::default()),
+            json!({"type":"object"}),
+            configure,
+            tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn with_workspace_inner(
+        root: TempDir,
+        home: PathBuf,
+        cwd: PathBuf,
+        scripts: Vec<Script>,
+        retry: Arc<dyn RetryPolicy>,
+        schema: serde_json::Value,
+        configure: impl FnOnce(&mut Registry),
+        compaction: tiechui_plugin_api::CompactionConfig,
+    ) -> Self {
         let store = tokio::task::spawn_blocking(move || {
             SessionStore::create(&home, &cwd, &CancellationToken::new()).unwrap()
         })

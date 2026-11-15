@@ -842,3 +842,203 @@ fn carry_changes_enforces_2000_file_and_200_mib_limits_without_side_effects() {
             .is_empty()
     );
 }
+
+#[test]
+fn captures_hidden_tree_snapshot_without_touching_index_status_branches_log_or_gc() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("snapshot-repo");
+    init_repo(&repo);
+    std::fs::write(repo.join("later-ignored.txt"), "tracked-v1\n").unwrap();
+    git(&repo, &["add", "later-ignored.txt"]);
+    git(&repo, &["commit", "-m", "add later-ignored"]);
+    std::fs::write(
+        repo.join(".gitignore"),
+        "node_modules/\nignored.log\nlater-ignored.txt\n",
+    )
+    .unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-m", "add gitignore"]);
+
+    let env = BTreeMap::new();
+    let wt = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_path = PathBuf::from(&wt.path);
+
+    std::fs::write(wt_path.join("README.md"), "staged-readme\n").unwrap();
+    git(&wt_path, &["add", "README.md"]);
+    std::fs::write(wt_path.join("README.md"), "working-readme\n").unwrap();
+    std::fs::write(wt_path.join("staged-only.txt"), "staged-new\n").unwrap();
+    git(&wt_path, &["add", "staged-only.txt"]);
+    std::fs::write(wt_path.join("later-ignored.txt"), "tracked-v2\n").unwrap();
+    std::fs::remove_file(wt_path.join("src/lib.rs")).unwrap();
+    std::fs::create_dir_all(wt_path.join("notes")).unwrap();
+    std::fs::write(wt_path.join("notes/todo.txt"), "untracked-note\n").unwrap();
+    std::fs::create_dir_all(wt_path.join("node_modules/pkg")).unwrap();
+    std::fs::write(wt_path.join("node_modules/pkg/index.js"), "ignored\n").unwrap();
+    std::fs::write(wt_path.join("ignored.log"), "ignored-log\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = wt_path.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("README.md", wt_path.join("readme-link")).unwrap();
+    }
+
+    let git_index_rel = git(&wt_path, &["rev-parse", "--git-path", "index"]);
+    let git_index_path = wt_path.join(git_index_rel.trim());
+    let status_before = git(&wt_path, &["status", "--porcelain=v1"]);
+    let cached_before = git(&wt_path, &["diff", "--cached"]);
+    let branches_before = git(&wt_path, &["branch", "-a"]);
+    let log_before = git(&wt_path, &["log", "--all", "--oneline"]);
+    let index_bytes_before = std::fs::read(&git_index_path).unwrap();
+
+    let snap = ws::capture_worktree_snapshot_with_env(
+        &wt_path,
+        "sess-1",
+        "turn/1..anchor",
+        Duration::from_secs(10),
+        &env,
+    )
+    .unwrap();
+    let index_bytes_after = std::fs::read(&git_index_path).unwrap();
+
+    assert!(snap.reference.starts_with("refs/tiechui/checkpoints/"));
+    git(&wt_path, &["check-ref-format", &snap.reference]);
+    assert_eq!(
+        snap.reference,
+        ws::checkpoint_ref_name("sess-1", "turn/1..anchor")
+    );
+    assert!(!git_index_path.with_extension("index.lock").exists());
+    assert_eq!(index_bytes_after, index_bytes_before);
+    assert_eq!(git(&wt_path, &["status", "--porcelain=v1"]), status_before);
+    assert_eq!(git(&wt_path, &["diff", "--cached"]), cached_before);
+    assert_eq!(git(&wt_path, &["branch", "-a"]), branches_before);
+    assert_eq!(git(&wt_path, &["log", "--all", "--oneline"]), log_before);
+
+    let refs_out = git(
+        &wt_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objecttype) %(objectname)",
+            "refs/tiechui/checkpoints/",
+        ],
+    );
+    assert_eq!(
+        refs_out.trim(),
+        format!("{} tree {}", snap.reference, snap.tree)
+    );
+
+    git(&repo, &["gc", "--prune=now", "-q"]);
+    git(&repo, &["fsck", "--full"]);
+
+    assert_eq!(
+        git(&wt_path, &["show", &format!("{}:README.md", snap.tree)]),
+        "working-readme\n"
+    );
+    assert_eq!(
+        git(
+            &wt_path,
+            &["show", &format!("{}:staged-only.txt", snap.tree)]
+        ),
+        "staged-new\n"
+    );
+    assert_eq!(
+        git(
+            &wt_path,
+            &["show", &format!("{}:later-ignored.txt", snap.tree)]
+        ),
+        "tracked-v2\n"
+    );
+    assert_eq!(
+        git(
+            &wt_path,
+            &["show", &format!("{}:notes/todo.txt", snap.tree)]
+        ),
+        "untracked-note\n"
+    );
+    let tree_files = git(&wt_path, &["ls-tree", "-r", "--name-only", &snap.tree]);
+    let names: BTreeSet<&str> = tree_files.lines().collect();
+    assert!(!names.contains("src/lib.rs"));
+    assert!(!names.contains("node_modules/pkg/index.js"));
+    assert!(!names.contains("ignored.log"));
+    #[cfg(unix)]
+    {
+        assert!(names.contains("run.sh"));
+        assert!(names.contains("readme-link"));
+    }
+}
+
+#[test]
+fn snapshot_capture_enforces_timeout_reaps_process_group_and_fails_on_broken_repo() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("not-a-repo");
+    std::fs::create_dir_all(&plain).unwrap();
+    let empty_env = BTreeMap::new();
+    assert!(
+        ws::capture_worktree_snapshot_with_env(
+            &plain,
+            "sess",
+            "anchor",
+            Duration::from_secs(2),
+            &empty_env,
+        )
+        .is_err()
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp.path().join("home");
+        let repo = temp.path().join("slow-repo");
+        init_repo(&repo);
+        let wt = ws::create_worktree_with_env(&home, &repo, None, &empty_env).unwrap();
+        let wt_path = PathBuf::from(&wt.path);
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let pid_file = temp.path().join("sleep.pid");
+        let fake_git = fake_bin.join("git");
+        std::fs::write(
+            &fake_git,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let slow_env =
+            BTreeMap::from([("PATH".into(), format!("{}:{orig_path}", fake_bin.display()))]);
+        let started = Instant::now();
+        let err = ws::capture_worktree_snapshot_with_env(
+            &wt_path,
+            "sess",
+            "anchor",
+            Duration::from_millis(120),
+            &slow_env,
+        )
+        .unwrap_err()
+        .0;
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+
+        if let Ok(raw_pid) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = raw_pid.trim().parse::<i32>()
+        {
+            unsafe extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            for _ in 0..20 {
+                if unsafe { kill(pid, 0) } != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_ne!(unsafe { kill(pid, 0) }, 0, "lingering child pid {pid}");
+        }
+    }
+}

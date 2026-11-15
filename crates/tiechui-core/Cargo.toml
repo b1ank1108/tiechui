@@ -37,6 +37,7 @@ tiechui-module-exec.workspace = true
 tiechui-module-hooks.workspace = true
 tiechui-module-permissions.workspace = true
 tiechui-module-mcp.workspace = true
+tiechui-workspace.workspace = true
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 axum.workspace = true
 async-trait.workspace = true
