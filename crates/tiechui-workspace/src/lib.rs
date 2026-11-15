@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use fs::{create, delete, list, mkdir, read, rename, tree, write};
 pub use git::{
-    branches, branches_with_env, compare, compare_with_env, log, log_with_env, pull_request,
-    pull_request_with_env, run, run_with_env, show, show_with_env, status, status_with_env,
+    branches_with_env, compare_with_env, log_with_env, pull_request_with_env, run_with_env,
+    show_with_env, status_with_env,
 };
 pub use search::search;
 use tiechui_protocol::workspace::{

@@ -347,18 +347,31 @@ fn unknown_agent_error(
     ))
 }
 
+fn lookup_agent<'a>(
+    name: &str,
+    catalog: &'a definitions::Catalog,
+) -> Result<&'a definitions::Definition, ToolError> {
+    if let Some(def) = catalog.agents.get(name) {
+        return Ok(def);
+    }
+    if let Some((path, reason)) = catalog.invalid.get(name) {
+        return Err(ToolError(format!(
+            "Invalid agent definition '{name}' in {}: {reason}",
+            path.display()
+        )));
+    }
+    Err(unknown_agent_error(name, &catalog.agents))
+}
+
 fn prepare_task(
     task: ValidatedTask,
-    agents: &BTreeMap<String, definitions::Definition>,
+    catalog: &definitions::Catalog,
     runner: &dyn ChildRunner,
 ) -> Result<PreparedTask, ToolError> {
     let (label, custom_agent) = match task.agent {
         None => ("default".to_owned(), None),
         Some(name) => {
-            let def = agents
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| unknown_agent_error(&name, agents))?;
+            let def = lookup_agent(&name, catalog)?.clone();
             (def.name.clone(), Some(def))
         }
     };
@@ -612,11 +625,11 @@ impl Service {
     ) -> Result<ToolOutput, ToolError> {
         let (mode, raw_tasks) = parameters(&call.arguments)?;
         let scope = call.arguments["agentScope"].as_str().unwrap_or("user");
-        let agents = definitions::discover(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
+        let catalog = definitions::discover_catalog(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
         let runner = self.bound_runner()?;
         let tasks = raw_tasks
             .into_iter()
-            .map(|task| prepare_task(task, &agents, runner.as_ref()))
+            .map(|task| prepare_task(task, &catalog, runner.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         self.confirm_project_agents(&tasks, &ctx.cancel).await?;
         let cancel = ctx.cancel.child_token();

@@ -113,5 +113,6 @@ fn save(home: &Path, p: AgentSaveParams) -> Result<(), String> {
         previous.as_deref(),
         &render(&existing, &definition),
         name,
+        (!in_project).then_some(home),
     )
 }

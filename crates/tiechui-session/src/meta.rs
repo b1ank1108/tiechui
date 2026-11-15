@@ -61,8 +61,11 @@ pub fn trash(home: &Path, session: &Path) -> Result<PathBuf, SessionError> {
     ) else {
         return Err(SessionError::new(session, "not a session file"));
     };
-    let directory = home.join("trash").join(group);
-    fs::create_dir_all(&directory).map_err(|error| SessionError::new(&directory, error))?;
+    let trash_root = home.join("trash");
+    let directory = trash_root.join(group);
+    crate::storage::create_private_dir_all(home)?;
+    crate::storage::create_private_dir_all(&trash_root)?;
+    crate::storage::create_private_dir_all(&directory)?;
     let target = directory.join(name);
     fs::rename(session, &target).map_err(|error| SessionError::new(session, error))?;
     let meta = meta_path(session);

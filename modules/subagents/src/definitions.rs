@@ -19,61 +19,138 @@ pub struct Definition {
     pub path: PathBuf,
 }
 
-fn parse_thinking(value: Option<&YamlOwned>) -> Option<Option<ChildThinking>> {
+#[derive(Default)]
+pub struct Catalog {
+    pub agents: BTreeMap<String, Definition>,
+    pub invalid: BTreeMap<String, (PathBuf, String)>,
+}
+
+struct ParseFailure {
+    name: Option<String>,
+    reason: String,
+}
+
+fn parse_thinking(value: Option<&YamlOwned>) -> Result<Option<ChildThinking>, String> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
-        return Some(None);
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err("invalid `thinking`: expected a string".into());
+    };
+    parse_child_thinking(raw)
+        .map(Some)
+        .map_err(|error| format!("invalid `thinking`: {}", error.0))
+}
+
+fn parse_optional_string(doc: &YamlOwned, key: &str) -> Result<Option<String>, String> {
+    let Some(value) = doc.as_mapping_get(key).filter(|value| !value.is_null()) else {
+        return Ok(None);
     };
     value
         .as_str()
-        .and_then(|raw| parse_child_thinking(raw).ok())
-        .map(Some)
+        .map(|raw| Some(raw.to_owned()))
+        .ok_or_else(|| format!("invalid `{key}`: expected a string"))
 }
 
-fn parse(text: &str, project: bool, path: PathBuf) -> Option<Definition> {
+fn parse_tools(value: Option<&YamlOwned>) -> Option<Vec<String>> {
+    let v = value.filter(|v| !v.is_null())?;
+    let items = if let Some(s) = v.as_str() {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        v.as_sequence()
+            .into_iter()
+            .flatten()
+            .filter_map(YamlOwned::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    (!items.is_empty()).then_some(items)
+}
+
+fn parse(text: &str, project: bool, path: PathBuf) -> Result<Definition, ParseFailure> {
+    let fail = |name: Option<String>, reason: &str| ParseFailure {
+        name,
+        reason: reason.into(),
+    };
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    let (header, prompt) = text.strip_prefix("---\n")?.split_once("\n---")?;
-    let docs = YamlOwned::load_from_str(header).ok()?;
-    let doc = docs.first()?;
-    let value = |key| doc.as_mapping_get(key);
-    let string = |key| value(key).and_then(YamlOwned::as_str).map(str::to_owned);
-    let description = string("description")?;
-    let tools = value("tools")
-        .map(|v| {
-            if let Some(s) = v.as_str() {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            } else {
-                v.as_sequence()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(YamlOwned::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            }
-        })
-        .filter(|v| !v.is_empty());
-    Some(Definition {
-        name: string("name")?,
+    let Some((header, prompt)) = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+    else {
+        return Err(fail(None, "missing YAML frontmatter"));
+    };
+    let docs =
+        YamlOwned::load_from_str(header).map_err(|_| fail(None, "invalid YAML frontmatter"))?;
+    let Some(doc) = docs.first() else {
+        return Err(fail(None, "empty YAML frontmatter"));
+    };
+    let Some(name) = doc
+        .as_mapping_get("name")
+        .and_then(YamlOwned::as_str)
+        .map(str::to_owned)
+    else {
+        return Err(fail(None, "missing or invalid `name`"));
+    };
+    let Some(description) = doc
+        .as_mapping_get("description")
+        .and_then(YamlOwned::as_str)
+        .map(str::to_owned)
+    else {
+        return Err(fail(Some(name), "missing or invalid `description`"));
+    };
+    let model = parse_optional_string(doc, "model").map_err(|reason| ParseFailure {
+        name: Some(name.clone()),
+        reason,
+    })?;
+    let thinking =
+        parse_thinking(doc.as_mapping_get("thinking")).map_err(|reason| ParseFailure {
+            name: Some(name.clone()),
+            reason,
+        })?;
+    Ok(Definition {
+        name,
         description,
         prompt: prompt.trim().into(),
-        tools,
-        model: string("model"),
-        thinking: parse_thinking(value("thinking"))?,
+        tools: parse_tools(doc.as_mapping_get("tools")),
+        model,
+        thinking,
         project,
         path,
     })
+}
+
+fn record_parsed(catalog: &mut Catalog, path: PathBuf, parsed: Result<Definition, ParseFailure>) {
+    match parsed {
+        Ok(agent) => {
+            catalog.invalid.remove(&agent.name);
+            catalog.agents.insert(agent.name.clone(), agent);
+        }
+        Err(failure) => {
+            if let Some(name) = failure.name {
+                catalog.agents.remove(&name);
+                catalog.invalid.insert(name, (path, failure.reason));
+            } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !catalog.agents.contains_key(stem)
+            {
+                catalog
+                    .invalid
+                    .insert(stem.to_owned(), (path, failure.reason));
+            }
+        }
+    }
 }
 
 fn load_directory(
     directory: PathBuf,
     project: bool,
     cancel: &CancellationToken,
-    agents: &mut BTreeMap<String, Definition>,
+    catalog: &mut Catalog,
 ) -> Result<(), ToolError> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
@@ -90,25 +167,24 @@ fn load_directory(
         if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Some(agent) = parse(&text, project, path)
-        {
-            agents.insert(agent.name.clone(), agent);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let parsed = parse(&text, project, path.clone());
+            record_parsed(catalog, path, parsed);
         }
     }
     Ok(())
 }
 
-pub fn discover(
+pub fn discover_catalog(
     home: &Path,
     cwd: &Path,
     scope: &str,
     cancel: &CancellationToken,
-) -> Result<BTreeMap<String, Definition>, ToolError> {
+) -> Result<Catalog, ToolError> {
     if !matches!(scope, "user" | "project" | "both") {
         return Err(ToolError("Invalid agentScope".into()));
     }
-    let mut agents = BTreeMap::new();
+    let mut catalog = Catalog::default();
     // User definitions deliberately win over project definitions with the same name.
     for (directory, project) in directories(home, cwd) {
         let included = if project {
@@ -117,10 +193,19 @@ pub fn discover(
             scope != "project"
         };
         if included {
-            load_directory(directory, project, cancel, &mut agents)?;
+            load_directory(directory, project, cancel, &mut catalog)?;
         }
     }
-    Ok(agents)
+    Ok(catalog)
+}
+
+pub fn discover(
+    home: &Path,
+    cwd: &Path,
+    scope: &str,
+    cancel: &CancellationToken,
+) -> Result<BTreeMap<String, Definition>, ToolError> {
+    discover_catalog(home, cwd, scope, cancel).map(|catalog| catalog.agents)
 }
 
 /// Definition directories in load order, flagged when they belong to the project: the

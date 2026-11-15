@@ -766,14 +766,30 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
     assert_eq!(agents["null_thinking"].thinking, None);
 
     for invalid in ["bogus", "\"\"", "HIGH", "42", "true", "[low]"] {
+        let path = directory.join("invalid_def.md");
         std::fs::write(
-            directory.join("invalid.md"),
+            &path,
             format!("---\nname: invalid\ndescription: bad\nthinking: {invalid}\n---\nBody"),
         )
         .unwrap();
         let agents =
             definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
         assert!(!agents.contains_key("invalid"), "accepted {invalid}");
+        assert!(agents.contains_key("valid"), "valid agent still discovered");
+
+        let err = h
+            .run_id("bad-thinking", json!({"agent": "invalid", "task": "check"}))
+            .await
+            .unwrap_err()
+            .0;
+        assert!(
+            err.contains(&path.display().to_string()),
+            "expected file path in error for {invalid}, got: {err}"
+        );
+        assert!(
+            err.contains("thinking"),
+            "expected offending field `thinking` in error for {invalid}, got: {err}"
+        );
     }
 }
 

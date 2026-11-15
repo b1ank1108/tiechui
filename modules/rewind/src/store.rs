@@ -150,6 +150,32 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T> {
     serde_json::from_reader(File::open(path)?).map_err(|e| ToolError(e.to_string()))
 }
 
+fn exempted_working_dir(parent: &str, rest: &[String]) -> bool {
+    matches!(parent, ".tiechui" | ".agents" | ".claude")
+        && rest
+            .first()
+            .is_some_and(|sub| matches!(sub.as_str(), "worktrees" | "plans" | "state"))
+        && rest.len() >= 2
+}
+
+fn unsafe_metadata_component(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(part) => Some(part.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    parts
+        .iter()
+        .enumerate()
+        .any(|(at, part)| match part.as_str() {
+            ".git" | ".pi" => true,
+            ".tiechui" | ".agents" | ".claude" => !exempted_working_dir(part, &parts[at + 1..]),
+            _ => false,
+        })
+}
+
 impl Store {
     pub fn new(base: &Path, root: &Path, session: &str) -> Result<Self> {
         let root = fs::canonicalize(root)?;
@@ -241,12 +267,7 @@ impl Store {
                 Component::Prefix(_) => !path.is_absolute(),
                 _ => true,
             })
-            || path.components().any(|part| {
-                matches!(
-                    part.as_os_str().to_str(),
-                    Some(".git" | ".pi" | ".tiechui" | ".agents" | ".claude")
-                )
-            })
+            || unsafe_metadata_component(path)
         {
             return Err(ToolError(format!("Unsafe rewind path: {file}")));
         }

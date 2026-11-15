@@ -189,28 +189,6 @@ impl Tool for BashTool {
 
 /// Runs a command under the bash tool's contract, streaming throttled snapshots to `emit`.
 /// `timeout` must have passed [`parse_timeout`].
-pub async fn run_bash(
-    command: &str,
-    timeout: Option<f64>,
-    cwd: &Path,
-    cancel: CancellationToken,
-    output: &Mutex<OutputAccumulator>,
-    on_spawn: impl FnOnce() + Send,
-    emit: impl Fn(ToolOutput) + Sync,
-) -> Outcome {
-    run_bash_with_env(
-        command,
-        timeout,
-        cwd,
-        &BTreeMap::new(),
-        cancel,
-        output,
-        on_spawn,
-        emit,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_bash_with_env(
     command: &str,

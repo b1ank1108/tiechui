@@ -145,10 +145,6 @@ fn repo(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<Repo>> {
 }
 
 /// None outside a Git work tree.
-pub fn status(root: &Path) -> Result<Option<GitStatus>> {
-    status_with_env(root, &BTreeMap::new())
-}
-
 pub fn status_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<GitStatus>> {
     let Some(repo) = repo(root, env)? else {
         return Ok(None);
@@ -266,10 +262,6 @@ fn files(name_status: &str, stats: &HashMap<String, (u32, u32)>) -> Vec<CommitFi
     files
 }
 
-pub fn compare(root: &Path, base: &str) -> Result<Comparison> {
-    compare_with_env(root, base, &BTreeMap::new())
-}
-
 pub fn compare_with_env(
     root: &Path,
     base: &str,
@@ -301,10 +293,6 @@ pub fn compare_with_env(
         behind: count(behind),
         files,
     })
-}
-
-pub fn log(root: &Path, limit: u32) -> Result<Vec<GitCommit>> {
-    log_with_env(root, limit, &BTreeMap::new())
 }
 
 pub fn log_with_env(
@@ -368,10 +356,6 @@ pub fn log_with_env(
 }
 
 /// The file's text at `rev`; None when it is absent there or binary.
-pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-    show_with_env(root, rev, path, &BTreeMap::new())
-}
-
 pub fn show_with_env(
     root: &Path,
     rev: &str,
@@ -386,10 +370,6 @@ pub fn show_with_env(
         .success()
         .then(|| fs::text(output.stdout))
         .flatten())
-}
-
-pub fn branches(root: &Path) -> Result<Branches> {
-    branches_with_env(root, &BTreeMap::new())
 }
 
 pub fn branches_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Branches> {
@@ -420,10 +400,6 @@ pub fn branches_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<
 }
 
 /// The current branch's pull request, when `gh` knows one.
-pub fn pull_request(root: &Path) -> Result<Option<PullRequest>> {
-    pull_request_with_env(root, &BTreeMap::new())
-}
-
 pub fn pull_request_with_env(
     root: &Path,
     env: &BTreeMap<String, String>,
@@ -448,10 +424,6 @@ pub fn pull_request_with_env(
         state,
         url: value["url"].as_str().unwrap_or_default().into(),
     }))
-}
-
-pub fn run(root: &Path, op: &GitOp) -> Result<String> {
-    run_with_env(root, op, &BTreeMap::new())
 }
 
 pub fn run_with_env(root: &Path, op: &GitOp, env: &BTreeMap<String, String>) -> Result<String> {

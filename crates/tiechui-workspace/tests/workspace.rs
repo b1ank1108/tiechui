@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -47,7 +48,7 @@ fn repo() -> tempfile::TempDir {
 }
 
 fn changes(root: &Path) -> Vec<(String, GitFileStatus, bool, u32, u32)> {
-    ws::status(root)
+    ws::status_with_env(root, &BTreeMap::new())
         .unwrap()
         .unwrap()
         .changes
@@ -179,7 +180,8 @@ fn status_splits_staged_and_unstaged_changes() {
     write(root, "a.txt", "one\nTWO\nthree\nfour\n");
     write(root, "src/new.rs", "a\nb\n");
     git(root, &["mv", "src/lib.rs", "src/main.rs"]);
-    let status = ws::status(root).unwrap().unwrap();
+    let env = BTreeMap::new();
+    let status = ws::status_with_env(root, &env).unwrap().unwrap();
     assert_eq!(status.branch.as_deref(), Some("main"));
     assert!(status.head.is_some() && status.upstream.is_none() && status.operation.is_none());
     assert_eq!(
@@ -200,23 +202,25 @@ fn status_splits_staged_and_unstaged_changes() {
         ]
     );
     assert!(
-        ws::status(tempfile::tempdir().unwrap().path())
+        ws::status_with_env(tempfile::tempdir().unwrap().path(), &env)
             .unwrap()
             .is_none()
     );
 
-    ws::run(
+    ws::run_with_env(
         root,
         &GitOp::Unstage {
             paths: vec!["a.txt".into()],
         },
+        &env,
     )
     .unwrap();
-    ws::run(
+    ws::run_with_env(
         root,
         &GitOp::Discard {
             paths: vec!["a.txt".into(), "src/new.rs".into()],
         },
+        &env,
     )
     .unwrap();
     assert_eq!(
@@ -234,31 +238,35 @@ fn status_splits_staged_and_unstaged_changes() {
 fn history_compare_and_show() {
     let dir = repo();
     let root = dir.path();
-    ws::run(
+    let env = BTreeMap::new();
+    ws::run_with_env(
         root,
         &GitOp::Checkout {
             branch: "feature".into(),
             create: true,
         },
+        &env,
     )
     .unwrap();
     write(root, "a.txt", "one\n");
     write(root, "b.txt", "b\n");
-    ws::run(
+    ws::run_with_env(
         root,
         &GitOp::Stage {
             paths: vec![".".into()],
         },
+        &env,
     )
     .unwrap();
-    ws::run(
+    ws::run_with_env(
         root,
         &GitOp::Commit {
             message: "second\n\nbody".into(),
         },
+        &env,
     )
     .unwrap();
-    let log = ws::log(root, 10).unwrap();
+    let log = ws::log_with_env(root, 10, &env).unwrap();
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].subject, "second");
     assert_eq!(log[0].refs, ["HEAD -> feature"]);
@@ -277,19 +285,29 @@ fn history_compare_and_show() {
     );
     assert_eq!(log[1].refs, ["main"]);
     assert_eq!(log[1].files.len(), 3);
-    let comparison = ws::compare(root, "main").unwrap();
+    let comparison = ws::compare_with_env(root, "main", &env).unwrap();
     assert_eq!(comparison.merge_base.as_deref(), Some(log[1].hash.as_str()));
     assert_eq!((comparison.ahead, comparison.behind), (1, 0));
     assert_eq!(comparison.files.len(), 2);
-    assert_eq!(ws::compare(root, "missing").unwrap().merge_base, None);
     assert_eq!(
-        ws::show(root, "main", "a.txt").unwrap().as_deref(),
+        ws::compare_with_env(root, "missing", &env)
+            .unwrap()
+            .merge_base,
+        None
+    );
+    assert_eq!(
+        ws::show_with_env(root, "main", "a.txt", &env)
+            .unwrap()
+            .as_deref(),
         Some("one\ntwo\n")
     );
-    assert_eq!(ws::show(root, "main", "b.txt").unwrap(), None);
-    let branches = ws::branches(root).unwrap();
+    assert_eq!(
+        ws::show_with_env(root, "main", "b.txt", &env).unwrap(),
+        None
+    );
+    let branches = ws::branches_with_env(root, &env).unwrap();
     assert_eq!(branches.local, ["feature", "main"]);
-    assert!(ws::run(root, &GitOp::Abort).is_err());
+    assert!(ws::run_with_env(root, &GitOp::Abort, &env).is_err());
 }
 
 #[test]

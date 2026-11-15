@@ -137,18 +137,10 @@ mod tests {
     use tiechui_protocol::{SessionEpoch, ThreadId, TurnId};
     use tiechui_tools::ExecutionScope;
 
-    #[tokio::test]
-    async fn build_default_mounts_tools_without_loading_default_agent_policy_file() {
-        let sandbox = tempfile::tempdir().unwrap();
+    fn fixture(sandbox: &tempfile::TempDir) -> (PathBuf, Children, ToolContext) {
         let cwd = sandbox.path().canonicalize().unwrap();
         let home = cwd.join("user-home");
         std::fs::create_dir_all(home.join("agents")).unwrap();
-        std::fs::write(
-            home.join("agents/default.md"),
-            "---\nname: default\ndescription: disk\npermission:\n  read: deny\n---\n",
-        )
-        .unwrap();
-
         let mut config = ModuleConfig::default();
         config.permissions.rules = Some(vec![PermissionRule {
             surface: "*".into(),
@@ -162,7 +154,7 @@ mod tests {
             config,
             permissions: PermissionsModule::headless(
                 cwd.clone(),
-                home,
+                home.clone(),
                 HeadlessPolicy::Unavailable,
             ),
             rewind: cwd.join("rewind"),
@@ -183,6 +175,18 @@ mod tests {
             parent_session: None,
             origin: Default::default(),
         };
+        (home, children, parent)
+    }
+
+    #[tokio::test]
+    async fn build_default_mounts_tools_without_loading_default_agent_policy_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let (home, children, parent) = fixture(&sandbox);
+        std::fs::write(
+            home.join("agents/default.md"),
+            "---\nname: default\ndescription: disk\npermission:\n  read: deny\n---\n",
+        )
+        .unwrap();
 
         let unnamed = children.build_default(&parent).unwrap();
         assert!(unnamed.tools().get("read").is_some());
@@ -220,6 +224,42 @@ mod tests {
         assert!(named.context_providers().is_empty());
         assert!(matches!(
             named.interceptors()[0]
+                .interceptor
+                .before(&call, parent)
+                .await
+                .unwrap(),
+            BeforeToolCall::Deny(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatched_agent_enforces_permission_when_filename_differs_from_frontmatter_name() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let (home, children, parent) = fixture(&sandbox);
+        std::fs::write(
+            home.join("agents/custom_file.md"),
+            "---\nname: my-reviewer\ndescription: custom reviewer\npermission:\n  read: deny\n---\nReview prompt\n",
+        )
+        .unwrap();
+
+        let discovered = tiechui_module_subagents::definitions::discover(
+            &home,
+            &parent.cwd,
+            "user",
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let child = children
+            .build(&parent, &discovered["my-reviewer"].name)
+            .unwrap();
+        let call = model::ToolCall {
+            id: "read".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "note.txt"}),
+            opaque: None,
+        };
+        assert!(matches!(
+            child.interceptors()[0]
                 .interceptor
                 .before(&call, parent)
                 .await

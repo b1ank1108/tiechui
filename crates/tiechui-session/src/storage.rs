@@ -228,6 +228,34 @@ pub(crate) fn list_in(
     Ok(result)
 }
 
+pub(crate) fn create_private_dir_all(directory: &Path) -> Result<(), SessionError> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .map_err(|error| SessionError::new(directory, error))?;
+    #[cfg(unix)]
+    tighten_dir_if_regular(directory);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tighten_dir_if_regular(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.is_dir()
+        && !meta.file_type().is_symlink()
+        && meta.permissions().mode() & 0o7777 != 0o700
+    {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+}
+
 impl SessionStore {
     pub(crate) fn create_in(
         directory: &Path,
@@ -237,16 +265,7 @@ impl SessionStore {
     ) -> Result<Self, SessionError> {
         check_cancel(directory, cancel)?;
         let cwd = resolve_cwd(cwd)?;
-        let mut builder = DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(directory)
-            .map_err(|error| SessionError::new(directory, error))?;
+        create_private_dir_all(directory)?;
         let directory = directory
             .canonicalize()
             .map_err(|error| SessionError::new(directory, error))?;

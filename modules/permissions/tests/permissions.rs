@@ -1067,6 +1067,97 @@ async fn agent_frontmatter_policy_uses_parent_trust_and_rejects_traversal() {
 }
 
 #[tokio::test]
+async fn agent_frontmatter_policy_matches_by_frontmatter_name_and_discovery_precedence() {
+    let f = Fixture::new(None);
+    std::fs::create_dir_all(f.home.join("agents")).unwrap();
+    std::fs::create_dir_all(f.cwd.join(".agents/agents")).unwrap();
+    std::fs::create_dir_all(f.cwd.join(".claude/agents")).unwrap();
+
+    // User agent whose filename (`custom_user_file.md`) differs from frontmatter `name`.
+    std::fs::write(
+        f.home.join("agents/custom_user_file.md"),
+        "---\nname: my-reviewer\ndescription: user reviewer\npermission:\n  write: deny\n  grep: allow\n---\n",
+    )
+    .unwrap();
+    // Project `.agents/agents` overrides `.claude/agents` for the same frontmatter `name`,
+    // while user rules win over project rules on conflicting surfaces (`grep`).
+    std::fs::write(
+        f.cwd.join(".claude/agents/claude_file.md"),
+        "---\nname: my-reviewer\ndescription: claude reviewer\npermission:\n  ls: deny\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        f.cwd.join(".agents/agents/project_file.md"),
+        "---\nname: my-reviewer\ndescription: project reviewer\npermission:\n  read: deny\n  grep: deny\n---\n",
+    )
+    .unwrap();
+
+    let module =
+        PermissionsModule::with_requester(f.cwd.clone(), f.home.clone(), f.prompter.clone());
+    let mut registry = Registry::default();
+    module
+        .register_child(
+            &mut registry,
+            &ModuleConfig::default(),
+            &f.home,
+            true,
+            "my-reviewer",
+        )
+        .unwrap();
+
+    let call = |name: &str| ToolCall {
+        id: name.into(),
+        name: name.into(),
+        arguments: json!({"path":"file.txt","content":"x","pattern":"foo"}),
+        opaque: None,
+    };
+    let interceptor = &registry.interceptors()[0].interceptor;
+    denied(
+        interceptor
+            .before(&call("write"), f.context())
+            .await
+            .unwrap(),
+    );
+    denied(
+        interceptor
+            .before(&call("read"), f.context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        interceptor
+            .before(&call("grep"), f.context())
+            .await
+            .unwrap(),
+        BeforeToolCall::Allow
+    );
+    // `.agents/agents` won over `.claude/agents`, so `ls: deny` from `.claude/agents` was not loaded.
+    assert_eq!(
+        interceptor.before(&call("ls"), f.context()).await.unwrap(),
+        BeforeToolCall::Allow
+    );
+
+    // Dispatching an agent named `custom_user_file` must NOT inherit `custom_user_file.md`
+    // because that file explicitly declares `name: my-reviewer`.
+    let mut other = Registry::default();
+    let mut allow_all = ModuleConfig::default();
+    allow_all.permissions.rules = Some(
+        serde_json::from_value(json!([{"surface":"*","pattern":"*","action":"allow"}])).unwrap(),
+    );
+    module
+        .register_child(&mut other, &allow_all, &f.home, true, "custom_user_file")
+        .unwrap();
+    assert_eq!(
+        other.interceptors()[0]
+            .interceptor
+            .before(&call("write"), f.context())
+            .await
+            .unwrap(),
+        BeforeToolCall::Allow
+    );
+}
+
+#[tokio::test]
 async fn diagnostics_show_rules_mode_session_grants_and_only_instance_decisions() {
     let f = Fixture::new(permissive());
     let command = f
