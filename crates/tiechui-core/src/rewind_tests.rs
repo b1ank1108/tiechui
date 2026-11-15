@@ -61,6 +61,24 @@ impl Tool for PartialWrite {
     }
 }
 
+fn test_tool_context(cwd: PathBuf, branch: Vec<BranchEntry>) -> ToolContext {
+    ToolContext {
+        invoker: None,
+        cwd,
+        cancel: CancellationToken::new(),
+        updates: Arc::new(|_| {}),
+        append_entry: Arc::new(|_| Ok(())),
+        epoch: SessionEpoch(0),
+        scope: ExecutionScope {
+            thread_id: ThreadId("session".into()),
+            turn_id: TurnId("turn".into()),
+        },
+        parent_session: None,
+        branch: Arc::new(branch),
+        origin: Default::default(),
+    }
+}
+
 #[tokio::test]
 async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editing_paths() {
     let root = tempfile::tempdir().unwrap();
@@ -92,19 +110,9 @@ async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editi
         (&outside, "../absolute-outside.txt"),
     ] {
         std::fs::write(cwd.join(file), "before").unwrap();
-        let ctx = ToolContext {
-            invoker: None,
-            cwd: cwd.clone(),
-            cancel: CancellationToken::new(),
-            updates: Arc::new(|_| {}),
-            append_entry: Arc::new(|_| Ok(())),
-            epoch: SessionEpoch(0),
-            scope: ExecutionScope {
-                thread_id: ThreadId("session".into()),
-                turn_id: TurnId("turn".into()),
-            },
-            parent_session: None,
-            branch: Arc::new(vec![BranchEntry {
+        let ctx = test_tool_context(
+            cwd.clone(),
+            vec![BranchEntry {
                 id: "control".into(),
                 parent_id: None,
                 timestamp: 0,
@@ -113,9 +121,8 @@ async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editi
                     tiechui_module_rewind::CONTROL_CHECKPOINT.into(),
                     json!({"version":1,"text":"control operation"}),
                 )),
-            }]),
-            origin: Default::default(),
-        };
+            }],
+        );
         let output = interception::execute_call(
             &registry,
             &ToolScheduler::default(),
@@ -149,56 +156,62 @@ async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editi
     }
 }
 
-#[tokio::test]
-async fn external_edits_checkpoint_only_after_permission_allows_them() {
+fn editing_rewind_fixture(
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    directory: &std::path::Path,
+    rules: serde_json::Value,
+    prompt_text: &str,
+) -> (Registry, ToolContext) {
     use tiechui_module_permissions::{HeadlessPolicy, PermissionsModule};
 
+    let mut registry = Registry::default();
+    tiechui_module_editing::EditingModule
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    tiechui_module_rewind::RewindModule {
+        directory: directory.to_path_buf(),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    let mut config = ModuleConfig::default();
+    config.permissions.rules = Some(serde_json::from_value(rules).unwrap());
+    PermissionsModule::headless(cwd.to_path_buf(), root.into(), HeadlessPolicy::Unavailable)
+        .register(&mut registry, &config)
+        .unwrap();
+    let ctx = test_tool_context(
+        cwd.to_path_buf(),
+        vec![BranchEntry {
+            id: "prompt".into(),
+            parent_id: None,
+            timestamp: 0,
+            content: Some(vec![InputContent::Text {
+                text: prompt_text.into(),
+            }]),
+            custom: None,
+        }],
+    );
+    (registry, ctx)
+}
+
+#[tokio::test]
+async fn external_edits_checkpoint_only_after_permission_allows_them() {
     for allowed in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("work");
         std::fs::create_dir(&cwd).unwrap();
         let directory = root.path().join("rewind");
         let file = root.path().join("outside/nested/file.txt");
-        let mut registry = Registry::default();
-        tiechui_module_editing::EditingModule
-            .register(&mut registry, &ModuleConfig::default())
-            .unwrap();
-        tiechui_module_rewind::RewindModule {
-            directory: directory.clone(),
-        }
-        .register(&mut registry, &ModuleConfig::default())
-        .unwrap();
-        let mut config = ModuleConfig::default();
-        config.permissions.rules = Some(serde_json::from_value(json!([
-            {"surface":"*","pattern":"*","action":"allow"},
-            {"surface":"external_directory_write","pattern":"*","action":if allowed { "allow" } else { "deny" }}
-        ])).unwrap());
-        PermissionsModule::headless(cwd.clone(), root.path().into(), HeadlessPolicy::Unavailable)
-            .register(&mut registry, &config)
-            .unwrap();
-        let ctx = ToolContext {
-            invoker: None,
-            cwd: cwd.clone(),
-            cancel: CancellationToken::new(),
-            updates: Arc::new(|_| {}),
-            append_entry: Arc::new(|_| Ok(())),
-            epoch: SessionEpoch(0),
-            scope: ExecutionScope {
-                thread_id: ThreadId("session".into()),
-                turn_id: TurnId("turn".into()),
-            },
-            parent_session: None,
-            branch: Arc::new(vec![BranchEntry {
-                id: "prompt".into(),
-                parent_id: None,
-                timestamp: 0,
-                content: Some(vec![InputContent::Text {
-                    text: "create then edit".into(),
-                }]),
-                custom: None,
-            }]),
-            origin: Default::default(),
-        };
+        let (registry, ctx) = editing_rewind_fixture(
+            root.path(),
+            &cwd,
+            &directory,
+            json!([
+                {"surface":"*","pattern":"*","action":"allow"},
+                {"surface":"external_directory_write","pattern":"*","action":if allowed { "allow" } else { "deny" }}
+            ]),
+            "create then edit",
+        );
         let output = interception::execute_call(
             &registry,
             &ToolScheduler::default(),
@@ -715,4 +728,60 @@ async fn conflicts_leave_conversation_action_and_stale_confirmation_cannot_resto
         "external"
     );
     h.stop().await;
+}
+
+#[tokio::test]
+async fn upper_repo_writes_to_exempted_agent_working_dirs_succeed_and_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("repo");
+    std::fs::create_dir(&cwd).unwrap();
+    let directory = root.path().join("rewind");
+    let (registry, ctx) = editing_rewind_fixture(
+        root.path(),
+        &cwd,
+        &directory,
+        json!([{"surface":"*","pattern":"*","action":"allow"}]),
+        "write worktree files",
+    );
+
+    let targets = [
+        ".tiechui/worktrees/x/a.txt",
+        ".tiechui/plans/plan.md",
+        ".tiechui/state/run.json",
+        ".claude/worktrees/x/a.txt",
+        ".claude/plans/plan.md",
+        ".claude/state/run.json",
+        ".agents/worktrees/x/a.txt",
+        ".agents/plans/plan.md",
+        ".agents/state/run.json",
+    ];
+    for (idx, rel) in targets.iter().enumerate() {
+        let output = interception::execute_call(
+            &registry,
+            &ToolScheduler::default(),
+            ToolCall {
+                id: format!("w-{idx}"),
+                name: "write".into(),
+                arguments: json!({"path": rel, "content": format!("content-{idx}\n")}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await;
+        assert!(!output.is_error, "{rel}: {output:?}");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join(rel)).unwrap(),
+            format!("content-{idx}\n")
+        );
+    }
+
+    let store = tiechui_module_rewind::store::Store::new(&directory, &cwd, "session").unwrap();
+    let cancel = CancellationToken::new();
+    let plan = store.plan(&["prompt".into()], &cancel).unwrap();
+    assert_eq!(plan.target.len(), targets.len());
+    let _lock = store.restore(&plan, &cancel).unwrap();
+    store.finish(&plan.target).unwrap();
+    for rel in targets {
+        assert!(!cwd.join(rel).exists(), "{rel}");
+    }
 }

@@ -108,6 +108,17 @@ impl PermissionsModule {
         };
         self
     }
+    fn project_agent_policy(&self, name: &str) -> Option<PathBuf> {
+        let directory = self.cwd.ancestors().find(|directory| {
+            [".agents/agents", ".claude/agents"]
+                .iter()
+                .any(|source| directory.join(source).is_dir())
+        })?;
+        [".agents/agents", ".claude/agents"]
+            .iter()
+            .find_map(|source| agents::find_in_dir(&directory.join(source), name))
+    }
+
     pub fn register_child(
         &self,
         registry: &mut Registry,
@@ -120,21 +131,11 @@ impl PermissionsModule {
             return Err(ToolError("Invalid agent policy name".into()));
         }
         let mut config = config.clone();
-        agents::load(&mut config, &home.join("agents").join(format!("{name}.md")));
-        if trusted
-            && let Some(directory) = self.cwd.ancestors().find(|directory| {
-                [".agents/agents", ".claude/agents"]
-                    .iter()
-                    .any(|name| directory.join(name).is_dir())
-            })
-        {
-            let path = [".agents/agents", ".claude/agents"]
-                .iter()
-                .map(|source| directory.join(source).join(format!("{name}.md")))
-                .find(|path| path.is_file());
-            if let Some(path) = path {
-                agents::load(&mut config, &path);
-            }
+        if trusted && let Some(path) = self.project_agent_policy(name) {
+            agents::load(&mut config, &path);
+        }
+        if let Some(path) = agents::find_in_dir(&home.join("agents"), name) {
+            agents::load(&mut config, &path);
         }
         let mut child = self.clone();
         child.actor = Some(format!("Child {name}"));

@@ -1,12 +1,13 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use tiechui_exec::{StopReason, execute};
+use tiechui_exec::{StopReason, execute_with_env};
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -29,10 +30,11 @@ fn shell_selection_ignores_shell_environment() {
 #[tokio::test]
 async fn merged_stream_preserves_writes_and_reports_signal_and_binary_bytes() {
     let mut output = Vec::new();
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         "printf 'one\\n'; printf 'two\\n' >&2; printf '\\377'; kill -USR1 $$",
         Path::new("/"),
+        &BTreeMap::new(),
         None,
         CancellationToken::new(),
         || {},
@@ -52,10 +54,11 @@ async fn merged_stream_preserves_writes_and_reports_signal_and_binary_bytes() {
 #[tokio::test]
 async fn timeout_and_precancel_are_distinct_and_prompt() {
     let start = tokio::time::Instant::now();
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         "sleep 30",
         Path::new("/"),
+        &BTreeMap::new(),
         Some(Duration::from_millis(40)),
         CancellationToken::new(),
         || {},
@@ -67,10 +70,11 @@ async fn timeout_and_precancel_are_distinct_and_prompt() {
     assert!(start.elapsed() < Duration::from_secs(3));
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/missing-shell"),
         "exit 99",
         Path::new("/"),
+        &BTreeMap::new(),
         None,
         cancel,
         || {},
@@ -84,10 +88,11 @@ async fn timeout_and_precancel_are_distinct_and_prompt() {
 #[tokio::test]
 async fn spawn_failure_is_reported() {
     assert!(
-        execute(
+        execute_with_env(
             Path::new("/no-such-tiechui-shell"),
             "true",
             Path::new("/"),
+            &BTreeMap::new(),
             None,
             CancellationToken::new(),
             || {},
@@ -101,10 +106,11 @@ async fn spawn_failure_is_reported() {
 #[tokio::test]
 async fn buffered_output_is_drained_after_shell_exit() {
     let mut output = Vec::new();
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         "i=0; while [ $i -lt 12 ]; do printf chunk; i=$((i+1)); done; exit 0",
         Path::new("/"),
+        &BTreeMap::new(),
         Some(Duration::from_secs(3)),
         CancellationToken::new(),
         || {},
@@ -189,10 +195,11 @@ async fn assert_tree_cancelled(mode: &str) {
     let mut output = String::new();
     let start = tokio::time::Instant::now();
     let mut cancelled_at = None;
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         &command,
         Path::new("/"),
+        &BTreeMap::new(),
         Some(Duration::from_secs(5)),
         cancel.clone(),
         || {},
@@ -280,10 +287,11 @@ async fn detached_descendant_holding_stdio_does_not_stall_completion() {
     );
     let mut output = String::new();
     let start = tokio::time::Instant::now();
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         &command,
         Path::new("/"),
+        &BTreeMap::new(),
         Some(Duration::from_secs(3)),
         CancellationToken::new(),
         || {},
@@ -313,10 +321,11 @@ async fn detached_descendant_holding_stdio_does_not_stall_completion() {
 #[tokio::test]
 async fn callback_error_cleans_up_root() {
     let mut pid = None;
-    let result = execute(
+    let result = execute_with_env(
         Path::new("/bin/bash"),
         "echo $$; sleep 30",
         Path::new("/"),
+        &BTreeMap::new(),
         None,
         CancellationToken::new(),
         || {},

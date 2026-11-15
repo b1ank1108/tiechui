@@ -256,6 +256,172 @@ async fn exercise(root: &Path) {
     }
     fs::write(&grant_path, original).unwrap();
     assert!(doctor(&home).status.success());
+
+    exercise_prompts_agents_and_trash(root).await;
+}
+
+async fn exercise_prompts_agents_and_trash(root: &Path) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command as TokioCommand;
+
+    let app_home = root.join("app-profile");
+    assert!(!app_home.exists());
+    let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_chui"))
+        .env_clear()
+        .env("TIECHUI_HOME", &app_home)
+        .env("HOME", root)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(root)
+        .arg("app-server")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    let mut rpc = async |id: u64, method: &str, params: serde_json::Value| {
+        let req =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        stdin
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        stdin.flush().await.unwrap();
+        loop {
+            let line = lines.next_line().await.unwrap().unwrap();
+            let msg: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if msg["id"] == id {
+                assert!(msg.get("error").is_none(), "{method} failed: {msg}");
+                return;
+            }
+        }
+    };
+
+    rpc(
+        1,
+        "prompts/save",
+        serde_json::json!({
+            "cwd": null,
+            "scope": "user",
+            "name": "review",
+            "description": "Review prompt",
+            "argument_hint": null,
+            "body": "Review carefully",
+            "previous": null,
+        }),
+    )
+    .await;
+    mode(&app_home, 0o700);
+    mode(&app_home.join("prompts"), 0o700);
+
+    let agents_only_home = root.join("agents-profile");
+    assert!(!agents_only_home.exists());
+    let mut agents_child = TokioCommand::new(env!("CARGO_BIN_EXE_chui"))
+        .env_clear()
+        .env("TIECHUI_HOME", &agents_only_home)
+        .env("HOME", root)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(root)
+        .arg("app-server")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut agents_stdin = agents_child.stdin.take().unwrap();
+    let mut agents_lines = BufReader::new(agents_child.stdout.take().unwrap()).lines();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "agents/save",
+        "params": {
+            "cwd": null,
+            "scope": "user",
+            "name": "reviewer",
+            "description": "Reviewer agent",
+            "tools": null,
+            "model": null,
+            "thinking": null,
+            "prompt": "Review diff",
+            "previous": null,
+        }
+    });
+    agents_stdin
+        .write_all(format!("{req}\n").as_bytes())
+        .await
+        .unwrap();
+    agents_stdin.flush().await.unwrap();
+    loop {
+        let line = agents_lines.next_line().await.unwrap().unwrap();
+        let msg: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if msg["id"] == 1 {
+            assert!(msg.get("error").is_none(), "agents/save failed: {msg}");
+            break;
+        }
+    }
+    drop(agents_stdin);
+    let _ = agents_child.wait().await;
+    mode(&agents_only_home, 0o700);
+    mode(&agents_only_home.join("agents"), 0o700);
+
+    rpc(
+        2,
+        "agents/save",
+        serde_json::json!({
+            "cwd": null,
+            "scope": "user",
+            "name": "reviewer",
+            "description": "Reviewer agent",
+            "tools": null,
+            "model": null,
+            "thinking": null,
+            "prompt": "Review diff",
+            "previous": null,
+        }),
+    )
+    .await;
+    mode(&app_home.join("agents"), 0o700);
+
+    let session =
+        tiechui_session::SessionStore::create(&app_home, root, &CancellationToken::new()).unwrap();
+    let session_path = session.path().to_path_buf();
+    drop(session);
+    rpc(
+        3,
+        "session/trash",
+        serde_json::json!({ "path": session_path }),
+    )
+    .await;
+    drop(stdin);
+    let _ = child.wait().await;
+
+    mode(&app_home.join("trash"), 0o700);
+    assert_private_directories(&app_home);
+    assert_private_directories(&agents_only_home);
+
+    let trash_only_home = root.join("trash-profile");
+    assert!(!trash_only_home.exists());
+    let staging = root.join("staging-profile");
+    let staged =
+        tiechui_session::SessionStore::create(&staging, root, &CancellationToken::new()).unwrap();
+    let staged_path = staged.path().to_path_buf();
+    drop(staged);
+    tiechui_session::trash(&trash_only_home, &staged_path).unwrap();
+    mode(&trash_only_home, 0o700);
+    mode(&trash_only_home.join("trash"), 0o700);
+    assert_private_directories(&trash_only_home);
+
+    for profile in [&app_home, &agents_only_home, &trash_only_home] {
+        let out = doctor(profile);
+        assert!(out.status.success(), "{profile:?}: {out:?}");
+        assert!(
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .contains("Doctor: OK")
+        );
+    }
 }
 
 fn doctor(home: &Path) -> std::process::Output {

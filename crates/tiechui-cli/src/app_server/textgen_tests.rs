@@ -802,7 +802,8 @@ async fn verify_commit_message_diffs(
     assert!(diff_prompt.contains("big_untracked.txt"));
     assert!(diff_prompt.contains("[diff truncated]"));
 
-    let commits = tiechui_workspace::log(repo, 10).unwrap();
+    let commits =
+        tiechui_workspace::log_with_env(repo, 10, &std::collections::BTreeMap::new()).unwrap();
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].subject, "initial");
 

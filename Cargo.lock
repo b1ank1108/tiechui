@@ -3483,6 +3483,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tiechui-config",
  "tiechui-model",
  "tokio-util",
  "windows-sys 0.61.2",

@@ -145,10 +145,6 @@ fn repo(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<Repo>> {
 }
 
 /// None outside a Git work tree.
-pub fn status(root: &Path) -> Result<Option<GitStatus>> {
-    status_with_env(root, &BTreeMap::new())
-}
-
 pub fn status_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Option<GitStatus>> {
     let Some(repo) = repo(root, env)? else {
         return Ok(None);
@@ -266,10 +262,6 @@ fn files(name_status: &str, stats: &HashMap<String, (u32, u32)>) -> Vec<CommitFi
     files
 }
 
-pub fn compare(root: &Path, base: &str) -> Result<Comparison> {
-    compare_with_env(root, base, &BTreeMap::new())
-}
-
 pub fn compare_with_env(
     root: &Path,
     base: &str,
@@ -301,10 +293,6 @@ pub fn compare_with_env(
         behind: count(behind),
         files,
     })
-}
-
-pub fn log(root: &Path, limit: u32) -> Result<Vec<GitCommit>> {
-    log_with_env(root, limit, &BTreeMap::new())
 }
 
 pub fn log_with_env(
@@ -368,10 +356,6 @@ pub fn log_with_env(
 }
 
 /// The file's text at `rev`; None when it is absent there or binary.
-pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-    show_with_env(root, rev, path, &BTreeMap::new())
-}
-
 pub fn show_with_env(
     root: &Path,
     rev: &str,
@@ -386,10 +370,6 @@ pub fn show_with_env(
         .success()
         .then(|| fs::text(output.stdout))
         .flatten())
-}
-
-pub fn branches(root: &Path) -> Result<Branches> {
-    branches_with_env(root, &BTreeMap::new())
 }
 
 pub fn branches_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<Branches> {
@@ -420,10 +400,6 @@ pub fn branches_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<
 }
 
 /// The current branch's pull request, when `gh` knows one.
-pub fn pull_request(root: &Path) -> Result<Option<PullRequest>> {
-    pull_request_with_env(root, &BTreeMap::new())
-}
-
 pub fn pull_request_with_env(
     root: &Path,
     env: &BTreeMap<String, String>,
@@ -448,10 +424,6 @@ pub fn pull_request_with_env(
         state,
         url: value["url"].as_str().unwrap_or_default().into(),
     }))
-}
-
-pub fn run(root: &Path, op: &GitOp) -> Result<String> {
-    run_with_env(root, op, &BTreeMap::new())
 }
 
 pub fn run_with_env(root: &Path, op: &GitOp, env: &BTreeMap<String, String>) -> Result<String> {
@@ -542,10 +514,6 @@ const UNTRACKED_FILE_CAP: usize = 64 << 10;
 const DIFF_COLLECT_CAP: usize = 128 << 10;
 
 /// Diff for commit-message generation: staged changes when present, otherwise all uncommitted changes.
-pub fn commit_diff(root: &Path) -> Result<String> {
-    commit_diff_with_env(root, &BTreeMap::new())
-}
-
 pub fn commit_diff_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<String> {
     if repo(root, env)?.is_none() {
         return fail("Not a Git repository");
@@ -678,12 +646,16 @@ mod tests {
     #[test]
     fn commit_diff_rejects_non_git_and_clean_worktree() {
         let non_git = tempfile::tempdir().unwrap();
-        let err = commit_diff(non_git.path()).unwrap_err().0;
+        let err = commit_diff_with_env(non_git.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
         assert!(err.contains("Not a Git repository"), "{err}");
 
         let repo_dir = tempfile::tempdir().unwrap();
         git_cmd(repo_dir.path(), &["init", "-q"]);
-        let unborn_err = commit_diff(repo_dir.path()).unwrap_err().0;
+        let unborn_err = commit_diff_with_env(repo_dir.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
         assert!(
             unborn_err.contains("No uncommitted changes"),
             "{unborn_err}"
@@ -693,7 +665,9 @@ mod tests {
         git_cmd(repo_dir.path(), &["add", "README.md"]);
         git_cmd(repo_dir.path(), &["commit", "-q", "-m", "init"]);
 
-        let clean_err = commit_diff(repo_dir.path()).unwrap_err().0;
+        let clean_err = commit_diff_with_env(repo_dir.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
         assert!(clean_err.contains("No uncommitted changes"), "{clean_err}");
     }
 
@@ -704,7 +678,7 @@ mod tests {
         git_cmd(root, &["init", "-q"]);
 
         std::fs::write(root.join("initial.txt"), "hello unborn\n").unwrap();
-        let unborn_untracked = commit_diff(root).unwrap();
+        let unborn_untracked = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
         assert!(
             unborn_untracked.contains("initial.txt"),
             "{unborn_untracked}"
@@ -720,7 +694,7 @@ mod tests {
         std::fs::write(root.join("initial.txt"), "hello unstaged\n").unwrap();
         std::fs::write(root.join("notes.txt"), "new untracked line\n").unwrap();
 
-        let fallback = commit_diff(root).unwrap();
+        let fallback = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
         assert!(fallback.contains("initial.txt"), "{fallback}");
         assert!(fallback.contains("+hello unstaged"), "{fallback}");
         assert!(fallback.contains("notes.txt"), "{fallback}");
@@ -729,7 +703,7 @@ mod tests {
         std::fs::write(root.join("staged.txt"), "only staged payload\n").unwrap();
         git_cmd(root, &["add", "staged.txt"]);
 
-        let staged_only = commit_diff(root).unwrap();
+        let staged_only = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
         assert!(staged_only.contains("staged.txt"), "{staged_only}");
         assert!(
             staged_only.contains("+only staged payload"),

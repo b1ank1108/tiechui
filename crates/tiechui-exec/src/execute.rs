@@ -53,28 +53,6 @@ async fn drain_output(
 /// Buffered output takes precedence over idle expiry; later descendant output is not guaranteed.
 /// Cancellation and the command timeout remain active during the drain.
 /// `on_spawn` runs once the process exists, before any output.
-pub async fn execute(
-    shell: &Path,
-    command_text: &str,
-    cwd: &Path,
-    timeout: Option<Duration>,
-    cancel: CancellationToken,
-    on_spawn: impl FnOnce() + Send,
-    on_data: impl FnMut(&[u8]) -> io::Result<()> + Send,
-) -> io::Result<ProcessResult> {
-    execute_with_env(
-        shell,
-        command_text,
-        cwd,
-        &BTreeMap::new(),
-        timeout,
-        cancel,
-        on_spawn,
-        on_data,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_with_env(
     shell: &Path,

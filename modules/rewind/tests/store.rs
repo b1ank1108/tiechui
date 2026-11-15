@@ -362,3 +362,50 @@ fn line_counts_are_checkpoint_to_current_and_unavailable_is_not_zero() {
         assert_eq!(line_stats(&bytes, b""), None);
     }
 }
+
+#[test]
+fn allows_working_subdirectories_under_agent_dirs_while_blocking_metadata() {
+    let (_root, store, cancel) = fixture();
+    let allowed = [
+        ".tiechui/worktrees/x/a.txt",
+        ".tiechui/plans/plan.md",
+        ".tiechui/state/cache.json",
+        ".claude/worktrees/x/a.txt",
+        ".claude/plans/plan.md",
+        ".claude/state/cache.json",
+        ".agents/worktrees/x/a.txt",
+        ".agents/plans/plan.md",
+        ".agents/state/cache.json",
+    ];
+    for file in allowed {
+        let full = store.root.join(file);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        store.before("one", file, &cancel).unwrap();
+        fs::write(&full, "created\n").unwrap();
+        store.after(file, &cancel).unwrap();
+    }
+    let plan = store.plan(&["one".into()], &cancel).unwrap();
+    assert_eq!(plan.target.len(), allowed.len());
+    let _lock = store.restore(&plan, &cancel).unwrap();
+    store.finish(&plan.target).unwrap();
+    for file in allowed {
+        assert!(!store.root.join(file).exists(), "{file}");
+    }
+
+    for blocked in [
+        ".tiechui/config.toml",
+        ".tiechui/worktrees",
+        ".tiechui/plans",
+        ".tiechui/state",
+        ".claude/settings.json",
+        ".claude/agents/reviewer.md",
+        ".agents/config.toml",
+        ".agents/agents/reviewer.md",
+        ".tiechui/worktrees/x/.git/config",
+        ".tiechui/worktrees/x/.claude/settings.json",
+        ".tiechui/worktrees/x/.agents/config.toml",
+        ".tiechui/worktrees/x/.tiechui/config.toml",
+    ] {
+        assert!(store.before("two", blocked, &cancel).is_err(), "{blocked}");
+    }
+}

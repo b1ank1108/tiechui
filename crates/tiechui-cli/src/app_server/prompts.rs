@@ -103,7 +103,14 @@ fn save(home: &Path, p: PromptSaveParams) -> Result<(), String> {
         }
     }
     let text = render(&p.description, p.argument_hint.as_deref(), &p.body);
-    replace(&target, previous.as_deref(), &text, &format!("/{name}"))
+    let private_home = (scope == "user").then_some(home);
+    replace(
+        &target,
+        previous.as_deref(),
+        &text,
+        &format!("/{name}"),
+        private_home,
+    )
 }
 
 /// A name that becomes `<name>.md`.
@@ -125,12 +132,13 @@ pub(super) fn replace(
     previous: Option<&Path>,
     text: &str,
     label: &str,
+    private_home: Option<&Path>,
 ) -> Result<(), String> {
     if previous != Some(target) && target.exists() {
         return Err(format!("{label} already exists"));
     }
     if let Some(dir) = target.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        create_target_dir(dir, private_home).map_err(|e| e.to_string())?;
     }
     fs::write(target, text).map_err(|e| e.to_string())?;
     match previous {
@@ -139,4 +147,12 @@ pub(super) fn replace(
         }
         _ => Ok(()),
     }
+}
+
+fn create_target_dir(dir: &Path, private_home: Option<&Path>) -> std::io::Result<()> {
+    let Some(home) = private_home else {
+        return fs::create_dir_all(dir);
+    };
+    tiechui_config::private::create_dir_all(home)?;
+    tiechui_config::private::create_dir_all(dir)
 }

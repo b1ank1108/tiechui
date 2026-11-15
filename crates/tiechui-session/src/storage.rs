@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -237,15 +237,7 @@ impl SessionStore {
     ) -> Result<Self, SessionError> {
         check_cancel(directory, cancel)?;
         let cwd = resolve_cwd(cwd)?;
-        let mut builder = DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(directory)
+        tiechui_config::private::create_dir_all(directory)
             .map_err(|error| SessionError::new(directory, error))?;
         let directory = directory
             .canonicalize()
