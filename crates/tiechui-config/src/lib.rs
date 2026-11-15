@@ -103,6 +103,9 @@ pub struct Config {
     /// Default model reference in `<provider>/<id>` form; the id may contain slashes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// User configuration only: model for auxiliary tasks in `<provider>/<id>` form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightweight_model: Option<String>,
     /// Default thinking level, clamped to the levels each model accepts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,

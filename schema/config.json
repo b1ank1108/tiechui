@@ -25,6 +25,14 @@
         }
       ]
     },
+    "lightweight_model": {
+      "description": "User configuration only: model for auxiliary tasks in `<provider>/<id>` form.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "mcp_servers": {
       "default": {},
       "type": "object",

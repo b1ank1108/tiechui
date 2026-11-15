@@ -509,3 +509,207 @@ pub fn run_with_env(root: &Path, op: &GitOp, env: &BTreeMap<String, String>) -> 
     }
     Ok(out.trim().to_owned())
 }
+
+const UNTRACKED_FILE_CAP: usize = 64 << 10;
+const DIFF_COLLECT_CAP: usize = 128 << 10;
+
+/// Diff for commit-message generation: staged changes when present, otherwise all uncommitted changes.
+pub fn commit_diff_with_env(root: &Path, env: &BTreeMap<String, String>) -> Result<String> {
+    if repo(root, env)?.is_none() {
+        return fail("Not a Git repository");
+    }
+    let staged = git(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--relative",
+            "--no-ext-diff",
+            "--no-color",
+        ],
+        env,
+    )?;
+    if !staged.trim().is_empty() {
+        return Ok(staged);
+    }
+    let mut combined = git(
+        root,
+        &["diff", "--relative", "--no-ext-diff", "--no-color"],
+        env,
+    )?;
+    append_untracked_diffs(root, env, &mut combined)?;
+    if combined.trim().is_empty() {
+        return fail("No uncommitted changes");
+    }
+    Ok(combined)
+}
+
+fn append_untracked_diffs(
+    root: &Path,
+    env: &BTreeMap<String, String>,
+    out: &mut String,
+) -> Result<()> {
+    let listing = git(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ],
+        env,
+    )?;
+    for rel in listing.split('\0').filter(|path| !path.is_empty()) {
+        if out.len() >= DIFF_COLLECT_CAP {
+            out.push_str(&format!(
+                "diff --git a/{rel} b/{rel}\nnew file mode 100644\n"
+            ));
+        } else {
+            out.push_str(&format_untracked_file(root, rel));
+        }
+    }
+    Ok(())
+}
+
+fn format_untracked_file(root: &Path, rel: &str) -> String {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(root.join(rel)) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take((UNTRACKED_FILE_CAP + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return String::new();
+    }
+    let truncated = bytes.len() > UNTRACKED_FILE_CAP;
+    if truncated {
+        bytes.truncate(UNTRACKED_FILE_CAP);
+    }
+    let Some(text) = utf8_prefix(&bytes, truncated) else {
+        return format!(
+            "diff --git a/{rel} b/{rel}\nnew file mode 100644\nBinary files /dev/null and b/{rel} differ\n"
+        );
+    };
+    render_new_file_patch(rel, text)
+}
+
+fn utf8_prefix(bytes: &[u8], truncated: bool) -> Option<&str> {
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return None;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        Err(err) if truncated && err.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..err.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+fn render_new_file_patch(rel: &str, text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut patch = format!(
+        "diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    patch
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn git_cmd(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn commit_diff_rejects_non_git_and_clean_worktree() {
+        let non_git = tempfile::tempdir().unwrap();
+        let err = commit_diff_with_env(non_git.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
+        assert!(err.contains("Not a Git repository"), "{err}");
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git_cmd(repo_dir.path(), &["init", "-q"]);
+        let unborn_err = commit_diff_with_env(repo_dir.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
+        assert!(
+            unborn_err.contains("No uncommitted changes"),
+            "{unborn_err}"
+        );
+
+        std::fs::write(repo_dir.path().join("README.md"), "# demo\n").unwrap();
+        git_cmd(repo_dir.path(), &["add", "README.md"]);
+        git_cmd(repo_dir.path(), &["commit", "-q", "-m", "init"]);
+
+        let clean_err = commit_diff_with_env(repo_dir.path(), &BTreeMap::new())
+            .unwrap_err()
+            .0;
+        assert!(clean_err.contains("No uncommitted changes"), "{clean_err}");
+    }
+
+    #[test]
+    fn commit_diff_prefers_staged_and_falls_back_to_unstaged_plus_untracked() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let root = repo_dir.path();
+        git_cmd(root, &["init", "-q"]);
+
+        std::fs::write(root.join("initial.txt"), "hello unborn\n").unwrap();
+        let unborn_untracked = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
+        assert!(
+            unborn_untracked.contains("initial.txt"),
+            "{unborn_untracked}"
+        );
+        assert!(
+            unborn_untracked.contains("+hello unborn"),
+            "{unborn_untracked}"
+        );
+
+        git_cmd(root, &["add", "initial.txt"]);
+        git_cmd(root, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(root.join("initial.txt"), "hello unstaged\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "new untracked line\n").unwrap();
+
+        let fallback = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
+        assert!(fallback.contains("initial.txt"), "{fallback}");
+        assert!(fallback.contains("+hello unstaged"), "{fallback}");
+        assert!(fallback.contains("notes.txt"), "{fallback}");
+        assert!(fallback.contains("+new untracked line"), "{fallback}");
+
+        std::fs::write(root.join("staged.txt"), "only staged payload\n").unwrap();
+        git_cmd(root, &["add", "staged.txt"]);
+
+        let staged_only = commit_diff_with_env(root, &BTreeMap::new()).unwrap();
+        assert!(staged_only.contains("staged.txt"), "{staged_only}");
+        assert!(
+            staged_only.contains("+only staged payload"),
+            "{staged_only}"
+        );
+        assert!(!staged_only.contains("hello unstaged"), "{staged_only}");
+        assert!(!staged_only.contains("new untracked line"), "{staged_only}");
+    }
+}

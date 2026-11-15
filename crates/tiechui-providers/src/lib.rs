@@ -4,6 +4,7 @@ mod anthropic;
 mod error;
 pub mod estimate;
 mod openai;
+mod presets;
 mod responses;
 mod thinking;
 mod transport;
@@ -18,6 +19,7 @@ use tiechui_model::{ModelCapabilities, ModelId, ModelRequest, ReasoningLevel, St
 use tokio_util::sync::CancellationToken;
 
 pub use error::{ErrorKind, ProviderError};
+pub use presets::{ModelPreset, model_preset};
 pub use thinking::offered;
 use transport::client_builder;
 

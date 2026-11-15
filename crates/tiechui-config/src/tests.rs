@@ -1789,3 +1789,74 @@ fn no_proxy_normalizes_semicolons_and_wildcard_domains_in_proxy_and_subprocess_e
         format!("{:?}", proxy_with(None))
     );
 }
+
+#[test]
+fn lightweight_model_is_user_only_and_names_a_provider_model() {
+    let temp = temp_dir();
+    assert_eq!(Config::default().lightweight_model, None);
+
+    let paths = paths(
+        temp.path(),
+        "model = 'local/main'\nlightweight_model = 'gateway/anthropic/claude-haiku-4-5'\n",
+        "lightweight_model = 'local/project-override'\n",
+    );
+    let loaded = load(&paths, true, &toml::Table::new()).unwrap();
+    assert_eq!(
+        loaded.config.lightweight_model.as_deref(),
+        Some("gateway/anthropic/claude-haiku-4-5")
+    );
+    assert_eq!(
+        loaded.diagnostics,
+        vec![Diagnostic {
+            file: paths.project.clone().unwrap(),
+            key: "lightweight_model".into(),
+            reason: IgnoredReason::UserOnly,
+        }]
+    );
+
+    let unset_user = self::paths(temp.path(), "", "lightweight_model = 'local/project'\n");
+    let loaded_unset = load(&unset_user, true, &toml::Table::new()).unwrap();
+    assert_eq!(loaded_unset.config.lightweight_model, None);
+
+    for malformed in [
+        "lightweight_model = 'no-provider'",
+        "lightweight_model = '/id'",
+        "lightweight_model = 'provider/'",
+    ] {
+        let invalid = self::paths(temp.path(), malformed, "");
+        let error = load(&invalid, false, &toml::Table::new()).unwrap_err();
+        assert_eq!(error.key, "lightweight_model", "{malformed}");
+    }
+
+    let pref_file = temp.path().join("prefs/config.toml");
+    fs::create_dir_all(pref_file.parent().unwrap()).unwrap();
+    fs::write(&pref_file, "model = \"local/main\"\n").unwrap();
+    save_preference(&pref_file, "lightweight_model", "local/fast".into()).unwrap();
+    save_preference(
+        &pref_file,
+        "permissions.classifier_model",
+        "local/judge".into(),
+    )
+    .unwrap();
+    let written = fs::read_to_string(&pref_file).unwrap();
+    assert!(written.contains("lightweight_model = \"local/fast\""));
+    assert!(written.contains("classifier_model = \"local/judge\""));
+
+    remove_preference(&pref_file, "lightweight_model").unwrap();
+    remove_preference(&pref_file, "permissions.classifier_model").unwrap();
+    let cleared = fs::read_to_string(&pref_file).unwrap();
+    assert!(!cleared.contains("lightweight_model"), "{cleared}");
+    assert!(!cleared.contains("classifier_model"), "{cleared}");
+    assert_eq!(cleared, "model = \"local/main\"\n\n[permissions]\n");
+    let reloaded = load(
+        &ConfigPaths {
+            user: pref_file,
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap();
+    assert_eq!(reloaded.config.lightweight_model, None);
+    assert_eq!(reloaded.config.permissions.classifier_model, None);
+}

@@ -18,6 +18,7 @@ use tiechui_module_loop::Schedules;
 struct Live {
     shutdown: CancellationToken,
     task: JoinHandle<Result<(), String>>,
+    title_task: JoinHandle<()>,
     cwd: PathBuf,
     path: PathBuf,
 }
@@ -25,18 +26,32 @@ struct Live {
 impl Live {
     /// Ends the session, with its failure if it had one.
     async fn end(self) -> Option<String> {
-        self.shutdown.cancel();
-        match self.task.await {
+        let Self {
+            shutdown,
+            task,
+            mut title_task,
+            ..
+        } = self;
+        shutdown.cancel();
+        let failure = match task.await {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error),
             Err(error) => Some(error.to_string()),
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut title_task)
+            .await
+            .is_err()
+        {
+            title_task.abort();
         }
+        failure
     }
 }
 
 /// The session and what the TUI needs of it; problems preparing it go to `warnings`.
 async fn open(
     args: &ArgMatches,
+    home: &Path,
     open: Open,
     epoch: SessionEpoch,
     schedules: &Schedules,
@@ -64,9 +79,13 @@ async fn open(
         warnings,
     )
     .await?;
+    let title_events = events.resubscribe();
+    let title_task =
+        crate::app_server::watch_session_title(home.to_owned(), path.clone(), title_events);
     let live = Live {
         shutdown,
         task,
+        title_task,
         cwd: cwd.clone(),
         path,
     };
@@ -134,7 +153,15 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
         (None, Default::default(), None, true)
     } else {
         let mut warnings = Vec::new();
-        let result = open(args, Open::Args, SessionEpoch(0), &schedules, &mut warnings).await;
+        let result = open(
+            args,
+            &home,
+            Open::Args,
+            SessionEpoch(0),
+            &schedules,
+            &mut warnings,
+        )
+        .await;
         for warning in warnings {
             eprintln!("{warning}");
         }
@@ -155,9 +182,19 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
         }
     };
     let switch: tiechui_tui::Switch = {
-        let (args, live, start) = (Rc::new(args.clone()), live.clone(), cwd.clone());
+        let (args, live, start, switch_home) = (
+            Rc::new(args.clone()),
+            live.clone(),
+            cwd.clone(),
+            home.clone(),
+        );
         Box::new(move |target, epoch| {
-            let (args, live, start) = (args.clone(), live.clone(), start.clone());
+            let (args, live, start, switch_home) = (
+                args.clone(),
+                live.clone(),
+                start.clone(),
+                switch_home.clone(),
+            );
             let schedules = schedules.clone();
             Box::pin(async move {
                 let mut warnings = Vec::new();
@@ -175,18 +212,33 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
                     (Target::Reload, Some(path)) => Open::Path(path.clone()),
                     (Target::New | Target::Reload, _) => Open::New(cwd),
                 };
-                let (session, mut opened) =
-                    match open(&args, request, epoch, &schedules, &mut warnings).await {
-                        Ok(pair) => pair,
-                        // Back to the session the user left, saying why.
-                        Err((_, message)) => {
-                            let path = path.ok_or_else(|| message.clone())?;
-                            warnings.push(message);
-                            open(&args, Open::Path(path), epoch, &schedules, &mut warnings)
-                                .await
-                                .map_err(|(_, message)| message)?
-                        }
-                    };
+                let (session, mut opened) = match open(
+                    &args,
+                    &switch_home,
+                    request,
+                    epoch,
+                    &schedules,
+                    &mut warnings,
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    // Back to the session the user left, saying why.
+                    Err((_, message)) => {
+                        let path = path.ok_or_else(|| message.clone())?;
+                        warnings.push(message);
+                        open(
+                            &args,
+                            &switch_home,
+                            Open::Path(path),
+                            epoch,
+                            &schedules,
+                            &mut warnings,
+                        )
+                        .await
+                        .map_err(|(_, message)| message)?
+                    }
+                };
                 live.set(Some(session));
                 opened.warnings = warnings;
                 Ok(opened)
