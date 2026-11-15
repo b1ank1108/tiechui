@@ -1425,4 +1425,181 @@ mod tests {
         server.remove_client(c1);
         server.shutdown_all().await;
     }
+
+    async fn rpc_call<T: DeserializeOwned>(
+        server: &Arc<Server>,
+        client_id: u64,
+        out: &ClientOut,
+        lines: &mut mpsc::UnboundedReceiver<String>,
+        req_id: i64,
+        method: &str,
+        params: Value,
+    ) -> T {
+        server
+            .dispatch(client_id, out, Id::Number(req_id), method, params)
+            .await;
+        loop {
+            let raw = lines.recv().await.expect("missing rpc reply");
+            let reply: Value = serde_json::from_str(&raw).unwrap();
+            if reply.get("id") != Some(&json!(req_id)) {
+                continue;
+            }
+            assert!(
+                reply.get("error").is_none(),
+                "unexpected rpc error: {reply}"
+            );
+            return serde_json::from_value(reply["result"].clone()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn providers_presets_returns_matched_entries_without_marking_sessions_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::new(dir.path().join("home"));
+        let (client_id, out, mut lines) = server.add_client();
+
+        let (submissions, _rx) = mpsc::channel(1);
+        let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
+        let live = Arc::new(Live {
+            path: dir.path().join("session.jsonl"),
+            cwd: dir.path().to_path_buf(),
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection: Arc::new(Mutex::new(Projection::default())),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        });
+        lock(&server.sessions).insert(ThreadId("t-presets".into()), live.clone());
+
+        let matched: Vec<ModelEntry> = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            10,
+            "providers/presets",
+            json!({
+                "ids": [
+                    "gpt-5.4",
+                    "unknown-model",
+                    "anthropic/claude-sonnet-4.5",
+                    "GLM-5.3-Flash",
+                    "kimi-k2-0905-preview"
+                ]
+            }),
+        )
+        .await;
+
+        let returned_ids: Vec<&str> = matched.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            returned_ids,
+            vec![
+                "gpt-5.4",
+                "anthropic/claude-sonnet-4.5",
+                "GLM-5.3-Flash",
+                "kimi-k2-0905-preview"
+            ]
+        );
+        assert_eq!(matched[0].context_window, 1_050_000);
+        assert!(matched[0].images);
+        assert_eq!(matched[1].context_window, 200_000);
+        assert!(matched[2].images);
+        assert!(!matched[3].images);
+        assert!(!live.stale.load(Ordering::Relaxed));
+
+        let empty: Vec<ModelEntry> = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            11,
+            "providers/presets",
+            json!({ "ids": ["not-in-presets"] }),
+        )
+        .await;
+        assert!(empty.is_empty());
+
+        server.remove_client(client_id);
+        server.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn providers_presets_round_trip_through_save_model_and_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::new(dir.path().join("home"));
+        let (client_id, out, mut lines) = server.add_client();
+
+        let _: Value = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            20,
+            "providers/save",
+            json!({
+                "name": "gateway",
+                "wire": "openai-completions",
+                "base_url": "http://127.0.0.1:9",
+                "api_key": "sk-test"
+            }),
+        )
+        .await;
+
+        let ids = vec![
+            "claude-opus-5",
+            "claude-sonnet-4-5",
+            "gpt-5.4",
+            "gpt-4o",
+            "gemini-3-flash",
+            "gemini-2.5-pro",
+            "deepseek-v4-pro",
+            "qwen3.8-max",
+            "glm-5.3-flash",
+            "kimi-k3",
+        ];
+        let presets: Vec<ModelEntry> = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            21,
+            "providers/presets",
+            json!({ "ids": ids }),
+        )
+        .await;
+        assert_eq!(presets.len(), 10);
+
+        for (i, model) in presets.iter().enumerate() {
+            let _: Value = rpc_call(
+                &server,
+                client_id,
+                &out,
+                &mut lines,
+                30 + i as i64,
+                "providers/save_model",
+                json!({
+                    "provider": "gateway",
+                    "previous": null,
+                    "model": model
+                }),
+            )
+            .await;
+        }
+
+        let listed: Vec<ProviderEntry> = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            99,
+            "providers/list",
+            json!({}),
+        )
+        .await;
+        assert_eq!(listed[0].models, presets);
+
+        server.remove_client(client_id);
+        server.shutdown_all().await;
+    }
 }

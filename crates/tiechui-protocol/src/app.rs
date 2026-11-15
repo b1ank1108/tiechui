@@ -265,6 +265,14 @@ pub struct ModelParams {
     pub id: String,
 }
 
+/// The `providers/presets` request; the result is a `Vec<ModelEntry>` with one entry per
+/// recognized id in `ids`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelPresetsParams {
+    pub ids: Vec<String>,
+}
+
 /// The `providers/test` result of one short request to the model.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

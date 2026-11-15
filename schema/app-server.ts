@@ -397,6 +397,8 @@ thinking_levels: Array<ThinkingLevel>, };
 
 export type ModelParams = { provider: string, id: string, };
 
+export type ModelPresetsParams = { ids: Array<string>, };
+
 export type ModelSaveParams = { provider: string, 
 /**
  * The id of the model to update; `None` adds the model.

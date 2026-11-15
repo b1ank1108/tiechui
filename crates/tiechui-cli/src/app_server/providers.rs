@@ -31,6 +31,7 @@ pub(super) fn handles(method: &str) -> bool {
         || matches!(
             method,
             "providers/list"
+                | "providers/presets"
                 | "providers/test"
                 | "providers/models"
                 | "config/get"
@@ -50,6 +51,7 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
     let file = home.join("providers.toml");
     match method {
         "providers/list" => blocking(move |_| list(&file)).await.and_then(value),
+        "providers/presets" => presets(params),
         "providers/save" => {
             let p: ProviderSaveParams = parse(params)?;
             write(move || {
@@ -149,6 +151,19 @@ fn list(file: &Path) -> Result<Vec<ProviderEntry>, String> {
             models: provider.models.iter().map(entry).collect(),
         })
         .collect())
+}
+
+fn presets(params: Value) -> Reply {
+    let p: ModelPresetsParams = parse(params)?;
+    let matched: Vec<ModelEntry> = p
+        .ids
+        .into_iter()
+        .filter_map(|id| {
+            let preset = tiechui_providers::model_preset(&id)?;
+            Some(entry(&preset.to_model_config(id)))
+        })
+        .collect();
+    value(matched)
 }
 
 fn entry(model: &ModelConfig) -> ModelEntry {

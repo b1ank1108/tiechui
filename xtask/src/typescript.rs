@@ -78,6 +78,7 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::ProviderParams>();
                 d.visit::<app::ModelSaveParams>();
                 d.visit::<app::ModelParams>();
+                d.visit::<app::ModelPresetsParams>();
                 d.visit::<app::ProviderTest>();
                 d.visit::<app::ConfigUpdateParams>();
                 d.visit::<app::ConfigValues>();
