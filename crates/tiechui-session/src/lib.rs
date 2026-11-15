@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use browse::{Part, Summary, preview, summaries};
 pub use entry::{Entry, EntryKind, FORMAT_VERSION, Header, ModelRef};
-pub use meta::{Meta, meta, save_meta, trash};
+pub use meta::{Meta, meta, save_meta, set_initial_title, trash, update_meta};
 pub use storage::{SessionInfo, SessionList, list, now_ms, resolve_cwd, session_dir};
 
 #[derive(Debug)]

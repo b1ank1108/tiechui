@@ -10,6 +10,8 @@
 
 # Select a model declared in providers.toml: <provider>/<model id>.
 # model = "example/model"
+# Auxiliary tasks run on this <provider>/<id>. User config only; omission leaves it unset.
+# lightweight_model = "example/model"
 # Optional thinking level, clamped to model capabilities. Omission leaves it unset.
 # Values: off, minimal, low, medium, high, xhigh, max.
 # thinking = "high"

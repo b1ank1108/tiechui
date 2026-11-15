@@ -92,11 +92,21 @@ forced?: number, responses: Array<CacheResponse>, omitted: number, unavailable: 
 
 export type CacheResponse = { compression?: number, input: number, cached: number, fresh: number, unattributed: number, };
 
+export type CancelCommitMessageParams = { request_id: string, };
+
 export type CheckpointStats = { files: { [key in string]: LineStats | null }, error: string | null, };
 
 export type CommandInfo = { name: string, description: string, argument_hint?: string | null, };
 
 export type CommitFile = { path: string, status: GitFileStatus, added: number, removed: number, };
+
+export type CommitMessageParams = { root: string, 
+/**
+ * Client-chosen token for `git/cancel_commit_message`.
+ */
+request_id?: string, };
+
+export type CommitMessageResult = { message: string, };
 
 export type CompactionPhase = "prepare" | "summarize" | "restore" | "commit";
 
@@ -116,7 +126,7 @@ behind: number, files: Array<CommitFile>, };
 
 export type ConfigUpdateParams = { key: string, value: JsonValue, };
 
-export type ConfigValues = { model: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, };
+export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, };
 
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
@@ -396,6 +406,8 @@ context_window: number, reasoning: boolean,
 thinking_levels: Array<ThinkingLevel>, };
 
 export type ModelParams = { provider: string, id: string, };
+
+export type ModelPresetsParams = { ids: Array<string>, };
 
 export type ModelSaveParams = { provider: string, 
 /**

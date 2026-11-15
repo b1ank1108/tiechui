@@ -8,6 +8,9 @@ mod projection;
 mod prompts;
 mod providers;
 mod skills;
+mod textgen;
+#[cfg(all(test, feature = "workspace"))]
+mod textgen_tests;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
@@ -36,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::exec::{Open, Options, Prepared, locations, prepare};
 use projection::Projection;
+pub(crate) use textgen::watch_session_title;
 
 const MAX_FRAME: u64 = 16 << 20;
 #[cfg(unix)]
@@ -70,6 +74,9 @@ struct Server {
     sweep: Notify,
     activity: Arc<Notify>,
     activity_seq: Arc<AtomicU64>,
+    shutdown: CancellationToken,
+    cancels: Mutex<textgen::CancelRegistry>,
+    title_tasks: Mutex<Vec<JoinHandle<()>>>,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
@@ -480,6 +487,9 @@ impl Server {
             sweep: Notify::new(),
             activity,
             activity_seq,
+            shutdown: CancellationToken::new(),
+            cancels: Mutex::default(),
+            title_tasks: Mutex::default(),
             #[cfg(feature = "workspace")]
             workspace,
         })
@@ -500,6 +510,7 @@ impl Server {
 
     fn remove_client(&self, id: u64) {
         if lock(&self.clients).remove(&id).is_some() {
+            lock(&self.cancels).remove_client(id);
             #[cfg(feature = "workspace")]
             self.workspace.remove_client(id);
             self.touch();
@@ -540,11 +551,25 @@ impl Server {
         lock(&self.clients).is_empty() && self.busy_sessions() == 0 && self.alive_terminals() == 0
     }
 
+    async fn drain_title_tasks(&self) {
+        loop {
+            let batch: Vec<_> = std::mem::take(&mut *lock(&self.title_tasks));
+            if batch.is_empty() {
+                break;
+            }
+            for handle in batch {
+                let _ = handle.await;
+            }
+        }
+    }
+
     async fn shutdown_all(&self) {
+        self.shutdown.cancel();
         let open: Vec<_> = lock(&self.sessions).keys().cloned().collect();
         for thread in open {
             self.close(&thread).await;
         }
+        self.drain_title_tasks().await;
         #[cfg(feature = "workspace")]
         self.workspace.close();
     }
@@ -568,7 +593,9 @@ impl Server {
                     server.touch();
                 });
             }
-            // This server sends no requests, so responses and notifications are unexpected.
+            Ok(JsonRpcMessage::Notification(note)) if note.method == "$/cancelRequest" => {
+                textgen::maybe_cancel_notification(self, client_id, note.params.map(|p| json!(p)));
+            }
             Ok(_) => {}
             Err(error) => respond(out, Id::Null, Err(failure(-32700, error))),
         }
@@ -582,100 +609,129 @@ impl Server {
         method: &str,
         params: Value,
     ) {
+        if matches!(
+            method,
+            "session/open" | "session/fork" | "session/reload" | "session/snapshot"
+        ) {
+            match self.open_snapshot(method, params).await {
+                Ok(live) => self.snapshot(out, id, &live),
+                Err(error) => respond(out, id, Err(error)),
+            }
+            return;
+        }
         let reply = match method {
             "initialize" => self.initialize(params),
             "daemon/status" => value(self.daemon_status()),
-            "session/list" => self.list(params).await,
-            "session/open" | "session/fork" | "session/reload" | "session/snapshot" => {
-                let opened = match method {
-                    "session/open" => self.open(params).await,
-                    "session/fork" => self.fork(params).await,
-                    "session/reload" => match parse::<ThreadParams>(params) {
-                        Ok(p) => self.reload(&p.thread_id).await,
-                        Err(error) => Err(error),
-                    },
-                    _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
-                };
-                match opened {
-                    Ok(live) => return self.snapshot(out, id, &live),
-                    Err(error) => Err(error),
-                }
+            "trust" => self.trust(params).await,
+            _ if method.starts_with("session/") || turns::handles(method) => {
+                self.dispatch_session(method, params).await
             }
-            "session/submit" => match parse::<SubmitParams>(params) {
-                Ok(p) => self.submit(&p.thread_id, p.op).await.and_then(value),
-                Err(error) => Err(error),
-            },
+            _ => self.dispatch_module(client_id, &id, method, params).await,
+        };
+        respond(out, id, reply);
+    }
+
+    async fn open_snapshot(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+    ) -> Result<Arc<Live>, rpc::Error> {
+        match method {
+            "session/open" => self.open(params).await,
+            "session/fork" => self.fork(params).await,
+            "session/reload" => {
+                let p: ThreadParams = parse(params)?;
+                self.reload(&p.thread_id).await
+            }
+            _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
+        }
+    }
+
+    async fn dispatch_session(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        if turns::handles(method) {
+            return self.turn(method, params).await;
+        }
+        match method {
+            "session/list" => self.list(params).await,
+            "session/submit" => {
+                let p: SubmitParams = parse(params)?;
+                self.submit(&p.thread_id, p.op).await.and_then(value)
+            }
             "session/branch" => self.branch(params).await,
-            "session/close" => match parse::<ThreadParams>(params) {
-                Ok(p) => {
-                    self.close(&p.thread_id).await;
-                    Ok(Value::Null)
-                }
-                Err(error) => Err(error),
-            },
+            "session/close" => {
+                let p: ThreadParams = parse(params)?;
+                self.close(&p.thread_id).await;
+                Ok(Value::Null)
+            }
+            _ => self.dispatch_session_meta(method, params).await,
+        }
+    }
+
+    async fn dispatch_session_meta(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        match method {
             "session/rename" => self.rename(params).await,
             "session/archive" => self.archive(params).await,
             "session/trash" => self.trash(params).await,
-            "trust" => self.trust(params).await,
-            _ if turns::handles(method) => self.turn(method, params).await,
-            _ if providers::handles(method) => {
-                let archiving = params["key"] == "sessions.archive_after_days";
-                let runtime_config = method == "config/update"
-                    && matches!(
-                        params["key"].as_str(),
-                        Some(
-                            "network.proxy"
-                                | "network.no_proxy"
-                                | "network.ca_cert"
-                                | "ask.auto_continue_after_sec"
-                        )
-                    );
-                let reply = providers::handle(&self.home, method, params).await;
-                if reply.is_ok() && (providers::edits(method) || runtime_config) {
-                    self.refresh();
-                }
-                if reply.is_ok() && archiving {
-                    self.sweep.notify_one();
-                }
-                reply
-            }
-            _ if mcp::handles(method) => {
-                let notify = |authorize| self.notify("mcp/authorize", authorize);
-                let reply = mcp::handle(&self.home, method, params, notify).await;
-                if reply.is_ok() && mcp::edits(method) {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if agents::handles(method) => agents::handle(&self.home, method, params).await,
-            _ if hooks::handles(method) => {
-                let reply = hooks::handle(&self.home, method, params).await;
-                if reply.is_ok() && method != "hooks/list" {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if prompts::handles(method) => {
-                let reply = prompts::handle(&self.home, method, params).await;
-                if reply.is_ok() && method != "prompts/list" {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if skills::handles(method) => {
-                let reply = skills::handle(&self.home, method, params).await;
-                if reply.is_ok() && method == "skills/enable" {
-                    self.refresh();
-                }
-                reply
-            }
-            #[cfg(feature = "workspace")]
-            _ if workspace::handles(method) => {
-                workspace::dispatch(&self.home, &self.workspace, client_id, method, params).await
-            }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
+        }
+    }
+
+    async fn dispatch_module(
+        self: &Arc<Self>,
+        client_id: u64,
+        id: &Id,
+        method: &str,
+        params: Value,
+    ) -> Reply {
+        if providers::handles(method) {
+            return self.dispatch_providers(method, params).await;
+        }
+        if mcp::handles(method) {
+            return self.dispatch_mcp(method, params).await;
+        }
+        #[cfg(feature = "workspace")]
+        if workspace::handles(method) {
+            return workspace::dispatch(self, client_id, id, method, params).await;
+        }
+        let _ = (client_id, id);
+        self.dispatch_extensions(method, params).await
+    }
+
+    async fn dispatch_mcp(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        let notify = |authorize| self.notify("mcp/authorize", authorize);
+        let reply = mcp::handle(&self.home, method, params, notify).await;
+        if reply.is_ok() && mcp::edits(method) {
+            self.refresh();
+        }
+        reply
+    }
+
+    async fn dispatch_extensions(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        if agents::handles(method) {
+            return agents::handle(&self.home, method, params).await;
+        }
+        let (reply, edited) = if hooks::handles(method) {
+            (
+                hooks::handle(&self.home, method, params).await,
+                method != "hooks/list",
+            )
+        } else if prompts::handles(method) {
+            (
+                prompts::handle(&self.home, method, params).await,
+                method != "prompts/list",
+            )
+        } else if skills::handles(method) {
+            (
+                skills::handle(&self.home, method, params).await,
+                method == "skills/enable",
+            )
+        } else {
+            return Err(failure(-32601, format!("unknown method {method}")));
         };
-        respond(out, id, reply);
+        if reply.is_ok() && edited {
+            self.refresh();
+        }
+        reply
     }
 
     fn initialize(&self, params: Value) -> Reply {
@@ -900,26 +956,7 @@ impl Server {
     ) {
         loop {
             match events.recv().await {
-                Ok(event) => {
-                    let settled = matches!(
-                        event.event,
-                        EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
-                    );
-                    {
-                        let mut projection = lock(&projection);
-                        let seq = projection.apply(&event);
-                        let epoch = matches!(event.event, EventKind::ThreadStarted { .. })
-                            .then_some(event.epoch);
-                        self.notify("session/event", SessionEvent { seq, event });
-                        if epoch.is_some() {
-                            ready.send_replace(epoch);
-                        }
-                    }
-                    self.touch();
-                    if settled && let Ok(live) = self.live(&thread) {
-                        self.settle(&thread, &live);
-                    }
-                }
+                Ok(event) => self.forward_event(&thread, &projection, &ready, event),
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     eprintln!("chui app-server: {}: {count} events were dropped", thread.0);
                 }
@@ -942,6 +979,44 @@ impl Server {
             );
         }
         self.touch();
+    }
+
+    fn forward_event(
+        self: &Arc<Self>,
+        thread: &ThreadId,
+        projection: &Mutex<Projection>,
+        ready: &watch::Sender<Option<SessionEpoch>>,
+        event: Event,
+    ) {
+        let settled = matches!(
+            event.event,
+            EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
+        );
+        let settled_live = settled.then(|| self.live(thread).ok()).flatten();
+        {
+            let mut projection = lock(projection);
+            if let Some(texts) = projection.take_initial_title_trigger(&event)
+                && let Some(live) = &settled_live
+            {
+                textgen::spawn_session_title(
+                    self.clone(),
+                    live.path.clone(),
+                    texts,
+                    self.shutdown.child_token(),
+                );
+            }
+            let seq = projection.apply(&event);
+            let epoch =
+                matches!(event.event, EventKind::ThreadStarted { .. }).then_some(event.epoch);
+            self.notify("session/event", SessionEvent { seq, event });
+            if epoch.is_some() {
+                ready.send_replace(epoch);
+            }
+        }
+        self.touch();
+        if let Some(live) = settled_live {
+            self.settle(thread, &live);
+        }
     }
 
     async fn submit(&self, thread: &ThreadId, op: Op) -> Result<SubmitResult, rpc::Error> {
@@ -999,16 +1074,59 @@ impl Server {
         Ok(reloaded)
     }
 
-    /// Marks each open session stale so it reloads the changed configuration.
-    fn refresh(self: &Arc<Self>) {
+    async fn dispatch_providers(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        let archiving = params["key"] == "sessions.archive_after_days";
+        let runtime_config = method == "config/update" && runtime_config_key(&params);
+        let reply = providers::handle(&self.home, method, params).await;
+        if reply.is_ok() {
+            if method == "providers/reload" {
+                self.await_idle_refresh().await;
+            } else if providers::edits(method) || runtime_config {
+                self.refresh();
+            }
+            if archiving {
+                self.sweep.notify_one();
+            }
+        }
+        reply
+    }
+
+    fn mark_open_sessions_stale(&self) -> Vec<(ThreadId, Arc<Live>)> {
         self.config_gen.fetch_add(1, Ordering::SeqCst);
         let open: Vec<_> = lock(&self.sessions)
             .iter()
             .map(|(thread, live)| (thread.clone(), live.clone()))
             .collect();
-        for (thread, live) in open {
+        for (_, live) in &open {
             live.stale.store(true, Ordering::SeqCst);
+        }
+        open
+    }
+
+    /// Marks each open session stale so it reloads the changed configuration.
+    fn refresh(self: &Arc<Self>) {
+        for (thread, live) in self.mark_open_sessions_stale() {
             self.settle(&thread, &live);
+        }
+    }
+
+    async fn await_idle_refresh(self: &Arc<Self>) {
+        for (thread, live) in self.mark_open_sessions_stale() {
+            if !lock(&live.projection).busy() && live.stale.swap(false, Ordering::SeqCst) {
+                self.reload_or_close(thread).await;
+            }
+        }
+    }
+
+    async fn reload_or_close(self: &Arc<Self>, thread: ThreadId) {
+        if let Err(error) = self.reload(&thread).await {
+            self.notify(
+                "session/closed",
+                SessionClosed {
+                    thread_id: thread,
+                    error: Some(error.message),
+                },
+            );
         }
     }
 
@@ -1021,15 +1139,7 @@ impl Server {
         let server = self.clone();
         let thread = thread.clone();
         tokio::spawn(async move {
-            if let Err(error) = server.reload(&thread).await {
-                server.notify(
-                    "session/closed",
-                    SessionClosed {
-                        thread_id: thread,
-                        error: Some(error.message),
-                    },
-                );
-            }
+            server.reload_or_close(thread).await;
         });
     }
 
@@ -1175,6 +1285,20 @@ impl Server {
     }
 }
 
+fn runtime_config_key(params: &Value) -> bool {
+    const KEYS: [&str; 6] = [
+        "lightweight_model",
+        "permissions.classifier_model",
+        "network.proxy",
+        "network.no_proxy",
+        "network.ca_cert",
+        "ask.auto_continue_after_sec",
+    ];
+    params["key"]
+        .as_str()
+        .is_some_and(|key| KEYS.contains(&key))
+}
+
 /// The permission mode the session last reported.
 fn mode(live: &Live) -> Option<String> {
     lock(&live.projection)
@@ -1203,13 +1327,13 @@ fn archive_before(
     let (summaries, _) =
         tiechui_session::summaries(home, None, cancel).map_err(|e| e.to_string())?;
     let mut archived = vec![];
-    for mut summary in summaries {
+    for summary in summaries {
         if summary.meta.archived_at.is_none()
             && summary.modified < before
             && !open.contains(&summary.path)
         {
-            summary.meta.archived_at = Some(now);
-            tiechui_session::save_meta(&summary.path, &summary.meta).map_err(|e| e.to_string())?;
+            tiechui_session::update_meta(&summary.path, |meta| meta.archived_at = Some(now))
+                .map_err(|e| e.to_string())?;
             archived.push(summary.path);
         }
     }
@@ -1221,10 +1345,7 @@ async fn update_meta(
     change: impl FnOnce(&mut tiechui_session::Meta) + Send + 'static,
 ) -> Reply {
     blocking(move |_| {
-        let path = Path::new(&path);
-        let mut meta = tiechui_session::meta(path).map_err(|e| e.to_string())?;
-        change(&mut meta);
-        tiechui_session::save_meta(path, &meta).map_err(|e| e.to_string())
+        tiechui_session::update_meta(Path::new(&path), change).map_err(|e| e.to_string())
     })
     .await?;
     Ok(Value::Null)
@@ -1273,40 +1394,251 @@ fn starts_turn(entry: &Entry) -> bool {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tiechui_protocol::{Turn, TurnId, TurnStatus};
 
-    async fn rpc_status(
-        server: &Arc<Server>,
+    pub(in crate::app_server) struct TestClient {
+        server: Arc<Server>,
         client_id: u64,
-        out: &ClientOut,
-        lines: &mut mpsc::UnboundedReceiver<String>,
-    ) -> DaemonStatus {
-        server
-            .dispatch(client_id, out, Id::Number(1), "daemon/status", json!({}))
-            .await;
-        loop {
-            let raw = lines.recv().await.expect("missing daemon/status reply");
-            let reply: Value = serde_json::from_str(&raw).unwrap();
-            if reply.get("id") != Some(&json!(1)) {
-                continue;
+        out: ClientOut,
+        lines: mpsc::UnboundedReceiver<String>,
+        buffered: Vec<Value>,
+        next_id: i64,
+    }
+
+    impl TestClient {
+        pub(in crate::app_server) fn new(server: Arc<Server>) -> Self {
+            let (client_id, out, lines) = server.add_client();
+            Self {
+                server,
+                client_id,
+                out,
+                lines,
+                buffered: Vec::new(),
+                next_id: 0,
             }
-            assert!(
-                reply.get("error").is_none(),
-                "unexpected rpc error: {reply}"
-            );
-            return serde_json::from_value(reply["result"].clone()).unwrap();
         }
+
+        pub(in crate::app_server) async fn call(
+            &mut self,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, Value> {
+            self.next_id += 1;
+            let req_id = self.next_id;
+            self.server
+                .dispatch(
+                    self.client_id,
+                    &self.out,
+                    Id::Number(req_id),
+                    method,
+                    params,
+                )
+                .await;
+            self.wait_reply(req_id).await
+        }
+
+        pub(in crate::app_server) async fn call_ok<T: DeserializeOwned>(
+            &mut self,
+            method: &str,
+            params: Value,
+        ) -> T {
+            let value = self
+                .call(method, params)
+                .await
+                .unwrap_or_else(|error| panic!("unexpected rpc error on {method}: {error}"));
+            serde_json::from_value(value).unwrap()
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) fn send_async(&mut self, method: &str, params: Value) -> i64 {
+            self.next_id += 1;
+            let req_id = self.next_id;
+            let raw = json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params
+            })
+            .to_string();
+            self.server
+                .receive(self.client_id, &self.out, raw.as_bytes());
+            req_id
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) fn send_notification(&self, method: &str, params: Value) {
+            let raw = json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params
+            })
+            .to_string();
+            self.server
+                .receive(self.client_id, &self.out, raw.as_bytes());
+        }
+
+        pub(in crate::app_server) async fn wait_reply(
+            &mut self,
+            req_id: i64,
+        ) -> Result<Value, Value> {
+            loop {
+                let raw = self.lines.recv().await.expect("missing rpc reply");
+                let msg: Value = serde_json::from_str(&raw).unwrap();
+                if msg.get("id") != Some(&json!(req_id)) {
+                    self.buffered.push(msg);
+                    continue;
+                }
+                return match msg.get("error") {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(msg["result"].clone()),
+                };
+            }
+        }
+
+        pub(in crate::app_server) async fn wait_matching<T>(
+            &mut self,
+            label: &str,
+            mut pred: impl FnMut(&Value) -> Option<T>,
+        ) -> T {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut idx = 0;
+                loop {
+                    while idx < self.buffered.len() {
+                        if let Some(found) = pred(&self.buffered[idx]) {
+                            self.buffered.remove(idx);
+                            return found;
+                        }
+                        idx += 1;
+                    }
+                    let raw = self.lines.recv().await.expect("expected notification");
+                    self.buffered.push(serde_json::from_str(&raw).unwrap());
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
+        }
+
+        pub(in crate::app_server) async fn next_event(
+            &mut self,
+            thread_id: &ThreadId,
+        ) -> EventKind {
+            self.wait_matching("session/event", |msg| {
+                if msg.get("method") != Some(&json!("session/event")) {
+                    return None;
+                }
+                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
+                (&ev.event.thread_id == thread_id).then_some(ev.event.event)
+            })
+            .await
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_turn_completed(
+            &mut self,
+            thread_id: &ThreadId,
+        ) -> Vec<EventKind> {
+            let mut seen = Vec::new();
+            loop {
+                let kind = self.next_event(thread_id).await;
+                let done = matches!(
+                    &kind,
+                    EventKind::TurnCompleted { turn } if turn.status == TurnStatus::Completed
+                );
+                seen.push(kind);
+                if done {
+                    return seen;
+                }
+            }
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_sessions_changed(&mut self) {
+            self.wait_matching("sessions/changed", |msg| {
+                (msg.get("method") == Some(&json!("sessions/changed"))).then_some(())
+            })
+            .await;
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_reloaded(&mut self, thread_id: &ThreadId) {
+            self.wait_matching("session reload", |msg| {
+                if msg.get("method") != Some(&json!("session/event")) {
+                    return None;
+                }
+                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
+                (&ev.event.thread_id == thread_id
+                    && ev.event.epoch.0 >= 1
+                    && matches!(ev.event.event, EventKind::ThreadStarted { .. }))
+                .then_some(())
+            })
+            .await;
+        }
+
+        pub(in crate::app_server) fn drain_notices(&mut self) {
+            self.buffered.clear();
+            while self.lines.try_recv().is_ok() {}
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn drain_title_tasks(&self) {
+            self.server.drain_title_tasks().await;
+        }
+
+        pub(in crate::app_server) async fn close(self) {
+            self.server.remove_client(self.client_id);
+            self.server.shutdown_all().await;
+        }
+    }
+
+    pub(in crate::app_server) fn sse_chat(content: &str) -> String {
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": content },
+                    "finish_reason": "stop"
+                }]
+            })
+        )
+    }
+
+    pub(in crate::app_server) fn isolated_home_child(
+        marker: &str,
+        test_name: &str,
+    ) -> Option<PathBuf> {
+        if let Some(home) = std::env::var_os(marker) {
+            return Some(PathBuf::from(home));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", test_name, "--nocapture"]);
+        cmd.envs([
+            (marker, home.as_os_str()),
+            ("TIECHUI_HOME", home.as_os_str()),
+            ("HOME", dir.path().as_os_str()),
+        ]);
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child {test_name} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        None
     }
 
     #[tokio::test]
     async fn daemon_status_counts_clients_busy_sessions_and_terminals() {
         let dir = tempfile::tempdir().unwrap();
         let server = Server::new(dir.path().join("home"));
+        let mut client = TestClient::new(server.clone());
 
-        let (c1, out1, mut lines1) = server.add_client();
-        let initial = rpc_status(&server, c1, &out1, &mut lines1).await;
+        let initial: DaemonStatus = client.call_ok("daemon/status", json!({})).await;
         assert_eq!(initial.pid, std::process::id());
         assert_eq!(initial.server_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(initial.protocol_version, APP_PROTOCOL_VERSION);
@@ -1316,7 +1648,8 @@ mod tests {
 
         let (c2, _out2, _lines2) = server.add_client();
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .connected_clients,
             2
@@ -1340,7 +1673,8 @@ mod tests {
             }),
         );
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             0
@@ -1361,7 +1695,8 @@ mod tests {
             },
         });
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             1
@@ -1382,7 +1717,8 @@ mod tests {
             },
         });
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             0
@@ -1401,14 +1737,16 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                rpc_status(&server, c1, &out1, &mut lines1)
+                client
+                    .call_ok::<DaemonStatus>("daemon/status", json!({}))
                     .await
                     .alive_terminals,
                 1
             );
             server.workspace.kill_terminal("unit-term");
             assert_eq!(
-                rpc_status(&server, c1, &out1, &mut lines1)
+                client
+                    .call_ok::<DaemonStatus>("daemon/status", json!({}))
                     .await
                     .alive_terminals,
                 0
@@ -1417,12 +1755,382 @@ mod tests {
 
         server.remove_client(c2);
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .connected_clients,
             1
         );
-        server.remove_client(c1);
-        server.shutdown_all().await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn providers_presets_returns_matched_entries_without_marking_sessions_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::new(dir.path().join("home"));
+        let mut client = TestClient::new(server.clone());
+
+        let (submissions, _rx) = mpsc::channel(1);
+        let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
+        let live = Arc::new(Live {
+            path: dir.path().join("session.jsonl"),
+            cwd: dir.path().to_path_buf(),
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection: Arc::new(Mutex::new(Projection::default())),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        });
+        lock(&server.sessions).insert(ThreadId("t-presets".into()), live.clone());
+
+        let matched: Vec<ModelEntry> = client
+            .call_ok(
+                "providers/presets",
+                json!({
+                    "ids": [
+                        "gpt-5.4",
+                        "unknown-model",
+                        "anthropic/claude-sonnet-4.5",
+                        "GLM-5.3-Flash",
+                        "kimi-k2-0905-preview"
+                    ]
+                }),
+            )
+            .await;
+
+        let returned_ids: Vec<&str> = matched.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            returned_ids,
+            vec![
+                "gpt-5.4",
+                "anthropic/claude-sonnet-4.5",
+                "GLM-5.3-Flash",
+                "kimi-k2-0905-preview"
+            ]
+        );
+        assert_eq!(matched[0].context_window, 1_050_000);
+        assert!(matched[0].images);
+        assert_eq!(matched[1].context_window, 200_000);
+        assert!(matched[2].images);
+        assert!(!matched[3].images);
+        assert!(!live.stale.load(Ordering::Relaxed));
+
+        let empty: Vec<ModelEntry> = client
+            .call_ok("providers/presets", json!({ "ids": ["not-in-presets"] }))
+            .await;
+        assert!(empty.is_empty());
+
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn providers_presets_round_trip_through_save_model_and_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut client = TestClient::new(Server::new(dir.path().join("home")));
+
+        let _: Value = client
+            .call_ok(
+                "providers/save",
+                json!({
+                    "name": "gateway",
+                    "wire": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "sk-test"
+                }),
+            )
+            .await;
+
+        let ids = vec![
+            "claude-opus-5",
+            "claude-sonnet-4-5",
+            "gpt-5.4",
+            "gpt-4o",
+            "gemini-3-flash",
+            "gemini-2.5-pro",
+            "deepseek-v4-pro",
+            "qwen3.8-max",
+            "glm-5.3-flash",
+            "kimi-k3",
+        ];
+        let presets: Vec<ModelEntry> = client
+            .call_ok("providers/presets", json!({ "ids": ids }))
+            .await;
+        assert_eq!(presets.len(), 10);
+
+        for model in &presets {
+            let _: Value = client
+                .call_ok(
+                    "providers/save_model",
+                    json!({
+                        "provider": "gateway",
+                        "previous": null,
+                        "model": model
+                    }),
+                )
+                .await;
+        }
+
+        let listed: Vec<ProviderEntry> = client.call_ok("providers/list", json!({})).await;
+        assert_eq!(listed[0].models, presets);
+
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn config_get_and_update_manage_lightweight_and_classifier_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let mut client = TestClient::new(Server::new(home.clone()));
+
+        let _: Value = client
+            .call_ok(
+                "providers/save",
+                json!({
+                    "name": "fixture",
+                    "wire": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "sk-test"
+                }),
+            )
+            .await;
+        for id in ["main", "fast", "openrouter/judge"] {
+            let _: Value = client
+                .call_ok(
+                    "providers/save_model",
+                    json!({
+                        "provider": "fixture",
+                        "previous": null,
+                        "model": {
+                            "id": id,
+                            "context_window": 200_000,
+                            "max_output": 8_192,
+                            "levels": ["off"],
+                            "mapping": {},
+                            "images": false
+                        }
+                    }),
+                )
+                .await;
+        }
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "model", "value": "fixture/main" }),
+            )
+            .await;
+
+        let raw_get: Value = client.call_ok("config/get", json!({})).await;
+        assert!(raw_get.get("lightweight_model").is_none());
+        assert!(raw_get.get("classifier_model").is_none());
+        let initial: ConfigValues = serde_json::from_value(raw_get).unwrap();
+        assert_eq!(initial.lightweight_model, None);
+        assert_eq!(initial.classifier_model, None);
+
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "lightweight_model", "value": "fixture/fast" }),
+            )
+            .await;
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({
+                    "key": "permissions.classifier_model",
+                    "value": "fixture/openrouter/judge"
+                }),
+            )
+            .await;
+
+        let updated: ConfigValues = client.call_ok("config/get", json!({})).await;
+        assert_eq!(updated.lightweight_model.as_deref(), Some("fixture/fast"));
+        assert_eq!(
+            updated.classifier_model.as_deref(),
+            Some("fixture/openrouter/judge")
+        );
+
+        let config_path = home.join("config.toml");
+        let saved_toml = std::fs::read_to_string(&config_path).unwrap();
+        assert!(saved_toml.contains("lightweight_model = \"fixture/fast\""));
+        assert!(saved_toml.contains("classifier_model = \"fixture/openrouter/judge\""));
+
+        for key in ["lightweight_model", "permissions.classifier_model"] {
+            for bad in [
+                json!("fixture/missing"),
+                json!("unknown/fast"),
+                json!("no-provider"),
+                json!("fixture/"),
+                json!("/fast"),
+                json!(42),
+                json!(true),
+                json!(["fixture/fast"]),
+            ] {
+                assert!(
+                    client
+                        .call("config/update", json!({ "key": key, "value": bad }))
+                        .await
+                        .is_err(),
+                    "expected error for {key} = {bad}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved_toml);
+
+        for id in ["fast", "openrouter/judge"] {
+            let _: Value = client
+                .call_ok(
+                    "providers/delete_model",
+                    json!({ "provider": "fixture", "id": id }),
+                )
+                .await;
+        }
+        for key in ["lightweight_model", "permissions.classifier_model"] {
+            let _: Value = client
+                .call_ok("config/update", json!({ "key": key, "value": null }))
+                .await;
+        }
+
+        let cleared_raw: Value = client.call_ok("config/get", json!({})).await;
+        assert!(cleared_raw.get("lightweight_model").is_none());
+        assert!(cleared_raw.get("classifier_model").is_none());
+        let cleared: ConfigValues = serde_json::from_value(cleared_raw).unwrap();
+        assert_eq!(cleared.lightweight_model, None);
+        assert_eq!(cleared.classifier_model, None);
+
+        let cleared_toml = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !cleared_toml.contains("lightweight_model"),
+            "{cleared_toml}"
+        );
+        assert!(!cleared_toml.contains("classifier_model"), "{cleared_toml}");
+
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn providers_reload_updates_open_session_models_without_reopening() {
+        let Some(home) = isolated_home_child(
+            "TIECHUI_TEST_PROVIDERS_RELOAD_HOME",
+            "app_server::tests::providers_reload_updates_open_session_models_without_reopening",
+        ) else {
+            return;
+        };
+        run_providers_reload_case(home).await;
+    }
+
+    async fn run_providers_reload_case(home: PathBuf) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let work = home.parent().unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(sse_chat("synced-ok"), "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        std::fs::write(home.join("config.toml"), "model = \"alpha/m1\"\n").unwrap();
+        let providers_path = home.join("providers.toml");
+        std::fs::write(
+            &providers_path,
+            format!(
+                "[alpha]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key = \"sk-alpha\"\nmodels = [{{ id = \"m1\", context_window = 128000, max_output = 4096 }}]\n",
+                mock.uri()
+            ),
+        )
+        .unwrap();
+
+        let mut client = TestClient::new(Server::new(home));
+        let opened: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
+        let thread_id = opened.thread_id;
+        client.drain_notices();
+
+        std::fs::write(
+            &providers_path,
+            format!(
+                "[alpha]\nwire = \"openai-completions\"\nbase_url = \"{uri}\"\napi_key = \"sk-alpha\"\nmodels = [\n  {{ id = \"m1\", context_window = 128000, max_output = 4096 }},\n  {{ id = \"m2\", context_window = 200000, max_output = 8192 }},\n]\n\n[beta]\nwire = \"openai-completions\"\nbase_url = \"{uri}\"\napi_key = \"sk-beta\"\nmodels = [{{ id = \"m3\", context_window = 256000, max_output = 16384 }}]\n",
+                uri = mock.uri()
+            ),
+        )
+        .unwrap();
+
+        let reload_res: Value = client.call_ok("providers/reload", json!({})).await;
+        assert_eq!(reload_res, Value::Null);
+
+        let listed: Vec<ProviderEntry> = client.call_ok("providers/list", json!({})).await;
+        assert_eq!(listed.len(), 2);
+
+        let updated_models = wait_for_reloaded_models(&mut client, &thread_id).await;
+        assert_eq!(updated_models, vec!["alpha/m1", "alpha/m2", "beta/m3"]);
+
+        verify_post_reload_turn(&mut client, &thread_id).await;
+        mock.verify().await;
+
+        std::fs::write(&providers_path, "[broken\n").unwrap();
+        assert!(client.call("providers/reload", json!({})).await.is_err());
+
+        client.close().await;
+    }
+
+    async fn wait_for_reloaded_models(
+        client: &mut TestClient,
+        thread_id: &ThreadId,
+    ) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let EventKind::ModelsUpdated { models } = client.next_event(thread_id).await {
+                    let refs: Vec<String> = models
+                        .iter()
+                        .map(|m| format!("{}/{}", m.provider, m.id))
+                        .collect();
+                    if refs.contains(&"beta/m3".to_string()) {
+                        return refs;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for models_updated")
+    }
+
+    async fn verify_post_reload_turn(client: &mut TestClient, thread_id: &ThreadId) {
+        let _: Value = client
+            .call_ok(
+                "session/submit",
+                json!({
+                    "thread_id": thread_id,
+                    "op": { "kind": "set_model", "provider": "beta", "model": "beta/m3" }
+                }),
+            )
+            .await;
+        let _: Value = client
+            .call_ok(
+                "session/submit",
+                json!({
+                    "thread_id": thread_id,
+                    "op": {
+                        "kind": "user_input",
+                        "delivery": "steer",
+                        "content": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let EventKind::TurnCompleted { turn } = client.next_event(thread_id).await {
+                    assert_eq!(turn.status, TurnStatus::Completed);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("turn did not complete on newly reloaded provider");
     }
 }

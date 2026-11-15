@@ -3,6 +3,7 @@
 mod conformance;
 mod errors;
 mod openai;
+mod presets;
 mod recovery;
 mod requests;
 mod responses;

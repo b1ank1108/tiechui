@@ -265,6 +265,14 @@ pub struct ModelParams {
     pub id: String,
 }
 
+/// The `providers/presets` request; the result is a `Vec<ModelEntry>` with one entry per
+/// recognized id in `ids`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelPresetsParams {
+    pub ids: Vec<String>,
+}
+
 /// The `providers/test` result of one short request to the model.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -274,9 +282,10 @@ pub struct ProviderTest {
     pub millis: u64,
 }
 
-/// Sets one key of the user's `config.toml`: `model`, `thinking`, `network.proxy`,
-/// `network.no_proxy`, `network.ca_cert`, `ask.auto_continue_after_sec` or
-/// `sessions.archive_after_days`; null removes it.
+/// Sets one key of the user's `config.toml`: `model`, `lightweight_model`,
+/// `permissions.classifier_model`, `thinking`, `network.proxy`, `network.no_proxy`,
+/// `network.ca_cert`, `ask.auto_continue_after_sec` or `sessions.archive_after_days`; null
+/// removes optional keys.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigUpdateParams {
@@ -289,6 +298,10 @@ pub struct ConfigUpdateParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigValues {
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lightweight_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_model: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub proxy: Option<String>,
     pub no_proxy: Option<String>,
