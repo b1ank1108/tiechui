@@ -66,6 +66,8 @@ export type ApprovalDecision = { "kind": "allow_once" } | { "kind": "allow_sessi
 
 export type ApprovalId = string;
 
+export type ApprovalParams = { thread_id: ThreadId, approval_id: ApprovalId, decision: ApprovalDecision, };
+
 export type ApprovalRequest = { "kind": "plugin", plugin: string, prompt: PluginPrompt, } | { "kind": "information", title: string, text: string, } | { "kind": "editor", title: string, text: string, } | { "kind": "rewind", panel: RewindPanel, } | { "kind": "permission", actor?: string | null, call_id: string, tool: string, arguments: JsonValue, surface: string, 
 /**
  * What the rule was matched against, such as the command or the paths.
@@ -83,6 +85,28 @@ preview?: FilePreview | null, } | { "kind": "elicitation", server: string, reque
 export type ArchiveParams = { path: string, archived: boolean, };
 
 export type Branches = { local: Array<string>, remote: Array<string>, };
+
+export type BtwAction = { "Send": { content: Array<InputContent>, } } | "Stop" | "Close" | "Share";
+
+export type BtwAskParams = { thread_id: ThreadId, content: Array<InputContent>, };
+
+export type BtwEvent = { "Update": { view: BtwView, open: boolean, } } | "Closed" | { "Models": { models: Array<ModelInfo>, current: ModelInfo | null, } };
+
+export type BtwMessage = { user: boolean, text: string, images: Array<InputContent>, thinking: string, complete: boolean, interrupted: boolean, error: string | null, };
+
+export type BtwModelParams = { thread_id: ThreadId, 
+/**
+ * `<provider>/<model id>`.
+ */
+model: string, thinking?: ThinkingLevel, };
+
+export type BtwOpenParams = { thread_id: ThreadId, 
+/**
+ * Creates a new side conversation from the session's current context when none is open.
+ */
+create: boolean, };
+
+export type BtwView = { id: string, model: ModelInfo, thinking: ThinkingLevel, messages: Array<BtwMessage>, busy: boolean, context: TokenUsage | null, total: TokenUsage, notice: string | null, };
 
 export type CacheDiagnostics = { folds?: number, reclaimed?: number, 
 /**

@@ -2,6 +2,9 @@
 //! message per line. Each session runs as in the TUI, with approvals sent to the client.
 
 mod agents;
+mod btw;
+#[cfg(all(test, feature = "workspace"))]
+mod btw_tests;
 mod hooks;
 mod mcp;
 mod projection;
@@ -54,6 +57,7 @@ struct Live {
     submissions: mpsc::Sender<Submission>,
     shutdown: CancellationToken,
     projection: Arc<Mutex<Projection>>,
+    applied: Arc<Notify>,
     /// The epoch of the latest `ThreadStarted`.
     started: watch::Receiver<Option<SessionEpoch>>,
     pump: Mutex<Option<JoinHandle<()>>>,
@@ -686,6 +690,9 @@ impl Server {
         if providers::handles(method) {
             return self.dispatch_providers(method, params).await;
         }
+        if btw::handles(method) {
+            return btw::handle(self, method, params).await;
+        }
         if mcp::handles(method) {
             return self.dispatch_mcp(method, params).await;
         }
@@ -922,8 +929,9 @@ impl Server {
             path,
             cwd,
             submissions: handle.submissions,
-            shutdown: shutdown.clone(),
-            projection: projection.clone(),
+            shutdown,
+            projection,
+            applied: Arc::new(Notify::new()),
             started: started.clone(),
             pump: Mutex::new(None),
             stale: AtomicBool::new(false),
@@ -933,8 +941,7 @@ impl Server {
             thread.clone(),
             handle.events,
             handle.task,
-            projection,
-            shutdown,
+            live.clone(),
             ready,
         ));
         *lock(&live.pump) = Some(pump);
@@ -950,13 +957,15 @@ impl Server {
         thread: ThreadId,
         mut events: broadcast::Receiver<Event>,
         task: JoinHandle<Result<(), String>>,
-        projection: Arc<Mutex<Projection>>,
-        shutdown: CancellationToken,
+        live: Arc<Live>,
         ready: watch::Sender<Option<SessionEpoch>>,
     ) {
         loop {
             match events.recv().await {
-                Ok(event) => self.forward_event(&thread, &projection, &ready, event),
+                Ok(event) => {
+                    self.forward_event(&thread, &live.projection, &ready, event);
+                    live.applied.notify_waiters();
+                }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     eprintln!("chui app-server: {}: {count} events were dropped", thread.0);
                 }
@@ -968,7 +977,7 @@ impl Server {
             Ok(Err(error)) => Some(error),
             Err(error) => Some(error.to_string()),
         };
-        if !shutdown.is_cancelled() {
+        if !live.shutdown.is_cancelled() {
             lock(&self.sessions).remove(&thread);
             self.notify(
                 "session/closed",
@@ -978,6 +987,7 @@ impl Server {
                 },
             );
         }
+        live.applied.notify_waiters();
         self.touch();
     }
 
@@ -986,15 +996,13 @@ impl Server {
         thread: &ThreadId,
         projection: &Mutex<Projection>,
         ready: &watch::Sender<Option<SessionEpoch>>,
-        event: Event,
+        mut event: Event,
     ) {
-        let settled = matches!(
-            event.event,
-            EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
-        );
+        let settled = is_settled_event(&event.event);
         let settled_live = settled.then(|| self.live(thread).ok()).flatten();
         {
             let mut projection = lock(projection);
+            projection.normalize_event(&mut event);
             if let Some(texts) = projection.take_initial_title_trigger(&event)
                 && let Some(live) = &settled_live
             {
@@ -1021,9 +1029,36 @@ impl Server {
 
     async fn submit(&self, thread: &ThreadId, op: Op) -> Result<SubmitResult, rpc::Error> {
         let live = self.live(thread)?;
+        let id = self.send_submission(thread, &live, op, false).await?;
+        Ok(SubmitResult { submission_id: id })
+    }
+
+    async fn submit_tracked(
+        &self,
+        thread: &ThreadId,
+        live: &Live,
+        op: Op,
+    ) -> Result<SubmissionId, rpc::Error> {
+        self.send_submission(thread, live, op, true).await
+    }
+
+    async fn send_submission(
+        &self,
+        thread: &ThreadId,
+        live: &Live,
+        op: Op,
+        track: bool,
+    ) -> Result<SubmissionId, rpc::Error> {
         let id = SubmissionId(format!("app-{}", self.next.fetch_add(1, Ordering::Relaxed)));
-        let epoch = lock(&live.projection).epoch;
-        live.submissions
+        let epoch = {
+            let mut proj = lock(&live.projection);
+            if track {
+                proj.track_submission(id.clone());
+            }
+            proj.epoch
+        };
+        if live
+            .submissions
             .send(Submission {
                 id: id.clone(),
                 thread_id: thread.clone(),
@@ -1031,8 +1066,14 @@ impl Server {
                 op,
             })
             .await
-            .map_err(|_| internal("session ended"))?;
-        Ok(SubmitResult { submission_id: id })
+            .is_err()
+        {
+            if track {
+                lock(&live.projection).untrack_submission(&id);
+            }
+            return Err(internal("session ended"));
+        }
+        Ok(id)
     }
 
     async fn close(&self, thread: &ThreadId) {
@@ -1040,6 +1081,7 @@ impl Server {
             return;
         };
         live.shutdown.cancel();
+        live.applied.notify_waiters();
         let pump = lock(&live.pump).take();
         if let Some(pump) = pump {
             let _ = pump.await;
@@ -1283,6 +1325,13 @@ impl Server {
         .await?;
         value(TrustResult { allowed })
     }
+}
+
+fn is_settled_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
+    ) || projection::is_btw_settled(kind)
 }
 
 fn runtime_config_key(params: &Value) -> bool {
@@ -1667,6 +1716,7 @@ pub(super) mod tests {
                 submissions,
                 shutdown: CancellationToken::new(),
                 projection: projection.clone(),
+                applied: Arc::new(Notify::new()),
                 started,
                 pump: Mutex::new(None),
                 stale: AtomicBool::new(false),
@@ -1778,6 +1828,7 @@ pub(super) mod tests {
             submissions,
             shutdown: CancellationToken::new(),
             projection: Arc::new(Mutex::new(Projection::default())),
+            applied: Arc::new(Notify::new()),
             started,
             pump: Mutex::new(None),
             stale: AtomicBool::new(false),

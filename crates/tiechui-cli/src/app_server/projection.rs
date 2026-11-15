@@ -1,10 +1,14 @@
 //! One session's state as its events leave it, so a client that connects late, or again,
 //! starts from a snapshot instead of the session's whole history.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use serde_json::Value;
 use tiechui_protocol::app::LiveState;
-use tiechui_protocol::{ApprovalId, Event, EventKind, Item, ItemId, KnownItem, SessionEpoch};
+use tiechui_protocol::{
+    ApprovalId, ApprovalRequest, BTW_EVENT, BtwEvent, BtwView, Event, EventKind, Item, ItemId,
+    KnownItem, SessionEpoch, SubmissionId, TurnId,
+};
 
 use super::textgen::InitialTitleTrigger;
 
@@ -23,12 +27,14 @@ pub(super) struct Projection {
     /// The latest error since a turn started; it explains the open or last failed turn.
     error: Option<Event>,
     retry: bool,
+    side_busy_id: Option<String>,
+    tracked_submissions: HashMap<SubmissionId, u32>,
     initial_title: InitialTitleTrigger,
 }
 
 impl Projection {
     pub fn state(&self) -> LiveState {
-        if !self.approvals.is_empty() {
+        if self.has_main_approval() {
             LiveState::Waiting
         } else if !self.turn.is_empty() {
             LiveState::Running
@@ -39,7 +45,19 @@ impl Projection {
         }
     }
 
-    /// Whether a turn, an approval, a compaction or queued input is under way.
+    fn has_main_approval(&self) -> bool {
+        self.approvals.iter().any(|(_, event)| {
+            !matches!(
+                &event.event,
+                EventKind::ApprovalRequested {
+                    turn_id: Some(turn_id),
+                    ..
+                } if turn_id.0.starts_with("side-")
+            )
+        })
+    }
+
+    /// Whether a turn, a side reply, an approval, a compaction or queued input is under way.
     pub fn busy(&self) -> bool {
         let queued = matches!(
             self.latest.get("queue").map(|e| &e.event),
@@ -49,19 +67,89 @@ impl Projection {
         queued
             || !self.turn.is_empty()
             || !self.approvals.is_empty()
+            || self.side_busy()
             || self.latest.contains_key("compaction")
+    }
+
+    pub(super) fn side_busy(&self) -> bool {
+        self.side_busy_id.is_some()
+    }
+
+    pub(super) fn btw_view(&self) -> Option<BtwView> {
+        let EventKind::Extension { data, .. } = &self.latest.get("extension:btw")?.event else {
+            return None;
+        };
+        match serde_json::from_value::<BtwEvent>(data.clone()).ok()? {
+            BtwEvent::Update { view, .. } => Some(view),
+            _ => None,
+        }
+    }
+
+    pub(super) fn has_command(&self, name: &str) -> bool {
+        match self.latest.get("commands").map(|e| &e.event) {
+            Some(EventKind::CommandsUpdated { commands }) => {
+                commands.iter().any(|cmd| cmd.name == name)
+            }
+            _ => true,
+        }
+    }
+
+    pub(super) fn track_submission(&mut self, id: SubmissionId) {
+        self.tracked_submissions.insert(id, 0);
+    }
+
+    pub(super) fn submission_count(&self, id: &SubmissionId) -> u32 {
+        self.tracked_submissions.get(id).copied().unwrap_or(0)
+    }
+
+    pub(super) fn untrack_submission(&mut self, id: &SubmissionId) {
+        self.tracked_submissions.remove(id);
+    }
+
+    pub(super) fn normalize_event(&self, event: &mut Event) {
+        let EventKind::ApprovalRequested {
+            turn_id, request, ..
+        } = &mut event.event
+        else {
+            return;
+        };
+        if let ApprovalRequest::Permission { call_id, .. } = request
+            && let Some(side_turn) = side_turn_from_call_id(call_id)
+        {
+            *turn_id = Some(side_turn);
+        } else if turn_id.is_none()
+            && self.turn.is_empty()
+            && matches!(
+                request,
+                ApprovalRequest::Questions { .. } | ApprovalRequest::Elicitation { .. }
+            )
+            && let Some(side_id) = &self.side_busy_id
+        {
+            *turn_id = Some(TurnId(side_id.clone()));
+        }
+    }
+
+    fn bump_tracked(&mut self, event: &Event) {
+        if let Some(sub_id) = &event.submission_id
+            && let Some(count) = self.tracked_submissions.get_mut(sub_id)
+        {
+            *count += 1;
+        }
     }
 
     /// Numbers the event and folds it in.
     pub fn apply(&mut self, event: &Event) -> u64 {
         self.seq += 1;
         self.epoch = event.epoch;
+        self.bump_tracked(event);
         match &event.event {
             EventKind::ThreadStarted { .. } => {
                 self.thread = Some(event.clone());
                 self.turn.clear();
                 self.approvals.clear();
                 self.error = None;
+                self.side_busy_id = None;
+                self.latest.remove("extension:btw");
             }
             EventKind::TurnStarted { .. } => {
                 self.turn = vec![event.clone()];
@@ -110,10 +198,29 @@ impl Projection {
             EventKind::CommandsUpdated { .. } => self.keep("commands", event),
             EventKind::ResourcesUpdated { .. } => self.keep("resources", event),
             EventKind::QueueUpdated { .. } => self.keep("queue", event),
-            EventKind::Extension { name, .. } => self.keep(&format!("extension:{name}"), event),
+            EventKind::Extension { name, data } => self.apply_extension(name, data, event),
             _ => {}
         }
         self.seq
+    }
+
+    fn apply_extension(&mut self, name: &str, data: &Value, event: &Event) {
+        if name != BTW_EVENT {
+            self.keep(&format!("extension:{name}"), event);
+            return;
+        }
+        match serde_json::from_value::<BtwEvent>(data.clone()) {
+            Ok(BtwEvent::Update { view, .. }) => {
+                self.side_busy_id = view.busy.then_some(view.id);
+                self.keep("extension:btw", event);
+            }
+            Ok(BtwEvent::Closed) => {
+                self.side_busy_id = None;
+                self.latest.remove("extension:btw");
+            }
+            Ok(BtwEvent::Models { .. }) => {}
+            Err(_) => self.keep("extension:btw", event),
+        }
     }
 
     /// Events that rebuild the current state, in an order a client can apply.
@@ -155,6 +262,30 @@ impl Projection {
             None => self.turn.push(event.clone()),
         }
     }
+}
+
+fn side_turn_from_call_id(call_id: &str) -> Option<TurnId> {
+    let rest = call_id.strip_prefix("command-side-")?;
+    let digits_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits_len == 0 || rest.as_bytes().get(digits_len) != Some(&b'-') {
+        return None;
+    }
+    Some(TurnId(format!("side-{}", &rest[..digits_len])))
+}
+
+pub(super) fn is_btw_settled(kind: &EventKind) -> bool {
+    let EventKind::Extension { name, data } = kind else {
+        return false;
+    };
+    name == BTW_EVENT
+        && matches!(
+            serde_json::from_value::<BtwEvent>(data.clone()),
+            Ok(BtwEvent::Closed)
+                | Ok(BtwEvent::Update {
+                    view: BtwView { busy: false, .. },
+                    ..
+                })
+        )
 }
 
 fn item_id(item: &Item) -> Option<ItemId> {
@@ -406,5 +537,111 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn btw_projection_tracks_busy_preserves_view_and_scopes_side_approvals() {
+        use tiechui_protocol::{ModelInfo, ThinkingLevel, TokenUsage};
+
+        let side_view = |busy: bool| BtwView {
+            id: "side-7".into(),
+            model: ModelInfo {
+                provider: "alpha".into(),
+                id: "main".into(),
+                context_window: 128000,
+                reasoning: false,
+                thinking_levels: vec![ThinkingLevel::Off],
+            },
+            thinking: ThinkingLevel::Off,
+            messages: vec![],
+            busy,
+            context: None,
+            total: TokenUsage::default(),
+            notice: None,
+        };
+
+        let mut p = Projection::default();
+        p.apply(&event(EventKind::ThreadStarted {
+            thread: Thread {
+                id: ThreadId("t".into()),
+                epoch: SessionEpoch(1),
+                turns: vec![],
+            },
+            replay: false,
+        }));
+        assert!(!p.busy());
+
+        p.apply(&event(EventKind::Extension {
+            name: BTW_EVENT.into(),
+            data: serde_json::to_value(BtwEvent::Update {
+                view: side_view(true),
+                open: true,
+            })
+            .unwrap(),
+        }));
+        assert!(p.busy());
+        assert_eq!(p.state(), LiveState::Idle);
+        assert_eq!(p.btw_view().unwrap().id, "side-7");
+
+        p.apply(&event(EventKind::Extension {
+            name: BTW_EVENT.into(),
+            data: serde_json::to_value(BtwEvent::Models {
+                models: vec![],
+                current: None,
+            })
+            .unwrap(),
+        }));
+        assert_eq!(p.btw_view().unwrap().id, "side-7");
+
+        let mut side_perm = event(EventKind::ApprovalRequested {
+            turn_id: Some(TurnId("turn-main".into())),
+            approval_id: ApprovalId("a-side".into()),
+            request: ApprovalRequest::Permission {
+                actor: None,
+                call_id: "command-side-7-call_w1".into(),
+                tool: "write".into(),
+                arguments: json!({}),
+                surface: "write".into(),
+                values: vec![],
+                matched_pattern: None,
+                origin: "direct".into(),
+                session_patterns: vec![],
+                preview: None,
+            },
+        });
+        p.normalize_event(&mut side_perm);
+        assert!(matches!(
+            &side_perm.event,
+            EventKind::ApprovalRequested { turn_id: Some(t), .. } if t.0 == "side-7"
+        ));
+        p.apply(&side_perm);
+        assert_eq!(p.state(), LiveState::Idle);
+        assert!(p.busy());
+
+        p.apply(&event(EventKind::TurnStarted {
+            turn: turn(TurnStatus::InProgress, vec![]),
+        }));
+        assert_eq!(p.state(), LiveState::Running);
+        p.apply(&event(EventKind::TurnCompleted {
+            turn: turn(TurnStatus::Completed, vec![]),
+        }));
+        p.apply(&event(EventKind::ApprovalResolved {
+            approval_id: ApprovalId("a-side".into()),
+        }));
+        p.apply(&event(EventKind::Extension {
+            name: BTW_EVENT.into(),
+            data: serde_json::to_value(BtwEvent::Update {
+                view: side_view(false),
+                open: false,
+            })
+            .unwrap(),
+        }));
+        assert!(!p.busy());
+
+        p.apply(&event(EventKind::Extension {
+            name: BTW_EVENT.into(),
+            data: serde_json::to_value(BtwEvent::Closed).unwrap(),
+        }));
+        assert!(p.btw_view().is_none());
     }
 }
