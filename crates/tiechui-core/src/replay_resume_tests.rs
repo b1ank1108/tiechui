@@ -220,6 +220,7 @@ async fn encode(wire: Wire, messages: Vec<Message>) -> serde_json::Value {
             ModelRequest {
                 disable_cache: false,
                 short_cache: false,
+                temporary_tail: 0,
                 cache_key: None,
                 input_tokens: None,
                 model: fixture_model().model,

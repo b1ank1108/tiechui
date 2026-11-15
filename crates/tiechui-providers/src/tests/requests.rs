@@ -376,6 +376,64 @@ async fn signature_only_thinking_is_preserved_and_unsigned_thinking_becomes_text
     );
 }
 
+/// Message and block indexes of every message cache breakpoint.
+fn breakpoints(body: &Value) -> Vec<(usize, usize)> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .flat_map(|(message, value)| {
+            value["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| block.get("cache_control").is_some())
+                .map(move |(block, _)| (message, block))
+        })
+        .collect()
+}
+
+#[test]
+fn message_breakpoints_skip_the_temporary_tail_and_anchor_the_previous_request() {
+    let model = &config("http://fixture.invalid").models[0];
+    let mut request = request();
+    let temporary = message(Role::User, vec![text("temporary status")]);
+    request.messages.push(temporary.clone());
+    request.temporary_tail = 1;
+    let first = crate::anthropic::request::encode(&request, model).unwrap();
+    assert_eq!(breakpoints(&first), [(0, 0)]);
+
+    request.messages.pop();
+    request.messages.extend([
+        message(Role::Assistant, vec![call("call_a", "a.txt")]),
+        result("call_a", vec![text("a")], false),
+        temporary.clone(),
+    ]);
+    let previous = crate::anthropic::request::encode(&request, model).unwrap();
+    // The temporary message shares the tool result's turn and stays after the breakpoint.
+    assert_eq!(
+        previous["messages"][2]["content"][1]["text"],
+        "temporary status"
+    );
+    assert_eq!(breakpoints(&previous), [(0, 0), (2, 0)]);
+
+    request.messages.pop();
+    request.messages.extend([
+        message(Role::Assistant, vec![call("call_b", "b.txt")]),
+        result("call_b", vec![text("b")], false),
+        temporary,
+    ]);
+    let next = crate::anthropic::request::encode(&request, model).unwrap();
+    // The previous request's tail is this request's anchor.
+    assert_eq!(breakpoints(&next), [(2, 0), (4, 0)]);
+    assert_eq!(
+        next["messages"][2]["content"],
+        json!([previous["messages"][2]["content"][0]])
+    );
+}
+
 #[tokio::test]
 async fn invalid_requests_are_rejected_before_http() {
     let server = MockServer::start().await;

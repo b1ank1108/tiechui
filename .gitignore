@@ -3,3 +3,5 @@
 .DS_Store
 *.snap.new
 /example/
+.verify/
+.worktrees/

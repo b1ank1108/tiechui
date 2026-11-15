@@ -102,9 +102,13 @@ Configured prices follow the returned model. The OpenAI wires reject fallback co
 
 Model `cache_retention = "none" | "short" | "long"` controls Anthropic breakpoints;
 the default is `short`, and `long` sends a one-hour TTL. Set `long` only on an
-endpoint that accepts it. Requests marked `short_cache`, such as subagent turns,
-send `long` as `short`. The OpenAI wires send no cache controls or cache keys, so
-this setting leaves its payload unchanged and cannot disable server-managed caching.
+endpoint that accepts it. Breakpoints go on the last tool, the system prompt, the
+last user-role block of the durable messages, and the user-role block before the
+last assistant message, where the previous request ended. Messages a request marks
+as its temporary tail follow the breakpoints uncached. Requests marked
+`short_cache`, such as subagent turns, send `long` as `short` on the two message
+breakpoints only. The OpenAI wires send no cache controls or cache keys, so this
+setting leaves its payload unchanged and cannot disable server-managed caching.
 
 Optional model `prices = { input = 2.0, output = 10.0, cache_read = 0.2,
 cache_write = 2.5 }` supplies USD per million tokens (illustrative rates only).

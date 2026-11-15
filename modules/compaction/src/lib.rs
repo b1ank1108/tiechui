@@ -186,25 +186,23 @@ impl RequestProjection for Service {
                     .collect();
                 if !shown.is_empty() {
                     self.issue(&shown.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>())?;
-                    view.messages.push(ProjectedMessage {
-                        source: None,
-                        message: Message {
-                            role: Role::User,
-                            content: vec![plain(format!(
-                                "Context maintenance hint (not a new user task). If these candidates are completed work, you may call compact_history with their ids and your summaries; otherwise continue. Native compaction remains the capacity fallback.\n{}",
-                                json!({
-                                    "pressure": pressure,
-                                    "candidates": shown.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
-                                })
-                            ))],
-                            opaque: None,
-                        },
+                    view.tail.push(Message {
+                        role: Role::User,
+                        content: vec![plain(format!(
+                            "Context maintenance hint (not a new user task). If these candidates are completed work, you may call compact_history with their ids and your summaries; otherwise continue. Native compaction remains the capacity fallback.\n{}",
+                            json!({
+                                "pressure": pressure,
+                                "candidates": shown.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+                            })
+                        ))],
+                        opaque: None,
                     });
                 }
             }
         }
         check(&cancel)?;
         let unchanged = view.entries.is_empty()
+            && view.tail.is_empty()
             && view.messages.len() == context.messages.len()
             && view
                 .messages
@@ -224,6 +222,7 @@ fn maintain(
 ) -> Result<ProjectedRequest, ToolError> {
     let current = ProjectedRequest {
         messages: history::request_view(p, &p.state, config, cancel)?,
+        tail: vec![],
         entries: vec![],
     };
     let size = request_size(context, &current.messages);
@@ -256,6 +255,7 @@ fn maintain(
     });
     Ok(ProjectedRequest {
         messages: view,
+        tail: vec![],
         entries: vec![(state::ENTRY.into(), json!(next))],
     })
 }

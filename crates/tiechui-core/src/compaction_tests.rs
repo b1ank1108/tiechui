@@ -598,6 +598,11 @@ impl tiechui_plugin_api::RequestProjection for Projector {
         });
         Ok(Some(tiechui_plugin_api::ProjectedRequest {
             messages,
+            tail: vec![Message {
+                role: Role::User,
+                content: vec![text_content("TAIL".into())],
+                opaque: None,
+            }],
             entries: vec![("test.projection".into(), json!({"point": true}))],
         }))
     }
@@ -614,7 +619,8 @@ async fn projection_entries_are_persisted_before_the_view_is_sent() {
     for input in ["first", "second"] {
         h.input(input, InputDelivery::FollowUp).await;
         let request = h.request().await;
-        assert!(text(&request).ends_with("PROJECTED"));
+        assert!(text(&request).ends_with("PROJECTED\nTAIL"));
+        assert_eq!(request.temporary_tail, 1);
         h.end(TurnStatus::Completed).await;
         let store = h.snapshot().await;
         let kinds: Vec<_> = store

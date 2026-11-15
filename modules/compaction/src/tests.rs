@@ -1219,16 +1219,16 @@ async fn nudges_offer_recommended_candidates_at_the_tail_only() {
         .project(ctx.clone(), CancellationToken::new())
         .await
         .unwrap()
-        .unwrap()
-        .messages;
+        .unwrap();
     assert_eq!(
-        &view[..view.len() - 1]
+        view.messages
             .iter()
             .map(|m| m.message.clone())
-            .collect::<Vec<_>>()[..],
-        &ctx.messages[..]
+            .collect::<Vec<_>>(),
+        ctx.messages
     );
-    let hint = messages::text(&view.last().unwrap().message.content);
+    assert_eq!(view.tail.len(), 1);
+    let hint = messages::text(&view.tail[0].content);
     assert!(hint.starts_with("Context maintenance hint"));
     let offered: Value = serde_json::from_str(hint.split_once('\n').unwrap().1).unwrap();
     let id = offered["candidates"][0]["id"].clone();

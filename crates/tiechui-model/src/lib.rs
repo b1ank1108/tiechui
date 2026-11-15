@@ -26,9 +26,13 @@ pub struct ModelRequest {
     /// Disable explicit prompt-cache writes for one-off requests such as summaries.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_cache: bool,
-    /// Cap explicit prompt-cache writes at the short retention, for short-lived sessions such as subagents.
+    /// Cap message prompt-cache writes at the short retention, for short-lived sessions such as
+    /// subagents. Tools and the system prompt keep the model's retention.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub short_cache: bool,
+    /// Trailing `messages` that only this request carries; prompt-cache breakpoints stay before them.
+    #[serde(default)]
+    pub temporary_tail: usize,
     /// Stable session key that providers may use to route prompt caching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,

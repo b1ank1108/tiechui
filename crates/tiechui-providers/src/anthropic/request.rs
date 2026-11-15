@@ -41,12 +41,28 @@ fn text_or_image(content: &Content, images: bool) -> Result<Option<Value>, Provi
     }
 }
 
+/// The last content block encoded so far, as message and block index.
+fn last_block(messages: &[Value]) -> Option<(usize, usize)> {
+    let message = messages.len().checked_sub(1)?;
+    let block = messages[message]["content"]
+        .as_array()?
+        .len()
+        .checked_sub(1)?;
+    Some((message, block))
+}
+
 pub(crate) fn encode(request: &ModelRequest, model: &ModelConfig) -> Result<Value, ProviderError> {
-    let cache = cache(match model.cache_retention {
-        _ if request.disable_cache => CacheRetention::None,
+    let retention = if request.disable_cache {
+        CacheRetention::None
+    } else {
+        model.cache_retention
+    };
+    // Later short-lived sessions reuse the tools and system prompt, never the messages.
+    let message_cache = cache(match retention {
         CacheRetention::Long if request.short_cache => CacheRetention::Short,
         retention => retention,
     });
+    let cache = cache(retention);
     let mut max_output = request.max_output.unwrap_or(model.max_output);
     if max_output == 0 || max_output > model.max_output {
         return Err(invalid(
@@ -106,7 +122,14 @@ pub(crate) fn encode(request: &ModelRequest, model: &ModelConfig) -> Result<Valu
     let mut pending = BTreeSet::new();
     let mut seen_calls = BTreeSet::new();
     let mut previous_tool = false;
-    for message in &request.messages {
+    let durable = request
+        .messages
+        .len()
+        .saturating_sub(request.temporary_tail);
+    // Where the next request finds this one, and where this one finds the previous request.
+    let mut tail = None;
+    let mut anchor = None;
+    for (index, message) in request.messages.iter().enumerate() {
         if message.opaque.is_some() {
             return Err(invalid("unsupported message replay metadata"));
         }
@@ -231,6 +254,14 @@ pub(crate) fn encode(request: &ModelRequest, model: &ModelConfig) -> Result<Valu
             messages.push(json!({"role":if message.role == Role::Assistant { "assistant" } else { "user" }, "content":blocks}));
         }
         previous_tool = message.role == Role::Tool;
+        if index >= durable {
+            continue;
+        }
+        if message.role == Role::Assistant {
+            anchor = tail.take().or(anchor);
+        } else {
+            tail = last_block(&messages);
+        }
     }
     if !pending.is_empty() {
         return Err(invalid("history ends with unresolved tool calls"));
@@ -240,14 +271,11 @@ pub(crate) fn encode(request: &ModelRequest, model: &ModelConfig) -> Result<Valu
             "at least one user or assistant message is required",
         ));
     }
-    if let Some(cache) = &cache
-        && let Some(message) = messages.last_mut()
-        && message["role"] == "user"
-        && let Some(last) = message["content"]
-            .as_array_mut()
-            .and_then(|content| content.last_mut())
-    {
-        last["cache_control"] = cache.clone();
+    // The anchor hits even when the last step added more blocks than the lookback covers.
+    if let (Some(cache), Some(tail)) = (&message_cache, tail) {
+        for (message, block) in anchor.into_iter().chain([tail]) {
+            messages[message]["content"][block]["cache_control"] = cache.clone();
+        }
     }
     let mut body =
         json!({"model":model.id, "messages":messages, "max_tokens":max_output, "stream":true});

@@ -92,6 +92,7 @@ fn reasoning_levels_round_trip_in_neutral_requests() {
         let request = ModelRequest {
             disable_cache: false,
             short_cache: false,
+            temporary_tail: 0,
             cache_key: None,
             input_tokens: None,
             model: ModelId("fixture/model".into()),

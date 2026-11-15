@@ -54,7 +54,7 @@ pub struct SessionConfig {
     /// The first epoch. A host that replaces a client's session continues the count, so the
     /// client can tell the old session's events from the new one's.
     pub epoch: SessionEpoch,
-    /// Caps prompt-cache writes at the short retention; set for short-lived child sessions.
+    /// Caps message prompt-cache writes at the short retention; set for short-lived child sessions.
     pub short_cache: bool,
 }
 
@@ -1512,6 +1512,7 @@ impl SessionActor {
         let tools = self.visible_tools();
         let mut history = self.store()?.build_context_with_origins(&self.excluded);
         let mut projected = false;
+        let mut temporary = Vec::new();
         for projection in self.registry.clone().projections() {
             let branch = self.branch_view()?;
             let raw = self
@@ -1621,8 +1622,9 @@ impl SessionActor {
                             )
                         })
                         .collect();
-                    projected |= next != history;
+                    projected |= next != history || !view.tail.is_empty();
                     history = next;
+                    temporary.extend(view.tail);
                 }
                 Ok(None) => {}
                 Err(error) => self.emit(EventKind::Extension {
@@ -1643,9 +1645,12 @@ impl SessionActor {
         let system = self.system_message();
         let assembled_system = system.is_some();
         messages.splice(0..0, system);
+        let durable = messages.len();
+        messages.extend(temporary);
         for extension in self.registry.runtime_extensions() {
             messages.extend(extension.messages());
         }
+        let temporary_tail = messages.len() - durable;
         let input_tokens = if projected {
             tiechui_providers::estimate::input(&messages, &tools)
         } else {
@@ -1660,6 +1665,7 @@ impl SessionActor {
         let request = ModelRequest {
             disable_cache: false,
             short_cache: self.config.short_cache,
+            temporary_tail,
             cache_key: Some(self.thread.0.clone()),
             input_tokens: Some(input_tokens),
             model: self.model.model.clone(),

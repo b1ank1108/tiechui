@@ -2337,6 +2337,7 @@ async fn interceptors_stream_one_off_requests_on_the_turn_model() {
             let request = ModelRequest {
                 disable_cache: true,
                 short_cache: false,
+                temporary_tail: 0,
                 cache_key: None,
                 model: invoker.model().unwrap(),
                 messages: vec![],

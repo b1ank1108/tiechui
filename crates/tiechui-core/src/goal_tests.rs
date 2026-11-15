@@ -93,6 +93,8 @@ async fn draft_pause_and_clear_win_before_continuation() {
     command(&mut h, "resume").await;
     let request = h.request().await;
     assert!(users(&request).iter().any(|s| s.contains("<active_goal")));
+    assert!(users(&request).last().unwrap().contains("<active_goal"));
+    assert_eq!(request.temporary_tail, 1);
     assert_eq!(request.messages[0].role, Role::System);
     assert!(
         !serde_json::to_string(&request.messages[0])

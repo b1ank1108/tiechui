@@ -19,7 +19,8 @@ belong to the current goal's run.
 
 Each state change appends `tiechui.goal.state`. Only the last entry on the
 current branch is read; clear and corrupt state never revive an older goal.
-Every request, including retry, gets the current goal as a temporary message.
+Every request, including retry, gets the current goal as a temporary message
+after the prompt-cache breakpoints.
 System instructions and user input history are unchanged. Reload and restart
 retain usage and defer active goals until new input or resume. Fork inherits
 the parent's current state and defers. Branch navigation pauses active goals;

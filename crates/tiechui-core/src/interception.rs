@@ -265,6 +265,7 @@ mod tests {
         let request = || ModelRequest {
             disable_cache: true,
             short_cache: false,
+            temporary_tail: 0,
             cache_key: None,
             model: ModelId("alpha/heavy".into()),
             messages: vec![tiechui_model::Message {

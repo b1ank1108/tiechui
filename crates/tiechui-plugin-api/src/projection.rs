@@ -30,6 +30,8 @@ pub struct ProjectedMessage {
 #[derive(Debug)]
 pub struct ProjectedRequest {
     pub messages: Vec<ProjectedMessage>,
+    /// Messages that only this request carries, sent after the view and outside the prompt cache.
+    pub tail: Vec<Message>,
     /// Custom entries persisted on the branch before the view is sent; if that fails the view is discarded.
     pub entries: Vec<(String, serde_json::Value)>,
 }

@@ -51,13 +51,19 @@ fn cache_retention_requests_preserve_default_and_completions_payloads() {
         default
     );
     request.short_cache = true;
-    for retention in [CacheRetention::Short, CacheRetention::Long] {
-        model.cache_retention = retention;
-        assert_eq!(
-            crate::anthropic::request::encode(&request, model).unwrap(),
-            default
-        );
-    }
+    assert_eq!(
+        crate::anthropic::request::encode(&request, model).unwrap(),
+        default
+    );
+    model.cache_retention = CacheRetention::Long;
+    let encoded = crate::anthropic::request::encode(&request, model).unwrap();
+    let long = json!({"type": "ephemeral", "ttl": "1h"});
+    assert_eq!(encoded["tools"][0]["cache_control"], long);
+    assert_eq!(encoded["system"][0]["cache_control"], long);
+    assert_eq!(
+        encoded["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
     model.cache_retention = CacheRetention::None;
     assert!(
         !crate::anthropic::request::encode(&request, model)

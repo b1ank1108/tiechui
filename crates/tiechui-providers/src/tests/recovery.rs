@@ -43,6 +43,7 @@ async fn output_clamps_at_context_edge_and_refits_thinking() {
             let request = ModelRequest {
                 disable_cache: false,
                 short_cache: false,
+                temporary_tail: 0,
                 cache_key: None,
                 input_tokens: None,
                 model: ModelId("fixture/fixture-model".into()),

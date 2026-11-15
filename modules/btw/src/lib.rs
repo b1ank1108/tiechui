@@ -342,6 +342,7 @@ fn request(thread: &Thread) -> ModelRequest {
     ModelRequest {
         disable_cache: false,
         short_cache: false,
+        temporary_tail: 0,
         cache_key: None,
         model: ModelId(format!(
             "{}/{}",

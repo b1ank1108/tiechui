@@ -647,6 +647,7 @@ impl SessionActor {
         ModelRequest {
             disable_cache: true,
             short_cache: false,
+            temporary_tail: 0,
             cache_key: None,
             model: self.model.model.clone(),
             messages: vec![

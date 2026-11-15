@@ -36,8 +36,9 @@ thinking level to the target model's supported levels. Parent sessions receive a
 `<subagent_models>` system prompt fragment listing the active `<provider>/<id>`
 and any ready candidate models with their thinking levels; child sessions omit
 this fragment, and no `providers.toml` paths or credentials are read. Child
-requests cap the target model's prompt cache at `short`: `long` (one hour) becomes
-the five-minute TTL, and `none` stays uncached.
+requests cap the message breakpoints of the target model's prompt cache at `short`:
+`long` (one hour) becomes the five-minute TTL there, tools and the system prompt
+keep `long` so later children reuse them, and `none` stays uncached.
 `ChildRegistry` builds a fresh registry per task with editing (including the
 native child `ls` tool), foreground shell execution, tool search, PTC, fresh
 permissions, parent-anchored rewind tracking, and existing MCP clients.

@@ -8,6 +8,9 @@ expression: body
     {
       "content": [
         {
+          "cache_control": {
+            "type": "ephemeral"
+          },
           "text": "Hello",
           "type": "text"
         }

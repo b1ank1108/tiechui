@@ -18,9 +18,9 @@ whole batch or nothing; failures are JSON with a code such as
 `CANDIDATE_CHANGED`, `INSUFFICIENT_SAVINGS` or `INVALID_ARGUMENT`. Recent
 messages/tokens, the latest user request, skill and compaction records, opaque
 content, tool pairs and signed/thinking envelopes are protected. Summaries may be
-merged again; tiers are kept only as depth. Hints appear only at the request tail
-and list at most three recommended candidates. Compaction never makes a separate
-model request.
+merged again; tiers are kept only as depth. Hints appear only at the request tail,
+after the prompt-cache breakpoints, and list at most three recommended candidates.
+Compaction never makes a separate model request.
 
 Each maintenance point starts a cooldown of three business responses, ended early
 by new user input. Under normal pressure it hides candidates and hints, and

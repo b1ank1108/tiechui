@@ -264,6 +264,7 @@ pub(crate) async fn check(
     let request = ModelRequest {
         disable_cache: true,
         short_cache: false,
+        temporary_tail: 0,
         cache_key: None,
         model: ModelId(format!("{name}/{}", model.id)),
         messages: vec![Message {

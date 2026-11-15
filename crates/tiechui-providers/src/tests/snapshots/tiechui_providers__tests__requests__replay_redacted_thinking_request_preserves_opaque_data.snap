@@ -8,6 +8,9 @@ expression: captured(request).await
     {
       "content": [
         {
+          "cache_control": {
+            "type": "ephemeral"
+          },
           "text": "Hello",
           "type": "text"
         }

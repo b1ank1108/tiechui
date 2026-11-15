@@ -8,6 +8,9 @@ expression: anthropic
     {
       "content": [
         {
+          "cache_control": {
+            "type": "ephemeral"
+          },
           "text": "Hello",
           "type": "text"
         }
