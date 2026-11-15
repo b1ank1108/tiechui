@@ -61,6 +61,24 @@ impl Tool for PartialWrite {
     }
 }
 
+fn test_tool_context(cwd: PathBuf, branch: Vec<BranchEntry>) -> ToolContext {
+    ToolContext {
+        invoker: None,
+        cwd,
+        cancel: CancellationToken::new(),
+        updates: Arc::new(|_| {}),
+        append_entry: Arc::new(|_| Ok(())),
+        epoch: SessionEpoch(0),
+        scope: ExecutionScope {
+            thread_id: ThreadId("session".into()),
+            turn_id: TurnId("turn".into()),
+        },
+        parent_session: None,
+        branch: Arc::new(branch),
+        origin: Default::default(),
+    }
+}
+
 #[tokio::test]
 async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editing_paths() {
     let root = tempfile::tempdir().unwrap();
@@ -92,19 +110,9 @@ async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editi
         (&outside, "../absolute-outside.txt"),
     ] {
         std::fs::write(cwd.join(file), "before").unwrap();
-        let ctx = ToolContext {
-            invoker: None,
-            cwd: cwd.clone(),
-            cancel: CancellationToken::new(),
-            updates: Arc::new(|_| {}),
-            append_entry: Arc::new(|_| Ok(())),
-            epoch: SessionEpoch(0),
-            scope: ExecutionScope {
-                thread_id: ThreadId("session".into()),
-                turn_id: TurnId("turn".into()),
-            },
-            parent_session: None,
-            branch: Arc::new(vec![BranchEntry {
+        let ctx = test_tool_context(
+            cwd.clone(),
+            vec![BranchEntry {
                 id: "control".into(),
                 parent_id: None,
                 timestamp: 0,
@@ -113,9 +121,8 @@ async fn cancelled_partial_writes_settle_control_anchored_checkpoints_with_editi
                     tiechui_module_rewind::CONTROL_CHECKPOINT.into(),
                     json!({"version":1,"text":"control operation"}),
                 )),
-            }]),
-            origin: Default::default(),
-        };
+            }],
+        );
         let output = interception::execute_call(
             &registry,
             &ToolScheduler::default(),
@@ -172,19 +179,9 @@ fn editing_rewind_fixture(
     PermissionsModule::headless(cwd.to_path_buf(), root.into(), HeadlessPolicy::Unavailable)
         .register(&mut registry, &config)
         .unwrap();
-    let ctx = ToolContext {
-        invoker: None,
-        cwd: cwd.to_path_buf(),
-        cancel: CancellationToken::new(),
-        updates: Arc::new(|_| {}),
-        append_entry: Arc::new(|_| Ok(())),
-        epoch: SessionEpoch(0),
-        scope: ExecutionScope {
-            thread_id: ThreadId("session".into()),
-            turn_id: TurnId("turn".into()),
-        },
-        parent_session: None,
-        branch: Arc::new(vec![BranchEntry {
+    let ctx = test_tool_context(
+        cwd.to_path_buf(),
+        vec![BranchEntry {
             id: "prompt".into(),
             parent_id: None,
             timestamp: 0,
@@ -192,9 +189,8 @@ fn editing_rewind_fixture(
                 text: prompt_text.into(),
             }]),
             custom: None,
-        }]),
-        origin: Default::default(),
-    };
+        }],
+    );
     (registry, ctx)
 }
 

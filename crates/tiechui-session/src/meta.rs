@@ -63,9 +63,10 @@ pub fn trash(home: &Path, session: &Path) -> Result<PathBuf, SessionError> {
     };
     let trash_root = home.join("trash");
     let directory = trash_root.join(group);
-    crate::storage::create_private_dir_all(home)?;
-    crate::storage::create_private_dir_all(&trash_root)?;
-    crate::storage::create_private_dir_all(&directory)?;
+    for path in [home, trash_root.as_path(), directory.as_path()] {
+        tiechui_config::private::create_dir_all(path)
+            .map_err(|error| SessionError::new(path, error))?;
+    }
     let target = directory.join(name);
     fs::rename(session, &target).map_err(|error| SessionError::new(session, error))?;
     let meta = meta_path(session);

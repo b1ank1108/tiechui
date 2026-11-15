@@ -1073,14 +1073,11 @@ async fn agent_frontmatter_policy_matches_by_frontmatter_name_and_discovery_prec
     std::fs::create_dir_all(f.cwd.join(".agents/agents")).unwrap();
     std::fs::create_dir_all(f.cwd.join(".claude/agents")).unwrap();
 
-    // User agent whose filename (`custom_user_file.md`) differs from frontmatter `name`.
     std::fs::write(
         f.home.join("agents/custom_user_file.md"),
         "---\nname: my-reviewer\ndescription: user reviewer\npermission:\n  write: deny\n  grep: allow\n---\n",
     )
     .unwrap();
-    // Project `.agents/agents` overrides `.claude/agents` for the same frontmatter `name`,
-    // while user rules win over project rules on conflicting surfaces (`grep`).
     std::fs::write(
         f.cwd.join(".claude/agents/claude_file.md"),
         "---\nname: my-reviewer\ndescription: claude reviewer\npermission:\n  ls: deny\n---\n",
@@ -1131,14 +1128,11 @@ async fn agent_frontmatter_policy_matches_by_frontmatter_name_and_discovery_prec
             .unwrap(),
         BeforeToolCall::Allow
     );
-    // `.agents/agents` won over `.claude/agents`, so `ls: deny` from `.claude/agents` was not loaded.
     assert_eq!(
         interceptor.before(&call("ls"), f.context()).await.unwrap(),
         BeforeToolCall::Allow
     );
 
-    // Dispatching an agent named `custom_user_file` must NOT inherit `custom_user_file.md`
-    // because that file explicitly declares `name: my-reviewer`.
     let mut other = Registry::default();
     let mut allow_all = ModuleConfig::default();
     allow_all.permissions.rules = Some(

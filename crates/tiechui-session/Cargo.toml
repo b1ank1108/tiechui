@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tiechui-config.workspace = true
 tiechui-model.workspace = true
 tokio-util.workspace = true
 
