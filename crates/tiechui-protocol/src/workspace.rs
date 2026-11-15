@@ -339,6 +339,56 @@ pub struct CancelCommitMessageParams {
     pub request_id: String,
 }
 
+/// A Git worktree created and registered by `chui` under `$TIECHUI_HOME/worktrees/`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeEntry {
+    pub name: String,
+    pub path: String,
+    pub project_root: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub dirty: bool,
+    /// Unix milliseconds when the worktree was created.
+    pub created_at: u64,
+}
+
+/// Creates a managed session worktree for `root` on branch `tiechui/<name>`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeCreateParams {
+    pub root: String,
+    /// Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+}
+
+/// Lists managed session worktrees for `root`, or across all projects when `root` is absent.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WorktreeListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+/// Removes a managed session worktree checkout while keeping its `tiechui/<name>` branch.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeRemoveParams {
+    pub path: String,
+    /// Removes the worktree even when it has uncommitted or untracked changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeRemoveResult {
+    pub path: String,
+    pub branch: String,
+}
+
 /// Starts a shell in `cwd` under a client-chosen id.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

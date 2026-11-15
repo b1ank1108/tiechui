@@ -56,6 +56,7 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::InitializeResult>();
                 d.visit::<app::DaemonStatus>();
                 d.visit::<app::SessionListParams>();
+                d.visit::<app::SessionWorktree>();
                 d.visit::<app::SessionSummary>();
                 d.visit::<app::SessionOpenParams>();
                 d.visit::<app::Snapshot>();
@@ -134,6 +135,11 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::CommitMessageParams>();
                 d.visit::<workspace::CommitMessageResult>();
                 d.visit::<workspace::CancelCommitMessageParams>();
+                d.visit::<workspace::WorktreeEntry>();
+                d.visit::<workspace::WorktreeCreateParams>();
+                d.visit::<workspace::WorktreeListParams>();
+                d.visit::<workspace::WorktreeRemoveParams>();
+                d.visit::<workspace::WorktreeRemoveResult>();
                 d.visit::<workspace::TerminalCreateParams>();
                 d.visit::<workspace::TerminalParams>();
                 d.visit::<workspace::TerminalAttached>();

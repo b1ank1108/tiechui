@@ -24,7 +24,8 @@ pub struct InitializeResult {
     pub server_version: String,
     /// The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
     pub home: String,
-    /// Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
+    /// Optional method groups: `workspace` for `fs/*`, `git/*`, `worktree/*`, `terminal/*` and
+    /// `ports/*`.
     pub capabilities: Vec<String>,
 }
 
@@ -61,12 +62,25 @@ pub enum LiveState {
     Failed,
 }
 
+/// Managed worktree metadata for a session running inside `$TIECHUI_HOME/worktrees/`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWorktree {
+    pub path: String,
+    pub name: String,
+    pub branch: String,
+    pub base_branch: String,
+}
+
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSummary {
     pub thread_id: ThreadId,
     pub path: String,
     pub cwd: String,
+    /// Present when `cwd` is a `chui`-managed session worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SessionWorktree>,
     /// Unix milliseconds.
     pub created_at: u64,
     /// Unix milliseconds of the latest user or assistant message.
@@ -101,6 +115,9 @@ pub struct Snapshot {
     pub thread_id: ThreadId,
     pub path: String,
     pub cwd: String,
+    /// Present when `cwd` is a `chui`-managed session worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SessionWorktree>,
     pub seq: u64,
     pub events: Vec<Event>,
 }

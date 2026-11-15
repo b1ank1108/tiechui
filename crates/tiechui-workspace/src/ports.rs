@@ -69,14 +69,16 @@ impl State {
 }
 
 pub(crate) struct PortMonitor {
+    home: Option<PathBuf>,
     sink: Sink,
     state: Mutex<State>,
     wake: Condvar,
 }
 
 impl PortMonitor {
-    pub(crate) fn new(sink: Sink) -> Arc<Self> {
+    pub(crate) fn new(home: Option<PathBuf>, sink: Sink) -> Arc<Self> {
         Arc::new(Self {
+            home,
             sink,
             state: Mutex::default(),
             wake: Condvar::new(),
@@ -107,14 +109,14 @@ impl PortMonitor {
         let union_ports = if union_roots.is_empty() {
             Vec::new()
         } else {
-            scan_attributed(&union_roots)
+            scan_attributed(&union_roots, self.home.as_deref())
         };
         let caller_ports = if caller_roots.is_empty() {
             Vec::new()
         } else if same_roots(&caller_roots, &union_roots) {
             union_ports.clone()
         } else {
-            scan_attributed(&caller_roots)
+            scan_attributed(&caller_roots, self.home.as_deref())
         };
         let notify = {
             let mut state = lock(&self.state);
@@ -175,7 +177,7 @@ impl PortMonitor {
             }
             roots
         };
-        let current = scan_attributed(&candidate_roots);
+        let current = scan_attributed(&candidate_roots, self.home.as_deref());
         let owned = current.iter().any(|entry| {
             entry.pid == params.pid
                 && entry.root == params.root
@@ -225,7 +227,7 @@ impl PortMonitor {
     }
 
     fn apply_scan(&self, roots: &[RegisteredRoot]) {
-        let ports = scan_attributed(roots);
+        let ports = scan_attributed(roots, self.home.as_deref());
         let emit = {
             let mut state = lock(&self.state);
             let merged = state.merged_roots();
@@ -293,7 +295,7 @@ fn spawn_watcher(monitor: Arc<PortMonitor>) {
     });
 }
 
-fn clean_path(path: &Path) -> PathBuf {
+pub(crate) fn clean_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -307,7 +309,7 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-fn resolve_existing_prefix(path: &Path) -> PathBuf {
+pub(crate) fn resolve_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return clean_path(&canon);
     }
@@ -334,7 +336,39 @@ struct ListenerProcess {
     sockets: Vec<(u16, String)>,
 }
 
-fn scan_attributed(roots: &[RegisteredRoot]) -> Vec<PortEntry> {
+fn expand_worktree_roots(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<RegisteredRoot> {
+    let Some(home) = home else {
+        return roots.to_vec();
+    };
+    let explicit: BTreeSet<PathBuf> = roots.iter().flat_map(|r| r.forms.iter().cloned()).collect();
+    let mut expanded = roots.to_vec();
+    for item in roots {
+        let Ok(project_path) = root(&item.raw) else {
+            continue;
+        };
+        for wt_path in crate::worktree::project_worktree_paths(home, &project_path) {
+            let lexical = clean_path(&wt_path);
+            let resolved = resolve_existing_prefix(&lexical);
+            if explicit.contains(&resolved) {
+                continue;
+            }
+            let score = (resolved.components().count(), resolved.as_os_str().len());
+            let mut forms = vec![resolved];
+            if !forms.contains(&lexical) {
+                forms.push(lexical);
+            }
+            expanded.push(RegisteredRoot {
+                raw: item.raw.clone(),
+                forms,
+                score,
+            });
+        }
+    }
+    expanded
+}
+
+fn scan_attributed(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<PortEntry> {
+    let roots = expand_worktree_roots(roots, home);
     let listeners = collect_listeners();
     let mut dedup: BTreeMap<(u32, u16), PortEntry> = BTreeMap::new();
 
@@ -342,7 +376,7 @@ fn scan_attributed(roots: &[RegisteredRoot]) -> Vec<PortEntry> {
         if should_ignore_process(proc_info.pid, &proc_info.process, &proc_info.cmdline) {
             continue;
         }
-        let Some(root_idx) = attribute_process(&proc_info, roots) else {
+        let Some(root_idx) = attribute_process(&proc_info, &roots) else {
             continue;
         };
         let root = &roots[root_idx].raw;

@@ -14,6 +14,8 @@ mod textgen_tests;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
+#[cfg(all(test, feature = "workspace"))]
+mod worktree_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -465,15 +467,18 @@ impl Server {
             let ws_clients = clients.clone();
             let ws_activity = activity.clone();
             let ws_seq = activity_seq.clone();
-            workspace::new(Arc::new(move |method, params| {
-                let line =
-                    json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
-                broadcast(&ws_clients, &line);
-                if matches!(method, "terminal/output" | "terminal/exit") {
-                    ws_seq.fetch_add(1, Ordering::Release);
-                    ws_activity.notify_one();
-                }
-            }))
+            workspace::new(
+                home.clone(),
+                Arc::new(move |method, params| {
+                    let line =
+                        json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
+                    broadcast(&ws_clients, &line);
+                    if matches!(method, "terminal/output" | "terminal/exit") {
+                        ws_seq.fetch_add(1, Ordering::Release);
+                        ws_activity.notify_one();
+                    }
+                }),
+            )
         };
         Arc::new(Self {
             home,
@@ -768,6 +773,18 @@ impl Server {
             .map(|(thread, live)| (thread.clone(), live.clone()))
     }
 
+    fn session_worktree_info(&self, cwd: &Path) -> Option<SessionWorktree> {
+        #[cfg(feature = "workspace")]
+        {
+            tiechui_workspace::session_worktree(&self.home, cwd)
+        }
+        #[cfg(not(feature = "workspace"))]
+        {
+            let _ = cwd;
+            None
+        }
+    }
+
     /// Responds while holding the projection, so later events follow the snapshot.
     fn snapshot(&self, out: &ClientOut, id: Id, live: &Live) {
         let projection = lock(&live.projection);
@@ -782,6 +799,7 @@ impl Server {
                 thread_id,
                 path: live.path.display().to_string(),
                 cwd: live.cwd.display().to_string(),
+                worktree: self.session_worktree_info(&live.cwd),
                 seq: projection.seq,
                 events: projection.snapshot(),
             }),
@@ -792,15 +810,29 @@ impl Server {
         let params: SessionListParams = parse(params)?;
         let home = self.home.clone();
         let cwd = PathBuf::from(&params.cwd);
-        let (summaries, _) = blocking(move |cancel| {
-            tiechui_session::summaries(&home, Some(&cwd), cancel).map_err(|e| e.to_string())
+        let summaries = blocking(move |cancel| {
+            let mut cwds = vec![cwd.clone()];
+            #[cfg(feature = "workspace")]
+            cwds.extend(tiechui_workspace::project_worktree_paths(&home, &cwd));
+            let (summaries, _) =
+                tiechui_session::summaries_in(&home, &cwds, cancel).map_err(|e| e.to_string())?;
+            Ok(summaries
+                .into_iter()
+                .map(|s| {
+                    #[cfg(feature = "workspace")]
+                    let worktree = tiechui_workspace::session_worktree(&home, &s.header.cwd);
+                    #[cfg(not(feature = "workspace"))]
+                    let worktree = None;
+                    (s, worktree)
+                })
+                .collect::<Vec<_>>())
         })
         .await?;
         let sessions = lock(&self.sessions);
         let mut listed: Vec<_> = summaries
             .into_iter()
-            .filter(|s| params.archived || s.meta.archived_at.is_none())
-            .map(|s| {
+            .filter(|(s, _)| params.archived || s.meta.archived_at.is_none())
+            .map(|(s, worktree)| {
                 let thread_id = ThreadId(s.header.id);
                 SessionSummary {
                     live: sessions
@@ -809,6 +841,7 @@ impl Server {
                     thread_id,
                     path: s.path.display().to_string(),
                     cwd: s.header.cwd.display().to_string(),
+                    worktree,
                     created_at: s.header.created_at,
                     modified: s.modified,
                     first_message: s.first_message,

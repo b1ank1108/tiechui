@@ -42,7 +42,7 @@ fn output(mut command: Command) -> Result<(String, String)> {
     Ok((stdout, stderr))
 }
 
-fn git(root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Result<String> {
+pub(crate) fn git(root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Result<String> {
     Ok(output(command("git", root, args, env))?.0)
 }
 

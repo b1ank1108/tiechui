@@ -7,6 +7,7 @@ mod ports;
 mod search;
 mod terminal;
 mod watch;
+mod worktree;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,10 @@ pub use git::{
 pub use search::search;
 use tiechui_protocol::workspace::{
     PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
+};
+pub use worktree::{
+    create_worktree_with_env, list_worktrees_with_env, project_worktree_paths,
+    remove_worktree_with_env, session_worktree,
 };
 
 /// Receives a notification's method and params.
@@ -62,7 +67,15 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(sink: Sink) -> Self {
-        let ports = ports::PortMonitor::new(sink.clone());
+        Self::new_inner(None, sink)
+    }
+
+    pub fn with_home(home: PathBuf, sink: Sink) -> Self {
+        Self::new_inner(Some(home), sink)
+    }
+
+    fn new_inner(home: Option<PathBuf>, sink: Sink) -> Self {
+        let ports = ports::PortMonitor::new(home, sink.clone());
         Self {
             sink,
             watches: Mutex::default(),

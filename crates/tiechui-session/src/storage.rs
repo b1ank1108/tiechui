@@ -62,9 +62,35 @@ fn lock_writer(file: &File) -> std::io::Result<()> {
 /// Percent-encode the canonical cwd, shortening long names with a stable hash.
 pub fn session_dir(home: &Path, cwd: &Path) -> Result<PathBuf, SessionError> {
     let cwd = canonical_cwd(cwd)?;
-    Ok(home
-        .join("sessions")
-        .join(encode_cwd(cwd.as_os_str().as_encoded_bytes())))
+    Ok(encoded_session_dir(home, &cwd))
+}
+
+pub(crate) fn session_dir_lenient(home: &Path, cwd: &Path) -> PathBuf {
+    let resolved = if let Ok(canon) = cwd.canonicalize() {
+        canon
+    } else {
+        best_effort_canonical(cwd)
+    };
+    encoded_session_dir(home, &resolved)
+}
+
+fn encoded_session_dir(home: &Path, canonical_cwd: &Path) -> PathBuf {
+    home.join("sessions")
+        .join(encode_cwd(canonical_cwd.as_os_str().as_encoded_bytes()))
+}
+
+fn best_effort_canonical(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(canon) = ancestor.canonicalize()
+            && let Ok(rest) = path.strip_prefix(ancestor)
+        {
+            return canon.join(rest);
+        }
+    }
+    path.to_owned()
 }
 
 fn encode_cwd(bytes: &[u8]) -> String {
@@ -116,6 +142,34 @@ pub fn list(
     cancel: &CancellationToken,
 ) -> Result<SessionList, SessionError> {
     list_in(&session_dir(home, cwd)?, cancel)
+}
+
+pub(crate) fn list_many(
+    home: &Path,
+    cwds: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Result<SessionList, SessionError> {
+    let Some((first, rest)) = cwds.split_first() else {
+        return Ok(SessionList::default());
+    };
+    let mut dirs = std::collections::BTreeSet::new();
+    dirs.insert(session_dir(home, first)?);
+    for extra in rest {
+        dirs.insert(session_dir_lenient(home, extra));
+    }
+    let mut merged = SessionList::default();
+    for dir in dirs {
+        let part = list_in(&dir, cancel)?;
+        merged.sessions.extend(part.sessions);
+        merged.diagnostics.extend(part.diagnostics);
+    }
+    merged
+        .sessions
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    merged
+        .diagnostics
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(merged)
 }
 
 pub(crate) fn list_all(

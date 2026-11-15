@@ -324,7 +324,8 @@ export type InitializeResult = { protocol_version: number, server_version: strin
  */
 home: string, 
 /**
- * Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
+ * Optional method groups: `workspace` for `fs/*`, `git/*`, `worktree/*`, `terminal/*` and
+ * `ports/*`.
  */
 capabilities: Array<string>, };
 
@@ -589,6 +590,10 @@ mode: string | null, };
 
 export type SessionSummary = { thread_id: ThreadId, path: string, cwd: string, 
 /**
+ * Present when `cwd` is a `chui`-managed session worktree.
+ */
+worktree?: SessionWorktree | null, 
+/**
  * Unix milliseconds.
  */
 created_at: number, 
@@ -604,6 +609,8 @@ parent: string | null,
  * Present while the session is open in this server.
  */
 live: LiveState | null, };
+
+export type SessionWorktree = { path: string, name: string, branch: string, base_branch: string, };
 
 export type ShellDetail = { id: string, output: string, log_path: string | null, };
 
@@ -661,7 +668,11 @@ export type SkillsListParams = {
  */
 cwd: string | null, };
 
-export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, seq: number, events: Array<Event>, };
+export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, 
+/**
+ * Present when `cwd` is a `chui`-managed session worktree.
+ */
+worktree?: SessionWorktree | null, seq: number, events: Array<Event>, };
 
 export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };
 
@@ -764,6 +775,28 @@ export type TurnStatus = "in_progress" | "completed" | "interrupted" | "failed";
 export type UndoCheck = { safe: Array<string>, unsafe: Array<string>, ignored: Array<string>, };
 
 export type Version = "2.0";
+
+export type WorktreeCreateParams = { root: string, 
+/**
+ * Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
+ */
+base_branch?: string | null, };
+
+export type WorktreeEntry = { name: string, path: string, project_root: string, branch: string, base_branch: string, dirty: boolean, 
+/**
+ * Unix milliseconds when the worktree was created.
+ */
+created_at: number, };
+
+export type WorktreeListParams = { root?: string | null, };
+
+export type WorktreeRemoveParams = { path: string, 
+/**
+ * Removes the worktree even when it has uncommitted or untracked changes.
+ */
+force?: boolean, };
+
+export type WorktreeRemoveResult = { path: string, branch: string, };
 
 export type WriteParams = { root: string, path: string, text: string, 
 /**

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -11,12 +11,12 @@ use tiechui_workspace::{self as ws, Sink, Workspace};
 
 use super::{Reply, Server, internal, parse, value};
 
-pub(super) fn new(sink: Sink) -> Arc<Workspace> {
-    Arc::new(Workspace::new(sink))
+pub(super) fn new(home: PathBuf, sink: Sink) -> Arc<Workspace> {
+    Arc::new(Workspace::with_home(home, sink))
 }
 
 pub(super) fn handles(method: &str) -> bool {
-    ["fs/", "git/", "terminal/", "ports/"]
+    ["fs/", "git/", "worktree/", "terminal/", "ports/"]
         .iter()
         .any(|group| method.starts_with(group))
 }
@@ -114,6 +114,7 @@ fn handle(
             ws::run_with_env(&ws::root(&p.root)?, &p.op, &git_env(home))
                 .map(|output| GitRunResult { output })
         }),
+        _ if method.starts_with("worktree/") => handle_worktree(home, method, params),
         "terminal/create" => call(params, |p: TerminalCreateParams| {
             workspace.create_terminal(p)
         }),
@@ -132,6 +133,27 @@ fn handle(
             workspace.list_ports_for_client(client_id, &p.roots)
         }),
         "ports/stop" => call(params, |p: PortStopParams| workspace.stop_port(&p)),
+        _ => Err(super::failure(-32601, format!("unknown method {method}"))),
+    }
+}
+
+fn handle_worktree(home: &Path, method: &str, params: Value) -> Reply {
+    match method {
+        "worktree/create" => call(params, |p: WorktreeCreateParams| {
+            ws::create_worktree_with_env(
+                home,
+                &ws::root(&p.root)?,
+                p.base_branch.as_deref(),
+                &git_env(home),
+            )
+        }),
+        "worktree/list" => call(params, |p: WorktreeListParams| {
+            let root = p.root.as_deref().map(ws::root).transpose()?;
+            ws::list_worktrees_with_env(home, root.as_deref(), &git_env(home))
+        }),
+        "worktree/remove" => call(params, |p: WorktreeRemoveParams| {
+            ws::remove_worktree_with_env(home, &ws::root(&p.path)?, p.force, &git_env(home))
+        }),
         _ => Err(super::failure(-32601, format!("unknown method {method}"))),
     }
 }
