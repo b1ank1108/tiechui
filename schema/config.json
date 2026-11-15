@@ -136,6 +136,16 @@
           "$ref": "#/definitions/TuiLayer"
         }
       ]
+    },
+    "worktrees": {
+      "default": {
+        "post_create_script": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorktreesLayer"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -903,6 +913,20 @@
           ]
         },
         "theme": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorktreesLayer": {
+      "type": "object",
+      "properties": {
+        "post_create_script": {
+          "description": "Project configuration: shell command run once inside a newly created session worktree when the project is trusted.",
           "default": null,
           "type": [
             "string",

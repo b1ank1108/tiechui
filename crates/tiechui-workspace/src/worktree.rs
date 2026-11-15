@@ -4,19 +4,26 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tiechui_protocol::app::SessionWorktree;
-use tiechui_protocol::workspace::{WorktreeEntry, WorktreeRemoveResult};
+use tiechui_protocol::workspace::{PostCreateResult, WorktreeEntry, WorktreeRemoveResult};
 
 use crate::ports::{clean_path, resolve_existing_prefix};
-use crate::{Result, fail, git, lock};
+use crate::{Result, fail, git, lock, worktree_carry, worktree_script};
 
 const LOCK_FILENAME: &str = "tiechui-worktree.lock";
 const REGISTRY_FILENAME: &str = "registry.json";
 const REGISTRY_LOCK_FILENAME: &str = "registry.lock";
+
+#[derive(Debug, Clone, Default)]
+pub struct CreateWorktreeOptions {
+    pub base_branch: Option<String>,
+    pub carry_changes: bool,
+    pub post_create_timeout: Option<Duration>,
+}
 
 #[derive(Clone)]
 struct Record {
@@ -26,6 +33,7 @@ struct Record {
     branch: String,
     base_branch: String,
     created_at: u64,
+    post_create: PostCreateResult,
 }
 
 impl Record {
@@ -37,10 +45,15 @@ impl Record {
             "branch": self.branch,
             "base_branch": self.base_branch,
             "created_at": self.created_at,
+            "post_create": self.post_create,
         })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
+        let post_create = value
+            .get("post_create")
+            .and_then(|raw| serde_json::from_value(raw.clone()).ok())
+            .unwrap_or_default();
         Some(Self {
             name: str_field(value, "name")?,
             path: str_field(value, "path")?,
@@ -48,6 +61,7 @@ impl Record {
             branch: str_field(value, "branch")?,
             base_branch: str_field(value, "base_branch")?,
             created_at: value.get("created_at")?.as_u64()?,
+            post_create,
         })
     }
 
@@ -66,12 +80,54 @@ pub fn create_worktree_with_env(
     base_branch: Option<&str>,
     env: &BTreeMap<String, String>,
 ) -> Result<WorktreeEntry> {
+    create_worktree_with_options(
+        home,
+        project_root,
+        CreateWorktreeOptions {
+            base_branch: base_branch.map(str::to_owned),
+            carry_changes: false,
+            post_create_timeout: None,
+        },
+        env,
+    )
+}
+
+pub fn create_worktree_with_options(
+    home: &Path,
+    project_root: &Path,
+    options: CreateWorktreeOptions,
+    env: &BTreeMap<String, String>,
+) -> Result<WorktreeEntry> {
     let clean_project = validate_project_dir(project_root)?;
     let common_dir = git_common_dir(&clean_project, env)?;
     let canonical_project = clean_project.canonicalize()?;
     let bucket_dir = worktrees_dir(home).join(bucket_name(&clean_project, &canonical_project));
-    with_file_lock(&common_dir.join(LOCK_FILENAME), || {
-        create_locked(home, &clean_project, &bucket_dir, base_branch, env)
+    let mut record = with_file_lock(&common_dir.join(LOCK_FILENAME), || {
+        create_locked(home, &clean_project, &bucket_dir, &options, env)
+    })?;
+    let wt_path = PathBuf::from(&record.path);
+    let post_create = worktree_script::run_project_post_create(
+        home,
+        &clean_project,
+        &wt_path,
+        options.post_create_timeout,
+        env,
+    );
+    if post_create != PostCreateResult::default() {
+        record.post_create = post_create;
+        let _ = update_record_post_create(home, &record);
+    }
+    let dirty = is_worktree_dirty(&wt_path, env).unwrap_or(false);
+    let branch = record.live_branch();
+    Ok(WorktreeEntry {
+        name: record.name,
+        path: record.path,
+        project_root: record.project_root,
+        branch,
+        base_branch: record.base_branch,
+        dirty,
+        created_at: record.created_at,
+        post_create: record.post_create,
     })
 }
 
@@ -79,41 +135,80 @@ fn create_locked(
     home: &Path,
     clean_project: &Path,
     bucket_dir: &Path,
-    base_branch: Option<&str>,
+    options: &CreateWorktreeOptions,
     env: &BTreeMap<String, String>,
-) -> Result<WorktreeEntry> {
-    let (base_label, start_point) = resolve_base(clean_project, base_branch, env)?;
+) -> Result<Record> {
+    let (base_label, start_point) =
+        resolve_base(clean_project, options.base_branch.as_deref(), env)?;
+    let carried = capture_optional_changes(clean_project, options.carry_changes, env)?;
     ensure_private_dirs(home, bucket_dir)?;
     let created_at = now_ms();
     let (name, branch, wt_path) = pick_worktree_slot(clean_project, bucket_dir, created_at, env)?;
-    let wt_str = path_str(&wt_path)?;
-    git::git(
-        clean_project,
-        &["worktree", "add", "-b", &branch, wt_str, &start_point],
-        env,
-    )?;
-    tighten_dirs_recursive(&wt_path)?;
     let record = Record {
         name,
-        path: wt_str.to_owned(),
+        path: path_str(&wt_path)?.to_owned(),
         project_root: clean_project.display().to_string(),
         branch,
         base_branch: base_label,
         created_at,
+        post_create: PostCreateResult::default(),
     };
-    if let Err(err) = register_record(home, record.clone()) {
-        rollback_checkout(clean_project, &wt_path, &record.branch, env);
-        return Err(err);
+    checkout_and_register(home, &start_point, carried.as_ref(), &record, env)?;
+    Ok(record)
+}
+
+fn capture_optional_changes(
+    clean_project: &Path,
+    carry_changes: bool,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<worktree_carry::CarriedSnapshot>> {
+    if !carry_changes {
+        return Ok(None);
     }
-    Ok(WorktreeEntry {
-        name: record.name,
-        path: record.path,
-        project_root: record.project_root,
-        branch: record.branch,
-        base_branch: record.base_branch,
-        dirty: false,
-        created_at: record.created_at,
-    })
+    worktree_carry::capture_uncommitted(clean_project, env).map(Some)
+}
+
+fn checkout_and_register(
+    home: &Path,
+    start_point: &str,
+    carried: Option<&worktree_carry::CarriedSnapshot>,
+    record: &Record,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    let clean_project = Path::new(&record.project_root);
+    let wt_path = Path::new(&record.path);
+    git::git(
+        clean_project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &record.branch,
+            &record.path,
+            start_point,
+        ],
+        env,
+    )?;
+    let result =
+        finish_checkout(wt_path, carried, env).and_then(|()| register_record(home, record.clone()));
+    if result.is_err() {
+        rollback_checkout(clean_project, wt_path, &record.branch, env);
+        if let Some(bucket_dir) = wt_path.parent() {
+            let _ = fs::remove_dir(bucket_dir);
+        }
+    }
+    result
+}
+
+fn finish_checkout(
+    wt_path: &Path,
+    carried: Option<&worktree_carry::CarriedSnapshot>,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    if let Some(snapshot) = carried {
+        snapshot.replay(wt_path, env)?;
+    }
+    tighten_dirs_recursive(wt_path)
 }
 
 pub fn list_worktrees_with_env(
@@ -152,6 +247,7 @@ pub fn list_worktrees_with_env(
             base_branch: record.base_branch,
             dirty,
             created_at: record.created_at,
+            post_create: record.post_create,
         });
     }
     Ok(entries)
@@ -471,6 +567,25 @@ fn register_record(home: &Path, record: Record) -> Result<()> {
         records.retain(|item| resolve_existing_prefix(Path::new(&item.path)) != key);
         records.push(record);
         save_registry_file(&wt_dir, &records)
+    })
+}
+
+fn update_record_post_create(home: &Path, updated: &Record) -> Result<()> {
+    let wt_dir = worktrees_dir(home);
+    if !wt_dir.exists() {
+        return Ok(());
+    }
+    with_file_lock(&wt_dir.join(REGISTRY_LOCK_FILENAME), || {
+        let mut records = load_registry_file(&wt_dir.join(REGISTRY_FILENAME))?;
+        let key = resolve_existing_prefix(Path::new(&updated.path));
+        if let Some(slot) = records
+            .iter_mut()
+            .find(|item| resolve_existing_prefix(Path::new(&item.path)) == key)
+        {
+            slot.post_create = updated.post_create.clone();
+            save_registry_file(&wt_dir, &records)?;
+        }
+        Ok(())
     })
 }
 

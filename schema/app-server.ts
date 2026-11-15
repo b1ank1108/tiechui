@@ -442,6 +442,10 @@ export type PortsChanged = { ports: Array<PortEntry>, };
 
 export type PortsListParams = { roots: Array<string>, };
 
+export type PostCreateResult = { status: PostCreateStatus, command?: string | null, exit_code?: number | null, output: string, reason?: string | null, truncated?: boolean, };
+
+export type PostCreateStatus = "none" | "succeeded" | "failed" | "skipped_untrusted";
+
 export type PromptDeleteParams = { cwd: string | null, path: string, };
 
 export type PromptEntry = { name: string, description: string, argument_hint: string | null, 
@@ -780,13 +784,17 @@ export type WorktreeCreateParams = { root: string,
 /**
  * Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
  */
-base_branch?: string | null, };
+base_branch?: string | null, 
+/**
+ * Carries uncommitted tracked and non-ignored untracked changes from `root` into the new worktree.
+ */
+carry_changes?: boolean, };
 
 export type WorktreeEntry = { name: string, path: string, project_root: string, branch: string, base_branch: string, dirty: boolean, 
 /**
  * Unix milliseconds when the worktree was created.
  */
-created_at: number, };
+created_at: number, post_create: PostCreateResult, };
 
 export type WorktreeListParams = { root?: string | null, };
 

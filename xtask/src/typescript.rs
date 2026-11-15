@@ -135,6 +135,8 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::CommitMessageParams>();
                 d.visit::<workspace::CommitMessageResult>();
                 d.visit::<workspace::CancelCommitMessageParams>();
+                d.visit::<workspace::PostCreateStatus>();
+                d.visit::<workspace::PostCreateResult>();
                 d.visit::<workspace::WorktreeEntry>();
                 d.visit::<workspace::WorktreeCreateParams>();
                 d.visit::<workspace::WorktreeListParams>();

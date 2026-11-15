@@ -20,6 +20,13 @@ impl ConfigPaths {
         Self::discover_with_env(cwd, |name| std::env::var_os(name))
     }
 
+    /// Discover user and project config paths using an explicit profile directory.
+    pub fn for_home(home: &Path, cwd: &Path) -> Result<Self, ConfigError> {
+        Self::discover_with_env(cwd, |name| {
+            (name == "TIECHUI_HOME").then(|| home.as_os_str().to_owned())
+        })
+    }
+
     pub(crate) fn discover_with_env(
         cwd: &Path,
         env: impl Fn(&str) -> Option<OsString>,

@@ -8,6 +8,8 @@ mod search;
 mod terminal;
 mod watch;
 mod worktree;
+mod worktree_carry;
+mod worktree_script;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,8 +25,8 @@ use tiechui_protocol::workspace::{
     PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
 };
 pub use worktree::{
-    create_worktree_with_env, list_worktrees_with_env, project_worktree_paths,
-    remove_worktree_with_env, session_worktree,
+    CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
+    list_worktrees_with_env, project_worktree_paths, remove_worktree_with_env, session_worktree,
 };
 
 /// Receives a notification's method and params.

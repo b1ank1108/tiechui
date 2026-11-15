@@ -339,6 +339,34 @@ pub struct CancelCommitMessageParams {
     pub request_id: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostCreateStatus {
+    #[default]
+    None,
+    Succeeded,
+    Failed,
+    SkippedUntrusted,
+}
+
+/// Outcome of the project's worktree post-create script.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PostCreateResult {
+    pub status: PostCreateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
 /// A Git worktree created and registered by `chui` under `$TIECHUI_HOME/worktrees/`.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -351,6 +379,8 @@ pub struct WorktreeEntry {
     pub dirty: bool,
     /// Unix milliseconds when the worktree was created.
     pub created_at: u64,
+    #[serde(default)]
+    pub post_create: PostCreateResult,
 }
 
 /// Creates a managed session worktree for `root` on branch `tiechui/<name>`.
@@ -361,6 +391,9 @@ pub struct WorktreeCreateParams {
     /// Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
+    /// Carries uncommitted tracked and non-ignored untracked changes from `root` into the new worktree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carry_changes: bool,
 }
 
 /// Lists managed session worktrees for `root`, or across all projects when `root` is absent.

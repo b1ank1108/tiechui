@@ -1860,3 +1860,72 @@ fn lightweight_model_is_user_only_and_names_a_provider_model() {
     assert_eq!(reloaded.config.lightweight_model, None);
     assert_eq!(reloaded.config.permissions.classifier_model, None);
 }
+
+#[test]
+fn project_post_create_script_respects_trust_and_project_config_discovery() {
+    let temp = temp_dir();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("profile");
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".claude/config.toml",
+        "[worktrees]\npost_create_script = 'echo from-claude'\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Untrusted("echo from-claude".into())
+    );
+
+    write(&repo, ".agents/config.toml", "[modules]\nediting = true\n");
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\npost_create_script = 'touch .setup-done'\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Untrusted("touch .setup-done".into())
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    TrustStore::new(&home)
+        .set(&repo, Some(true), &cancel)
+        .unwrap();
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Trusted("touch .setup-done".into())
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\npost_create_script = '   '\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\nunknown_key = 1\n",
+    );
+    assert!(matches!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Invalid(_)
+    ));
+}

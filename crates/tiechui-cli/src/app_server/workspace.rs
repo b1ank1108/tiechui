@@ -140,10 +140,14 @@ fn handle(
 fn handle_worktree(home: &Path, method: &str, params: Value) -> Reply {
     match method {
         "worktree/create" => call(params, |p: WorktreeCreateParams| {
-            ws::create_worktree_with_env(
+            ws::create_worktree_with_options(
                 home,
                 &ws::root(&p.root)?,
-                p.base_branch.as_deref(),
+                ws::CreateWorktreeOptions {
+                    base_branch: p.base_branch,
+                    carry_changes: p.carry_changes,
+                    post_create_timeout: None,
+                },
                 &git_env(home),
             )
         }),

@@ -5,8 +5,10 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use tiechui_model::{Content, Message, ModelId, Role};
-use tiechui_protocol::app::{SessionSummary, SessionWorktree, Snapshot};
-use tiechui_protocol::workspace::{Branches, WorktreeEntry, WorktreeRemoveResult};
+use tiechui_protocol::app::{SessionSummary, SessionWorktree, Snapshot, TrustResult};
+use tiechui_protocol::workspace::{
+    Branches, PostCreateStatus, WorktreeEntry, WorktreeRemoveResult,
+};
 use tiechui_session::{EntryKind, ModelRef, SessionStore};
 use tokio_util::sync::CancellationToken;
 
@@ -240,4 +242,120 @@ async fn worktree_rpc_and_project_session_listing_attribute_managed_worktrees_an
     assert!(!Path::new(&created.path).exists());
 
     restarted.close().await;
+}
+
+#[tokio::test]
+async fn worktree_create_handles_post_create_trust_failure_and_carry_changes_without_blocking_sessions()
+ {
+    let Some(home) = isolated_home_child(
+        "TC_WT_POST_CREATE_HOME",
+        "app_server::worktree_tests::worktree_create_handles_post_create_trust_failure_and_carry_changes_without_blocking_sessions",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let repo = workspace_dir.path().join("scripted-repo");
+    init_repo(&repo);
+    std::fs::create_dir_all(repo.join(".agents")).unwrap();
+    std::fs::write(
+        repo.join(".agents/config.toml"),
+        "[worktrees]\npost_create_script = 'echo rpc-setup-ok && touch .setup-done'\n",
+    )
+    .unwrap();
+    git(&repo, &["add", ".agents/config.toml"]);
+    git(&repo, &["commit", "-m", "configure post-create"]);
+
+    let mut client = TestClient::new(Server::new(home.clone()));
+    let _: Value = client
+        .call_ok(
+            "providers/save",
+            json!({
+                "name": "fixture",
+                "wire": "openai-completions",
+                "base_url": "http://127.0.0.1:9",
+                "api_key": "sk-test"
+            }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok(
+            "providers/save_model",
+            json!({
+                "provider": "fixture",
+                "previous": null,
+                "model": {
+                    "id": "m1",
+                    "context_window": 128000,
+                    "max_output": 4096,
+                    "levels": ["off"],
+                    "mapping": {},
+                    "images": false
+                }
+            }),
+        )
+        .await;
+
+    let untrusted: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    assert_eq!(
+        untrusted.post_create.status,
+        PostCreateStatus::SkippedUntrusted
+    );
+    assert!(!Path::new(&untrusted.path).join(".setup-done").exists());
+
+    let trust_res: TrustResult = client
+        .call_ok("trust", json!({ "cwd": repo, "allow": true }))
+        .await;
+    assert_eq!(trust_res.allowed, Some(true));
+
+    std::fs::write(repo.join("README.md"), "edited in main\n").unwrap();
+    std::fs::write(repo.join("carried.txt"), "new untracked\n").unwrap();
+    let main_status_before = git(&repo, &["status", "--porcelain"]);
+    let main_cached_before = git(&repo, &["diff", "--cached"]);
+
+    let trusted: WorktreeEntry = client
+        .call_ok(
+            "worktree/create",
+            json!({ "root": repo, "carry_changes": true }),
+        )
+        .await;
+    assert_eq!(trusted.post_create.status, PostCreateStatus::Succeeded);
+    assert_eq!(trusted.post_create.exit_code, Some(0));
+    assert!(trusted.post_create.output.contains("rpc-setup-ok"));
+    assert!(Path::new(&trusted.path).join(".setup-done").exists());
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&trusted.path).join("README.md")).unwrap(),
+        "edited in main\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&trusted.path).join("carried.txt")).unwrap(),
+        "new untracked\n"
+    );
+    assert_eq!(git(&repo, &["status", "--porcelain"]), main_status_before);
+    assert_eq!(git(&repo, &["diff", "--cached"]), main_cached_before);
+
+    std::fs::write(
+        repo.join(".agents/config.toml"),
+        "[worktrees]\npost_create_script = 'echo broken-setup >&2 && exit 1'\n",
+    )
+    .unwrap();
+    let failed: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    assert_eq!(failed.post_create.status, PostCreateStatus::Failed);
+    assert_eq!(failed.post_create.exit_code, Some(1));
+    assert!(failed.post_create.output.contains("broken-setup"));
+
+    let snap: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": failed.path, "model": "fixture/m1" }),
+        )
+        .await;
+    assert_eq!(snap.cwd, failed.path);
+    assert!(snap.worktree.is_some());
+
+    client.close().await;
 }

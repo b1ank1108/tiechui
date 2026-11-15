@@ -9,8 +9,16 @@ use toml::{Table, Value};
 
 use crate::{
     Config, ConfigError, ConfigPaths, Diagnostic, IgnoredReason, LoadedConfig, ProviderConfig,
-    StatusLineConfig, StatusLineItem, TuiConfig, Wire, validate_env_name,
+    StatusLineConfig, StatusLineItem, TuiConfig, Wire, WorktreesConfig, validate_env_name,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectPostCreate {
+    None,
+    Trusted(String),
+    Untrusted(String),
+    Invalid(ConfigError),
+}
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -31,6 +39,14 @@ struct Layer {
     ask: Option<crate::AskConfig>,
     sessions: Option<crate::SessionsConfig>,
     skills: Option<crate::SkillsConfig>,
+    worktrees: WorktreesLayer,
+}
+
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+struct WorktreesLayer {
+    /// Project configuration: shell command run once inside a newly created session worktree when the project is trusted.
+    post_create_script: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
@@ -58,6 +74,68 @@ pub fn schema() -> schemars::schema::RootSchema {
 /// Schema for `providers.toml`: each top-level table is one provider.
 pub fn providers_schema() -> schemars::schema::RootSchema {
     schemars::schema_for!(BTreeMap<String, ProviderConfig>)
+}
+
+pub fn project_post_create_script(
+    home: &Path,
+    project_root: &Path,
+) -> Result<ProjectPostCreate, ConfigError> {
+    let paths = ConfigPaths::for_home(home, project_root)?;
+    let Some(project_path) = paths.project else {
+        return Ok(ProjectPostCreate::None);
+    };
+    let Some(text) = read_optional(&project_path)? else {
+        return Ok(ProjectPostCreate::None);
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let trusted = crate::TrustStore::new(home).get(project_root, &cancel)? == Some(true);
+    if trusted {
+        Ok(parse_trusted_post_create(&project_path, &text))
+    } else {
+        Ok(parse_untrusted_post_create(&project_path, &text))
+    }
+}
+
+fn parse_untrusted_post_create(path: &Path, text: &str) -> ProjectPostCreate {
+    let Ok(table) = parse_table(path, text) else {
+        return ProjectPostCreate::None;
+    };
+    let script = table
+        .get("worktrees")
+        .and_then(Value::as_table)
+        .and_then(|wt| wt.get("post_create_script"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty());
+    match script {
+        Some(raw) => ProjectPostCreate::Untrusted(raw.to_owned()),
+        None => ProjectPostCreate::None,
+    }
+}
+
+fn parse_trusted_post_create(path: &Path, text: &str) -> ProjectPostCreate {
+    let mut table = match parse_table(path, text) {
+        Ok(table) => table,
+        Err(err) => return ProjectPostCreate::Invalid(err),
+    };
+    let layer = match parse_layer(path, table.clone()) {
+        Ok(layer) => Ok(layer),
+        Err(err) if err.key.starts_with("permissions") => {
+            table.remove("permissions");
+            parse_layer(path, table)
+        }
+        Err(err) => Err(err),
+    };
+    match layer {
+        Ok(layer) => match layer
+            .worktrees
+            .post_create_script
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(script) => ProjectPostCreate::Trusted(script),
+            None => ProjectPostCreate::None,
+        },
+        Err(err) => ProjectPostCreate::Invalid(err),
+    }
 }
 
 /// Merge defaults, user, trusted project, then CLI settings; module keys merge
@@ -180,6 +258,9 @@ pub fn load_with_mandatory_modules(
         ask: merged.ask.unwrap_or_default(),
         sessions: merged.sessions.unwrap_or_default(),
         skills: merged.skills.unwrap_or_default(),
+        worktrees: WorktreesConfig {
+            post_create_script: merged.worktrees.post_create_script,
+        },
         providers: load_providers(&paths.providers())?,
     };
     Ok(LoadedConfig {
@@ -438,6 +519,10 @@ fn merge(
     base.ask = layer.ask.or(base.ask.take());
     base.sessions = layer.sessions.or(base.sessions.take());
     base.skills = layer.skills.or(base.skills.take());
+    base.worktrees.post_create_script = layer
+        .worktrees
+        .post_create_script
+        .or(base.worktrees.post_create_script.take());
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);
     let (line, next) = (&mut base.tui.status_line, layer.tui.status_line);

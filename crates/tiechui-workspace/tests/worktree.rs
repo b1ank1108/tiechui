@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tiechui_protocol::workspace::PortStopParams;
+use sha2::{Digest, Sha256};
+use tiechui_config::TrustStore;
+use tiechui_protocol::workspace::{PortStopParams, PostCreateStatus};
 use tiechui_workspace as ws;
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -489,4 +491,354 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
     }
     let _ = listener_cwd;
     workspace.close();
+}
+
+#[test]
+fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_on_failure_or_timeout()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("script-repo");
+    init_repo(&repo);
+    let env = BTreeMap::new();
+
+    let wt_none = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    assert_eq!(wt_none.post_create.status, PostCreateStatus::None);
+    assert!(wt_none.post_create.output.is_empty());
+
+    std::fs::create_dir_all(repo.join(".agents")).unwrap();
+    let setup_script = if cfg!(windows) {
+        "echo setup-out && echo setup-err 1>&2 && echo ok > .setup-done"
+    } else {
+        "echo setup-out && echo setup-err >&2 && touch .setup-done && mkdir -m 755 generated && ln -s README.md linked-readme"
+    };
+    std::fs::write(
+        repo.join(".agents/config.toml"),
+        format!("[worktrees]\npost_create_script = {setup_script:?}\n"),
+    )
+    .unwrap();
+    git(&repo, &["add", ".agents/config.toml"]);
+    git(&repo, &["commit", "-m", "add post_create_script"]);
+
+    let wt_untrusted = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    assert_eq!(
+        wt_untrusted.post_create.status,
+        PostCreateStatus::SkippedUntrusted
+    );
+    assert!(wt_untrusted.post_create.reason.is_some());
+    assert!(!Path::new(&wt_untrusted.path).join(".setup-done").exists());
+
+    TrustStore::new(&home)
+        .set_blocking(&repo, Some(true))
+        .unwrap();
+
+    let wt_ok = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    assert_eq!(wt_ok.post_create.status, PostCreateStatus::Succeeded);
+    assert_eq!(wt_ok.post_create.exit_code, Some(0));
+    assert!(wt_ok.post_create.output.contains("setup-out"));
+    assert!(wt_ok.post_create.output.contains("setup-err"));
+    assert!(Path::new(&wt_ok.path).join(".setup-done").exists());
+    assert!(!repo.join(".setup-done").exists());
+    assert!(wt_ok.dirty);
+
+    let listed = ws::list_worktrees_with_env(&home, Some(&repo), &env).unwrap();
+    let listed_ok = listed.iter().find(|e| e.name == wt_ok.name).unwrap();
+    assert_eq!(listed_ok.post_create, wt_ok.post_create);
+
+    let fail_script = "echo step-failed >&2 && exit 1";
+    std::fs::write(
+        repo.join(".agents/config.toml"),
+        format!("[worktrees]\npost_create_script = {fail_script:?}\n"),
+    )
+    .unwrap();
+    let wt_fail = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    assert_eq!(wt_fail.post_create.status, PostCreateStatus::Failed);
+    assert_eq!(wt_fail.post_create.exit_code, Some(1));
+    assert!(wt_fail.post_create.output.contains("step-failed"));
+    assert!(wt_fail.post_create.reason.is_some());
+    assert!(Path::new(&wt_fail.path).is_dir());
+    assert!(ws::session_worktree(&home, Path::new(&wt_fail.path)).is_some());
+
+    #[cfg(unix)]
+    {
+        let hang_script = "echo before-timeout && sleep 10";
+        std::fs::write(
+            repo.join(".agents/config.toml"),
+            format!("[worktrees]\npost_create_script = {hang_script:?}\n"),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let wt_timeout = ws::create_worktree_with_options(
+            &home,
+            &repo,
+            ws::CreateWorktreeOptions {
+                base_branch: None,
+                carry_changes: false,
+                post_create_timeout: Some(Duration::from_millis(200)),
+            },
+            &env,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(wt_timeout.post_create.status, PostCreateStatus::Failed);
+        assert!(wt_timeout.post_create.output.contains("before-timeout"));
+        assert!(
+            wt_timeout
+                .post_create
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("timed out")),
+            "reason: {:?}",
+            wt_timeout.post_create.reason
+        );
+        assert!(Path::new(&wt_timeout.path).is_dir());
+    }
+}
+
+#[test]
+fn carry_changes_replays_tracked_and_untracked_changes_without_touching_main_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("carry-repo");
+    init_repo(&repo);
+    std::fs::write(repo.join(".gitignore"), "ignored.log\nbuild/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-m", "add gitignore"]);
+
+    std::fs::write(repo.join("staged.txt"), "staged payload\n").unwrap();
+    git(&repo, &["add", "staged.txt"]);
+    std::fs::write(repo.join("README.md"), "modified readme\n").unwrap();
+    std::fs::remove_file(repo.join("src/lib.rs")).unwrap();
+    std::fs::create_dir_all(repo.join("notes")).unwrap();
+    std::fs::write(repo.join("notes/todo.txt"), "untracked note\n").unwrap();
+    std::fs::write(repo.join("ignored.log"), "do not carry\n").unwrap();
+    std::fs::create_dir_all(repo.join("build")).unwrap();
+    std::fs::write(repo.join("build/out.bin"), "ignored dir\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        std::fs::create_dir_all(repo.join("bin")).unwrap();
+        let script_path = repo.join("bin/tool.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("README.md", repo.join("readme-link")).unwrap();
+    }
+
+    let status_before = git(
+        &repo,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+    );
+    let cached_before = git(&repo, &["--no-optional-locks", "diff", "--cached"]);
+    assert!(!cached_before.is_empty());
+    let index_path = repo.join(".git/index");
+    let index_hash_before = Sha256::digest(std::fs::read(&index_path).unwrap());
+    let index_mtime_before = std::fs::metadata(&index_path).unwrap().modified().unwrap();
+
+    std::thread::sleep(Duration::from_millis(20));
+
+    let env = BTreeMap::new();
+    let wt_clean = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    assert!(!wt_clean.dirty);
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&wt_clean.path).join("README.md")).unwrap(),
+        "hello\n"
+    );
+    assert!(!Path::new(&wt_clean.path).join("notes/todo.txt").exists());
+
+    let main_index_lock = repo.join(".git/index.lock");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&main_index_lock)
+        .unwrap();
+
+    let wt_carried = ws::create_worktree_with_options(
+        &home,
+        &repo,
+        ws::CreateWorktreeOptions {
+            base_branch: None,
+            carry_changes: true,
+            post_create_timeout: None,
+        },
+        &env,
+    )
+    .unwrap();
+    std::fs::remove_file(&main_index_lock).unwrap();
+    let wt_path = PathBuf::from(&wt_carried.path);
+
+    assert_eq!(
+        Sha256::digest(std::fs::read(&index_path).unwrap()),
+        index_hash_before
+    );
+    assert_eq!(
+        std::fs::metadata(&index_path).unwrap().modified().unwrap(),
+        index_mtime_before
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+        ),
+        status_before
+    );
+    assert_eq!(
+        git(&repo, &["--no-optional-locks", "diff", "--cached"]),
+        cached_before
+    );
+    assert!(!main_index_lock.exists());
+
+    assert!(wt_carried.dirty);
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("README.md")).unwrap(),
+        "modified readme\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("staged.txt")).unwrap(),
+        "staged payload\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("notes/todo.txt")).unwrap(),
+        "untracked note\n"
+    );
+    assert!(!wt_path.join("src/lib.rs").exists());
+    assert!(!wt_path.join("ignored.log").exists());
+    assert!(!wt_path.join("build").exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(wt_path.join("bin/tool.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "expected executable mode, got {mode:04o}");
+        let link_meta = std::fs::symlink_metadata(wt_path.join("readme-link")).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(wt_path.join("readme-link")).unwrap(),
+            Path::new("README.md")
+        );
+    }
+
+    assert_eq!(git(&wt_path, &["diff", "--cached"]), "");
+    let wt_status = git(
+        &wt_path,
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(wt_status.contains(" M README.md"), "wt_status: {wt_status}");
+    assert!(
+        wt_status.contains(" D src/lib.rs"),
+        "wt_status: {wt_status}"
+    );
+    assert!(
+        wt_status.contains("?? notes/todo.txt"),
+        "wt_status: {wt_status}"
+    );
+    assert!(
+        wt_status.contains("?? staged.txt"),
+        "wt_status: {wt_status}"
+    );
+}
+
+#[test]
+fn carry_changes_enforces_2000_file_and_200_mib_limits_without_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo_many = temp.path().join("many-repo");
+    init_repo(&repo_many);
+    let bulk_dir = repo_many.join("bulk");
+    std::fs::create_dir_all(&bulk_dir).unwrap();
+    for i in 0..2_001 {
+        std::fs::write(bulk_dir.join(format!("f-{i:04}.txt")), "x").unwrap();
+    }
+
+    let env = BTreeMap::new();
+    let err_many = ws::create_worktree_with_options(
+        &home,
+        &repo_many,
+        ws::CreateWorktreeOptions {
+            base_branch: None,
+            carry_changes: true,
+            post_create_timeout: None,
+        },
+        &env,
+    )
+    .unwrap_err()
+    .0;
+    assert!(
+        err_many.contains("2000") || err_many.contains("2,000"),
+        "unexpected error: {err_many}"
+    );
+    assert!(!home.join("worktrees").exists());
+    assert_eq!(git(&repo_many, &["branch", "--list", "tiechui/*"]), "");
+    assert!(
+        ws::list_worktrees_with_env(&home, Some(&repo_many), &env)
+            .unwrap()
+            .is_empty()
+    );
+
+    let repo_large = temp.path().join("large-repo");
+    init_repo(&repo_large);
+    std::fs::write(repo_large.join(".gitignore"), "ignored-huge.bin\n").unwrap();
+    git(&repo_large, &["add", ".gitignore"]);
+    git(&repo_large, &["commit", "-m", "ignore huge"]);
+
+    let ignored_file = std::fs::File::create(repo_large.join("ignored-huge.bin")).unwrap();
+    ignored_file.set_len(200 * 1024 * 1024 + 1024).unwrap();
+    drop(ignored_file);
+
+    let wt_with_ignored = ws::create_worktree_with_options(
+        &home,
+        &repo_large,
+        ws::CreateWorktreeOptions {
+            base_branch: None,
+            carry_changes: true,
+            post_create_timeout: None,
+        },
+        &env,
+    )
+    .unwrap();
+    ws::remove_worktree_with_env(&home, Path::new(&wt_with_ignored.path), true, &env).unwrap();
+    let branches_before = git(&repo_large, &["branch", "--list", "tiechui/*"]);
+
+    let huge_file = std::fs::File::create(repo_large.join("untracked-huge.bin")).unwrap();
+    huge_file.set_len(200 * 1024 * 1024 + 1).unwrap();
+    drop(huge_file);
+
+    let err_large = ws::create_worktree_with_options(
+        &home,
+        &repo_large,
+        ws::CreateWorktreeOptions {
+            base_branch: None,
+            carry_changes: true,
+            post_create_timeout: None,
+        },
+        &env,
+    )
+    .unwrap_err()
+    .0;
+    assert!(
+        err_large.contains("200 MiB"),
+        "unexpected error: {err_large}"
+    );
+    assert_eq!(
+        git(&repo_large, &["branch", "--list", "tiechui/*"]),
+        branches_before
+    );
+    assert!(
+        ws::list_worktrees_with_env(&home, Some(&repo_large), &env)
+            .unwrap()
+            .is_empty()
+    );
 }

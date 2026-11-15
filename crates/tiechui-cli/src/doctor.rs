@@ -148,6 +148,40 @@ fn grants(path: &Path, plugin: bool) -> Result<()> {
     Ok(())
 }
 
+fn is_managed_worktree_dir(relative: &Path) -> bool {
+    relative.starts_with("worktrees") && relative.components().count() == 3
+}
+
+fn check_worktree_registry(path: &Path, findings: &mut Vec<String>) -> Result<()> {
+    mode(path, 0o600, findings)?;
+    let value = json(path)?;
+    if value["version"] != 1 || !value["worktrees"].is_array() {
+        return Err("invalid worktree registry schema".into());
+    }
+    Ok(())
+}
+
+fn walk_dir(
+    path: &Path,
+    relative: &Path,
+    profile: &Path,
+    findings: &mut Vec<String>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    mode(path, 0o700, findings)?;
+    if is_managed_worktree_dir(relative) {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
+        if let Err(error) = walk(&path, profile, findings, cancel) {
+            check(cancel)?;
+            findings.push(format!("{}: {error}", path.display()));
+        }
+    }
+    Ok(())
+}
+
 fn walk(
     path: &Path,
     profile: &Path,
@@ -160,21 +194,16 @@ fn walk(
         findings.push(format!("{}: symlink is not checked", path.display()));
         return Ok(());
     }
+    let relative = path.strip_prefix(profile)?;
     if meta.is_dir() {
-        mode(path, 0o700, findings)?;
-        for entry in fs::read_dir(path)? {
-            let path = entry?.path();
-            if let Err(error) = walk(&path, profile, findings, cancel) {
-                check(cancel)?;
-                findings.push(format!("{}: {error}", path.display()));
-            }
-        }
-        return Ok(());
+        return walk_dir(path, relative, profile, findings, cancel);
     }
     if !meta.is_file() {
         return Err("expected a regular profile file".into());
     }
-    let relative = path.strip_prefix(profile)?;
+    if relative == Path::new("worktrees/registry.json") {
+        return check_worktree_registry(path, findings);
+    }
     if relative == Path::new("secrets.env")
         || relative.starts_with("mcp-oauth")
         || relative.starts_with("tokens")

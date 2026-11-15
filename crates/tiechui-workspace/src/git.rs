@@ -28,7 +28,10 @@ fn command(program: &str, root: &Path, args: &[&str], env: &BTreeMap<String, Str
 
 /// Stdout and stderr of a successful run.
 fn output(mut command: Command) -> Result<(String, String)> {
-    let output = command.output()?;
+    decode_output(command.output()?)
+}
+
+fn decode_output(output: std::process::Output) -> Result<(String, String)> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
@@ -44,6 +47,30 @@ fn output(mut command: Command) -> Result<(String, String)> {
 
 pub(crate) fn git(root: &Path, args: &[&str], env: &BTreeMap<String, String>) -> Result<String> {
     Ok(output(command("git", root, args, env))?.0)
+}
+
+pub(crate) fn git_with_stdin(
+    root: &Path,
+    args: &[&str],
+    stdin_bytes: &[u8],
+    env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut cmd = command("git", root, args, env);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let child_stdin = child.stdin.take();
+    let out = std::thread::scope(|scope| {
+        if let Some(mut pipe) = child_stdin {
+            scope.spawn(move || {
+                use std::io::Write;
+                let _ = pipe.write_all(stdin_bytes);
+            });
+        }
+        child.wait_with_output()
+    })?;
+    Ok(decode_output(out)?.0)
 }
 
 fn git_with(

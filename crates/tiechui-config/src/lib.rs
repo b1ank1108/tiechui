@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use load::{load, load_providers, load_with_mandatory_modules, providers_schema, schema};
+pub use load::{
+    ProjectPostCreate, load, load_providers, load_with_mandatory_modules,
+    project_post_create_script, providers_schema, schema,
+};
 pub use mcp::McpServerConfig;
 pub use paths::ConfigPaths;
 pub use permissions::{PermissionAction, PermissionMode, PermissionRule, PermissionsConfig};
@@ -124,6 +127,7 @@ pub struct Config {
     pub sessions: SessionsConfig,
     /// User configuration only.
     pub skills: SkillsConfig,
+    pub worktrees: WorktreesConfig,
     #[serde(skip)]
     #[schemars(skip)]
     pub mcp_origins: BTreeMap<String, PathBuf>,
@@ -602,6 +606,14 @@ pub struct SessionsConfig {
 pub struct SkillsConfig {
     /// Names of discovered skills that sessions leave out.
     pub disabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorktreesConfig {
+    /// Project configuration: shell command run once inside a newly created session worktree when the project is trusted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_create_script: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
