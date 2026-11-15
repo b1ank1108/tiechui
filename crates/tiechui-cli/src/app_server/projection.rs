@@ -129,11 +129,8 @@ impl Projection {
     /// Fires at most once, when a newly created session finishes its first completed turn.
     pub fn should_generate_title(&mut self, event: &Event) -> bool {
         match &event.event {
-            EventKind::ThreadStarted {
-                thread,
-                replay: false,
-            } if self.title_eligible.is_none() => {
-                self.title_eligible = Some(thread.turns.is_empty());
+            EventKind::ThreadStarted { thread, replay } if self.title_eligible.is_none() => {
+                self.title_eligible = Some(!*replay && thread.turns.is_empty());
                 false
             }
             EventKind::TurnCompleted { turn }
@@ -301,5 +298,72 @@ mod tests {
             json!({"kind": "retry_available", "available": true})
         );
         assert!(matches!(&snapshot[3].event, EventKind::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    fn title_eligibility_locks_once_for_new_replayed_and_non_empty_threads() {
+        let empty_thread = || Thread {
+            id: ThreadId("t".into()),
+            epoch: SessionEpoch(1),
+            turns: vec![],
+        };
+
+        let mut fresh = Projection::default();
+        assert!(
+            !fresh.should_generate_title(&event(EventKind::ThreadStarted {
+                thread: empty_thread(),
+                replay: false,
+            }))
+        );
+        assert!(
+            !fresh.should_generate_title(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Failed, vec![]),
+            }))
+        );
+        assert!(
+            fresh.should_generate_title(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![]),
+            }))
+        );
+        assert!(
+            !fresh.should_generate_title(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![]),
+            }))
+        );
+
+        let mut replayed = Projection::default();
+        assert!(
+            !replayed.should_generate_title(&event(EventKind::ThreadStarted {
+                thread: empty_thread(),
+                replay: true,
+            }))
+        );
+        assert!(
+            !replayed.should_generate_title(&event(EventKind::ThreadStarted {
+                thread: empty_thread(),
+                replay: false,
+            }))
+        );
+        assert!(
+            !replayed.should_generate_title(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![]),
+            }))
+        );
+
+        let mut resumed = Projection::default();
+        assert!(
+            !resumed.should_generate_title(&event(EventKind::ThreadStarted {
+                thread: Thread {
+                    turns: vec![turn(TurnStatus::Completed, vec![])],
+                    ..empty_thread()
+                },
+                replay: false,
+            }))
+        );
+        assert!(
+            !resumed.should_generate_title(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![]),
+            }))
+        );
     }
 }

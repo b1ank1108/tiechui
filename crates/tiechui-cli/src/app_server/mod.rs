@@ -75,6 +75,7 @@ struct Server {
     activity_seq: Arc<AtomicU64>,
     shutdown: CancellationToken,
     cancels: Mutex<textgen::CancelRegistry>,
+    title_tasks: Mutex<Vec<JoinHandle<()>>>,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
@@ -487,6 +488,7 @@ impl Server {
             activity_seq,
             shutdown: CancellationToken::new(),
             cancels: Mutex::default(),
+            title_tasks: Mutex::default(),
             #[cfg(feature = "workspace")]
             workspace,
         })
@@ -548,12 +550,25 @@ impl Server {
         lock(&self.clients).is_empty() && self.busy_sessions() == 0 && self.alive_terminals() == 0
     }
 
+    async fn drain_title_tasks(&self) {
+        loop {
+            let batch: Vec<_> = std::mem::take(&mut *lock(&self.title_tasks));
+            if batch.is_empty() {
+                break;
+            }
+            for handle in batch {
+                let _ = handle.await;
+            }
+        }
+    }
+
     async fn shutdown_all(&self) {
         self.shutdown.cancel();
         let open: Vec<_> = lock(&self.sessions).keys().cloned().collect();
         for thread in open {
             self.close(&thread).await;
         }
+        self.drain_title_tasks().await;
         #[cfg(feature = "workspace")]
         self.workspace.close();
     }
@@ -977,9 +992,18 @@ impl Server {
             event.event,
             EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
         );
-        let generate_title = {
+        let settled_live = settled.then(|| self.live(thread).ok()).flatten();
+        {
             let mut projection = lock(projection);
-            let generate_title = projection.should_generate_title(&event);
+            if projection.should_generate_title(&event)
+                && let Some(live) = &settled_live
+            {
+                textgen::spawn_session_title(
+                    self.clone(),
+                    live.path.clone(),
+                    self.shutdown.child_token(),
+                );
+            }
             let seq = projection.apply(&event);
             let epoch =
                 matches!(event.event, EventKind::ThreadStarted { .. }).then_some(event.epoch);
@@ -987,20 +1011,10 @@ impl Server {
             if epoch.is_some() {
                 ready.send_replace(epoch);
             }
-            generate_title
-        };
+        }
         self.touch();
-        if let Ok(live) = self.live(thread) {
-            if generate_title {
-                textgen::spawn_session_title(
-                    self.clone(),
-                    live.path.clone(),
-                    self.shutdown.child_token(),
-                );
-            }
-            if settled {
-                self.settle(thread, &live);
-            }
+        if let Some(live) = settled_live {
+            self.settle(thread, &live);
         }
     }
 

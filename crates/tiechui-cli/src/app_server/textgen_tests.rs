@@ -8,12 +8,31 @@ use tiechui_protocol::app::{SessionEvent, SessionSummary, Snapshot};
 use tiechui_protocol::rpc::Id;
 use tiechui_protocol::workspace::CommitMessageResult;
 use tiechui_protocol::{EventKind, ThreadId, TurnStatus};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{ClientOut, Server};
+
+struct SignalResponder {
+    arrived: Arc<Notify>,
+    template: ResponseTemplate,
+}
+
+impl wiremock::Respond for SignalResponder {
+    fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+        self.arrived.notify_one();
+        self.template.clone()
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+async fn wait_arrived(arrived: &Notify) {
+    tokio::time::timeout(Duration::from_secs(10), arrived.notified())
+        .await
+        .expect("timed out waiting for mock request arrival");
+}
 
 struct RpcHarness {
     server: Arc<Server>,
@@ -163,6 +182,10 @@ impl RpcHarness {
         while self.lines.try_recv().is_ok() {}
     }
 
+    async fn drain_title_tasks(&self) {
+        self.server.drain_title_tasks().await;
+    }
+
     async fn close(self) {
         self.server.remove_client(self.client_id);
         self.server.shutdown_all().await;
@@ -300,7 +323,7 @@ async fn run_title_generation_cases(home: PathBuf) {
     .unwrap();
     client.drain_notices();
     submit_text(&mut client, &resumed.thread_id, "继续第二轮").await;
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 0);
     assert_eq!(
         tiechui_session::meta(Path::new(&untitled_history_path))
@@ -331,6 +354,7 @@ async fn verify_first_turn_title(
     let long_user = "排查生产环境鉴权接口超时问题🚀".repeat(150);
     submit_text(client, &opened.thread_id, &long_user).await;
     client.wait_sessions_changed().await;
+    client.drain_title_tasks().await;
 
     let reqs = light_mock.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
@@ -361,9 +385,8 @@ async fn verify_first_turn_title(
         .unwrap();
     assert_eq!(tui_item.meta.title.as_deref(), Some("修复鉴权超时"));
 
-    // Second turn must not trigger another title request.
     submit_text(client, &opened.thread_id, "第二轮追问").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 1);
     client
         .call("session/close", json!({ "thread_id": opened.thread_id }))
@@ -395,7 +418,7 @@ async fn verify_unset_and_resume_guards(
     .unwrap();
     client.drain_notices();
     submit_text(client, &opened.thread_id, "未配置轻量模型首条消息").await;
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 0);
     assert_eq!(
         tiechui_session::meta(Path::new(&opened.path))
@@ -438,6 +461,7 @@ async fn verify_unset_and_resume_guards(
     client.drain_notices();
     submit_text(client, &pre_opened.thread_id, "配置轻量模型后发送首轮").await;
     client.wait_sessions_changed().await;
+    client.drain_title_tasks().await;
     assert_eq!(
         tiechui_session::meta(Path::new(&pre_opened.path))
             .unwrap()
@@ -458,7 +482,6 @@ async fn verify_unset_and_resume_guards(
 
 #[allow(clippy::unwrap_used)]
 async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: &MockServer) {
-    // Early rename before turn 1 -> zero lightweight requests.
     light_mock.reset().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -483,7 +506,7 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
         .unwrap();
     client.drain_notices();
     submit_text(client, &early.thread_id, "测试早期改名").await;
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 0);
     assert_eq!(
         tiechui_session::meta(Path::new(&early.path))
@@ -493,14 +516,16 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
         Some("手动早期标题")
     );
 
-    // Mid-flight rename while slow title request is running -> custom rename wins.
     light_mock.reset().await;
+    let arrived = Arc::new(Notify::new());
     Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(500))
+        .respond_with(SignalResponder {
+            arrived: arrived.clone(),
+            template: ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(400))
                 .set_body_raw(sse_chat("AI晚到标题"), "text/event-stream"),
-        )
+        })
+        .expect(1)
         .mount(light_mock)
         .await;
 
@@ -513,6 +538,7 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
     .unwrap();
     client.drain_notices();
     submit_text(client, &mid.thread_id, "测试中途改名").await;
+    wait_arrived(&arrived).await;
     client
         .call(
             "session/rename",
@@ -520,7 +546,8 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(750)).await;
+    client.drain_title_tasks().await;
+    assert_eq!(light_mock.received_requests().await.unwrap().len(), 1);
     assert_eq!(
         tiechui_session::meta(Path::new(&mid.path))
             .unwrap()
@@ -543,6 +570,7 @@ async fn verify_silent_failure(client: &mut RpcHarness, work: &Path, light_mock:
     light_mock.reset().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500).set_body_string("upstream down"))
+        .expect(1)
         .mount(light_mock)
         .await;
 
@@ -555,7 +583,8 @@ async fn verify_silent_failure(client: &mut RpcHarness, work: &Path, light_mock:
     .unwrap();
     client.drain_notices();
     let events = submit_text(client, &failing.thread_id, "测试失败静默").await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    client.drain_title_tasks().await;
+    assert_eq!(light_mock.received_requests().await.unwrap().len(), 1);
     assert!(!events.iter().any(|e| matches!(e, EventKind::Error { .. })));
     assert_eq!(
         tiechui_session::meta(Path::new(&failing.path))
@@ -643,46 +672,8 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     );
 
     verify_commit_message_diffs(&mut client, &repo, &light_mock).await;
+    verify_commit_message_cancellation(&mut client, &repo, &light_mock).await;
 
-    light_mock.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(10))
-                .set_body_raw(sse_chat("too late"), "text/event-stream"),
-        )
-        .mount(&light_mock)
-        .await;
-
-    let started = Instant::now();
-    let req_id = client.send_async(
-        "git/commit_message",
-        json!({ "root": repo, "request_id": "cancel-token-1" }),
-    );
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let cancel_res = client
-        .call(
-            "git/cancel_commit_message",
-            json!({ "request_id": "cancel-token-1" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(cancel_res, Value::Null);
-
-    let cancelled = client.wait_reply(req_id).await.unwrap_err();
-    assert_eq!(cancelled["code"], -32800, "{cancelled}");
-    assert!(started.elapsed() < Duration::from_secs(5));
-
-    // Also support JSON-RPC $/cancelRequest notification by id.
-    let rpc_started = Instant::now();
-    let rpc_cancel_id = client.send_async("git/commit_message", json!({ "root": repo }));
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    client.send_notification("$/cancelRequest", json!({ "id": rpc_cancel_id }));
-    let rpc_cancelled = client.wait_reply(rpc_cancel_id).await.unwrap_err();
-    assert_eq!(rpc_cancelled["code"], -32800, "{rpc_cancelled}");
-    assert!(rpc_started.elapsed() < Duration::from_secs(5));
-
-    // Deleting the declared model surfaces a clear error rather than falling back to main model.
     client
         .call(
             "providers/delete_model",
@@ -703,6 +694,58 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     );
 
     client.close().await;
+}
+
+#[allow(clippy::unwrap_used)]
+async fn verify_commit_message_cancellation(
+    client: &mut RpcHarness,
+    repo: &Path,
+    light_mock: &MockServer,
+) {
+    light_mock.reset().await;
+    let arrived = Arc::new(Notify::new());
+    Mock::given(method("POST"))
+        .respond_with(SignalResponder {
+            arrived: arrived.clone(),
+            template: ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_raw(sse_chat("too late"), "text/event-stream"),
+        })
+        .mount(light_mock)
+        .await;
+
+    let req_id = client.send_async(
+        "git/commit_message",
+        json!({ "root": repo, "request_id": "cancel-token-1" }),
+    );
+    wait_arrived(&arrived).await;
+    let started = Instant::now();
+    let cancel_res = client
+        .call(
+            "git/cancel_commit_message",
+            json!({ "request_id": "cancel-token-1" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancel_res, Value::Null);
+    let cancelled = client.wait_reply(req_id).await.unwrap_err();
+    assert_eq!(cancelled["code"], -32800, "{cancelled}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    let rpc_cancel_id = client.send_async("git/commit_message", json!({ "root": repo }));
+    wait_arrived(&arrived).await;
+    let rpc_started = Instant::now();
+    client.send_notification("$/cancelRequest", json!({ "id": rpc_cancel_id }));
+    let rpc_cancelled = client.wait_reply(rpc_cancel_id).await.unwrap_err();
+    assert_eq!(rpc_cancelled["code"], -32800, "{rpc_cancelled}");
+    assert!(rpc_started.elapsed() < Duration::from_secs(5));
+
+    let immediate_started = Instant::now();
+    let immediate_id = client.send_async("git/commit_message", json!({ "root": repo }));
+    client.send_notification("$/cancelRequest", json!({ "id": immediate_id }));
+    let immediate_cancelled = client.wait_reply(immediate_id).await.unwrap_err();
+    assert_eq!(immediate_cancelled["code"], -32800, "{immediate_cancelled}");
+    assert!(immediate_started.elapsed() < Duration::from_secs(5));
 }
 
 #[allow(clippy::unwrap_used)]

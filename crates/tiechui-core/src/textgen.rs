@@ -413,13 +413,24 @@ mod tests {
         assert!(user_content.len() <= COMMIT_DIFF_MAX_BYTES + 128);
         assert!(user_content.contains("[diff truncated]"));
 
+        struct NotifyOnPost {
+            arrived: std::sync::Arc<tokio::sync::Notify>,
+        }
+        impl wiremock::Respond for NotifyOnPost {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                self.arrived.notify_one();
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(30))
+                    .set_body_raw("data: [DONE]\n\n", "text/event-stream")
+            }
+        }
+
+        let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
         let slow_mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_secs(10))
-                    .set_body_raw("data: [DONE]\n\n", "text/event-stream"),
-            )
+            .respond_with(NotifyOnPost {
+                arrived: arrived.clone(),
+            })
             .mount(&slow_mock)
             .await;
 
@@ -427,7 +438,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let cancel_trigger = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            arrived.notified().await;
             cancel_trigger.cancel();
         });
         let started = Instant::now();

@@ -25,6 +25,7 @@ const REQUEST_CANCELLED_CODE: i64 = -32800;
 pub(super) struct CancelRegistry {
     by_rpc: HashMap<(u64, String), CancellationToken>,
     by_request_id: HashMap<String, (u64, CancellationToken)>,
+    pre_cancelled_rpc: VecDeque<(u64, String)>,
     pre_cancelled: VecDeque<String>,
 }
 
@@ -33,6 +34,25 @@ fn rpc_key(id: &Id) -> String {
         Id::String(s) => format!("s:{s}"),
         Id::Number(n) => format!("n:{n}"),
         Id::Null => "null".into(),
+    }
+}
+
+fn push_bounded<T: PartialEq>(queue: &mut VecDeque<T>, item: T) {
+    if !queue.contains(&item) {
+        if queue.len() >= MAX_PRE_CANCELLED {
+            queue.pop_front();
+        }
+        queue.push_back(item);
+    }
+}
+
+fn take_queued<T: PartialEq>(queue: &mut VecDeque<T>, item: &T) -> bool {
+    match queue.iter().position(|queued| queued == item) {
+        Some(pos) => {
+            queue.remove(pos);
+            true
+        }
+        None => false,
     }
 }
 
@@ -45,16 +65,18 @@ impl CancelRegistry {
         parent: &CancellationToken,
     ) -> CancellationToken {
         let token = parent.child_token();
-        self.by_rpc
-            .insert((client_id, rpc_key(rpc_id)), token.clone());
+        let key = (client_id, rpc_key(rpc_id));
+        let pre_rpc = take_queued(&mut self.pre_cancelled_rpc, &key);
+        let pre_req =
+            request_id.is_some_and(|id| take_queued(&mut self.pre_cancelled, &id.to_owned()));
+        if pre_rpc || pre_req {
+            token.cancel();
+            return token;
+        }
+        self.by_rpc.insert(key, token.clone());
         if let Some(req_id) = request_id {
-            if let Some(pos) = self.pre_cancelled.iter().position(|id| id == req_id) {
-                self.pre_cancelled.remove(pos);
-                token.cancel();
-            } else {
-                self.by_request_id
-                    .insert(req_id.to_owned(), (client_id, token.clone()));
-            }
+            self.by_request_id
+                .insert(req_id.to_owned(), (client_id, token.clone()));
         }
         token
     }
@@ -69,23 +91,23 @@ impl CancelRegistry {
     pub(super) fn cancel_request_id(&mut self, request_id: &str) {
         if let Some((_, token)) = self.by_request_id.remove(request_id) {
             token.cancel();
-            return;
-        }
-        if !self.pre_cancelled.iter().any(|id| id == request_id) {
-            if self.pre_cancelled.len() >= MAX_PRE_CANCELLED {
-                self.pre_cancelled.pop_front();
-            }
-            self.pre_cancelled.push_back(request_id.to_owned());
+        } else {
+            push_bounded(&mut self.pre_cancelled, request_id.to_owned());
         }
     }
 
     pub(super) fn cancel_rpc(&mut self, client_id: u64, rpc_id: &Id) {
-        if let Some(token) = self.by_rpc.remove(&(client_id, rpc_key(rpc_id))) {
+        let key = (client_id, rpc_key(rpc_id));
+        if let Some(token) = self.by_rpc.remove(&key) {
             token.cancel();
+        } else {
+            push_bounded(&mut self.pre_cancelled_rpc, key);
         }
     }
 
     pub(super) fn remove_client(&mut self, client_id: u64) {
+        self.pre_cancelled_rpc
+            .retain(|(owner, _)| *owner != client_id);
         self.by_rpc.retain(|(owner, _), token| {
             if *owner == client_id {
                 token.cancel();
@@ -216,35 +238,42 @@ fn collect_message_text(content: &[Content], out: &mut Vec<String>) {
 }
 
 pub(super) fn spawn_session_title(server: Arc<Server>, path: PathBuf, cancel: CancellationToken) {
-    tokio::spawn(async move {
-        let home = server.home.clone();
-        let job_path = path.clone();
-        let job_cancel = cancel.clone();
-        let Ok(Some(job)) =
-            tokio::task::spawn_blocking(move || prepare_title_job(&home, &job_path, &job_cancel))
-                .await
-        else {
-            return;
-        };
-        let Some(title) = tiechui_core::textgen::generate_session_title(
-            job.provider.as_ref(),
-            job.model,
-            &job.user_text,
-            &job.assistant_text,
-            cancel,
-        )
-        .await
-        else {
-            return;
-        };
-        let saved =
-            tokio::task::spawn_blocking(move || tiechui_session::set_initial_title(&path, &title))
-                .await;
-        if matches!(saved, Ok(Ok(true))) {
-            server.notify("sessions/changed", Value::Null);
-            server.touch();
-        }
+    let task_server = server.clone();
+    let handle = tokio::spawn(async move {
+        run_session_title(task_server, path, cancel).await;
     });
+    let mut tasks = lock(&server.title_tasks);
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(handle);
+}
+
+async fn run_session_title(server: Arc<Server>, path: PathBuf, cancel: CancellationToken) {
+    let home = server.home.clone();
+    let job_path = path.clone();
+    let job_cancel = cancel.clone();
+    let Ok(Some(job)) =
+        tokio::task::spawn_blocking(move || prepare_title_job(&home, &job_path, &job_cancel)).await
+    else {
+        return;
+    };
+    let Some(title) = tiechui_core::textgen::generate_session_title(
+        job.provider.as_ref(),
+        job.model,
+        &job.user_text,
+        &job.assistant_text,
+        cancel,
+    )
+    .await
+    else {
+        return;
+    };
+    let saved =
+        tokio::task::spawn_blocking(move || tiechui_session::set_initial_title(&path, &title))
+            .await;
+    if matches!(saved, Ok(Ok(true))) {
+        server.notify("sessions/changed", Value::Null);
+        server.touch();
+    }
 }
 
 pub(super) fn maybe_cancel_notification(server: &Server, client_id: u64, params: Option<Value>) {
