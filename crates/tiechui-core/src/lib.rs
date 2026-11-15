@@ -11,6 +11,7 @@ mod replay;
 mod retry;
 mod runtime;
 mod stream;
+pub mod textgen;
 mod validation;
 
 pub use interactions::{Inbox, Interactions};

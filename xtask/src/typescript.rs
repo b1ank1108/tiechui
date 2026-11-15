@@ -131,6 +131,9 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::PullRequest>();
                 d.visit::<workspace::GitRunParams>();
                 d.visit::<workspace::GitRunResult>();
+                d.visit::<workspace::CommitMessageParams>();
+                d.visit::<workspace::CommitMessageResult>();
+                d.visit::<workspace::CancelCommitMessageParams>();
                 d.visit::<workspace::TerminalCreateParams>();
                 d.visit::<workspace::TerminalParams>();
                 d.visit::<workspace::TerminalAttached>();

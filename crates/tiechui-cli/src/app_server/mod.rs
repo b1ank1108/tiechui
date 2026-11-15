@@ -8,6 +8,9 @@ mod projection;
 mod prompts;
 mod providers;
 mod skills;
+mod textgen;
+#[cfg(all(test, feature = "workspace"))]
+mod textgen_tests;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
@@ -70,6 +73,8 @@ struct Server {
     sweep: Notify,
     activity: Arc<Notify>,
     activity_seq: Arc<AtomicU64>,
+    shutdown: CancellationToken,
+    cancels: Mutex<textgen::CancelRegistry>,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
@@ -480,6 +485,8 @@ impl Server {
             sweep: Notify::new(),
             activity,
             activity_seq,
+            shutdown: CancellationToken::new(),
+            cancels: Mutex::default(),
             #[cfg(feature = "workspace")]
             workspace,
         })
@@ -500,6 +507,7 @@ impl Server {
 
     fn remove_client(&self, id: u64) {
         if lock(&self.clients).remove(&id).is_some() {
+            lock(&self.cancels).remove_client(id);
             #[cfg(feature = "workspace")]
             self.workspace.remove_client(id);
             self.touch();
@@ -541,6 +549,7 @@ impl Server {
     }
 
     async fn shutdown_all(&self) {
+        self.shutdown.cancel();
         let open: Vec<_> = lock(&self.sessions).keys().cloned().collect();
         for thread in open {
             self.close(&thread).await;
@@ -568,7 +577,10 @@ impl Server {
                     server.touch();
                 });
             }
-            // This server sends no requests, so responses and notifications are unexpected.
+            Ok(JsonRpcMessage::Notification(note)) if note.method == "$/cancelRequest" => {
+                textgen::maybe_cancel_notification(self, client_id, note.params.map(|p| json!(p)));
+            }
+            // This server sends no requests, so responses and other notifications are unexpected.
             Ok(_) => {}
             Err(error) => respond(out, Id::Null, Err(failure(-32700, error))),
         }
@@ -582,80 +594,129 @@ impl Server {
         method: &str,
         params: Value,
     ) {
+        if matches!(
+            method,
+            "session/open" | "session/fork" | "session/reload" | "session/snapshot"
+        ) {
+            match self.open_snapshot(method, params).await {
+                Ok(live) => self.snapshot(out, id, &live),
+                Err(error) => respond(out, id, Err(error)),
+            }
+            return;
+        }
         let reply = match method {
             "initialize" => self.initialize(params),
             "daemon/status" => value(self.daemon_status()),
-            "session/list" => self.list(params).await,
-            "session/open" | "session/fork" | "session/reload" | "session/snapshot" => {
-                let opened = match method {
-                    "session/open" => self.open(params).await,
-                    "session/fork" => self.fork(params).await,
-                    "session/reload" => match parse::<ThreadParams>(params) {
-                        Ok(p) => self.reload(&p.thread_id).await,
-                        Err(error) => Err(error),
-                    },
-                    _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
-                };
-                match opened {
-                    Ok(live) => return self.snapshot(out, id, &live),
-                    Err(error) => Err(error),
-                }
+            "trust" => self.trust(params).await,
+            _ if method.starts_with("session/") || turns::handles(method) => {
+                self.dispatch_session(method, params).await
             }
-            "session/submit" => match parse::<SubmitParams>(params) {
-                Ok(p) => self.submit(&p.thread_id, p.op).await.and_then(value),
-                Err(error) => Err(error),
-            },
+            _ => self.dispatch_module(client_id, &id, method, params).await,
+        };
+        respond(out, id, reply);
+    }
+
+    async fn open_snapshot(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+    ) -> Result<Arc<Live>, rpc::Error> {
+        match method {
+            "session/open" => self.open(params).await,
+            "session/fork" => self.fork(params).await,
+            "session/reload" => {
+                let p: ThreadParams = parse(params)?;
+                self.reload(&p.thread_id).await
+            }
+            _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
+        }
+    }
+
+    async fn dispatch_session(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        if turns::handles(method) {
+            return self.turn(method, params).await;
+        }
+        match method {
+            "session/list" => self.list(params).await,
+            "session/submit" => {
+                let p: SubmitParams = parse(params)?;
+                self.submit(&p.thread_id, p.op).await.and_then(value)
+            }
             "session/branch" => self.branch(params).await,
-            "session/close" => match parse::<ThreadParams>(params) {
-                Ok(p) => {
-                    self.close(&p.thread_id).await;
-                    Ok(Value::Null)
-                }
-                Err(error) => Err(error),
-            },
+            "session/close" => {
+                let p: ThreadParams = parse(params)?;
+                self.close(&p.thread_id).await;
+                Ok(Value::Null)
+            }
+            _ => self.dispatch_session_meta(method, params).await,
+        }
+    }
+
+    async fn dispatch_session_meta(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        match method {
             "session/rename" => self.rename(params).await,
             "session/archive" => self.archive(params).await,
             "session/trash" => self.trash(params).await,
-            "trust" => self.trust(params).await,
-            _ if turns::handles(method) => self.turn(method, params).await,
-            _ if providers::handles(method) => self.dispatch_providers(method, params).await,
-            _ if mcp::handles(method) => {
-                let notify = |authorize| self.notify("mcp/authorize", authorize);
-                let reply = mcp::handle(&self.home, method, params, notify).await;
-                if reply.is_ok() && mcp::edits(method) {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if agents::handles(method) => agents::handle(&self.home, method, params).await,
-            _ if hooks::handles(method) => {
-                let reply = hooks::handle(&self.home, method, params).await;
-                if reply.is_ok() && method != "hooks/list" {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if prompts::handles(method) => {
-                let reply = prompts::handle(&self.home, method, params).await;
-                if reply.is_ok() && method != "prompts/list" {
-                    self.refresh();
-                }
-                reply
-            }
-            _ if skills::handles(method) => {
-                let reply = skills::handle(&self.home, method, params).await;
-                if reply.is_ok() && method == "skills/enable" {
-                    self.refresh();
-                }
-                reply
-            }
-            #[cfg(feature = "workspace")]
-            _ if workspace::handles(method) => {
-                workspace::dispatch(&self.home, &self.workspace, client_id, method, params).await
-            }
             _ => Err(failure(-32601, format!("unknown method {method}"))),
+        }
+    }
+
+    async fn dispatch_module(
+        self: &Arc<Self>,
+        client_id: u64,
+        id: &Id,
+        method: &str,
+        params: Value,
+    ) -> Reply {
+        if providers::handles(method) {
+            return self.dispatch_providers(method, params).await;
+        }
+        if mcp::handles(method) {
+            return self.dispatch_mcp(method, params).await;
+        }
+        #[cfg(feature = "workspace")]
+        if workspace::handles(method) {
+            return workspace::dispatch(self, client_id, id, method, params).await;
+        }
+        let _ = (client_id, id);
+        self.dispatch_extensions(method, params).await
+    }
+
+    async fn dispatch_mcp(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        let notify = |authorize| self.notify("mcp/authorize", authorize);
+        let reply = mcp::handle(&self.home, method, params, notify).await;
+        if reply.is_ok() && mcp::edits(method) {
+            self.refresh();
+        }
+        reply
+    }
+
+    async fn dispatch_extensions(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        if agents::handles(method) {
+            return agents::handle(&self.home, method, params).await;
+        }
+        let (reply, edited) = if hooks::handles(method) {
+            (
+                hooks::handle(&self.home, method, params).await,
+                method != "hooks/list",
+            )
+        } else if prompts::handles(method) {
+            (
+                prompts::handle(&self.home, method, params).await,
+                method != "prompts/list",
+            )
+        } else if skills::handles(method) {
+            (
+                skills::handle(&self.home, method, params).await,
+                method == "skills/enable",
+            )
+        } else {
+            return Err(failure(-32601, format!("unknown method {method}")));
         };
-        respond(out, id, reply);
+        if reply.is_ok() && edited {
+            self.refresh();
+        }
+        reply
     }
 
     fn initialize(&self, params: Value) -> Reply {
@@ -880,26 +941,7 @@ impl Server {
     ) {
         loop {
             match events.recv().await {
-                Ok(event) => {
-                    let settled = matches!(
-                        event.event,
-                        EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
-                    );
-                    {
-                        let mut projection = lock(&projection);
-                        let seq = projection.apply(&event);
-                        let epoch = matches!(event.event, EventKind::ThreadStarted { .. })
-                            .then_some(event.epoch);
-                        self.notify("session/event", SessionEvent { seq, event });
-                        if epoch.is_some() {
-                            ready.send_replace(epoch);
-                        }
-                    }
-                    self.touch();
-                    if settled && let Ok(live) = self.live(&thread) {
-                        self.settle(&thread, &live);
-                    }
-                }
+                Ok(event) => self.forward_event(&thread, &projection, &ready, event),
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     eprintln!("chui app-server: {}: {count} events were dropped", thread.0);
                 }
@@ -922,6 +964,44 @@ impl Server {
             );
         }
         self.touch();
+    }
+
+    fn forward_event(
+        self: &Arc<Self>,
+        thread: &ThreadId,
+        projection: &Mutex<Projection>,
+        ready: &watch::Sender<Option<SessionEpoch>>,
+        event: Event,
+    ) {
+        let settled = matches!(
+            event.event,
+            EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
+        );
+        let generate_title = {
+            let mut projection = lock(projection);
+            let generate_title = projection.should_generate_title(&event);
+            let seq = projection.apply(&event);
+            let epoch =
+                matches!(event.event, EventKind::ThreadStarted { .. }).then_some(event.epoch);
+            self.notify("session/event", SessionEvent { seq, event });
+            if epoch.is_some() {
+                ready.send_replace(epoch);
+            }
+            generate_title
+        };
+        self.touch();
+        if let Ok(live) = self.live(thread) {
+            if generate_title {
+                textgen::spawn_session_title(
+                    self.clone(),
+                    live.path.clone(),
+                    self.shutdown.child_token(),
+                );
+            }
+            if settled {
+                self.settle(thread, &live);
+            }
+        }
     }
 
     async fn submit(&self, thread: &ThreadId, op: Op) -> Result<SubmitResult, rpc::Error> {
@@ -1240,13 +1320,13 @@ fn archive_before(
     let (summaries, _) =
         tiechui_session::summaries(home, None, cancel).map_err(|e| e.to_string())?;
     let mut archived = vec![];
-    for mut summary in summaries {
+    for summary in summaries {
         if summary.meta.archived_at.is_none()
             && summary.modified < before
             && !open.contains(&summary.path)
         {
-            summary.meta.archived_at = Some(now);
-            tiechui_session::save_meta(&summary.path, &summary.meta).map_err(|e| e.to_string())?;
+            tiechui_session::update_meta(&summary.path, |meta| meta.archived_at = Some(now))
+                .map_err(|e| e.to_string())?;
             archived.push(summary.path);
         }
     }
@@ -1258,10 +1338,7 @@ async fn update_meta(
     change: impl FnOnce(&mut tiechui_session::Meta) + Send + 'static,
 ) -> Reply {
     blocking(move |_| {
-        let path = Path::new(&path);
-        let mut meta = tiechui_session::meta(path).map_err(|e| e.to_string())?;
-        change(&mut meta);
-        tiechui_session::save_meta(path, &meta).map_err(|e| e.to_string())
+        tiechui_session::update_meta(Path::new(&path), change).map_err(|e| e.to_string())
     })
     .await?;
     Ok(Value::Null)

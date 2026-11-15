@@ -5,10 +5,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tiechui_protocol::rpc::Id;
 use tiechui_protocol::workspace::*;
 use tiechui_workspace::{self as ws, Sink, Workspace};
 
-use super::{Reply, internal, parse, value};
+use super::{Reply, Server, internal, parse, value};
 
 pub(super) fn new(sink: Sink) -> Arc<Workspace> {
     Arc::new(Workspace::new(sink))
@@ -21,14 +22,17 @@ pub(super) fn handles(method: &str) -> bool {
 }
 
 pub(super) async fn dispatch(
-    home: &Path,
-    workspace: &Arc<Workspace>,
+    server: &Server,
     client_id: u64,
+    rpc_id: &Id,
     method: &str,
     params: Value,
 ) -> Reply {
-    let home = home.to_owned();
-    let workspace = workspace.clone();
+    if super::textgen::handles_git(method) {
+        return super::textgen::dispatch_git(server, client_id, rpc_id, method, params).await;
+    }
+    let home = server.home.clone();
+    let workspace = server.workspace.clone();
     let method = method.to_owned();
     tokio::task::spawn_blocking(move || handle(&home, &workspace, client_id, &method, params))
         .await

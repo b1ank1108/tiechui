@@ -92,11 +92,21 @@ forced?: number, responses: Array<CacheResponse>, omitted: number, unavailable: 
 
 export type CacheResponse = { compression?: number, input: number, cached: number, fresh: number, unattributed: number, };
 
+export type CancelCommitMessageParams = { request_id: string, };
+
 export type CheckpointStats = { files: { [key in string]: LineStats | null }, error: string | null, };
 
 export type CommandInfo = { name: string, description: string, argument_hint?: string | null, };
 
 export type CommitFile = { path: string, status: GitFileStatus, added: number, removed: number, };
+
+export type CommitMessageParams = { root: string, 
+/**
+ * Client-chosen token for `git/cancel_commit_message`.
+ */
+request_id?: string, };
+
+export type CommitMessageResult = { message: string, };
 
 export type CompactionPhase = "prepare" | "summarize" | "restore" | "commit";
 

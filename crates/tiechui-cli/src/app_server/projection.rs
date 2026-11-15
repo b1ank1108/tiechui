@@ -21,6 +21,7 @@ pub(super) struct Projection {
     /// The latest error since a turn started; it explains the open or last failed turn.
     error: Option<Event>,
     retry: bool,
+    title_eligible: Option<bool>,
 }
 
 impl Projection {
@@ -123,6 +124,27 @@ impl Projection {
             .chain(self.approvals.iter().map(|(_, event)| event))
             .cloned()
             .collect()
+    }
+
+    /// Fires at most once, when a newly created session finishes its first completed turn.
+    pub fn should_generate_title(&mut self, event: &Event) -> bool {
+        match &event.event {
+            EventKind::ThreadStarted {
+                thread,
+                replay: false,
+            } if self.title_eligible.is_none() => {
+                self.title_eligible = Some(thread.turns.is_empty());
+                false
+            }
+            EventKind::TurnCompleted { turn }
+                if turn.status == tiechui_protocol::TurnStatus::Completed
+                    && self.title_eligible == Some(true) =>
+            {
+                self.title_eligible = Some(false);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn keep(&mut self, key: &str, event: &Event) {
