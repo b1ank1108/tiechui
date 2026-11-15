@@ -39,12 +39,17 @@ pub(super) fn handles(method: &str) -> bool {
         )
 }
 
-/// Whether the method changes the providers, which open sessions then reload.
+const EDITS: [&str; 5] = [
+    "providers/save",
+    "providers/delete",
+    "providers/save_model",
+    "providers/delete_model",
+    "providers/reload",
+];
+
+/// Whether the method changes or reloads the providers, which open sessions then reload.
 pub(super) fn edits(method: &str) -> bool {
-    matches!(
-        method,
-        "providers/save" | "providers/delete" | "providers/save_model" | "providers/delete_model"
-    )
+    EDITS.contains(&method)
 }
 
 pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
@@ -52,6 +57,7 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
     match method {
         "providers/list" => blocking(move |_| list(&file)).await.and_then(value),
         "providers/presets" => presets(params),
+        "providers/reload" => write(move || tiechui_config::load_providers(&file).map(drop)).await,
         "providers/save" => {
             let p: ProviderSaveParams = parse(params)?;
             write(move || {
@@ -228,6 +234,8 @@ fn config(model: ModelEntry) -> ModelConfig {
 fn values(config: tiechui_config::Config) -> ConfigValues {
     ConfigValues {
         model: config.model,
+        lightweight_model: config.lightweight_model,
+        classifier_model: config.permissions.classifier_model,
         thinking: config.thinking.map(convert),
         proxy: config.network.proxy,
         no_proxy: config.network.no_proxy,
@@ -241,13 +249,21 @@ fn values(config: tiechui_config::Config) -> ConfigValues {
 }
 
 /// Keys besides `model` and `thinking`, which null removes.
-const OPTIONAL: [&str; 5] = [
+const OPTIONAL: [&str; 7] = [
+    "lightweight_model",
+    "permissions.classifier_model",
     "network.proxy",
     "network.no_proxy",
     "network.ca_cert",
     "ask.auto_continue_after_sec",
     "sessions.archive_after_days",
 ];
+
+const MODEL_KEYS: [&str; 3] = ["model", "lightweight_model", "permissions.classifier_model"];
+
+const NETWORK_KEYS: [&str; 3] = ["network.proxy", "network.no_proxy", "network.ca_cert"];
+
+const NUMBER_KEYS: [&str; 2] = ["ask.auto_continue_after_sec", "sessions.archive_after_days"];
 
 /// `config/update`: one key of the user's `config.toml`, kept only if the configuration still
 /// loads.
@@ -257,39 +273,7 @@ fn update(home: &Path, params: ConfigUpdateParams) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         read => Some(read.map_err(|e| e.to_string())?),
     };
-    let key = params.key.as_str();
-    let save = |value| tiechui_config::save_preference(&path, key, value);
-    match (key, params.value) {
-        ("model", value) => {
-            let model = value.as_str().ok_or("model is a string")?;
-            let (provider, id) = model.split_once('/').ok_or("model is <provider>/<id>")?;
-            let providers = tiechui_config::load_providers(&home.join("providers.toml"))
-                .map_err(|e| e.to_string())?;
-            if !providers
-                .get(provider)
-                .is_some_and(|declared| declared.models.iter().any(|m| m.id == id))
-            {
-                return Err(format!("{model} is not declared"));
-            }
-            save(model.into())
-        }
-        ("thinking", value) => {
-            let level: ThinkingLevel = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            save(convert::<String>(level).into())
-        }
-        (key, Value::Null) if OPTIONAL.contains(&key) => {
-            tiechui_config::remove_preference(&path, key)
-        }
-        ("network.proxy" | "network.no_proxy" | "network.ca_cert", Value::String(text)) => {
-            save(text.as_str().into())
-        }
-        ("ask.auto_continue_after_sec" | "sessions.archive_after_days", Value::Number(number)) => {
-            save(number.as_i64().ok_or("expected a whole number")?.into())
-        }
-        (key, _) if OPTIONAL.contains(&key) => return Err(format!("{key} has the wrong type")),
-        (key, _) => return Err(format!("{key} cannot be set here")),
-    }
-    .map_err(|e| e.to_string())?;
+    apply_preference(home, &path, params.key.as_str(), params.value)?;
     let config = crate::setup::user_config(&path);
     // Certificates are read only as clients are made.
     let network = config.and_then(|config| config.network.apply(reqwest::Client::builder()));
@@ -301,6 +285,61 @@ fn update(home: &Path, params: ConfigUpdateParams) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         Err(error)
     })
+}
+
+fn declared_model(home: &Path, key: &str, model: &str) -> Result<(), String> {
+    let (provider, id) = model
+        .split_once('/')
+        .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        .ok_or_else(|| format!("{key} is <provider>/<id>"))?;
+    let providers =
+        tiechui_config::load_providers(&home.join("providers.toml")).map_err(|e| e.to_string())?;
+    let exists = providers
+        .get(provider)
+        .is_some_and(|declared| declared.models.iter().any(|m| m.id == id));
+    exists
+        .then_some(())
+        .ok_or_else(|| format!("{model} is not declared"))
+}
+
+fn apply_preference(home: &Path, path: &Path, key: &str, value: Value) -> Result<(), String> {
+    if value.is_null() && OPTIONAL.contains(&key) {
+        return tiechui_config::remove_preference(path, key).map_err(|e| e.to_string());
+    }
+    if save_string_preference(home, path, key, &value)? {
+        return Ok(());
+    }
+    let save = |val| tiechui_config::save_preference(path, key, val).map_err(|e| e.to_string());
+    if key == "thinking" {
+        let level: ThinkingLevel = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        return save(convert::<String>(level).into());
+    }
+    if NUMBER_KEYS.contains(&key) {
+        let number = value
+            .as_i64()
+            .ok_or_else(|| format!("{key} has the wrong type"))?;
+        return save(number.into());
+    }
+    Err(format!("{key} cannot be set here"))
+}
+
+fn save_string_preference(
+    home: &Path,
+    path: &Path,
+    key: &str,
+    value: &Value,
+) -> Result<bool, String> {
+    if !MODEL_KEYS.contains(&key) && !NETWORK_KEYS.contains(&key) {
+        return Ok(false);
+    }
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("{key} has the wrong type"))?;
+    if MODEL_KEYS.contains(&key) {
+        declared_model(home, key, text)?;
+    }
+    tiechui_config::save_preference(path, key, text.into()).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// The provider with the user's network settings.

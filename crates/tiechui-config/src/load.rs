@@ -18,6 +18,8 @@ use crate::{
 struct Layer {
     /// Default model reference in `<provider>/<id>` form.
     model: Option<String>,
+    /// User configuration only: model for auxiliary tasks in `<provider>/<id>` form.
+    lightweight_model: Option<String>,
     thinking: Option<crate::ThinkingLevel>,
     modules: BTreeMap<String, bool>,
     retry: Option<crate::RetryConfig>,
@@ -122,27 +124,7 @@ pub fn load_with_mandatory_modules(
                     }
                     Err(error) => return Err(error),
                 };
-                let mut user_only = vec![];
-                if let Some(permissions) = project_layer.permissions.take() {
-                    if permissions.mode.is_some() {
-                        user_only.push("permissions.mode");
-                    }
-                    // A project could otherwise send every reviewed action to a model it picks.
-                    if permissions.classifier_model.is_some() {
-                        user_only.push("permissions.classifier_model");
-                    }
-                    project_rules = permissions.rules.unwrap_or_default();
-                }
-                // A project could otherwise route requests, keys included, through its own proxy.
-                if project_layer.network.take().is_some() {
-                    user_only.push("network");
-                }
-                if project_layer.sessions.take().is_some() {
-                    user_only.push("sessions");
-                }
-                if project_layer.skills.take().is_some() {
-                    user_only.push("skills");
-                }
+                let user_only = strip_user_only(&mut project_layer, &mut project_rules);
                 diagnostics.extend(user_only.into_iter().map(|key| Diagnostic {
                     file: path.to_owned(),
                     key: key.into(),
@@ -181,6 +163,7 @@ pub fn load_with_mandatory_modules(
     }
     let config = Config {
         model: merged.model,
+        lightweight_model: merged.lightweight_model,
         thinking: merged.thinking,
         modules: merged.modules,
         retry: merged.retry.unwrap_or_default(),
@@ -203,6 +186,37 @@ pub fn load_with_mandatory_modules(
         config,
         diagnostics,
     })
+}
+
+fn strip_user_only(
+    project_layer: &mut Layer,
+    project_rules: &mut Vec<crate::PermissionRule>,
+) -> Vec<&'static str> {
+    let mut user_only = vec![];
+    if project_layer.lightweight_model.take().is_some() {
+        user_only.push("lightweight_model");
+    }
+    if let Some(permissions) = project_layer.permissions.take() {
+        if permissions.mode.is_some() {
+            user_only.push("permissions.mode");
+        }
+        // A project could otherwise send every reviewed action to a model it picks.
+        if permissions.classifier_model.is_some() {
+            user_only.push("permissions.classifier_model");
+        }
+        *project_rules = permissions.rules.unwrap_or_default();
+    }
+    // A project could otherwise route requests, keys included, through its own proxy.
+    for (present, key) in [
+        (project_layer.network.take().is_some(), "network"),
+        (project_layer.sessions.take().is_some(), "sessions"),
+        (project_layer.skills.take().is_some(), "skills"),
+    ] {
+        if present {
+            user_only.push(key);
+        }
+    }
+    user_only
 }
 
 fn tui(layer: TuiLayer) -> TuiConfig {
@@ -358,17 +372,23 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             "token settings must be non-negative safe integers",
         ));
     }
+    validate_models_and_permissions(&layer, path)?;
+    Ok(layer)
+}
+
+fn validate_models_and_permissions(layer: &Layer, path: &Path) -> Result<(), ConfigError> {
     let model_ref = |model: &str| {
         model
             .split_once('/')
             .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
     };
-    if layer
-        .model
-        .as_deref()
-        .is_some_and(|model| !model_ref(model))
-    {
-        return Err(ConfigError::new(path, "model", "expected <provider>/<id>"));
+    for (key, value) in [
+        ("model", layer.model.as_deref()),
+        ("lightweight_model", layer.lightweight_model.as_deref()),
+    ] {
+        if value.is_some_and(|model| !model_ref(model)) {
+            return Err(ConfigError::new(path, key, "expected <provider>/<id>"));
+        }
     }
     if let Some(permissions) = &layer.permissions {
         if permissions
@@ -388,7 +408,7 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             })?;
         }
     }
-    Ok(layer)
+    Ok(())
 }
 
 fn merge(
@@ -409,34 +429,17 @@ fn merge(
         mcp_origins.insert(name.clone(), source.to_owned());
         base.mcp_servers.insert(name, server);
     }
-    if layer.model.is_some() {
-        base.model = layer.model;
-    }
-    if layer.thinking.is_some() {
-        base.thinking = layer.thinking;
-    }
+    base.model = layer.model.or(base.model.take());
+    base.lightweight_model = layer.lightweight_model.or(base.lightweight_model.take());
+    base.thinking = layer.thinking.or(base.thinking);
     base.modules.extend(layer.modules);
-    if layer.retry.is_some() {
-        base.retry = layer.retry;
-    }
-    if layer.compaction.is_some() {
-        base.compaction = layer.compaction;
-    }
-    if layer.permissions.is_some() {
-        base.permissions = layer.permissions;
-    }
-    if layer.network.is_some() {
-        base.network = layer.network;
-    }
-    if layer.ask.is_some() {
-        base.ask = layer.ask;
-    }
-    if layer.sessions.is_some() {
-        base.sessions = layer.sessions;
-    }
-    if layer.skills.is_some() {
-        base.skills = layer.skills;
-    }
+    base.retry = layer.retry.or(base.retry.take());
+    base.compaction = layer.compaction.or(base.compaction.take());
+    base.permissions = layer.permissions.or(base.permissions.take());
+    base.network = layer.network.or(base.network.take());
+    base.ask = layer.ask.or(base.ask.take());
+    base.sessions = layer.sessions.or(base.sessions.take());
+    base.skills = layer.skills.or(base.skills.take());
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);
     let (line, next) = (&mut base.tui.status_line, layer.tui.status_line);

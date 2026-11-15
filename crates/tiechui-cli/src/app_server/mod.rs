@@ -618,27 +618,7 @@ impl Server {
             "session/trash" => self.trash(params).await,
             "trust" => self.trust(params).await,
             _ if turns::handles(method) => self.turn(method, params).await,
-            _ if providers::handles(method) => {
-                let archiving = params["key"] == "sessions.archive_after_days";
-                let runtime_config = method == "config/update"
-                    && matches!(
-                        params["key"].as_str(),
-                        Some(
-                            "network.proxy"
-                                | "network.no_proxy"
-                                | "network.ca_cert"
-                                | "ask.auto_continue_after_sec"
-                        )
-                    );
-                let reply = providers::handle(&self.home, method, params).await;
-                if reply.is_ok() && (providers::edits(method) || runtime_config) {
-                    self.refresh();
-                }
-                if reply.is_ok() && archiving {
-                    self.sweep.notify_one();
-                }
-                reply
-            }
+            _ if providers::handles(method) => self.dispatch_providers(method, params).await,
             _ if mcp::handles(method) => {
                 let notify = |authorize| self.notify("mcp/authorize", authorize);
                 let reply = mcp::handle(&self.home, method, params, notify).await;
@@ -999,6 +979,23 @@ impl Server {
         Ok(reloaded)
     }
 
+    async fn dispatch_providers(self: &Arc<Self>, method: &str, params: Value) -> Reply {
+        let archiving = params["key"] == "sessions.archive_after_days";
+        let runtime_config = method == "config/update" && runtime_config_key(&params);
+        let reply = providers::handle(&self.home, method, params).await;
+        if reply.is_ok() {
+            if method == "providers/reload" {
+                self.refresh_idle().await;
+            } else if providers::edits(method) || runtime_config {
+                self.refresh();
+            }
+            if archiving {
+                self.sweep.notify_one();
+            }
+        }
+        reply
+    }
+
     /// Marks each open session stale so it reloads the changed configuration.
     fn refresh(self: &Arc<Self>) {
         self.config_gen.fetch_add(1, Ordering::SeqCst);
@@ -1009,6 +1006,31 @@ impl Server {
         for (thread, live) in open {
             live.stale.store(true, Ordering::SeqCst);
             self.settle(&thread, &live);
+        }
+    }
+
+    /// Reloads idle open sessions before answering `providers/reload`, leaving busy ones stale
+    /// so they reload once their active work finishes.
+    async fn refresh_idle(self: &Arc<Self>) {
+        self.config_gen.fetch_add(1, Ordering::SeqCst);
+        let open: Vec<_> = lock(&self.sessions)
+            .iter()
+            .map(|(thread, live)| (thread.clone(), live.clone()))
+            .collect();
+        for (thread, live) in open {
+            live.stale.store(true, Ordering::SeqCst);
+            if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::SeqCst) {
+                continue;
+            }
+            if let Err(error) = self.reload(&thread).await {
+                self.notify(
+                    "session/closed",
+                    SessionClosed {
+                        thread_id: thread,
+                        error: Some(error.message),
+                    },
+                );
+            }
         }
     }
 
@@ -1173,6 +1195,21 @@ impl Server {
         .await?;
         value(TrustResult { allowed })
     }
+}
+
+/// Keys of `config/update` that open sessions read at runtime rather than only as defaults.
+fn runtime_config_key(params: &Value) -> bool {
+    const KEYS: [&str; 6] = [
+        "lightweight_model",
+        "permissions.classifier_model",
+        "network.proxy",
+        "network.no_proxy",
+        "network.ca_cert",
+        "ask.auto_continue_after_sec",
+    ];
+    params["key"]
+        .as_str()
+        .is_some_and(|key| KEYS.contains(&key))
 }
 
 /// The permission mode the session last reported.
@@ -1601,5 +1638,480 @@ mod tests {
 
         server.remove_client(client_id);
         server.shutdown_all().await;
+    }
+
+    async fn rpc_result(
+        server: &Arc<Server>,
+        client_id: u64,
+        out: &ClientOut,
+        lines: &mut mpsc::UnboundedReceiver<String>,
+        req_id: i64,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, Value> {
+        server
+            .dispatch(client_id, out, Id::Number(req_id), method, params)
+            .await;
+        loop {
+            let raw = lines.recv().await.expect("missing rpc reply");
+            let reply: Value = serde_json::from_str(&raw).unwrap();
+            if reply.get("id") != Some(&json!(req_id)) {
+                continue;
+            }
+            return match reply.get("error") {
+                Some(error) => Err(error.clone()),
+                None => Ok(reply["result"].clone()),
+            };
+        }
+    }
+
+    #[tokio::test]
+    async fn config_get_and_update_manage_lightweight_and_classifier_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let server = Server::new(home.clone());
+        let (client_id, out, mut lines) = server.add_client();
+
+        let _: Value = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            1,
+            "providers/save",
+            json!({
+                "name": "fixture",
+                "wire": "openai-completions",
+                "base_url": "http://127.0.0.1:9",
+                "api_key": "sk-test"
+            }),
+        )
+        .await;
+        for (index, id) in ["main", "fast", "openrouter/judge"].into_iter().enumerate() {
+            let _: Value = rpc_call(
+                &server,
+                client_id,
+                &out,
+                &mut lines,
+                2 + index as i64,
+                "providers/save_model",
+                json!({
+                    "provider": "fixture",
+                    "previous": null,
+                    "model": {
+                        "id": id,
+                        "context_window": 200_000,
+                        "max_output": 8_192,
+                        "levels": ["off"],
+                        "mapping": {},
+                        "images": false
+                    }
+                }),
+            )
+            .await;
+        }
+        let _: Value = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            10,
+            "config/update",
+            json!({ "key": "model", "value": "fixture/main" }),
+        )
+        .await;
+
+        let raw_get = rpc_result(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            11,
+            "config/get",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert!(raw_get.get("lightweight_model").is_none());
+        assert!(raw_get.get("classifier_model").is_none());
+        let initial: ConfigValues = serde_json::from_value(raw_get).unwrap();
+        assert_eq!(initial.lightweight_model, None);
+        assert_eq!(initial.classifier_model, None);
+
+        let _: Value = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            12,
+            "config/update",
+            json!({ "key": "lightweight_model", "value": "fixture/fast" }),
+        )
+        .await;
+        let _: Value = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            13,
+            "config/update",
+            json!({
+                "key": "permissions.classifier_model",
+                "value": "fixture/openrouter/judge"
+            }),
+        )
+        .await;
+
+        let updated: ConfigValues = rpc_call(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            14,
+            "config/get",
+            json!({}),
+        )
+        .await;
+        assert_eq!(updated.lightweight_model.as_deref(), Some("fixture/fast"));
+        assert_eq!(
+            updated.classifier_model.as_deref(),
+            Some("fixture/openrouter/judge")
+        );
+
+        let config_path = home.join("config.toml");
+        let saved_toml = std::fs::read_to_string(&config_path).unwrap();
+        assert!(saved_toml.contains("lightweight_model = \"fixture/fast\""));
+        assert!(saved_toml.contains("classifier_model = \"fixture/openrouter/judge\""));
+
+        let mut req_id = 20;
+        for key in ["lightweight_model", "permissions.classifier_model"] {
+            for bad in [
+                json!("fixture/missing"),
+                json!("unknown/fast"),
+                json!("no-provider"),
+                json!("fixture/"),
+                json!("/fast"),
+                json!(42),
+                json!(true),
+                json!(["fixture/fast"]),
+            ] {
+                req_id += 1;
+                assert!(
+                    rpc_result(
+                        &server,
+                        client_id,
+                        &out,
+                        &mut lines,
+                        req_id,
+                        "config/update",
+                        json!({ "key": key, "value": bad }),
+                    )
+                    .await
+                    .is_err(),
+                    "expected error for {key} = {bad}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved_toml);
+
+        // Removing a previously saved model must succeed even after that model is deleted from providers.toml.
+        for (offset, id) in ["fast", "openrouter/judge"].into_iter().enumerate() {
+            let _: Value = rpc_call(
+                &server,
+                client_id,
+                &out,
+                &mut lines,
+                50 + offset as i64,
+                "providers/delete_model",
+                json!({ "provider": "fixture", "id": id }),
+            )
+            .await;
+        }
+        for (offset, key) in ["lightweight_model", "permissions.classifier_model"]
+            .into_iter()
+            .enumerate()
+        {
+            let _: Value = rpc_call(
+                &server,
+                client_id,
+                &out,
+                &mut lines,
+                60 + offset as i64,
+                "config/update",
+                json!({ "key": key, "value": null }),
+            )
+            .await;
+        }
+
+        let cleared_raw = rpc_result(
+            &server,
+            client_id,
+            &out,
+            &mut lines,
+            70,
+            "config/get",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert!(cleared_raw.get("lightweight_model").is_none());
+        assert!(cleared_raw.get("classifier_model").is_none());
+        let cleared: ConfigValues = serde_json::from_value(cleared_raw).unwrap();
+        assert_eq!(cleared.lightweight_model, None);
+        assert_eq!(cleared.classifier_model, None);
+
+        let cleared_toml = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !cleared_toml.contains("lightweight_model"),
+            "{cleared_toml}"
+        );
+        assert!(!cleared_toml.contains("classifier_model"), "{cleared_toml}");
+
+        server.remove_client(client_id);
+        server.shutdown_all().await;
+    }
+
+    struct TestClient {
+        server: Arc<Server>,
+        client_id: u64,
+        out: ClientOut,
+        lines: mpsc::UnboundedReceiver<String>,
+        buffered: Vec<Value>,
+        next_id: i64,
+    }
+
+    impl TestClient {
+        fn new(server: Arc<Server>) -> Self {
+            let (client_id, out, lines) = server.add_client();
+            Self {
+                server,
+                client_id,
+                out,
+                lines,
+                buffered: Vec::new(),
+                next_id: 0,
+            }
+        }
+
+        async fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
+            self.next_id += 1;
+            let req_id = self.next_id;
+            self.server
+                .dispatch(
+                    self.client_id,
+                    &self.out,
+                    Id::Number(req_id),
+                    method,
+                    params,
+                )
+                .await;
+            loop {
+                let raw = self.lines.recv().await.expect("missing rpc reply");
+                let msg: Value = serde_json::from_str(&raw).unwrap();
+                if msg.get("id") != Some(&json!(req_id)) {
+                    self.buffered.push(msg);
+                    continue;
+                }
+                return match msg.get("error") {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(msg["result"].clone()),
+                };
+            }
+        }
+
+        async fn next_event(&mut self, thread_id: &ThreadId) -> EventKind {
+            loop {
+                let msg = if self.buffered.is_empty() {
+                    let raw = self.lines.recv().await.expect("expected notification");
+                    serde_json::from_str(&raw).unwrap()
+                } else {
+                    self.buffered.remove(0)
+                };
+                if msg.get("method") != Some(&json!("session/event")) {
+                    continue;
+                }
+                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
+                if &ev.event.thread_id == thread_id {
+                    return ev.event.event;
+                }
+            }
+        }
+
+        fn drain_notices(&mut self) {
+            self.buffered.clear();
+            while self.lines.try_recv().is_ok() {}
+        }
+
+        async fn close(self) {
+            self.server.remove_client(self.client_id);
+            self.server.shutdown_all().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn providers_reload_updates_open_session_models_without_reopening() {
+        const CHILD_MARKER: &str = "TIECHUI_TEST_PROVIDERS_RELOAD_HOME";
+        let Some(home_env) = std::env::var_os(CHILD_MARKER) else {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app_server::tests::providers_reload_updates_open_session_models_without_reopening",
+                    "--nocapture",
+                ])
+                .env(CHILD_MARKER, &home)
+                .env("TIECHUI_HOME", &home)
+                .env("HOME", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+
+        run_providers_reload_case(PathBuf::from(home_env)).await;
+    }
+
+    async fn run_providers_reload_case(home: PathBuf) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let work = home.parent().unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mock = MockServer::start().await;
+        let sse_reply = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": "synced-ok" },
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse_reply, "text/event-stream"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        std::fs::write(home.join("config.toml"), "model = \"alpha/m1\"\n").unwrap();
+        let providers_path = home.join("providers.toml");
+        std::fs::write(
+            &providers_path,
+            format!(
+                "[alpha]\nwire = \"openai-completions\"\nbase_url = \"{}\"\napi_key = \"sk-alpha\"\nmodels = [{{ id = \"m1\", context_window = 128000, max_output = 4096 }}]\n",
+                mock.uri()
+            ),
+        )
+        .unwrap();
+
+        let mut client = TestClient::new(Server::new(home));
+        let opened: Snapshot = serde_json::from_value(
+            client
+                .call("session/open", json!({ "cwd": work }))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let thread_id = opened.thread_id;
+        client.drain_notices();
+
+        std::fs::write(
+            &providers_path,
+            format!(
+                "[alpha]\nwire = \"openai-completions\"\nbase_url = \"{uri}\"\napi_key = \"sk-alpha\"\nmodels = [\n  {{ id = \"m1\", context_window = 128000, max_output = 4096 }},\n  {{ id = \"m2\", context_window = 200000, max_output = 8192 }},\n]\n\n[beta]\nwire = \"openai-completions\"\nbase_url = \"{uri}\"\napi_key = \"sk-beta\"\nmodels = [{{ id = \"m3\", context_window = 256000, max_output = 16384 }}]\n",
+                uri = mock.uri()
+            ),
+        )
+        .unwrap();
+
+        let reload_res = client
+            .call("providers/reload", json!({}))
+            .await
+            .expect("providers/reload must succeed");
+        assert_eq!(reload_res, Value::Null);
+
+        let listed: Vec<ProviderEntry> =
+            serde_json::from_value(client.call("providers/list", json!({})).await.unwrap())
+                .unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let updated_models = wait_for_reloaded_models(&mut client, &thread_id).await;
+        assert_eq!(updated_models, vec!["alpha/m1", "alpha/m2", "beta/m3"]);
+
+        verify_post_reload_turn(&mut client, &thread_id).await;
+        mock.verify().await;
+
+        std::fs::write(&providers_path, "[broken\n").unwrap();
+        assert!(client.call("providers/reload", json!({})).await.is_err());
+
+        client.close().await;
+    }
+
+    async fn wait_for_reloaded_models(
+        client: &mut TestClient,
+        thread_id: &ThreadId,
+    ) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let EventKind::ModelsUpdated { models } = client.next_event(thread_id).await {
+                    let refs: Vec<String> = models
+                        .iter()
+                        .map(|m| format!("{}/{}", m.provider, m.id))
+                        .collect();
+                    if refs.contains(&"beta/m3".to_string()) {
+                        return refs;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for models_updated")
+    }
+
+    async fn verify_post_reload_turn(client: &mut TestClient, thread_id: &ThreadId) {
+        client
+            .call(
+                "session/submit",
+                json!({
+                    "thread_id": thread_id,
+                    "op": { "kind": "set_model", "provider": "beta", "model": "beta/m3" }
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                "session/submit",
+                json!({
+                    "thread_id": thread_id,
+                    "op": {
+                        "kind": "user_input",
+                        "delivery": "steer",
+                        "content": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let EventKind::TurnCompleted { turn } = client.next_event(thread_id).await {
+                    assert_eq!(turn.status, TurnStatus::Completed);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("turn did not complete on newly reloaded provider");
     }
 }
