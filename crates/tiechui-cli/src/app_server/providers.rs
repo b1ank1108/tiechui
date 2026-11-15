@@ -1,6 +1,6 @@
 //! `providers/*` and `config/*`: the user's `providers.toml` and `config.toml`, edited in place.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -26,38 +26,53 @@ const LEVELS: [ThinkingLevel; 7] = [
     ThinkingLevel::Max,
 ];
 
-pub(super) fn handles(method: &str) -> bool {
-    edits(method)
-        || matches!(
-            method,
-            "providers/list"
-                | "providers/presets"
-                | "providers/test"
-                | "providers/models"
-                | "config/get"
-                | "config/update"
-        )
-}
+const QUERIES: [&str; 5] = [
+    "providers/list",
+    "providers/presets",
+    "providers/reload",
+    "providers/test",
+    "providers/models",
+];
 
-const EDITS: [&str; 5] = [
+const EDITS: [&str; 4] = [
     "providers/save",
     "providers/delete",
     "providers/save_model",
     "providers/delete_model",
-    "providers/reload",
 ];
 
-/// Whether the method changes or reloads the providers, which open sessions then reload.
+pub(super) fn handles(method: &str) -> bool {
+    edits(method) || QUERIES.contains(&method) || matches!(method, "config/get" | "config/update")
+}
+
 pub(super) fn edits(method: &str) -> bool {
     EDITS.contains(&method)
 }
 
 pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
-    let file = home.join("providers.toml");
+    if matches!(method, "config/get" | "config/update") {
+        return handle_config(home, method, params).await;
+    }
+    if edits(method) {
+        return handle_edit(home.join("providers.toml"), method, params).await;
+    }
+    handle_query(home, method, params).await
+}
+
+async fn handle_config(home: &Path, method: &str, params: Value) -> Reply {
+    if method == "config/get" {
+        let user = home.join("config.toml");
+        return blocking(move |_| crate::setup::user_config(&user))
+            .await
+            .and_then(|config| value(values(config)));
+    }
+    let p: ConfigUpdateParams = parse(params)?;
+    let home = home.to_owned();
+    write(move || update(&home, p)).await
+}
+
+async fn handle_edit(file: PathBuf, method: &str, params: Value) -> Reply {
     match method {
-        "providers/list" => blocking(move |_| list(&file)).await.and_then(value),
-        "providers/presets" => presets(params),
-        "providers/reload" => write(move || tiechui_config::load_providers(&file).map(drop)).await,
         "providers/save" => {
             let p: ProviderSaveParams = parse(params)?;
             write(move || {
@@ -87,47 +102,49 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
             })
             .await
         }
-        "providers/delete_model" => {
+        _ => {
             let p: ModelParams = parse(params)?;
             write(move || tiechui_config::remove_model(&file, &p.provider, &p.id)).await
         }
-        "providers/test" => {
-            let p: ModelParams = parse(params)?;
-            let (provider, network) = declared(home, p.provider.clone()).await?;
-            let model = provider
-                .models
-                .iter()
-                .find(|model| model.id == p.id)
-                .ok_or_else(|| invalid(format!("{}/{} is not declared", p.provider, p.id)))?;
-            let start = Instant::now();
-            let error = crate::setup::check(&p.provider, &provider, model, &network)
-                .await
-                .err();
-            value(ProviderTest {
-                error,
-                millis: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-            })
-        }
-        "providers/models" => {
-            let p: ProviderParams = parse(params)?;
-            let (provider, network) = declared(home, p.name).await?;
-            tiechui_providers::list_models(&provider, &network, &CancellationToken::new())
-                .await
-                .map_err(internal)
-                .and_then(value)
-        }
-        "config/get" => {
-            let user = home.join("config.toml");
-            blocking(move |_| crate::setup::user_config(&user))
-                .await
-                .and_then(|config| value(values(config)))
-        }
-        _ => {
-            let p: ConfigUpdateParams = parse(params)?;
-            let home = home.to_owned();
-            write(move || update(&home, p)).await
-        }
     }
+}
+
+async fn handle_query(home: &Path, method: &str, params: Value) -> Reply {
+    let file = home.join("providers.toml");
+    match method {
+        "providers/list" => blocking(move |_| list(&file)).await.and_then(value),
+        "providers/presets" => presets(params),
+        "providers/reload" => write(move || tiechui_config::load_providers(&file).map(drop)).await,
+        "providers/test" => test_model(home, params).await,
+        _ => list_remote_models(home, params).await,
+    }
+}
+
+async fn test_model(home: &Path, params: Value) -> Reply {
+    let p: ModelParams = parse(params)?;
+    let (provider, network) = declared(home, p.provider.clone()).await?;
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == p.id)
+        .ok_or_else(|| invalid(format!("{}/{} is not declared", p.provider, p.id)))?;
+    let start = Instant::now();
+    let error = crate::setup::check(&p.provider, &provider, model, &network)
+        .await
+        .err();
+    value(ProviderTest {
+        error,
+        millis: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+    })
+}
+
+async fn list_remote_models(home: &Path, params: Value) -> Reply {
+    let p: ProviderParams = parse(params)?;
+    let (provider, network) = declared(home, p.name).await?;
+    tiechui_providers::list_models(&provider, &network, &CancellationToken::new())
+        .await
+        .map_err(internal)
+        .and_then(value)
 }
 
 /// Edits read, change and replace a whole file, so they run one at a time to keep each other's

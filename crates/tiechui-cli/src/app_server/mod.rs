@@ -39,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::exec::{Open, Options, Prepared, locations, prepare};
 use projection::Projection;
+pub(crate) use textgen::watch_session_title;
 
 const MAX_FRAME: u64 = 16 << 20;
 #[cfg(unix)]
@@ -595,7 +596,6 @@ impl Server {
             Ok(JsonRpcMessage::Notification(note)) if note.method == "$/cancelRequest" => {
                 textgen::maybe_cancel_notification(self, client_id, note.params.map(|p| json!(p)));
             }
-            // This server sends no requests, so responses and other notifications are unexpected.
             Ok(_) => {}
             Err(error) => respond(out, Id::Null, Err(failure(-32700, error))),
         }
@@ -995,12 +995,13 @@ impl Server {
         let settled_live = settled.then(|| self.live(thread).ok()).flatten();
         {
             let mut projection = lock(projection);
-            if projection.should_generate_title(&event)
+            if let Some(texts) = projection.take_initial_title_trigger(&event)
                 && let Some(live) = &settled_live
             {
                 textgen::spawn_session_title(
                     self.clone(),
                     live.path.clone(),
+                    texts,
                     self.shutdown.child_token(),
                 );
             }
@@ -1079,7 +1080,7 @@ impl Server {
         let reply = providers::handle(&self.home, method, params).await;
         if reply.is_ok() {
             if method == "providers/reload" {
-                self.refresh_idle().await;
+                self.await_idle_refresh().await;
             } else if providers::edits(method) || runtime_config {
                 self.refresh();
             }
@@ -1090,41 +1091,42 @@ impl Server {
         reply
     }
 
-    /// Marks each open session stale so it reloads the changed configuration.
-    fn refresh(self: &Arc<Self>) {
+    fn mark_open_sessions_stale(&self) -> Vec<(ThreadId, Arc<Live>)> {
         self.config_gen.fetch_add(1, Ordering::SeqCst);
         let open: Vec<_> = lock(&self.sessions)
             .iter()
             .map(|(thread, live)| (thread.clone(), live.clone()))
             .collect();
-        for (thread, live) in open {
+        for (_, live) in &open {
             live.stale.store(true, Ordering::SeqCst);
+        }
+        open
+    }
+
+    /// Marks each open session stale so it reloads the changed configuration.
+    fn refresh(self: &Arc<Self>) {
+        for (thread, live) in self.mark_open_sessions_stale() {
             self.settle(&thread, &live);
         }
     }
 
-    /// Reloads idle open sessions before answering `providers/reload`, leaving busy ones stale
-    /// so they reload once their active work finishes.
-    async fn refresh_idle(self: &Arc<Self>) {
-        self.config_gen.fetch_add(1, Ordering::SeqCst);
-        let open: Vec<_> = lock(&self.sessions)
-            .iter()
-            .map(|(thread, live)| (thread.clone(), live.clone()))
-            .collect();
-        for (thread, live) in open {
-            live.stale.store(true, Ordering::SeqCst);
-            if lock(&live.projection).busy() || !live.stale.swap(false, Ordering::SeqCst) {
-                continue;
+    async fn await_idle_refresh(self: &Arc<Self>) {
+        for (thread, live) in self.mark_open_sessions_stale() {
+            if !lock(&live.projection).busy() && live.stale.swap(false, Ordering::SeqCst) {
+                self.reload_or_close(thread).await;
             }
-            if let Err(error) = self.reload(&thread).await {
-                self.notify(
-                    "session/closed",
-                    SessionClosed {
-                        thread_id: thread,
-                        error: Some(error.message),
-                    },
-                );
-            }
+        }
+    }
+
+    async fn reload_or_close(self: &Arc<Self>, thread: ThreadId) {
+        if let Err(error) = self.reload(&thread).await {
+            self.notify(
+                "session/closed",
+                SessionClosed {
+                    thread_id: thread,
+                    error: Some(error.message),
+                },
+            );
         }
     }
 
@@ -1137,15 +1139,7 @@ impl Server {
         let server = self.clone();
         let thread = thread.clone();
         tokio::spawn(async move {
-            if let Err(error) = server.reload(&thread).await {
-                server.notify(
-                    "session/closed",
-                    SessionClosed {
-                        thread_id: thread,
-                        error: Some(error.message),
-                    },
-                );
-            }
+            server.reload_or_close(thread).await;
         });
     }
 
@@ -1291,7 +1285,6 @@ impl Server {
     }
 }
 
-/// Keys of `config/update` that open sessions read at runtime rather than only as defaults.
 fn runtime_config_key(params: &Value) -> bool {
     const KEYS: [&str; 6] = [
         "lightweight_model",
@@ -1401,40 +1394,251 @@ fn starts_turn(entry: &Entry) -> bool {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tiechui_protocol::{Turn, TurnId, TurnStatus};
 
-    async fn rpc_status(
-        server: &Arc<Server>,
+    pub(in crate::app_server) struct TestClient {
+        server: Arc<Server>,
         client_id: u64,
-        out: &ClientOut,
-        lines: &mut mpsc::UnboundedReceiver<String>,
-    ) -> DaemonStatus {
-        server
-            .dispatch(client_id, out, Id::Number(1), "daemon/status", json!({}))
-            .await;
-        loop {
-            let raw = lines.recv().await.expect("missing daemon/status reply");
-            let reply: Value = serde_json::from_str(&raw).unwrap();
-            if reply.get("id") != Some(&json!(1)) {
-                continue;
+        out: ClientOut,
+        lines: mpsc::UnboundedReceiver<String>,
+        buffered: Vec<Value>,
+        next_id: i64,
+    }
+
+    impl TestClient {
+        pub(in crate::app_server) fn new(server: Arc<Server>) -> Self {
+            let (client_id, out, lines) = server.add_client();
+            Self {
+                server,
+                client_id,
+                out,
+                lines,
+                buffered: Vec::new(),
+                next_id: 0,
             }
-            assert!(
-                reply.get("error").is_none(),
-                "unexpected rpc error: {reply}"
-            );
-            return serde_json::from_value(reply["result"].clone()).unwrap();
         }
+
+        pub(in crate::app_server) async fn call(
+            &mut self,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, Value> {
+            self.next_id += 1;
+            let req_id = self.next_id;
+            self.server
+                .dispatch(
+                    self.client_id,
+                    &self.out,
+                    Id::Number(req_id),
+                    method,
+                    params,
+                )
+                .await;
+            self.wait_reply(req_id).await
+        }
+
+        pub(in crate::app_server) async fn call_ok<T: DeserializeOwned>(
+            &mut self,
+            method: &str,
+            params: Value,
+        ) -> T {
+            let value = self
+                .call(method, params)
+                .await
+                .unwrap_or_else(|error| panic!("unexpected rpc error on {method}: {error}"));
+            serde_json::from_value(value).unwrap()
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) fn send_async(&mut self, method: &str, params: Value) -> i64 {
+            self.next_id += 1;
+            let req_id = self.next_id;
+            let raw = json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params
+            })
+            .to_string();
+            self.server
+                .receive(self.client_id, &self.out, raw.as_bytes());
+            req_id
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) fn send_notification(&self, method: &str, params: Value) {
+            let raw = json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params
+            })
+            .to_string();
+            self.server
+                .receive(self.client_id, &self.out, raw.as_bytes());
+        }
+
+        pub(in crate::app_server) async fn wait_reply(
+            &mut self,
+            req_id: i64,
+        ) -> Result<Value, Value> {
+            loop {
+                let raw = self.lines.recv().await.expect("missing rpc reply");
+                let msg: Value = serde_json::from_str(&raw).unwrap();
+                if msg.get("id") != Some(&json!(req_id)) {
+                    self.buffered.push(msg);
+                    continue;
+                }
+                return match msg.get("error") {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(msg["result"].clone()),
+                };
+            }
+        }
+
+        pub(in crate::app_server) async fn wait_matching<T>(
+            &mut self,
+            label: &str,
+            mut pred: impl FnMut(&Value) -> Option<T>,
+        ) -> T {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut idx = 0;
+                loop {
+                    while idx < self.buffered.len() {
+                        if let Some(found) = pred(&self.buffered[idx]) {
+                            self.buffered.remove(idx);
+                            return found;
+                        }
+                        idx += 1;
+                    }
+                    let raw = self.lines.recv().await.expect("expected notification");
+                    self.buffered.push(serde_json::from_str(&raw).unwrap());
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
+        }
+
+        pub(in crate::app_server) async fn next_event(
+            &mut self,
+            thread_id: &ThreadId,
+        ) -> EventKind {
+            self.wait_matching("session/event", |msg| {
+                if msg.get("method") != Some(&json!("session/event")) {
+                    return None;
+                }
+                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
+                (&ev.event.thread_id == thread_id).then_some(ev.event.event)
+            })
+            .await
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_turn_completed(
+            &mut self,
+            thread_id: &ThreadId,
+        ) -> Vec<EventKind> {
+            let mut seen = Vec::new();
+            loop {
+                let kind = self.next_event(thread_id).await;
+                let done = matches!(
+                    &kind,
+                    EventKind::TurnCompleted { turn } if turn.status == TurnStatus::Completed
+                );
+                seen.push(kind);
+                if done {
+                    return seen;
+                }
+            }
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_sessions_changed(&mut self) {
+            self.wait_matching("sessions/changed", |msg| {
+                (msg.get("method") == Some(&json!("sessions/changed"))).then_some(())
+            })
+            .await;
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn wait_reloaded(&mut self, thread_id: &ThreadId) {
+            self.wait_matching("session reload", |msg| {
+                if msg.get("method") != Some(&json!("session/event")) {
+                    return None;
+                }
+                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
+                (&ev.event.thread_id == thread_id
+                    && ev.event.epoch.0 >= 1
+                    && matches!(ev.event.event, EventKind::ThreadStarted { .. }))
+                .then_some(())
+            })
+            .await;
+        }
+
+        pub(in crate::app_server) fn drain_notices(&mut self) {
+            self.buffered.clear();
+            while self.lines.try_recv().is_ok() {}
+        }
+
+        #[cfg(feature = "workspace")]
+        pub(in crate::app_server) async fn drain_title_tasks(&self) {
+            self.server.drain_title_tasks().await;
+        }
+
+        pub(in crate::app_server) async fn close(self) {
+            self.server.remove_client(self.client_id);
+            self.server.shutdown_all().await;
+        }
+    }
+
+    pub(in crate::app_server) fn sse_chat(content: &str) -> String {
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": content },
+                    "finish_reason": "stop"
+                }]
+            })
+        )
+    }
+
+    pub(in crate::app_server) fn isolated_home_child(
+        marker: &str,
+        test_name: &str,
+    ) -> Option<PathBuf> {
+        if let Some(home) = std::env::var_os(marker) {
+            return Some(PathBuf::from(home));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", test_name, "--nocapture"]);
+        cmd.envs([
+            (marker, home.as_os_str()),
+            ("TIECHUI_HOME", home.as_os_str()),
+            ("HOME", dir.path().as_os_str()),
+        ]);
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child {test_name} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        None
     }
 
     #[tokio::test]
     async fn daemon_status_counts_clients_busy_sessions_and_terminals() {
         let dir = tempfile::tempdir().unwrap();
         let server = Server::new(dir.path().join("home"));
+        let mut client = TestClient::new(server.clone());
 
-        let (c1, out1, mut lines1) = server.add_client();
-        let initial = rpc_status(&server, c1, &out1, &mut lines1).await;
+        let initial: DaemonStatus = client.call_ok("daemon/status", json!({})).await;
         assert_eq!(initial.pid, std::process::id());
         assert_eq!(initial.server_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(initial.protocol_version, APP_PROTOCOL_VERSION);
@@ -1444,7 +1648,8 @@ mod tests {
 
         let (c2, _out2, _lines2) = server.add_client();
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .connected_clients,
             2
@@ -1468,7 +1673,8 @@ mod tests {
             }),
         );
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             0
@@ -1489,7 +1695,8 @@ mod tests {
             },
         });
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             1
@@ -1510,7 +1717,8 @@ mod tests {
             },
         });
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .busy_sessions,
             0
@@ -1529,14 +1737,16 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                rpc_status(&server, c1, &out1, &mut lines1)
+                client
+                    .call_ok::<DaemonStatus>("daemon/status", json!({}))
                     .await
                     .alive_terminals,
                 1
             );
             server.workspace.kill_terminal("unit-term");
             assert_eq!(
-                rpc_status(&server, c1, &out1, &mut lines1)
+                client
+                    .call_ok::<DaemonStatus>("daemon/status", json!({}))
                     .await
                     .alive_terminals,
                 0
@@ -1545,46 +1755,20 @@ mod tests {
 
         server.remove_client(c2);
         assert_eq!(
-            rpc_status(&server, c1, &out1, &mut lines1)
+            client
+                .call_ok::<DaemonStatus>("daemon/status", json!({}))
                 .await
                 .connected_clients,
             1
         );
-        server.remove_client(c1);
-        server.shutdown_all().await;
-    }
-
-    async fn rpc_call<T: DeserializeOwned>(
-        server: &Arc<Server>,
-        client_id: u64,
-        out: &ClientOut,
-        lines: &mut mpsc::UnboundedReceiver<String>,
-        req_id: i64,
-        method: &str,
-        params: Value,
-    ) -> T {
-        server
-            .dispatch(client_id, out, Id::Number(req_id), method, params)
-            .await;
-        loop {
-            let raw = lines.recv().await.expect("missing rpc reply");
-            let reply: Value = serde_json::from_str(&raw).unwrap();
-            if reply.get("id") != Some(&json!(req_id)) {
-                continue;
-            }
-            assert!(
-                reply.get("error").is_none(),
-                "unexpected rpc error: {reply}"
-            );
-            return serde_json::from_value(reply["result"].clone()).unwrap();
-        }
+        client.close().await;
     }
 
     #[tokio::test]
     async fn providers_presets_returns_matched_entries_without_marking_sessions_stale() {
         let dir = tempfile::tempdir().unwrap();
         let server = Server::new(dir.path().join("home"));
-        let (client_id, out, mut lines) = server.add_client();
+        let mut client = TestClient::new(server.clone());
 
         let (submissions, _rx) = mpsc::channel(1);
         let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
@@ -1600,24 +1784,20 @@ mod tests {
         });
         lock(&server.sessions).insert(ThreadId("t-presets".into()), live.clone());
 
-        let matched: Vec<ModelEntry> = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            10,
-            "providers/presets",
-            json!({
-                "ids": [
-                    "gpt-5.4",
-                    "unknown-model",
-                    "anthropic/claude-sonnet-4.5",
-                    "GLM-5.3-Flash",
-                    "kimi-k2-0905-preview"
-                ]
-            }),
-        )
-        .await;
+        let matched: Vec<ModelEntry> = client
+            .call_ok(
+                "providers/presets",
+                json!({
+                    "ids": [
+                        "gpt-5.4",
+                        "unknown-model",
+                        "anthropic/claude-sonnet-4.5",
+                        "GLM-5.3-Flash",
+                        "kimi-k2-0905-preview"
+                    ]
+                }),
+            )
+            .await;
 
         let returned_ids: Vec<&str> = matched.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
@@ -1636,43 +1816,30 @@ mod tests {
         assert!(!matched[3].images);
         assert!(!live.stale.load(Ordering::Relaxed));
 
-        let empty: Vec<ModelEntry> = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            11,
-            "providers/presets",
-            json!({ "ids": ["not-in-presets"] }),
-        )
-        .await;
+        let empty: Vec<ModelEntry> = client
+            .call_ok("providers/presets", json!({ "ids": ["not-in-presets"] }))
+            .await;
         assert!(empty.is_empty());
 
-        server.remove_client(client_id);
-        server.shutdown_all().await;
+        client.close().await;
     }
 
     #[tokio::test]
     async fn providers_presets_round_trip_through_save_model_and_list() {
         let dir = tempfile::tempdir().unwrap();
-        let server = Server::new(dir.path().join("home"));
-        let (client_id, out, mut lines) = server.add_client();
+        let mut client = TestClient::new(Server::new(dir.path().join("home")));
 
-        let _: Value = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            20,
-            "providers/save",
-            json!({
-                "name": "gateway",
-                "wire": "openai-completions",
-                "base_url": "http://127.0.0.1:9",
-                "api_key": "sk-test"
-            }),
-        )
-        .await;
+        let _: Value = client
+            .call_ok(
+                "providers/save",
+                json!({
+                    "name": "gateway",
+                    "wire": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "sk-test"
+                }),
+            )
+            .await;
 
         let ids = vec![
             "claude-opus-5",
@@ -1686,183 +1853,97 @@ mod tests {
             "glm-5.3-flash",
             "kimi-k3",
         ];
-        let presets: Vec<ModelEntry> = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            21,
-            "providers/presets",
-            json!({ "ids": ids }),
-        )
-        .await;
+        let presets: Vec<ModelEntry> = client
+            .call_ok("providers/presets", json!({ "ids": ids }))
+            .await;
         assert_eq!(presets.len(), 10);
 
-        for (i, model) in presets.iter().enumerate() {
-            let _: Value = rpc_call(
-                &server,
-                client_id,
-                &out,
-                &mut lines,
-                30 + i as i64,
-                "providers/save_model",
-                json!({
-                    "provider": "gateway",
-                    "previous": null,
-                    "model": model
-                }),
-            )
-            .await;
+        for model in &presets {
+            let _: Value = client
+                .call_ok(
+                    "providers/save_model",
+                    json!({
+                        "provider": "gateway",
+                        "previous": null,
+                        "model": model
+                    }),
+                )
+                .await;
         }
 
-        let listed: Vec<ProviderEntry> = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            99,
-            "providers/list",
-            json!({}),
-        )
-        .await;
+        let listed: Vec<ProviderEntry> = client.call_ok("providers/list", json!({})).await;
         assert_eq!(listed[0].models, presets);
 
-        server.remove_client(client_id);
-        server.shutdown_all().await;
-    }
-
-    async fn rpc_result(
-        server: &Arc<Server>,
-        client_id: u64,
-        out: &ClientOut,
-        lines: &mut mpsc::UnboundedReceiver<String>,
-        req_id: i64,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, Value> {
-        server
-            .dispatch(client_id, out, Id::Number(req_id), method, params)
-            .await;
-        loop {
-            let raw = lines.recv().await.expect("missing rpc reply");
-            let reply: Value = serde_json::from_str(&raw).unwrap();
-            if reply.get("id") != Some(&json!(req_id)) {
-                continue;
-            }
-            return match reply.get("error") {
-                Some(error) => Err(error.clone()),
-                None => Ok(reply["result"].clone()),
-            };
-        }
+        client.close().await;
     }
 
     #[tokio::test]
     async fn config_get_and_update_manage_lightweight_and_classifier_models() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let server = Server::new(home.clone());
-        let (client_id, out, mut lines) = server.add_client();
+        let mut client = TestClient::new(Server::new(home.clone()));
 
-        let _: Value = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            1,
-            "providers/save",
-            json!({
-                "name": "fixture",
-                "wire": "openai-completions",
-                "base_url": "http://127.0.0.1:9",
-                "api_key": "sk-test"
-            }),
-        )
-        .await;
-        for (index, id) in ["main", "fast", "openrouter/judge"].into_iter().enumerate() {
-            let _: Value = rpc_call(
-                &server,
-                client_id,
-                &out,
-                &mut lines,
-                2 + index as i64,
-                "providers/save_model",
+        let _: Value = client
+            .call_ok(
+                "providers/save",
                 json!({
-                    "provider": "fixture",
-                    "previous": null,
-                    "model": {
-                        "id": id,
-                        "context_window": 200_000,
-                        "max_output": 8_192,
-                        "levels": ["off"],
-                        "mapping": {},
-                        "images": false
-                    }
+                    "name": "fixture",
+                    "wire": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "sk-test"
                 }),
             )
             .await;
+        for id in ["main", "fast", "openrouter/judge"] {
+            let _: Value = client
+                .call_ok(
+                    "providers/save_model",
+                    json!({
+                        "provider": "fixture",
+                        "previous": null,
+                        "model": {
+                            "id": id,
+                            "context_window": 200_000,
+                            "max_output": 8_192,
+                            "levels": ["off"],
+                            "mapping": {},
+                            "images": false
+                        }
+                    }),
+                )
+                .await;
         }
-        let _: Value = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            10,
-            "config/update",
-            json!({ "key": "model", "value": "fixture/main" }),
-        )
-        .await;
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "model", "value": "fixture/main" }),
+            )
+            .await;
 
-        let raw_get = rpc_result(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            11,
-            "config/get",
-            json!({}),
-        )
-        .await
-        .unwrap();
+        let raw_get: Value = client.call_ok("config/get", json!({})).await;
         assert!(raw_get.get("lightweight_model").is_none());
         assert!(raw_get.get("classifier_model").is_none());
         let initial: ConfigValues = serde_json::from_value(raw_get).unwrap();
         assert_eq!(initial.lightweight_model, None);
         assert_eq!(initial.classifier_model, None);
 
-        let _: Value = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            12,
-            "config/update",
-            json!({ "key": "lightweight_model", "value": "fixture/fast" }),
-        )
-        .await;
-        let _: Value = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            13,
-            "config/update",
-            json!({
-                "key": "permissions.classifier_model",
-                "value": "fixture/openrouter/judge"
-            }),
-        )
-        .await;
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "lightweight_model", "value": "fixture/fast" }),
+            )
+            .await;
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({
+                    "key": "permissions.classifier_model",
+                    "value": "fixture/openrouter/judge"
+                }),
+            )
+            .await;
 
-        let updated: ConfigValues = rpc_call(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            14,
-            "config/get",
-            json!({}),
-        )
-        .await;
+        let updated: ConfigValues = client.call_ok("config/get", json!({})).await;
         assert_eq!(updated.lightweight_model.as_deref(), Some("fixture/fast"));
         assert_eq!(
             updated.classifier_model.as_deref(),
@@ -1874,7 +1955,6 @@ mod tests {
         assert!(saved_toml.contains("lightweight_model = \"fixture/fast\""));
         assert!(saved_toml.contains("classifier_model = \"fixture/openrouter/judge\""));
 
-        let mut req_id = 20;
         for key in ["lightweight_model", "permissions.classifier_model"] {
             for bad in [
                 json!("fixture/missing"),
@@ -1886,65 +1966,32 @@ mod tests {
                 json!(true),
                 json!(["fixture/fast"]),
             ] {
-                req_id += 1;
                 assert!(
-                    rpc_result(
-                        &server,
-                        client_id,
-                        &out,
-                        &mut lines,
-                        req_id,
-                        "config/update",
-                        json!({ "key": key, "value": bad }),
-                    )
-                    .await
-                    .is_err(),
+                    client
+                        .call("config/update", json!({ "key": key, "value": bad }))
+                        .await
+                        .is_err(),
                     "expected error for {key} = {bad}"
                 );
             }
         }
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved_toml);
 
-        // Removing a previously saved model must succeed even after that model is deleted from providers.toml.
-        for (offset, id) in ["fast", "openrouter/judge"].into_iter().enumerate() {
-            let _: Value = rpc_call(
-                &server,
-                client_id,
-                &out,
-                &mut lines,
-                50 + offset as i64,
-                "providers/delete_model",
-                json!({ "provider": "fixture", "id": id }),
-            )
-            .await;
+        for id in ["fast", "openrouter/judge"] {
+            let _: Value = client
+                .call_ok(
+                    "providers/delete_model",
+                    json!({ "provider": "fixture", "id": id }),
+                )
+                .await;
         }
-        for (offset, key) in ["lightweight_model", "permissions.classifier_model"]
-            .into_iter()
-            .enumerate()
-        {
-            let _: Value = rpc_call(
-                &server,
-                client_id,
-                &out,
-                &mut lines,
-                60 + offset as i64,
-                "config/update",
-                json!({ "key": key, "value": null }),
-            )
-            .await;
+        for key in ["lightweight_model", "permissions.classifier_model"] {
+            let _: Value = client
+                .call_ok("config/update", json!({ "key": key, "value": null }))
+                .await;
         }
 
-        let cleared_raw = rpc_result(
-            &server,
-            client_id,
-            &out,
-            &mut lines,
-            70,
-            "config/get",
-            json!({}),
-        )
-        .await
-        .unwrap();
+        let cleared_raw: Value = client.call_ok("config/get", json!({})).await;
         assert!(cleared_raw.get("lightweight_model").is_none());
         assert!(cleared_raw.get("classifier_model").is_none());
         let cleared: ConfigValues = serde_json::from_value(cleared_raw).unwrap();
@@ -1958,116 +2005,18 @@ mod tests {
         );
         assert!(!cleared_toml.contains("classifier_model"), "{cleared_toml}");
 
-        server.remove_client(client_id);
-        server.shutdown_all().await;
-    }
-
-    struct TestClient {
-        server: Arc<Server>,
-        client_id: u64,
-        out: ClientOut,
-        lines: mpsc::UnboundedReceiver<String>,
-        buffered: Vec<Value>,
-        next_id: i64,
-    }
-
-    impl TestClient {
-        fn new(server: Arc<Server>) -> Self {
-            let (client_id, out, lines) = server.add_client();
-            Self {
-                server,
-                client_id,
-                out,
-                lines,
-                buffered: Vec::new(),
-                next_id: 0,
-            }
-        }
-
-        async fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
-            self.next_id += 1;
-            let req_id = self.next_id;
-            self.server
-                .dispatch(
-                    self.client_id,
-                    &self.out,
-                    Id::Number(req_id),
-                    method,
-                    params,
-                )
-                .await;
-            loop {
-                let raw = self.lines.recv().await.expect("missing rpc reply");
-                let msg: Value = serde_json::from_str(&raw).unwrap();
-                if msg.get("id") != Some(&json!(req_id)) {
-                    self.buffered.push(msg);
-                    continue;
-                }
-                return match msg.get("error") {
-                    Some(error) => Err(error.clone()),
-                    None => Ok(msg["result"].clone()),
-                };
-            }
-        }
-
-        async fn next_event(&mut self, thread_id: &ThreadId) -> EventKind {
-            loop {
-                let msg = if self.buffered.is_empty() {
-                    let raw = self.lines.recv().await.expect("expected notification");
-                    serde_json::from_str(&raw).unwrap()
-                } else {
-                    self.buffered.remove(0)
-                };
-                if msg.get("method") != Some(&json!("session/event")) {
-                    continue;
-                }
-                let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
-                if &ev.event.thread_id == thread_id {
-                    return ev.event.event;
-                }
-            }
-        }
-
-        fn drain_notices(&mut self) {
-            self.buffered.clear();
-            while self.lines.try_recv().is_ok() {}
-        }
-
-        async fn close(self) {
-            self.server.remove_client(self.client_id);
-            self.server.shutdown_all().await;
-        }
+        client.close().await;
     }
 
     #[tokio::test]
     async fn providers_reload_updates_open_session_models_without_reopening() {
-        const CHILD_MARKER: &str = "TIECHUI_TEST_PROVIDERS_RELOAD_HOME";
-        let Some(home_env) = std::env::var_os(CHILD_MARKER) else {
-            let dir = tempfile::tempdir().unwrap();
-            let home = dir.path().join("home");
-            std::fs::create_dir_all(&home).unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "app_server::tests::providers_reload_updates_open_session_models_without_reopening",
-                    "--nocapture",
-                ])
-                .env(CHILD_MARKER, &home)
-                .env("TIECHUI_HOME", &home)
-                .env("HOME", dir.path())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        let Some(home) = isolated_home_child(
+            "TIECHUI_TEST_PROVIDERS_RELOAD_HOME",
+            "app_server::tests::providers_reload_updates_open_session_models_without_reopening",
+        ) else {
             return;
         };
-
-        run_providers_reload_case(PathBuf::from(home_env)).await;
+        run_providers_reload_case(home).await;
     }
 
     async fn run_providers_reload_case(home: PathBuf) {
@@ -2078,18 +2027,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
 
         let mock = MockServer::start().await;
-        let sse_reply = format!(
-            "data: {}\n\ndata: [DONE]\n\n",
-            json!({
-                "choices": [{
-                    "index": 0,
-                    "delta": { "content": "synced-ok" },
-                    "finish_reason": "stop"
-                }]
-            })
-        );
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(sse_reply, "text/event-stream"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(sse_chat("synced-ok"), "text/event-stream"),
+            )
             .expect(1)
             .mount(&mock)
             .await;
@@ -2106,13 +2047,7 @@ mod tests {
         .unwrap();
 
         let mut client = TestClient::new(Server::new(home));
-        let opened: Snapshot = serde_json::from_value(
-            client
-                .call("session/open", json!({ "cwd": work }))
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let opened: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
         let thread_id = opened.thread_id;
         client.drain_notices();
 
@@ -2125,15 +2060,10 @@ mod tests {
         )
         .unwrap();
 
-        let reload_res = client
-            .call("providers/reload", json!({}))
-            .await
-            .expect("providers/reload must succeed");
+        let reload_res: Value = client.call_ok("providers/reload", json!({})).await;
         assert_eq!(reload_res, Value::Null);
 
-        let listed: Vec<ProviderEntry> =
-            serde_json::from_value(client.call("providers/list", json!({})).await.unwrap())
-                .unwrap();
+        let listed: Vec<ProviderEntry> = client.call_ok("providers/list", json!({})).await;
         assert_eq!(listed.len(), 2);
 
         let updated_models = wait_for_reloaded_models(&mut client, &thread_id).await;
@@ -2170,18 +2100,17 @@ mod tests {
     }
 
     async fn verify_post_reload_turn(client: &mut TestClient, thread_id: &ThreadId) {
-        client
-            .call(
+        let _: Value = client
+            .call_ok(
                 "session/submit",
                 json!({
                     "thread_id": thread_id,
                     "op": { "kind": "set_model", "provider": "beta", "model": "beta/m3" }
                 }),
             )
-            .await
-            .unwrap();
-        client
-            .call(
+            .await;
+        let _: Value = client
+            .call_ok(
                 "session/submit",
                 json!({
                     "thread_id": thread_id,
@@ -2192,8 +2121,7 @@ mod tests {
                     }
                 }),
             )
-            .await
-            .unwrap();
+            .await;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let EventKind::TurnCompleted { turn } = client.next_event(thread_id).await {

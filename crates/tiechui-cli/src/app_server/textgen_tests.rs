@@ -1,19 +1,28 @@
+#![allow(clippy::unwrap_used)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tiechui_protocol::app::{SessionEvent, SessionSummary, Snapshot};
-use tiechui_protocol::rpc::Id;
+use tiechui_model::{Content, Message, Role};
+use tiechui_protocol::app::{SessionSummary, Snapshot};
 use tiechui_protocol::workspace::CommitMessageResult;
-use tiechui_protocol::{EventKind, ThreadId, TurnStatus};
-use tokio::sync::{Notify, mpsc};
+use tiechui_protocol::{
+    Event, EventKind, InputContent, Item, ItemId, KnownItem, SessionEpoch, Thread, ThreadId, Turn,
+    TurnId, TurnStatus,
+};
+use tiechui_session::{EntryKind, SessionStore};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{ClientOut, Server};
+use super::projection::Projection;
+use super::tests::{TestClient, isolated_home_child, sse_chat};
+use super::{Live, Server, lock, watch_session_title};
 
 struct SignalResponder {
     arrived: Arc<Notify>,
@@ -27,185 +36,12 @@ impl wiremock::Respond for SignalResponder {
     }
 }
 
-#[allow(clippy::unwrap_used)]
 async fn wait_arrived(arrived: &Notify) {
     tokio::time::timeout(Duration::from_secs(10), arrived.notified())
         .await
         .expect("timed out waiting for mock request arrival");
 }
 
-struct RpcHarness {
-    server: Arc<Server>,
-    client_id: u64,
-    out: ClientOut,
-    lines: mpsc::UnboundedReceiver<String>,
-    buffered: Vec<Value>,
-    next_id: i64,
-}
-
-#[allow(clippy::unwrap_used)]
-impl RpcHarness {
-    fn new(server: Arc<Server>) -> Self {
-        let (client_id, out, lines) = server.add_client();
-        Self {
-            server,
-            client_id,
-            out,
-            lines,
-            buffered: Vec::new(),
-            next_id: 0,
-        }
-    }
-
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
-        self.next_id += 1;
-        let req_id = self.next_id;
-        self.server
-            .dispatch(
-                self.client_id,
-                &self.out,
-                Id::Number(req_id),
-                method,
-                params,
-            )
-            .await;
-        self.wait_reply(req_id).await
-    }
-
-    fn send_async(&mut self, method: &str, params: Value) -> i64 {
-        self.next_id += 1;
-        let req_id = self.next_id;
-        let raw = json!({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params
-        })
-        .to_string();
-        self.server
-            .receive(self.client_id, &self.out, raw.as_bytes());
-        req_id
-    }
-
-    fn send_notification(&self, method: &str, params: Value) {
-        let raw = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params
-        })
-        .to_string();
-        self.server
-            .receive(self.client_id, &self.out, raw.as_bytes());
-    }
-
-    async fn wait_reply(&mut self, req_id: i64) -> Result<Value, Value> {
-        loop {
-            let raw = self.lines.recv().await.expect("missing rpc reply");
-            let msg: Value = serde_json::from_str(&raw).unwrap();
-            if msg.get("id") != Some(&json!(req_id)) {
-                self.buffered.push(msg);
-                continue;
-            }
-            return match msg.get("error") {
-                Some(error) => Err(error.clone()),
-                None => Ok(msg["result"].clone()),
-            };
-        }
-    }
-
-    async fn wait_matching<T>(
-        &mut self,
-        label: &str,
-        mut pred: impl FnMut(&Value) -> Option<T>,
-    ) -> T {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let mut idx = 0;
-            loop {
-                while idx < self.buffered.len() {
-                    if let Some(found) = pred(&self.buffered[idx]) {
-                        self.buffered.remove(idx);
-                        return found;
-                    }
-                    idx += 1;
-                }
-                let raw = self.lines.recv().await.expect("expected notification");
-                self.buffered.push(serde_json::from_str(&raw).unwrap());
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
-    }
-
-    async fn wait_turn_completed(&mut self, thread_id: &ThreadId) -> Vec<EventKind> {
-        let mut seen = Vec::new();
-        loop {
-            let kind = self
-                .wait_matching("TurnCompleted", |msg| {
-                    if msg.get("method") != Some(&json!("session/event")) {
-                        return None;
-                    }
-                    let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
-                    (&ev.event.thread_id == thread_id).then_some(ev.event.event)
-                })
-                .await;
-            let done = matches!(&kind, EventKind::TurnCompleted { turn } if turn.status == TurnStatus::Completed);
-            seen.push(kind);
-            if done {
-                return seen;
-            }
-        }
-    }
-
-    async fn wait_sessions_changed(&mut self) {
-        self.wait_matching("sessions/changed", |msg| {
-            (msg.get("method") == Some(&json!("sessions/changed"))).then_some(())
-        })
-        .await;
-    }
-
-    async fn wait_reloaded(&mut self, thread_id: &ThreadId) {
-        self.wait_matching("session reload", |msg| {
-            if msg.get("method") != Some(&json!("session/event")) {
-                return None;
-            }
-            let ev: SessionEvent = serde_json::from_value(msg["params"].clone()).unwrap();
-            (&ev.event.thread_id == thread_id
-                && ev.event.epoch.0 >= 1
-                && matches!(ev.event.event, EventKind::ThreadStarted { .. }))
-            .then_some(())
-        })
-        .await;
-    }
-
-    fn drain_notices(&mut self) {
-        self.buffered.clear();
-        while self.lines.try_recv().is_ok() {}
-    }
-
-    async fn drain_title_tasks(&self) {
-        self.server.drain_title_tasks().await;
-    }
-
-    async fn close(self) {
-        self.server.remove_client(self.client_id);
-        self.server.shutdown_all().await;
-    }
-}
-
-fn sse_chat(content: &str) -> String {
-    format!(
-        "data: {}\n\ndata: [DONE]\n\n",
-        json!({
-            "choices": [{
-                "index": 0,
-                "delta": { "content": content },
-                "finish_reason": "stop"
-            }]
-        })
-    )
-}
-
-#[allow(clippy::unwrap_used)]
 fn write_test_providers(home: &Path, main_uri: &str, light_uri: &str) {
     std::fs::write(
         home.join("providers.toml"),
@@ -219,10 +55,22 @@ fn write_test_providers(home: &Path, main_uri: &str, light_uri: &str) {
     .unwrap();
 }
 
-#[allow(clippy::unwrap_used)]
-async fn submit_text(client: &mut RpcHarness, thread_id: &ThreadId, text: &str) -> Vec<EventKind> {
-    client
-        .call(
+async fn single_lightweight_prompt(mock: &MockServer) -> (Value, String) {
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["model"], "fast");
+    assert_eq!(body["reasoning_effort"], "none");
+    let prompt = body["messages"][1]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (body, prompt)
+}
+
+async fn submit_text(client: &mut TestClient, thread_id: &ThreadId, text: &str) -> Vec<EventKind> {
+    let _: Value = client
+        .call_ok(
             "session/submit",
             json!({
                 "thread_id": thread_id,
@@ -233,43 +81,91 @@ async fn submit_text(client: &mut RpcHarness, thread_id: &ThreadId, text: &str) 
                 }
             }),
         )
-        .await
-        .unwrap();
+        .await;
     client.wait_turn_completed(thread_id).await
 }
 
-#[tokio::test]
-#[allow(clippy::unwrap_used)]
-async fn session_title_generation_lifecycle_and_guards() {
-    const MARKER: &str = "TIECHUI_TEST_TITLE_GEN_HOME";
-    let Some(home_env) = std::env::var_os(MARKER) else {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "app_server::textgen_tests::session_title_generation_lifecycle_and_guards",
-                "--nocapture",
-            ])
-            .env(MARKER, &home)
-            .env("TIECHUI_HOME", &home)
-            .env("HOME", dir.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    };
-
-    run_title_generation_cases(PathBuf::from(home_env)).await;
+fn append_user_message(store: &mut SessionStore, text: &str, cancel: &CancellationToken) {
+    store
+        .append(
+            EntryKind::Message {
+                message: Message {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: text.into(),
+                        opaque: None,
+                    }],
+                    opaque: None,
+                },
+                usage: None,
+                model: None,
+                stop_reason: None,
+                reasoning: None,
+                details: None,
+            },
+            cancel,
+        )
+        .unwrap();
 }
 
-#[allow(clippy::unwrap_used)]
+fn thread_started_event(thread_id: &str) -> Event {
+    Event {
+        submission_id: None,
+        thread_id: ThreadId(thread_id.into()),
+        epoch: SessionEpoch(0),
+        event: EventKind::ThreadStarted {
+            thread: Thread {
+                id: ThreadId(thread_id.into()),
+                epoch: SessionEpoch(0),
+                turns: vec![],
+            },
+            replay: false,
+        },
+    }
+}
+
+fn completed_turn_event(thread_id: &str, items: Vec<Item>) -> Event {
+    Event {
+        submission_id: None,
+        thread_id: ThreadId(thread_id.into()),
+        epoch: SessionEpoch(0),
+        event: EventKind::TurnCompleted {
+            turn: Turn {
+                id: TurnId("t-1".into()),
+                status: TurnStatus::Completed,
+                items,
+                started_at: 1,
+                ended_at: Some(2),
+            },
+        },
+    }
+}
+
+fn user_item(id: &str, text: &str) -> Item {
+    Item::Known(KnownItem::UserMessage {
+        id: ItemId(id.into()),
+        content: vec![InputContent::Text { text: text.into() }],
+    })
+}
+
+fn assistant_item(id: &str, text: &str) -> Item {
+    Item::Known(KnownItem::AssistantMessage {
+        id: ItemId(id.into()),
+        text: text.into(),
+    })
+}
+
+#[tokio::test]
+async fn session_title_generation_lifecycle_and_guards() {
+    let Some(home) = isolated_home_child(
+        "TIECHUI_TEST_TITLE_GEN_HOME",
+        "app_server::textgen_tests::session_title_generation_lifecycle_and_guards",
+    ) else {
+        return;
+    };
+    run_title_generation_cases(home).await;
+}
+
 async fn run_title_generation_cases(home: PathBuf) {
     let work = home.parent().unwrap().join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -299,11 +195,12 @@ async fn run_title_generation_cases(home: PathBuf) {
     .unwrap();
     write_test_providers(&home, &main_mock.uri(), &light_mock.uri());
 
-    let mut client = RpcHarness::new(Server::new(home.clone()));
+    let mut client = TestClient::new(Server::new(home.clone()));
 
     verify_first_turn_title(&mut client, &home, &work, &light_mock).await;
     let untitled_history_path =
         verify_unset_and_resume_guards(&mut client, &work, &light_mock).await;
+    verify_fork_guard(&mut client, &home, &work, &light_mock).await;
     verify_rename_guards(&mut client, &work, &light_mock).await;
     verify_silent_failure(&mut client, &work, &light_mock).await;
 
@@ -314,13 +211,9 @@ async fn run_title_generation_cases(home: PathBuf) {
         )
         .mount(&light_mock)
         .await;
-    let resumed: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "path": untitled_history_path }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let resumed: Snapshot = client
+        .call_ok("session/open", json!({ "path": untitled_history_path }))
+        .await;
     client.drain_notices();
     submit_text(&mut client, &resumed.thread_id, "继续第二轮").await;
     client.drain_title_tasks().await;
@@ -335,20 +228,13 @@ async fn run_title_generation_cases(home: PathBuf) {
     client.close().await;
 }
 
-#[allow(clippy::unwrap_used)]
 async fn verify_first_turn_title(
-    client: &mut RpcHarness,
+    client: &mut TestClient,
     home: &Path,
     work: &Path,
     light_mock: &MockServer,
 ) {
-    let opened: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let opened: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
     client.drain_notices();
 
     let long_user = "排查生产环境鉴权接口超时问题🚀".repeat(150);
@@ -356,24 +242,13 @@ async fn verify_first_turn_title(
     client.wait_sessions_changed().await;
     client.drain_title_tasks().await;
 
-    let reqs = light_mock.received_requests().await.unwrap();
-    assert_eq!(reqs.len(), 1);
-    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    assert_eq!(body["model"], "fast");
-    assert_eq!(body["reasoning_effort"], "none");
+    let (body, prompt) = single_lightweight_prompt(light_mock).await;
     assert!(body.get("prompt_cache_key").is_none());
-    let prompt = body["messages"][1]["content"][0]["text"].as_str().unwrap();
     assert!(prompt.len() < 4_000, "prompt too large: {}", prompt.len());
     assert!(prompt.contains("排查生产环境鉴权接口超时问题🚀"));
     assert!(prompt.contains("这是助手针对鉴权超时的详细排查结论🔍"));
 
-    let listed: Vec<SessionSummary> = serde_json::from_value(
-        client
-            .call("session/list", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let listed: Vec<SessionSummary> = client.call_ok("session/list", json!({ "cwd": work })).await;
     let item = listed.iter().find(|s| s.path == opened.path).unwrap();
     assert_eq!(item.title.as_deref(), Some("修复鉴权超时"));
 
@@ -388,34 +263,25 @@ async fn verify_first_turn_title(
     submit_text(client, &opened.thread_id, "第二轮追问").await;
     client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 1);
-    client
-        .call("session/close", json!({ "thread_id": opened.thread_id }))
-        .await
-        .unwrap();
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": opened.thread_id }))
+        .await;
 }
 
-#[allow(clippy::unwrap_used)]
 async fn verify_unset_and_resume_guards(
-    client: &mut RpcHarness,
+    client: &mut TestClient,
     work: &Path,
     light_mock: &MockServer,
 ) -> String {
     light_mock.reset().await;
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "config/update",
             json!({ "key": "lightweight_model", "value": null }),
         )
-        .await
-        .unwrap();
+        .await;
 
-    let opened: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let opened: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
     client.drain_notices();
     submit_text(client, &opened.thread_id, "未配置轻量模型首条消息").await;
     client.drain_title_tasks().await;
@@ -427,13 +293,10 @@ async fn verify_unset_and_resume_guards(
         None
     );
 
-    client
-        .call("session/close", json!({ "thread_id": opened.thread_id }))
-        .await
-        .unwrap();
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": opened.thread_id }))
+        .await;
 
-    // Open a new empty session while lightweight_model is unset, then configure lightweight_model
-    // (triggering session reload before turn 1) and verify turn 1 still generates a title.
     Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
@@ -442,21 +305,14 @@ async fn verify_unset_and_resume_guards(
         .expect(1)
         .mount(light_mock)
         .await;
-    let pre_opened: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let pre_opened: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
     client.drain_notices();
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "config/update",
             json!({ "key": "lightweight_model", "value": "beta/fast" }),
         )
-        .await
-        .unwrap();
+        .await;
     client.wait_reloaded(&pre_opened.thread_id).await;
     client.drain_notices();
     submit_text(client, &pre_opened.thread_id, "配置轻量模型后发送首轮").await;
@@ -469,19 +325,54 @@ async fn verify_unset_and_resume_guards(
             .as_deref(),
         Some("热更新后生成标题")
     );
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "session/close",
             json!({ "thread_id": pre_opened.thread_id }),
         )
-        .await
-        .unwrap();
+        .await;
 
     opened.path
 }
 
-#[allow(clippy::unwrap_used)]
-async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: &MockServer) {
+async fn verify_fork_guard(
+    client: &mut TestClient,
+    home: &Path,
+    work: &Path,
+    light_mock: &MockServer,
+) {
+    light_mock.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_chat("分叉不应生成标题"), "text/event-stream"),
+        )
+        .mount(light_mock)
+        .await;
+
+    let cancel = CancellationToken::new();
+    let root_store = SessionStore::create(home, work, &cancel).unwrap();
+    let forked_path = {
+        let forked = root_store.fork(&root_store.header().id, &cancel).unwrap();
+        assert!(forked.header().parent_session.is_some());
+        forked.path().to_owned()
+    };
+    drop(root_store);
+
+    let opened: Snapshot = client
+        .call_ok("session/open", json!({ "path": forked_path }))
+        .await;
+    client.drain_notices();
+    submit_text(client, &opened.thread_id, "在分叉会话发送首轮").await;
+    client.drain_title_tasks().await;
+    assert_eq!(light_mock.received_requests().await.unwrap().len(), 0);
+    assert_eq!(tiechui_session::meta(&forked_path).unwrap().title, None);
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": opened.thread_id }))
+        .await;
+}
+
+async fn verify_rename_guards(client: &mut TestClient, work: &Path, light_mock: &MockServer) {
     light_mock.reset().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -490,20 +381,13 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
         .mount(light_mock)
         .await;
 
-    let early: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    client
-        .call(
+    let early: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
+    let _: Value = client
+        .call_ok(
             "session/rename",
             json!({ "path": early.path, "title": "手动早期标题" }),
         )
-        .await
-        .unwrap();
+        .await;
     client.drain_notices();
     submit_text(client, &early.thread_id, "测试早期改名").await;
     client.drain_title_tasks().await;
@@ -529,23 +413,16 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
         .mount(light_mock)
         .await;
 
-    let mid: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let mid: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
     client.drain_notices();
     submit_text(client, &mid.thread_id, "测试中途改名").await;
     wait_arrived(&arrived).await;
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "session/rename",
             json!({ "path": mid.path, "title": "手动中途改名" }),
         )
-        .await
-        .unwrap();
+        .await;
     client.drain_title_tasks().await;
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 1);
     assert_eq!(
@@ -555,18 +432,15 @@ async fn verify_rename_guards(client: &mut RpcHarness, work: &Path, light_mock: 
             .as_deref(),
         Some("手动中途改名")
     );
-    client
-        .call("session/close", json!({ "thread_id": early.thread_id }))
-        .await
-        .unwrap();
-    client
-        .call("session/close", json!({ "thread_id": mid.thread_id }))
-        .await
-        .unwrap();
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": early.thread_id }))
+        .await;
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": mid.thread_id }))
+        .await;
 }
 
-#[allow(clippy::unwrap_used)]
-async fn verify_silent_failure(client: &mut RpcHarness, work: &Path, light_mock: &MockServer) {
+async fn verify_silent_failure(client: &mut TestClient, work: &Path, light_mock: &MockServer) {
     light_mock.reset().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500).set_body_string("upstream down"))
@@ -574,13 +448,7 @@ async fn verify_silent_failure(client: &mut RpcHarness, work: &Path, light_mock:
         .mount(light_mock)
         .await;
 
-    let failing: Snapshot = serde_json::from_value(
-        client
-            .call("session/open", json!({ "cwd": work }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let failing: Snapshot = client.call_ok("session/open", json!({ "cwd": work })).await;
     client.drain_notices();
     let events = submit_text(client, &failing.thread_id, "测试失败静默").await;
     client.drain_title_tasks().await;
@@ -592,27 +460,183 @@ async fn verify_silent_failure(client: &mut RpcHarness, work: &Path, light_mock:
             .title,
         None
     );
-    client
-        .call("session/close", json!({ "thread_id": failing.thread_id }))
-        .await
-        .unwrap();
-}
-
-fn git_cmd(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .status()
-        .expect("git failed to spawn");
-    assert!(status.success(), "git {args:?} failed");
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": failing.thread_id }))
+        .await;
 }
 
 #[tokio::test]
-#[allow(clippy::unwrap_used)]
+async fn first_turn_title_ignores_mid_turn_steers_and_queued_followup_entries_in_server_and_tui() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let light_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_chat("修复鉴权并发竞态"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&light_mock)
+        .await;
+
+    write_test_providers(&home, "http://127.0.0.1:9", &light_mock.uri());
+    std::fs::write(
+        home.join("config.toml"),
+        "model = \"alpha/main\"\nlightweight_model = \"beta/fast\"\n",
+    )
+    .unwrap();
+
+    let cancel = CancellationToken::new();
+    let tui_path = {
+        let mut store = SessionStore::create(&home, &work, &cancel).unwrap();
+        append_user_message(&mut store, "首轮初始提问：排查鉴权竞态", &cancel);
+        append_user_message(&mut store, "中途 steer 补充说明", &cancel);
+        append_user_message(&mut store, "第二轮 follow-up 提前落盘消息", &cancel);
+        store.path().to_owned()
+    };
+
+    let (events_tx, events_rx) = broadcast::channel(16);
+    let tui_handle = watch_session_title(home.clone(), tui_path.clone(), events_rx);
+    events_tx.send(thread_started_event("tui-t1")).unwrap();
+    events_tx
+        .send(completed_turn_event(
+            "tui-t1",
+            vec![
+                user_item("u1", "首轮初始提问：排查鉴权竞态"),
+                assistant_item("a1", "先读取会话日志"),
+                user_item("u2", "中途 steer 补充说明"),
+                assistant_item("a2", "已修复首轮提取逻辑"),
+            ],
+        ))
+        .unwrap();
+    tui_handle.await.unwrap();
+
+    let (_, tui_prompt) = single_lightweight_prompt(&light_mock).await;
+    assert!(tui_prompt.contains("首轮初始提问：排查鉴权竞态"));
+    assert!(tui_prompt.contains("先读取会话日志\n\n已修复首轮提取逻辑"));
+    assert!(!tui_prompt.contains("中途 steer 补充说明"));
+    assert!(!tui_prompt.contains("第二轮 follow-up 提前落盘消息"));
+    assert_eq!(
+        tiechui_session::meta(&tui_path).unwrap().title.as_deref(),
+        Some("修复鉴权并发竞态")
+    );
+
+    verify_server_multi_user_turn_and_unset_tui(&home, &work, &light_mock).await;
+}
+
+async fn verify_server_multi_user_turn_and_unset_tui(
+    home: &Path,
+    work: &Path,
+    light_mock: &MockServer,
+) {
+    light_mock.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_chat("服务端首轮标题"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(light_mock)
+        .await;
+
+    let cancel = CancellationToken::new();
+    let app_path = {
+        let mut store = SessionStore::create(home, work, &cancel).unwrap();
+        append_user_message(&mut store, "桌面端首轮提问", &cancel);
+        append_user_message(&mut store, "BeforeStop 钩子续跑提示", &cancel);
+        append_user_message(&mut store, "排队中的第二轮消息", &cancel);
+        store.path().to_owned()
+    };
+
+    let server = Server::new(home.to_owned());
+    let mut client = TestClient::new(server.clone());
+    let projection = Arc::new(Mutex::new(Projection::default()));
+    let (submissions, _rx) = mpsc::channel(1);
+    let (ready_tx, started) = watch::channel(None);
+    let thread = ThreadId("app-t1".into());
+    lock(&server.sessions).insert(
+        thread.clone(),
+        Arc::new(Live {
+            path: app_path.clone(),
+            cwd: work.to_owned(),
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection: projection.clone(),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        }),
+    );
+
+    server.forward_event(
+        &thread,
+        &projection,
+        &ready_tx,
+        thread_started_event("app-t1"),
+    );
+    server.forward_event(
+        &thread,
+        &projection,
+        &ready_tx,
+        completed_turn_event(
+            "app-t1",
+            vec![
+                user_item("u1", "桌面端首轮提问"),
+                user_item("u2", "BeforeStop 钩子续跑提示"),
+                assistant_item("a1", "桌面端首轮回答"),
+            ],
+        ),
+    );
+    client.wait_sessions_changed().await;
+    client.drain_title_tasks().await;
+    let (_, app_prompt) = single_lightweight_prompt(light_mock).await;
+    assert!(app_prompt.contains("桌面端首轮提问"));
+    assert!(!app_prompt.contains("BeforeStop 钩子续跑提示"));
+    assert!(!app_prompt.contains("排队中的第二轮消息"));
+    assert_eq!(
+        tiechui_session::meta(&app_path).unwrap().title.as_deref(),
+        Some("服务端首轮标题")
+    );
+    client.close().await;
+
+    light_mock.reset().await;
+    std::fs::write(home.join("config.toml"), "model = \"alpha/main\"\n").unwrap();
+    let unset_path = SessionStore::create(home, work, &cancel)
+        .unwrap()
+        .path()
+        .to_owned();
+    let (unset_tx, unset_rx) = broadcast::channel(8);
+    let unset_handle = watch_session_title(home.to_owned(), unset_path.clone(), unset_rx);
+    unset_tx.send(thread_started_event("tui-unset")).unwrap();
+    unset_tx
+        .send(completed_turn_event(
+            "tui-unset",
+            vec![
+                user_item("u1", "未配置轻量模型"),
+                assistant_item("a1", "正常回复"),
+            ],
+        ))
+        .unwrap();
+    unset_handle.await.unwrap();
+    assert!(light_mock.received_requests().await.unwrap().is_empty());
+    assert_eq!(tiechui_session::meta(&unset_path).unwrap().title, None);
+}
+
+fn run_git(root: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=T", "-c", "user.email=t@e.co"])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+}
+
+#[tokio::test]
 async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -626,9 +650,9 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     write_test_providers(&home, "http://127.0.0.1:9", &light_mock.uri());
     std::fs::write(home.join("config.toml"), "model = \"alpha/main\"\n").unwrap();
 
-    let mut client = RpcHarness::new(Server::new(home.clone()));
+    let mut client = TestClient::new(Server::new(home.clone()));
 
-    git_cmd(&repo, &["init", "-q"]);
+    run_git(&repo, &["init", "-q"]);
     std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
     let unset_err = client
         .call("git/commit_message", json!({ "root": repo }))
@@ -643,13 +667,12 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     );
     assert_eq!(light_mock.received_requests().await.unwrap().len(), 0);
 
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "config/update",
             json!({ "key": "lightweight_model", "value": "beta/fast" }),
         )
-        .await
-        .unwrap();
+        .await;
 
     assert!(
         client
@@ -657,8 +680,8 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
             .await
             .is_err()
     );
-    git_cmd(&repo, &["add", "a.txt"]);
-    git_cmd(&repo, &["commit", "-q", "-m", "initial"]);
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(&repo, &["commit", "-q", "-m", "initial"]);
     let clean_err = client
         .call("git/commit_message", json!({ "root": repo }))
         .await
@@ -674,13 +697,12 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     verify_commit_message_diffs(&mut client, &repo, &light_mock).await;
     verify_commit_message_cancellation(&mut client, &repo, &light_mock).await;
 
-    client
-        .call(
+    let _: Value = client
+        .call_ok(
             "providers/delete_model",
             json!({ "provider": "beta", "id": "fast" }),
         )
-        .await
-        .unwrap();
+        .await;
     let undeclared = client
         .call("git/commit_message", json!({ "root": repo }))
         .await
@@ -696,9 +718,8 @@ async fn git_commit_message_rpc_handles_diffs_errors_and_cancellation() {
     client.close().await;
 }
 
-#[allow(clippy::unwrap_used)]
 async fn verify_commit_message_cancellation(
-    client: &mut RpcHarness,
+    client: &mut TestClient,
     repo: &Path,
     light_mock: &MockServer,
 ) {
@@ -720,13 +741,12 @@ async fn verify_commit_message_cancellation(
     );
     wait_arrived(&arrived).await;
     let started = Instant::now();
-    let cancel_res = client
-        .call(
+    let cancel_res: Value = client
+        .call_ok(
             "git/cancel_commit_message",
             json!({ "request_id": "cancel-token-1" }),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(cancel_res, Value::Null);
     let cancelled = client.wait_reply(req_id).await.unwrap_err();
     assert_eq!(cancelled["code"], -32800, "{cancelled}");
@@ -748,9 +768,8 @@ async fn verify_commit_message_cancellation(
     assert!(immediate_started.elapsed() < Duration::from_secs(5));
 }
 
-#[allow(clippy::unwrap_used)]
 async fn verify_commit_message_diffs(
-    client: &mut RpcHarness,
+    client: &mut TestClient,
     repo: &Path,
     light_mock: &MockServer,
 ) {
@@ -770,34 +789,23 @@ async fn verify_commit_message_diffs(
     )
     .unwrap();
 
-    let fallback: CommitMessageResult = serde_json::from_value(
-        client
-            .call("git/commit_message", json!({ "root": repo }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let fallback: CommitMessageResult = client
+        .call_ok("git/commit_message", json!({ "root": repo }))
+        .await;
     assert_eq!(
         fallback.message,
         "feat(notes): update tracked and untracked files"
     );
 
-    let reqs = light_mock.received_requests().await.unwrap();
-    assert_eq!(reqs.len(), 1);
-    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    assert_eq!(body["model"], "fast");
-    assert_eq!(body["reasoning_effort"], "none");
-    let diff_prompt = body["messages"][1]["content"][0]["text"].as_str().unwrap();
+    let (_, diff_prompt) = single_lightweight_prompt(light_mock).await;
     assert!(diff_prompt.contains("+unstaged edit"));
     assert!(diff_prompt.contains("big_untracked.txt"));
     assert!(diff_prompt.contains("[diff truncated]"));
 
-    // Verify HEAD did not advance (chui never executes git commit).
     let commits = tiechui_workspace::log(repo, 10).unwrap();
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].subject, "initial");
 
-    // Stage a single file -> only staged diff is sent.
     light_mock.reset().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -809,21 +817,13 @@ async fn verify_commit_message_diffs(
         .await;
 
     std::fs::write(repo.join("staged_only.txt"), "staged line\n").unwrap();
-    git_cmd(repo, &["add", "staged_only.txt"]);
+    run_git(repo, &["add", "staged_only.txt"]);
 
-    let staged_res: CommitMessageResult = serde_json::from_value(
-        client
-            .call("git/commit_message", json!({ "root": repo }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let staged_res: CommitMessageResult = client
+        .call_ok("git/commit_message", json!({ "root": repo }))
+        .await;
     assert_eq!(staged_res.message, "fix: add staged file only");
-    let staged_reqs = light_mock.received_requests().await.unwrap();
-    let staged_body: Value = serde_json::from_slice(&staged_reqs[0].body).unwrap();
-    let staged_prompt = staged_body["messages"][1]["content"][0]["text"]
-        .as_str()
-        .unwrap();
+    let (_, staged_prompt) = single_lightweight_prompt(light_mock).await;
     assert!(staged_prompt.contains("staged_only.txt"));
     assert!(!staged_prompt.contains("unstaged edit"));
     assert!(!staged_prompt.contains("big_untracked.txt"));

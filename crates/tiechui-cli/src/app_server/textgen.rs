@@ -3,22 +3,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+#[cfg(feature = "workspace")]
 use tiechui_core::textgen::TextGenError;
-use tiechui_model::{Content, ModelId, Role};
-use tiechui_protocol::rpc::{self, Id};
+use tiechui_model::ModelId;
+use tiechui_protocol::rpc::Id;
 #[cfg(feature = "workspace")]
 use tiechui_protocol::workspace::{
     CancelCommitMessageParams, CommitMessageParams, CommitMessageResult,
 };
+use tiechui_protocol::{Event, EventKind, InputContent, Item, KnownItem, TurnStatus};
 use tiechui_providers::ModelProvider;
-use tiechui_session::{EntryKind, SessionStore};
+use tiechui_session::SessionStore;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "workspace")]
-use super::{Reply, internal, parse, value};
-use super::{Server, failure, lock};
+use super::{Reply, failure, internal, parse, rpc, value};
+use super::{Server, lock};
 
 const MAX_PRE_CANCELLED: usize = 64;
+#[cfg(feature = "workspace")]
 const REQUEST_CANCELLED_CODE: i64 = -32800;
 
 #[derive(Default)]
@@ -26,6 +31,7 @@ pub(super) struct CancelRegistry {
     by_rpc: HashMap<(u64, String), CancellationToken>,
     by_request_id: HashMap<String, (u64, CancellationToken)>,
     pre_cancelled_rpc: VecDeque<(u64, String)>,
+    #[cfg(feature = "workspace")]
     pre_cancelled: VecDeque<String>,
 }
 
@@ -46,6 +52,7 @@ fn push_bounded<T: PartialEq>(queue: &mut VecDeque<T>, item: T) {
     }
 }
 
+#[cfg(feature = "workspace")]
 fn take_queued<T: PartialEq>(queue: &mut VecDeque<T>, item: &T) -> bool {
     match queue.iter().position(|queued| queued == item) {
         Some(pos) => {
@@ -57,6 +64,7 @@ fn take_queued<T: PartialEq>(queue: &mut VecDeque<T>, item: &T) -> bool {
 }
 
 impl CancelRegistry {
+    #[cfg(feature = "workspace")]
     pub(super) fn register(
         &mut self,
         client_id: u64,
@@ -81,6 +89,7 @@ impl CancelRegistry {
         token
     }
 
+    #[cfg(feature = "workspace")]
     pub(super) fn finish(&mut self, client_id: u64, rpc_id: &Id, request_id: Option<&str>) {
         self.by_rpc.remove(&(client_id, rpc_key(rpc_id)));
         if let Some(req_id) = request_id {
@@ -88,6 +97,7 @@ impl CancelRegistry {
         }
     }
 
+    #[cfg(feature = "workspace")]
     pub(super) fn cancel_request_id(&mut self, request_id: &str) {
         if let Some((_, token)) = self.by_request_id.remove(request_id) {
             token.cancel();
@@ -160,120 +170,178 @@ fn resolve_lightweight(
     Ok((provider, ModelId(raw.to_owned()), config.network))
 }
 
+#[derive(Default)]
+pub(crate) struct InitialTitleTrigger {
+    eligible: Option<bool>,
+}
+
+impl InitialTitleTrigger {
+    pub(crate) fn take(&mut self, event: &Event) -> Option<(String, String)> {
+        match &event.event {
+            EventKind::ThreadStarted { thread, replay } if self.eligible.is_none() => {
+                self.eligible = Some(!*replay && thread.turns.is_empty());
+                None
+            }
+            EventKind::TurnCompleted { turn }
+                if turn.status == TurnStatus::Completed && self.eligible == Some(true) =>
+            {
+                self.eligible = Some(false);
+                turn_title_texts(&turn.items)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.eligible == Some(false)
+    }
+}
+
+fn first_user_text(items: &[Item]) -> Option<String> {
+    items.iter().find_map(|item| {
+        let Item::Known(KnownItem::UserMessage { content, .. }) = item else {
+            return None;
+        };
+        let parts: Vec<&str> = content
+            .iter()
+            .filter_map(|block| match block {
+                InputContent::Text { text } if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n"))
+    })
+}
+
+fn turn_title_texts(items: &[Item]) -> Option<(String, String)> {
+    let user_text = first_user_text(items)?;
+    if user_text.trim().is_empty() {
+        return None;
+    }
+    let assistant_parts: Vec<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Known(KnownItem::AssistantMessage { text, .. }) if !text.is_empty() => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    Some((user_text, assistant_parts.join("\n\n")))
+}
+
 struct TitleJob {
     provider: Box<dyn ModelProvider>,
     model: ModelId,
-    user_text: String,
-    assistant_text: String,
 }
 
 fn prepare_title_job(home: &Path, path: &Path, cancel: &CancellationToken) -> Option<TitleJob> {
     if !path.exists() || tiechui_session::meta(path).ok()?.title.is_some() {
         return None;
     }
-    let (provider, model, _) = resolve_lightweight(home).ok()?;
-    let store = SessionStore::open_read_only(path, cancel).ok()?;
-    let (user_text, assistant_text) = first_turn_texts(&store)?;
-    Some(TitleJob {
-        provider,
-        model,
-        user_text,
-        assistant_text,
-    })
-}
-
-#[derive(Default)]
-struct FirstTurnCollector {
-    user_turns: usize,
-    user_parts: Vec<String>,
-    assistant_parts: Vec<String>,
-}
-
-impl FirstTurnCollector {
-    fn push(&mut self, entry: &tiechui_session::Entry) {
-        let EntryKind::Message { message, .. } = &entry.kind else {
-            return;
-        };
-        match message.role {
-            Role::User => {
-                self.user_turns += 1;
-                collect_message_text(&message.content, &mut self.user_parts);
-            }
-            Role::Assistant if self.user_turns == 1 => {
-                collect_message_text(&message.content, &mut self.assistant_parts);
-            }
-            _ => {}
-        }
-    }
-
-    fn finish(self) -> Option<(String, String)> {
-        if self.user_turns != 1 {
-            return None;
-        }
-        let user_text = self.user_parts.join("\n");
-        (!user_text.trim().is_empty()).then(|| (user_text, self.assistant_parts.join("\n\n")))
-    }
-}
-
-fn first_turn_texts(store: &SessionStore) -> Option<(String, String)> {
-    if store.header().parent_session.is_some() {
+    if SessionStore::open_read_only(path, cancel)
+        .ok()?
+        .header()
+        .parent_session
+        .is_some()
+    {
         return None;
     }
-    let branch = store.path_to_root(store.current_leaf()?).ok()?;
-    let mut collector = FirstTurnCollector::default();
-    for entry in branch {
-        collector.push(entry);
-    }
-    collector.finish()
+    let (provider, model, _) = resolve_lightweight(home).ok()?;
+    Some(TitleJob { provider, model })
 }
 
-fn collect_message_text(content: &[Content], out: &mut Vec<String>) {
-    for block in content {
-        if let Content::Text { text, .. } = block
-            && !text.is_empty()
-        {
-            out.push(text.clone());
-        }
-    }
-}
-
-pub(super) fn spawn_session_title(server: Arc<Server>, path: PathBuf, cancel: CancellationToken) {
-    let task_server = server.clone();
-    let handle = tokio::spawn(async move {
-        run_session_title(task_server, path, cancel).await;
-    });
-    let mut tasks = lock(&server.title_tasks);
-    tasks.retain(|task| !task.is_finished());
-    tasks.push(handle);
-}
-
-async fn run_session_title(server: Arc<Server>, path: PathBuf, cancel: CancellationToken) {
-    let home = server.home.clone();
-    let job_path = path.clone();
+pub(super) async fn generate_and_save_session_title(
+    home: &Path,
+    path: &Path,
+    user_text: &str,
+    assistant_text: &str,
+    cancel: CancellationToken,
+) -> bool {
+    let job_home = home.to_owned();
+    let job_path = path.to_owned();
     let job_cancel = cancel.clone();
     let Ok(Some(job)) =
-        tokio::task::spawn_blocking(move || prepare_title_job(&home, &job_path, &job_cancel)).await
+        tokio::task::spawn_blocking(move || prepare_title_job(&job_home, &job_path, &job_cancel))
+            .await
     else {
-        return;
+        return false;
     };
     let Some(title) = tiechui_core::textgen::generate_session_title(
         job.provider.as_ref(),
         job.model,
-        &job.user_text,
-        &job.assistant_text,
+        user_text,
+        assistant_text,
         cancel,
     )
     .await
     else {
-        return;
+        return false;
     };
+    let save_path = path.to_owned();
     let saved =
-        tokio::task::spawn_blocking(move || tiechui_session::set_initial_title(&path, &title))
+        tokio::task::spawn_blocking(move || tiechui_session::set_initial_title(&save_path, &title))
             .await;
-    if matches!(saved, Ok(Ok(true))) {
-        server.notify("sessions/changed", Value::Null);
-        server.touch();
-    }
+    matches!(saved, Ok(Ok(true)))
+}
+
+pub(crate) fn watch_session_title(
+    home: PathBuf,
+    path: PathBuf,
+    mut events: broadcast::Receiver<Event>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut trigger = InitialTitleTrigger::default();
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Some((user_text, assistant_text)) = trigger.take(&event) {
+                        generate_and_save_session_title(
+                            &home,
+                            &path,
+                            &user_text,
+                            &assistant_text,
+                            CancellationToken::new(),
+                        )
+                        .await;
+                        break;
+                    }
+                    if trigger.is_exhausted() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+pub(super) fn spawn_session_title(
+    server: Arc<Server>,
+    path: PathBuf,
+    texts: (String, String),
+    cancel: CancellationToken,
+) {
+    let (user_text, assistant_text) = texts;
+    let task_server = server.clone();
+    let handle = tokio::spawn(async move {
+        if generate_and_save_session_title(
+            &task_server.home,
+            &path,
+            &user_text,
+            &assistant_text,
+            cancel,
+        )
+        .await
+        {
+            task_server.notify("sessions/changed", Value::Null);
+            task_server.touch();
+        }
+    });
+    let mut tasks = lock(&server.title_tasks);
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(handle);
 }
 
 pub(super) fn maybe_cancel_notification(server: &Server, client_id: u64, params: Option<Value>) {

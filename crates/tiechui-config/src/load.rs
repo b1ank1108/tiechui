@@ -200,13 +200,11 @@ fn strip_user_only(
         if permissions.mode.is_some() {
             user_only.push("permissions.mode");
         }
-        // A project could otherwise send every reviewed action to a model it picks.
         if permissions.classifier_model.is_some() {
             user_only.push("permissions.classifier_model");
         }
         *project_rules = permissions.rules.unwrap_or_default();
     }
-    // A project could otherwise route requests, keys included, through its own proxy.
     for (present, key) in [
         (project_layer.network.take().is_some(), "network"),
         (project_layer.sessions.take().is_some(), "sessions"),

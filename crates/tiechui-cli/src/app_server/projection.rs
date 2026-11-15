@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use tiechui_protocol::app::LiveState;
 use tiechui_protocol::{ApprovalId, Event, EventKind, Item, ItemId, KnownItem, SessionEpoch};
 
+use super::textgen::InitialTitleTrigger;
+
 #[derive(Default)]
 pub(super) struct Projection {
     pub seq: u64,
@@ -21,7 +23,7 @@ pub(super) struct Projection {
     /// The latest error since a turn started; it explains the open or last failed turn.
     error: Option<Event>,
     retry: bool,
-    title_eligible: Option<bool>,
+    initial_title: InitialTitleTrigger,
 }
 
 impl Projection {
@@ -126,22 +128,8 @@ impl Projection {
             .collect()
     }
 
-    /// Fires at most once, when a newly created session finishes its first completed turn.
-    pub fn should_generate_title(&mut self, event: &Event) -> bool {
-        match &event.event {
-            EventKind::ThreadStarted { thread, replay } if self.title_eligible.is_none() => {
-                self.title_eligible = Some(!*replay && thread.turns.is_empty());
-                false
-            }
-            EventKind::TurnCompleted { turn }
-                if turn.status == tiechui_protocol::TurnStatus::Completed
-                    && self.title_eligible == Some(true) =>
-            {
-                self.title_eligible = Some(false);
-                true
-            }
-            _ => false,
-        }
+    pub(super) fn take_initial_title_trigger(&mut self, event: &Event) -> Option<(String, String)> {
+        self.initial_title.take(event)
     }
 
     fn keep(&mut self, key: &str, event: &Event) {
@@ -300,8 +288,20 @@ mod tests {
         assert!(matches!(&snapshot[3].event, EventKind::Error { message } if message == "boom"));
     }
 
+    fn user(id: &str, parts: &[&str]) -> Item {
+        Item::Known(KnownItem::UserMessage {
+            id: ItemId(id.into()),
+            content: parts
+                .iter()
+                .map(|part| tiechui_protocol::InputContent::Text {
+                    text: (*part).into(),
+                })
+                .collect(),
+        })
+    }
+
     #[test]
-    fn title_eligibility_locks_once_for_new_replayed_and_non_empty_threads() {
+    fn initial_title_trigger_extracts_opening_prompt_and_locks_once() {
         let empty_thread = || Thread {
             id: ThreadId("t".into()),
             epoch: SessionEpoch(1),
@@ -309,61 +309,102 @@ mod tests {
         };
 
         let mut fresh = Projection::default();
-        assert!(
-            !fresh.should_generate_title(&event(EventKind::ThreadStarted {
+        assert_eq!(
+            fresh.take_initial_title_trigger(&event(EventKind::ThreadStarted {
                 thread: empty_thread(),
                 replay: false,
-            }))
+            })),
+            None
         );
-        assert!(
-            !fresh.should_generate_title(&event(EventKind::TurnCompleted {
-                turn: turn(TurnStatus::Failed, vec![]),
-            }))
+        assert_eq!(
+            fresh.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Failed, vec![user("u0", &["failed"])]),
+            })),
+            None
         );
-        assert!(
-            fresh.should_generate_title(&event(EventKind::TurnCompleted {
-                turn: turn(TurnStatus::Completed, vec![]),
-            }))
+        assert_eq!(
+            fresh.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(
+                    TurnStatus::Completed,
+                    vec![
+                        user("u1", &["首轮主问题", "补充上下文"]),
+                        text("a1", "先检查配置"),
+                        user("u2", &["中途 steer 提示"]),
+                        text("a2", "已定位根因"),
+                    ]
+                ),
+            })),
+            Some((
+                "首轮主问题\n补充上下文".into(),
+                "先检查配置\n\n已定位根因".into()
+            ))
         );
-        assert!(
-            !fresh.should_generate_title(&event(EventKind::TurnCompleted {
-                turn: turn(TurnStatus::Completed, vec![]),
-            }))
+        assert_eq!(
+            fresh.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![user("u3", &["第二轮"])]),
+            })),
+            None
+        );
+
+        let mut blank_first = Projection::default();
+        blank_first.take_initial_title_trigger(&event(EventKind::ThreadStarted {
+            thread: empty_thread(),
+            replay: false,
+        }));
+        assert_eq!(
+            blank_first.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(
+                    TurnStatus::Completed,
+                    vec![user("u1", &["   "]), user("u2", &["hook 注入提示"])]
+                ),
+            })),
+            None
+        );
+        assert_eq!(
+            blank_first.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![user("u3", &["第二轮"])]),
+            })),
+            None
         );
 
         let mut replayed = Projection::default();
-        assert!(
-            !replayed.should_generate_title(&event(EventKind::ThreadStarted {
+        assert_eq!(
+            replayed.take_initial_title_trigger(&event(EventKind::ThreadStarted {
                 thread: empty_thread(),
                 replay: true,
-            }))
+            })),
+            None
         );
-        assert!(
-            !replayed.should_generate_title(&event(EventKind::ThreadStarted {
+        assert_eq!(
+            replayed.take_initial_title_trigger(&event(EventKind::ThreadStarted {
                 thread: empty_thread(),
                 replay: false,
-            }))
+            })),
+            None
         );
-        assert!(
-            !replayed.should_generate_title(&event(EventKind::TurnCompleted {
-                turn: turn(TurnStatus::Completed, vec![]),
-            }))
+        assert_eq!(
+            replayed.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![user("u1", &["不生成"])]),
+            })),
+            None
         );
 
         let mut resumed = Projection::default();
-        assert!(
-            !resumed.should_generate_title(&event(EventKind::ThreadStarted {
+        assert_eq!(
+            resumed.take_initial_title_trigger(&event(EventKind::ThreadStarted {
                 thread: Thread {
                     turns: vec![turn(TurnStatus::Completed, vec![])],
                     ..empty_thread()
                 },
                 replay: false,
-            }))
+            })),
+            None
         );
-        assert!(
-            !resumed.should_generate_title(&event(EventKind::TurnCompleted {
-                turn: turn(TurnStatus::Completed, vec![]),
-            }))
+        assert_eq!(
+            resumed.take_initial_title_trigger(&event(EventKind::TurnCompleted {
+                turn: turn(TurnStatus::Completed, vec![user("u2", &["恢复会话"])]),
+            })),
+            None
         );
     }
 }
