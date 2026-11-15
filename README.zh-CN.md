@@ -184,8 +184,8 @@ theme = "automatic"                    # 跟随终端背景
 ```
 
 - 省略 `base_url` 时，按协议默认为 `https://api.anthropic.com` 或
-  `https://api.openai.com`。地址里没有版本段时自动补 `/v1`；自带版本段的（如
-  `/api/paas/v4`）原样使用。
+  `https://api.openai.com`。地址后总会补上 `/v1` 与协议路径；以 `#` 结尾则原样请求，
+  如 `https://open.bigmodel.cn/api/paas/v4/chat/completions#`。
 - `compat` 表让请求适配 DeepSeek 风格推理网关等服务。模型自己的 `compat` 表可以
   覆盖单个字段，适用于混合多个模型家族的网关。
 - 思考级别会被限制在模型 `thinking_levels` 声明的范围内。`openai-responses` 关闭思考时发送

@@ -7,13 +7,13 @@ rustls, and eventsource-stream.
 `from_config(name, entry)` resolves the key from `entry.api_key` or `entry.api_key_env`. Requests use qualified
 model IDs (`name/model-id`); the wire request uses the configured model ID. Token
 limits and capabilities come from the entry's model list. `base_url` is the API
-root: Anthropic defaults to `https://api.anthropic.com` and appends `/messages`;
-OpenAI defaults to `https://api.openai.com` and appends `/chat/completions`, or
-`/responses` for Responses.
-A root without a version segment (`v` and a digit, such as `v1`, `v4` or
-`v1beta`) gets `/v1` first, so `https://gateway.example` and
-`https://gateway.example/v1` reach the same endpoint while `/api/paas/v4` keeps
-its own version. All preserve any proxy path prefix. Redirects and automatic HTTP retries are disabled. TLS
+root without `/v1`: Anthropic defaults to `https://api.anthropic.com` and appends
+`/v1/messages`; OpenAI defaults to `https://api.openai.com` and appends
+`/v1/chat/completions`, or `/v1/responses` for Responses. Any custom `base_url`
+without a trailing `#` appends `/v1` followed by the wire suffix (preserving any
+proxy path prefix). Ending `base_url` with `#` (such as
+`https://gateway.example/chat/custom#`) strips the `#` and uses the exact URL as
+the request endpoint without appending `/v1` or the wire suffix; model listing then replaces the wire's own suffix (`/messages`, `/chat/completions`, `/responses`) with `/models`, and fails when the URL does not end with it. Redirects and automatic HTTP retries are disabled. TLS
 uses native trust roots plus the `[network]` `ca_cert` file; `[network]` `proxy`
 replaces the `*_PROXY` environment variables. A 300-second read timeout bounds silent connections.
 

@@ -37,7 +37,7 @@ async fn collect(fixture: &str) -> Vec<Result<StreamEvent, ProviderError>> {
         .expect(1)
         .mount(&server)
         .await;
-    provider(&format!("{}/proxy/v1/", server.uri()))
+    provider(&format!("{}/proxy", server.uri()))
         .stream(request(), CancellationToken::new())
         .await
         .unwrap()
@@ -406,37 +406,66 @@ async fn first_turn_request_is_captured_with_api_root_and_auth() {
 }
 
 #[tokio::test]
-async fn base_urls_gain_the_api_version_only_without_one() {
+async fn base_urls_always_gain_v1_and_a_trailing_hash_keeps_the_exact_path() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(PLAIN, "text/event-stream"))
+        .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    for (root, expected) in [
-        ("", "/v1/chat/completions"),
-        ("/v1/", "/v1/chat/completions"),
-        ("/api/paas/v4", "/api/paas/v4/chat/completions"),
-        ("/v1beta/openai", "/v1beta/openai/chat/completions"),
-        ("/proxy", "/proxy/v1/chat/completions"),
-    ] {
-        let events: Vec<_> = provider(&format!("{}{root}", server.uri()))
-            .stream(request(), CancellationToken::new())
-            .await
-            .unwrap()
-            .collect()
-            .await;
-        assert!(events.iter().all(Result::is_ok), "{root}");
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.last().unwrap().url.path(), expected, "{root}");
+    async fn hit(provider: impl ModelProvider) {
+        let _ = provider.stream(request(), CancellationToken::new()).await;
     }
-    // Anthropic roots follow the same rule.
-    let anthropic = serve(super::PLAIN, 1).await;
-    assert!(
-        super::collect(&format!("{}/v1", anthropic.uri()), request())
-            .await
-            .iter()
-            .all(Result::is_ok)
-    );
+    for (root, suffixes) in [
+        (
+            "",
+            ["/v1/messages", "/v1/chat/completions", "/v1/responses"],
+        ),
+        (
+            "/",
+            ["/v1/messages", "/v1/chat/completions", "/v1/responses"],
+        ),
+        (
+            "/proxy/",
+            [
+                "/proxy/v1/messages",
+                "/proxy/v1/chat/completions",
+                "/proxy/v1/responses",
+            ],
+        ),
+        (
+            "/v1",
+            [
+                "/v1/v1/messages",
+                "/v1/v1/chat/completions",
+                "/v1/v1/responses",
+            ],
+        ),
+        ("/chat/comxxx#", ["/chat/comxxx"; 3]),
+    ] {
+        let base = format!("{}{root}", server.uri());
+        let before = server.received_requests().await.unwrap().len();
+        hit(super::provider(&base)).await;
+        hit(provider(&base)).await;
+        hit(super::responses::provider(&base)).await;
+        let requests = server.received_requests().await.unwrap();
+        let paths: Vec<_> = requests[before..].iter().map(|r| r.url.path()).collect();
+        assert_eq!(paths, suffixes, "{root}");
+    }
+}
+
+#[tokio::test]
+async fn base_urls_reject_a_misplaced_fragment() {
+    for base in [
+        "https://gateway.example/a#b",
+        "https://gateway.example/#a/b#",
+        "https://gateway.example/a##",
+    ] {
+        let client = crate::client_builder().no_proxy().build().unwrap();
+        let error = Openai::new("fixture", &config(base), "fixture-key", client)
+            .err()
+            .unwrap_or_else(|| panic!("{base} was accepted"));
+        assert_eq!(error.kind, ErrorKind::InvalidRequest, "{base}");
+    }
 }
 
 #[tokio::test]
@@ -476,9 +505,44 @@ async fn models_are_listed_from_the_versioned_root() {
     };
     assert_eq!(list(Wire::OpenaiCompletions, "").await.unwrap(), ["a", "b"]);
     assert_eq!(list(Wire::OpenaiResponses, "").await.unwrap(), ["a", "b"]);
-    assert_eq!(list(Wire::AnthropicMessages, "/v1").await.unwrap(), ["c"]);
+    assert_eq!(list(Wire::AnthropicMessages, "").await.unwrap(), ["c"]);
     let error = list(Wire::OpenaiCompletions, "/denied").await.unwrap_err();
     assert_eq!(error.kind, ErrorKind::Auth);
+}
+
+#[tokio::test]
+async fn hash_urls_list_models_by_replacing_the_wire_suffix() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gw/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "m"}]})))
+        .mount(&server)
+        .await;
+    let list = |wire, root: &str| {
+        let config = ProviderConfig {
+            wire,
+            api_key: Some(tiechui_config::ApiKey("fixture-key".into())),
+            models: vec![],
+            ..super::config(&format!("{}{root}", server.uri()))
+        };
+        async move { crate::list_models(&config, &Default::default(), &CancellationToken::new()).await }
+    };
+    for (wire, root) in [
+        (Wire::OpenaiCompletions, "/gw/chat/completions#"),
+        (Wire::OpenaiResponses, "/gw/responses#"),
+        (Wire::AnthropicMessages, "/gw/messages#"),
+    ] {
+        assert_eq!(list(wire, root).await.unwrap(), ["m"], "{root}");
+    }
+    let error = list(Wire::OpenaiCompletions, "/gw/comxxx#")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    assert!(error.message.contains("models endpoint"), "{error}");
+    let error = list(Wire::OpenaiResponses, "/gw/chat/completions#")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
 }
 
 #[tokio::test]
