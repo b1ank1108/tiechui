@@ -566,6 +566,7 @@ async fn verify_server_multi_user_turn_and_unset_tui(
             submissions,
             shutdown: CancellationToken::new(),
             projection: projection.clone(),
+            applied: Arc::new(Notify::new()),
             started,
             pump: Mutex::new(None),
             stale: AtomicBool::new(false),

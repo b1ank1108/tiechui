@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{Event, Op, SubmissionId, ThinkingLevel, ThreadId};
+use crate::{
+    ApprovalDecision, ApprovalId, Event, InputContent, Op, SubmissionId, ThinkingLevel, ThreadId,
+};
 
 pub const APP_PROTOCOL_VERSION: u32 = 1;
 
@@ -608,4 +610,44 @@ pub struct SessionEvent {
 pub struct SessionClosed {
     pub thread_id: ThreadId,
     pub error: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Opens or queries a session's in-memory side conversation.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BtwOpenParams {
+    pub thread_id: ThreadId,
+    /// Creates a new side conversation from the session's current context when none is open.
+    #[serde(default = "default_true")]
+    pub create: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BtwAskParams {
+    pub thread_id: ThreadId,
+    pub content: Vec<InputContent>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BtwModelParams {
+    pub thread_id: ThreadId,
+    /// `<provider>/<model id>`.
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub thinking: Option<ThinkingLevel>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalParams {
+    pub thread_id: ThreadId,
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
 }

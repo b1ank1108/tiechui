@@ -1,13 +1,14 @@
 //! Ephemeral side conversation presentation; transported as a module extension event.
 
 use crate::{InputContent, ModelInfo, ThinkingLevel, TokenUsage};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const BTW_EVENT: &str = "btw";
 pub const BTW_SHARE: &str = "tiechui.btw.shared";
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BtwAction {
     Send { content: Vec<InputContent> },
     Stop,
@@ -16,7 +17,7 @@ pub enum BtwAction {
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BtwEvent {
     Update {
         view: BtwView,
@@ -30,7 +31,7 @@ pub enum BtwEvent {
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BtwView {
     pub id: String,
     pub model: ModelInfo,
@@ -43,7 +44,7 @@ pub struct BtwView {
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BtwMessage {
     pub user: bool,
     pub text: String,

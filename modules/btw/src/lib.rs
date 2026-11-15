@@ -1,5 +1,9 @@
 //! An ephemeral side conversation with policy-checked tools and frozen reference context.
 
+mod rpc;
+
+pub use rpc::{BtwRpcError, BtwRpcOp, BtwRpcOutcome, BtwRpcTicket, prepare_rpc};
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -11,6 +15,7 @@ use tiechui_plugin_api::{
     serde_json::{self, json},
     *,
 };
+use tokio::sync::watch;
 
 pub struct BtwModule;
 impl Module for BtwModule {
@@ -26,38 +31,55 @@ impl Module for BtwModule {
     }
 }
 
-const WAIT: &str = "Side reply is still running. Wait for it or press Esc in the side panel before sending another question.";
+pub(crate) const WAIT: &str = "Side reply is still running. Wait for it or press Esc in the side panel before sending another question.";
+const SHARED_NOTICE: &str =
+    "Shared with main conversation. It will be available on the next model request.";
+
 #[derive(Default)]
-struct Btw {
+pub(crate) struct Btw {
     state: Arc<Mutex<Option<Thread>>>,
 }
-struct Thread {
-    view: BtwView,
+pub(crate) struct Thread {
+    pub(crate) view: BtwView,
     system: String,
-    thinking: ThinkingLevel,
-    cancel: CancellationToken,
+    pub(crate) thinking: ThinkingLevel,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) settled: watch::Receiver<bool>,
     history: Vec<Message>,
 }
+pub(crate) struct PendingAnswer {
+    id: String,
+    request: ModelRequest,
+    cancel: CancellationToken,
+    settled: watch::Sender<bool>,
+}
 impl Btw {
-    fn state(&self) -> Result<MutexGuard<'_, Option<Thread>>, ToolError> {
+    pub(crate) fn state(&self) -> Result<MutexGuard<'_, Option<Thread>>, ToolError> {
         self.state.lock().map_err(|e| ToolError(e.to_string()))
     }
     fn discard(&self) {
+        let _ = self.discard_with_settle();
+    }
+    pub(crate) fn discard_with_settle(&self) -> Option<watch::Receiver<bool>> {
         if let Ok(mut state) = self.state.lock()
             && let Some(thread) = state.take()
         {
             thread.cancel.cancel();
+            return thread.view.busy.then_some(thread.settled);
         }
+        None
     }
-    fn create(&self, host: &dyn CommandHost) -> Result<(), ToolError> {
+    pub(crate) fn create(&self, host: &dyn CommandHost) -> Result<(), ToolError> {
         let mut state = self.state()?;
         if state.is_none() {
             static NEXT: AtomicU64 = AtomicU64::new(1);
             let context = host.model_context()?;
+            let (_, settled) = watch::channel(true);
             *state = Some(Thread {
                 system: instructions(&context.system, &snapshot(&context.messages)),
                 thinking: context.thinking,
                 cancel: CancellationToken::new(),
+                settled,
                 history: Vec::new(),
                 view: BtwView {
                     id: format!("side-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
@@ -73,10 +95,113 @@ impl Btw {
         }
         Ok(())
     }
-    async fn publish(&self, host: &dyn CommandHost, open: bool) -> Result<(), ToolError> {
+    pub(crate) async fn publish(
+        &self,
+        host: &dyn CommandHost,
+        open: bool,
+    ) -> Result<Option<BtwView>, ToolError> {
         let view = self.state()?.as_ref().map(|t| t.view.clone());
-        if let Some(view) = view {
-            emit(host, BtwEvent::Update { view, open }).await?;
+        if let Some(ref view) = view {
+            emit(
+                host,
+                BtwEvent::Update {
+                    view: view.clone(),
+                    open,
+                },
+            )
+            .await?;
+        }
+        Ok(view)
+    }
+    pub(crate) fn start_question(
+        &self,
+        content: Vec<InputContent>,
+        host: &dyn CommandHost,
+        lifetime: &CancellationToken,
+    ) -> Result<Option<PendingAnswer>, ToolError> {
+        let mut state = self.state()?;
+        let Some(thread) = state.as_mut() else {
+            return Ok(None);
+        };
+        if thread.view.busy {
+            thread.view.notice = Some(WAIT.into());
+            return Ok(None);
+        }
+        let question = content
+            .iter()
+            .filter_map(|part| match part {
+                InputContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        thread.view.messages.push(BtwMessage {
+            user: true,
+            text: question,
+            images: content
+                .into_iter()
+                .filter(|p| matches!(p, InputContent::Image { .. }))
+                .collect(),
+            ..BtwMessage::default()
+        });
+        let row = thread
+            .view
+            .messages
+            .last()
+            .ok_or_else(|| ToolError("Missing side input".into()))?;
+        let mut content = vec![text(row.text.clone())];
+        content.extend(row.images.iter().filter_map(|part| match part {
+            InputContent::Image { mime_type, data } => Some(Content::Image {
+                mime_type: mime_type.clone(),
+                data: data.clone(),
+            }),
+            _ => None,
+        }));
+        thread.history.push(Message {
+            role: Role::User,
+            content,
+            opaque: None,
+        });
+        let mut request = request(thread);
+        request.tools = host
+            .tool_specs()
+            .into_iter()
+            .filter(|spec| side_tool(&spec.name))
+            .collect();
+        thread.view.messages.push(BtwMessage::default());
+        thread.view.busy = true;
+        thread.view.notice = None;
+        thread.cancel = lifetime.child_token();
+        let (settled_tx, settled_rx) = watch::channel(false);
+        thread.settled = settled_rx;
+        Ok(Some(PendingAnswer {
+            id: thread.view.id.clone(),
+            request,
+            cancel: thread.cancel.clone(),
+            settled: settled_tx,
+        }))
+    }
+    pub(crate) fn spawn_answer(&self, host: Arc<dyn CommandHost>, work: PendingAnswer) {
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            answer(state, host, work.id, work.request, work.cancel).await;
+            let _ = work.settled.send(true);
+        });
+    }
+    pub(crate) async fn apply_share(
+        &self,
+        host: &dyn CommandHost,
+        id: String,
+        text: String,
+    ) -> Result<(), ToolError> {
+        host.apply(SessionEffect::Message {
+            kind: BTW_SHARE.into(),
+            text: format!("Side conversation result (shared by the user):\n\n{text}"),
+            details: json!({"threadId": id}),
+        })
+        .await?;
+        if let Some(thread) = self.state()?.as_mut() {
+            thread.view.notice = Some(SHARED_NOTICE.into());
         }
         Ok(())
     }
@@ -86,69 +211,13 @@ impl Btw {
         host: Arc<dyn CommandHost>,
         lifetime: CancellationToken,
     ) -> Result<(), ToolError> {
-        let work = {
-            let mut state = self.state()?;
-            let Some(thread) = state.as_mut() else {
-                return Ok(());
-            };
-            if thread.view.busy {
-                thread.view.notice = Some(WAIT.into());
-                None
-            } else {
-                let question = content
-                    .iter()
-                    .filter_map(|part| match part {
-                        InputContent::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                thread.view.messages.push(BtwMessage {
-                    user: true,
-                    text: question,
-                    images: content
-                        .into_iter()
-                        .filter(|p| matches!(p, InputContent::Image { .. }))
-                        .collect(),
-                    ..BtwMessage::default()
-                });
-                let row = thread
-                    .view
-                    .messages
-                    .last()
-                    .ok_or_else(|| ToolError("Missing side input".into()))?;
-                let mut content = vec![text(row.text.clone())];
-                content.extend(row.images.iter().filter_map(|part| match part {
-                    InputContent::Image { mime_type, data } => Some(Content::Image {
-                        mime_type: mime_type.clone(),
-                        data: data.clone(),
-                    }),
-                    _ => None,
-                }));
-                thread.history.push(Message {
-                    role: Role::User,
-                    content,
-                    opaque: None,
-                });
-                let mut request = request(thread);
-                request.tools = host
-                    .tool_specs()
-                    .into_iter()
-                    .filter(|spec| side_tool(&spec.name))
-                    .collect();
-                thread.view.messages.push(BtwMessage::default());
-                thread.view.busy = true;
-                thread.view.notice = None;
-                thread.cancel = lifetime.child_token();
-                Some((thread.view.id.clone(), request, thread.cancel.clone()))
-            }
-        };
+        if self.state()?.is_none() {
+            return Ok(());
+        }
+        let work = self.start_question(content, &*host, &lifetime)?;
         self.publish(&*host, false).await?;
-        if let Some((id, request, cancel)) = work {
-            let state = self.state.clone();
-            tokio::spawn(async move {
-                answer(state, host, id, request, cancel).await;
-            });
+        if let Some(work) = work {
+            self.spawn_answer(host, work);
         }
         Ok(())
     }
@@ -215,16 +284,11 @@ impl Command for Btw {
                 )
                 .await?;
             } else {
-                let model = context
-                    .models
-                    .into_iter()
-                    .find(|m| format!("{}/{}", m.provider, m.id) == words[1])
-                    .ok_or_else(|| {
-                        ToolError(
-                            "Unknown side model. Use /btw model to select an available model."
-                                .into(),
-                        )
-                    })?;
+                let model = find_model(context.models, words[1]).ok_or_else(|| {
+                    ToolError(
+                        "Unknown side model. Use /btw model to select an available model.".into(),
+                    )
+                })?;
                 self.create(&*session.host)?;
                 if let Some(thread) = self.state()?.as_mut() {
                     thread.view.thinking = clamp(thread.thinking, &model);
@@ -254,6 +318,9 @@ impl Command for Btw {
         session: CommandSession,
         cancel: CancellationToken,
     ) -> Result<String, ToolError> {
+        if let Some(id) = rpc::rpc_id(&data) {
+            return self.run_rpc(id, session, cancel).await;
+        }
         match serde_json::from_value::<BtwAction>(data).map_err(|e| ToolError(e.to_string()))? {
             BtwAction::Close => {
                 self.discard();
@@ -266,31 +333,11 @@ impl Command for Btw {
             }
             BtwAction::Send { content } => self.send(content, session.host, cancel).await?,
             BtwAction::Share => {
-                let answer = self.state()?.as_ref().and_then(|t| {
-                    t.view
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| !m.user && m.complete && !m.text.trim().is_empty())
-                        .map(|m| (t.view.id.clone(), m.text.clone()))
-                });
-                let notice = if let Some((id, text)) = answer {
-                    session
-                        .host
-                        .apply(SessionEffect::Message {
-                            kind: BTW_SHARE.into(),
-                            text: format!(
-                                "Side conversation result (shared by the user):\n\n{text}"
-                            ),
-                            details: json!({"threadId": id}),
-                        })
-                        .await?;
-                    "Shared with main conversation. It will be available on the next model request."
-                } else {
-                    "No completed side answer to share."
-                };
-                if let Some(thread) = self.state()?.as_mut() {
-                    thread.view.notice = Some(notice.into());
+                let answer = self.state()?.as_ref().and_then(last_completed_answer);
+                if let Some((id, text)) = answer {
+                    self.apply_share(&*session.host, id, text).await?;
+                } else if let Some(thread) = self.state()?.as_mut() {
+                    thread.view.notice = Some("No completed side answer to share.".into());
                 }
                 self.publish(&*session.host, false).await?;
             }
@@ -299,14 +346,36 @@ impl Command for Btw {
     }
 }
 
-async fn emit(host: &dyn CommandHost, event: BtwEvent) -> Result<(), ToolError> {
+pub(crate) fn last_completed_answer(thread: &Thread) -> Option<(String, String)> {
+    thread
+        .view
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.user && m.complete && !m.text.trim().is_empty())
+        .map(|m| (thread.view.id.clone(), m.text.clone()))
+}
+
+pub(crate) fn find_model(models: Vec<ModelInfo>, spec: &str) -> Option<ModelInfo> {
+    if !spec
+        .split_once('/')
+        .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
+    {
+        return None;
+    }
+    models
+        .into_iter()
+        .find(|m| format!("{}/{}", m.provider, m.id) == spec)
+}
+
+pub(crate) async fn emit(host: &dyn CommandHost, event: BtwEvent) -> Result<(), ToolError> {
     host.apply(SessionEffect::Emit {
         kind: BTW_EVENT.into(),
         data: serde_json::to_value(event).map_err(|e| ToolError(e.to_string()))?,
     })
     .await
 }
-fn clamp(level: ThinkingLevel, model: &ModelInfo) -> ThinkingLevel {
+pub(crate) fn clamp(level: ThinkingLevel, model: &ModelInfo) -> ThinkingLevel {
     model
         .thinking_levels
         .iter()
