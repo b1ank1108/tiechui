@@ -110,41 +110,7 @@ async fn worktree_rpc_and_project_session_listing_attribute_managed_worktrees_an
         ],
     );
 
-    let mut client = TestClient::new(Server::new(home.clone()));
-    let _: Value = client
-        .call_ok(
-            "providers/save",
-            json!({
-                "name": "fixture",
-                "wire": "openai-completions",
-                "base_url": "http://127.0.0.1:9",
-                "api_key": "sk-test"
-            }),
-        )
-        .await;
-    let _: Value = client
-        .call_ok(
-            "providers/save_model",
-            json!({
-                "provider": "fixture",
-                "previous": null,
-                "model": {
-                    "id": "m1",
-                    "context_window": 128000,
-                    "max_output": 4096,
-                    "levels": ["off"],
-                    "mapping": {},
-                    "images": false
-                }
-            }),
-        )
-        .await;
-    let _: Value = client
-        .call_ok(
-            "config/update",
-            json!({ "key": "model", "value": "fixture/m1" }),
-        )
-        .await;
+    let mut client = new_configured_client(&home).await;
 
     let branches: Branches = client
         .call_ok("git/branches", json!({ "root": repo }))
@@ -224,16 +190,7 @@ async fn worktree_rpc_and_project_session_listing_attribute_managed_worktrees_an
     assert_eq!(wt_summary.cwd, created.path);
     assert_eq!(wt_summary.worktree, Some(expected_wt));
 
-    let doctor_home = home.clone();
-    tokio::task::spawn_blocking(move || {
-        let matches = clap::Command::new("doctor")
-            .arg(clap::Arg::new("profile").long("profile"))
-            .arg(clap::Arg::new("prefix").long("prefix"))
-            .get_matches_from(["doctor", "--profile", doctor_home.to_str().unwrap()]);
-        crate::doctor::run(&matches).unwrap();
-    })
-    .await
-    .unwrap();
+    assert_doctor_ok(&home).await;
 
     std::fs::write(Path::new(&created.path).join("dirty.txt"), "dirty\n").unwrap();
     let err = restarted
@@ -276,35 +233,7 @@ async fn worktree_create_handles_post_create_trust_failure_and_carry_changes_wit
     git(&repo, &["add", ".agents/config.toml"]);
     git(&repo, &["commit", "-m", "configure post-create"]);
 
-    let mut client = TestClient::new(Server::new(home.clone()));
-    let _: Value = client
-        .call_ok(
-            "providers/save",
-            json!({
-                "name": "fixture",
-                "wire": "openai-completions",
-                "base_url": "http://127.0.0.1:9",
-                "api_key": "sk-test"
-            }),
-        )
-        .await;
-    let _: Value = client
-        .call_ok(
-            "providers/save_model",
-            json!({
-                "provider": "fixture",
-                "previous": null,
-                "model": {
-                    "id": "m1",
-                    "context_window": 128000,
-                    "max_output": 4096,
-                    "levels": ["off"],
-                    "mapping": {},
-                    "images": false
-                }
-            }),
-        )
-        .await;
+    let mut client = new_configured_client(&home).await;
 
     let untrusted: WorktreeEntry = client
         .call_ok("worktree/create", json!({ "root": repo }))
@@ -528,14 +457,7 @@ async fn worktree_session_snapshot_rewind_restores_bash_and_manual_edits_while_h
     let branches_before = git(wt_path, &["branch", "-a"]);
     let log_before = git(wt_path, &["log", "--all", "--oneline"]);
 
-    let opened: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "cwd": wt.path, "model": "fixture/m1", "mode": "yolo" }),
-        )
-        .await;
-    let turn1_item = run_user_turn(&mut client, &opened.thread_id, "turn one").await;
-    let turn2_item = run_user_turn(&mut client, &opened.thread_id, "turn two").await;
+    let (opened, turn1_item, turn2_item) = open_yolo_two_turns(&mut client, wt_path).await;
 
     assert!(!wt_path.join("a.txt").exists());
     assert_eq!(
@@ -632,11 +554,7 @@ async fn worktree_rewind_enforces_directory_isolation_across_equal_ancestor_desc
     };
     tiechui_config::private::create_dir_all(&home).unwrap();
     let workspace_dir = tempfile::tempdir().unwrap();
-    let repo = workspace_dir.path().join("iso-repo");
-    init_repo(&repo);
-    std::fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "add a.txt"]);
+    let repo = init_repo_with_a_txt(workspace_dir.path(), "iso-repo");
 
     let (_mock, mut client) = setup_mock_server_and_client(
         &home,
@@ -659,14 +577,7 @@ async fn worktree_rewind_enforces_directory_isolation_across_equal_ancestor_desc
     let subdir = wt_path.join("nested/sub");
     std::fs::create_dir_all(&subdir).unwrap();
 
-    let opened: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "cwd": wt.path, "model": "fixture/m1", "mode": "yolo" }),
-        )
-        .await;
-    let turn1_item = run_user_turn(&mut client, &opened.thread_id, "turn one").await;
-    let turn2_item = run_user_turn(&mut client, &opened.thread_id, "turn two").await;
+    let (opened, turn1_item, turn2_item) = open_yolo_two_turns(&mut client, wt_path).await;
     assert!(!wt_path.join("a.txt").exists());
     assert!(wt_path.join("b.txt").exists());
 
@@ -882,14 +793,7 @@ async fn worktree_missing_snapshot_falls_back_to_patch_rewind_with_reason() {
         .call_ok("worktree/create", json!({ "root": repo }))
         .await;
     let wt_path = Path::new(&wt.path);
-    let opened: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "cwd": wt.path, "model": "fixture/m1", "mode": "yolo" }),
-        )
-        .await;
-    let _turn1_item = run_user_turn(&mut client, &opened.thread_id, "turn one").await;
-    let turn2_item = run_user_turn(&mut client, &opened.thread_id, "turn two").await;
+    let (opened, _turn1_item, turn2_item) = open_yolo_two_turns(&mut client, wt_path).await;
 
     let cancel = CancellationToken::new();
     let rewind_store =
@@ -1181,11 +1085,7 @@ async fn session_rewind_validates_and_branches_conversation_before_touching_any_
     };
     tiechui_config::private::create_dir_all(&home).unwrap();
     let workspace_dir = tempfile::tempdir().unwrap();
-    let repo = workspace_dir.path().join("order-repo");
-    init_repo(&repo);
-    std::fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "add a.txt"]);
+    let repo = init_repo_with_a_txt(workspace_dir.path(), "order-repo");
 
     let (_mock, mut client) = setup_mock_server_and_client(
         &home,
@@ -1216,14 +1116,19 @@ async fn session_rewind_validates_and_branches_conversation_before_touching_any_
     drop(client);
     let mut client = TestClient::new(server.clone());
 
-    let opened: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "cwd": wt.path, "model": "fixture/m1", "mode": "yolo" }),
-        )
-        .await;
-    let _turn1_item = run_user_turn(&mut client, &opened.thread_id, "turn one").await;
-    let turn2_item = run_user_turn(&mut client, &opened.thread_id, "turn two").await;
+    let (opened, _turn1_item, turn2_item) = open_yolo_two_turns(&mut client, wt_path).await;
+
+    let assert_untouched = || {
+        assert!(!wt_path.join("a.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("b.txt")).unwrap(),
+            "x\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("tracked.txt")).unwrap(),
+            "written\n"
+        );
+    };
 
     for bad_item in ["nonexistent-item", "call-c-b"] {
         for mode in ["snapshot", "patch"] {
@@ -1240,15 +1145,7 @@ async fn session_rewind_validates_and_branches_conversation_before_touching_any_
                     .await
                     .is_err()
             );
-            assert!(!wt_path.join("a.txt").exists());
-            assert_eq!(
-                std::fs::read_to_string(wt_path.join("b.txt")).unwrap(),
-                "x\n"
-            );
-            assert_eq!(
-                std::fs::read_to_string(wt_path.join("tracked.txt")).unwrap(),
-                "written\n"
-            );
+            assert_untouched();
         }
     }
 
@@ -1272,17 +1169,43 @@ async fn session_rewind_validates_and_branches_conversation_before_touching_any_
             .await
             .is_err()
     );
-    assert!(!wt_path.join("a.txt").exists());
-    assert_eq!(
-        std::fs::read_to_string(wt_path.join("b.txt")).unwrap(),
-        "x\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(wt_path.join("tracked.txt")).unwrap(),
-        "written\n"
-    );
+    assert_untouched();
 
     client.close().await;
+}
+
+fn init_repo_with_a_txt(parent: &Path, name: &str) -> std::path::PathBuf {
+    let repo = parent.join(name);
+    init_repo(&repo);
+    std::fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "add a.txt"]);
+    repo
+}
+
+async fn open_yolo_two_turns(client: &mut TestClient, cwd: &Path) -> (Snapshot, String, String) {
+    let opened: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": cwd, "model": "fixture/m1", "mode": "yolo" }),
+        )
+        .await;
+    let turn1 = run_user_turn(client, &opened.thread_id, "turn one").await;
+    let turn2 = run_user_turn(client, &opened.thread_id, "turn two").await;
+    (opened, turn1, turn2)
+}
+
+async fn assert_doctor_ok(home: &Path) {
+    let doctor_home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let matches = clap::Command::new("doctor")
+            .arg(clap::Arg::new("profile").long("profile"))
+            .arg(clap::Arg::new("prefix").long("prefix"))
+            .get_matches_from(["doctor", "--profile", doctor_home.to_str().unwrap()]);
+        crate::doctor::run(&matches).unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 async fn new_configured_client(home: &Path) -> TestClient {
@@ -1759,16 +1682,196 @@ async fn verify_startup_sweep_and_doctor(
         assert!(kept_branches.contains(b), "missing {b} in {kept_branches}");
     }
 
-    let doctor_home = home.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let matches = clap::Command::new("doctor")
-            .arg(clap::Arg::new("profile").long("profile"))
-            .arg(clap::Arg::new("prefix").long("prefix"))
-            .get_matches_from(["doctor", "--profile", doctor_home.to_str().unwrap()]);
-        crate::doctor::run(&matches).unwrap();
-    })
-    .await
-    .unwrap();
+    assert_doctor_ok(home).await;
 
     restarted.close().await;
+}
+
+#[tokio::test]
+async fn managed_worktree_inherits_project_root_trust_and_blocks_home_ancestor_leak() {
+    let Some(home) = isolated_home_child(
+        "TC_WT_TRUST_ROOT_HOME",
+        "app_server::worktree_tests::managed_worktree_inherits_project_root_trust_and_blocks_home_ancestor_leak",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let trusted_repo = workspace_dir.path().join("trusted-repo");
+    init_repo(&trusted_repo);
+    std::fs::create_dir_all(trusted_repo.join(".agents/prompts")).unwrap();
+    std::fs::write(
+        trusted_repo.join(".agents/prompts/wt-check.md"),
+        "---\ndescription: wt prompt\n---\nBody\n",
+    )
+    .unwrap();
+    git(&trusted_repo, &["add", "."]);
+    git(&trusted_repo, &["commit", "-m", "add project prompt"]);
+
+    let mut client = new_configured_client(&home).await;
+    let _: TrustResult = client
+        .call_ok("trust", json!({ "cwd": trusted_repo, "allow": true }))
+        .await;
+    let wt_trusted: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": trusted_repo }))
+        .await;
+    let wt_trust_status: TrustResult = client
+        .call_ok("trust", json!({ "cwd": wt_trusted.path }))
+        .await;
+    assert_eq!(wt_trust_status.allowed, Some(true));
+
+    let prompts: tiechui_protocol::app::PromptList = client
+        .call_ok("prompts/list", json!({ "cwd": wt_trusted.path }))
+        .await;
+    assert!(
+        prompts.prompts.iter().any(|p| p.name == "wt-check"),
+        "expected project prompt in trusted worktree: {prompts:?}"
+    );
+
+    let mut prep_warnings = Vec::new();
+    let schedules = tiechui_module_loop::Schedules::default();
+    let prep = crate::exec::prepare(
+        &crate::exec::Options {
+            home: Some(home.clone()),
+            model: Some("fixture/m1".into()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+        true,
+        crate::exec::Open::New(Path::new(&wt_trusted.path).to_path_buf()),
+        tiechui_protocol::SessionEpoch(0),
+        &schedules,
+        &mut prep_warnings,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !prep_warnings
+            .iter()
+            .any(|w| w.contains("skipping untrusted project content")),
+        "unexpected trust warning: {prep_warnings:?}"
+    );
+    drop(prep);
+
+    let parent_root = tempfile::tempdir().unwrap();
+    let nested_home = parent_root.path().join(".tiechui");
+    tiechui_config::private::create_dir_all(&nested_home).unwrap();
+    let denied_repo = parent_root.path().join("untrusted-repo");
+    init_repo(&denied_repo);
+
+    let store = tiechui_config::TrustStore::new(&nested_home);
+    let cancel = CancellationToken::new();
+    store.set(parent_root.path(), Some(true), &cancel).unwrap();
+    store.set(&denied_repo, Some(false), &cancel).unwrap();
+
+    let mut nested_client = new_configured_client(&nested_home).await;
+    let wt_denied: WorktreeEntry = nested_client
+        .call_ok("worktree/create", json!({ "root": denied_repo }))
+        .await;
+    let denied_status: TrustResult = nested_client
+        .call_ok("trust", json!({ "cwd": wt_denied.path }))
+        .await;
+    assert_eq!(
+        denied_status.allowed,
+        Some(false),
+        "managed worktree under trusted parent home must inherit owning project decision"
+    );
+
+    nested_client.close().await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn idle_cleanup_retains_session_attribution_reopens_checkout_and_trash_prunes_registry() {
+    let Some(home) = isolated_home_child(
+        "TC_WT_IDLE_REOPEN_HOME",
+        "app_server::worktree_tests::idle_cleanup_retains_session_attribution_reopens_checkout_and_trash_prunes_registry",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let repo = workspace_dir.path().join("idle-reopen-repo");
+    init_repo(&repo);
+
+    let mut client = new_configured_client(&home).await;
+    let wt: WorktreeEntry = client
+        .call_ok(
+            "worktree/create",
+            json!({ "root": repo, "base_branch": "release/v1" }),
+        )
+        .await;
+    let wt_path = Path::new(&wt.path);
+    std::fs::write(wt_path.join("branch-note.txt"), "saved-on-branch\n").unwrap();
+    git(wt_path, &["add", "branch-note.txt"]);
+    git(wt_path, &["commit", "-m", "save branch work"]);
+
+    let opened: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt.path, "model": "fixture/m1" }),
+        )
+        .await;
+    client.close().await;
+    append_turn(Path::new(&opened.path), "turn before idle cleanup");
+
+    let mut after_idle = TestClient::new(Server::new(home.clone()));
+    let _: Value = after_idle
+        .call_ok(
+            "config/update",
+            json!({ "key": "worktrees.auto_clean_idle_days", "value": 0 }),
+        )
+        .await;
+    let cleaned: WorktreeCleanupStatus = after_idle.call_ok("worktree/cleanup", json!({})).await;
+    assert_eq!(cleaned.removed.len(), 1);
+    assert!(!wt_path.exists());
+
+    let listed_wt: Vec<WorktreeEntry> = after_idle
+        .call_ok("worktree/list", json!({ "root": repo }))
+        .await;
+    assert!(listed_wt.is_empty());
+
+    let sessions: Vec<SessionSummary> = after_idle
+        .call_ok("session/list", json!({ "cwd": repo }))
+        .await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].thread_id, opened.thread_id);
+    assert_eq!(
+        sessions[0].worktree.as_ref().map(|w| w.name.as_str()),
+        Some(wt.name.as_str())
+    );
+
+    let reopened: Snapshot = after_idle
+        .call_ok("session/open", json!({ "path": opened.path }))
+        .await;
+    assert!(
+        wt_path.is_dir(),
+        "expected session/open to restore worktree checkout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("branch-note.txt")).unwrap(),
+        "saved-on-branch\n"
+    );
+    assert_eq!(reopened.cwd, wt.path);
+    assert_eq!(
+        reopened.worktree.as_ref().map(|w| w.branch.as_str()),
+        Some(wt.branch.as_str())
+    );
+    after_idle.close().await;
+
+    let mut final_client = TestClient::new(Server::new(home.clone()));
+    let cleaned_again: WorktreeCleanupStatus =
+        final_client.call_ok("worktree/cleanup", json!({})).await;
+    assert_eq!(cleaned_again.removed.len(), 1);
+    assert!(!wt_path.exists());
+
+    let trashed: TrashResult = final_client
+        .call_ok(
+            "session/trash",
+            json!({ "path": opened.path, "worktree_policy": "keep" }),
+        )
+        .await;
+    assert!(trashed.trashed);
+    assert!(tiechui_workspace::project_worktree_paths(&home, &repo).is_empty());
+    final_client.close().await;
 }

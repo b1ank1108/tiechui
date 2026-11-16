@@ -298,11 +298,124 @@ fn remove_locked(
     if let Some(bucket) = wt_path.parent() {
         let _ = fs::remove_dir(bucket);
     }
-    unregister_record(home, target_key)?;
+    if !has_referencing_disk_session(home, wt_path) {
+        unregister_record(home, target_key)?;
+    }
     Ok(WorktreeRemoveResult {
         path: record.path.clone(),
         branch: record.branch.clone(),
     })
+}
+
+fn has_referencing_disk_session(home: &Path, wt_path: &Path) -> bool {
+    let wt_norm = crate::worktree_isolation::normalize_dir(wt_path);
+    let Ok(headers) = crate::worktree_isolation::list_disk_session_headers(home) else {
+        return false;
+    };
+    headers.into_iter().any(|header| {
+        let sess_norm = crate::worktree_isolation::normalize_dir(&header.cwd);
+        crate::worktree_isolation::classify_overlap(&wt_norm, &sess_norm).is_some()
+    })
+}
+
+pub fn prune_orphan_worktree_records(home: &Path) -> Result<()> {
+    let wt_dir = worktrees_dir(home);
+    if !wt_dir.exists() {
+        return Ok(());
+    }
+    with_file_lock(&wt_dir.join(REGISTRY_LOCK_FILENAME), || {
+        let reg_path = wt_dir.join(REGISTRY_FILENAME);
+        let mut records = load_registry_file(&reg_path)?;
+        let before = records.len();
+        records.retain(|item| {
+            let path = Path::new(&item.path);
+            path.exists() || has_referencing_disk_session(home, path)
+        });
+        if records.len() != before {
+            save_registry_file(&wt_dir, &records)?;
+        }
+        Ok(())
+    })
+}
+
+pub fn worktree_project_root(home: &Path, cwd: &Path) -> Option<PathBuf> {
+    let candidate = resolve_existing_prefix(&clean_path(cwd));
+    read_registry_unlocked(home).into_iter().find_map(|item| {
+        let wt_key = resolve_existing_prefix(Path::new(&item.path));
+        candidate
+            .starts_with(&wt_key)
+            .then(|| resolve_existing_prefix(Path::new(&item.project_root)))
+    })
+}
+
+pub fn ensure_worktree_checkout(
+    home: &Path,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let cleaned = clean_path(cwd);
+    let target_key = resolve_existing_prefix(&cleaned);
+    let Some(record) = read_registry_locked(home)?
+        .into_iter()
+        .find(|item| target_key.starts_with(resolve_existing_prefix(Path::new(&item.path))))
+    else {
+        return Ok(None);
+    };
+    let wt_path = PathBuf::from(&record.path);
+    if wt_path.is_dir() {
+        return Ok(Some(resolve_restored_subdir(&wt_path, &cleaned)));
+    }
+    let project_root = PathBuf::from(&record.project_root);
+    if !project_root.is_dir() {
+        return Ok(None);
+    }
+    let lock_path = git_common_dir(&project_root, env)
+        .ok()
+        .map(|d| d.join(LOCK_FILENAME));
+    with_optional_lock(lock_path.as_deref(), || {
+        recheckout_locked(home, &record, &project_root, &cleaned, env)
+    })
+}
+
+fn recheckout_locked(
+    home: &Path,
+    record: &Record,
+    project_root: &Path,
+    requested: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let wt_path = Path::new(&record.path);
+    if wt_path.is_dir() {
+        return Ok(Some(resolve_restored_subdir(wt_path, requested)));
+    }
+    if !branch_exists(project_root, &record.branch, env) {
+        return Ok(Some(project_root.to_path_buf()));
+    }
+    if let Some(bucket) = wt_path.parent() {
+        ensure_private_dirs(home, bucket)?;
+    }
+    let _ = git::git(project_root, &["worktree", "prune"], env);
+    git::git(
+        project_root,
+        &["worktree", "add", &record.path, &record.branch],
+        env,
+    )?;
+    tighten_dirs_recursive(wt_path)?;
+    Ok(Some(resolve_restored_subdir(wt_path, requested)))
+}
+
+fn resolve_restored_subdir(wt_path: &Path, requested: &Path) -> PathBuf {
+    let wt_resolved = resolve_existing_prefix(&clean_path(wt_path));
+    let req_resolved = resolve_existing_prefix(requested);
+    if let Ok(rel) = req_resolved.strip_prefix(&wt_resolved)
+        && !rel.as_os_str().is_empty()
+    {
+        let sub = wt_path.join(rel);
+        if sub.is_dir() {
+            return sub;
+        }
+    }
+    wt_path.to_path_buf()
 }
 
 pub fn project_worktree_paths(home: &Path, project_root: &Path) -> Vec<PathBuf> {
@@ -318,7 +431,7 @@ pub fn session_worktree(home: &Path, cwd: &Path) -> Option<SessionWorktree> {
     let expected = resolve_existing_prefix(&clean_path(cwd));
     let record = read_registry_unlocked(home)
         .into_iter()
-        .find(|item| resolve_existing_prefix(Path::new(&item.path)) == expected)?;
+        .find(|item| expected.starts_with(resolve_existing_prefix(Path::new(&item.path))))?;
     let branch = record.live_branch();
     Some(SessionWorktree {
         path: record.path,
@@ -336,7 +449,7 @@ pub fn managed_worktree_with_env(
     let expected = resolve_existing_prefix(&clean_path(cwd));
     let Some(record) = read_registry_locked(home)?
         .into_iter()
-        .find(|item| resolve_existing_prefix(Path::new(&item.path)) == expected)
+        .find(|item| expected.starts_with(resolve_existing_prefix(Path::new(&item.path))))
     else {
         return Ok(None);
     };

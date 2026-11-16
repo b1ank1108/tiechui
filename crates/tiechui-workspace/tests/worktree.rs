@@ -464,6 +464,16 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
     );
     assert!(listed.iter().all(|e| e.pid != listener_manual.pid));
 
+    let listed_with_wt_root = workspace
+        .list_ports(&[a_str.clone(), wt_a.path.clone(), b_str.clone()])
+        .unwrap();
+    assert!(
+        listed_with_wt_root.iter().any(|e| {
+            e.root == a_str && e.pid == listener_cmd.pid && e.port == listener_cmd.port
+        }),
+        "expected managed worktree listener to remain attributed to project root, got: {listed_with_wt_root:?}"
+    );
+
     assert!(
         workspace
             .stop_port(&PortStopParams {

@@ -945,11 +945,12 @@ impl Server {
     /// Opens a session and waits for its thread to start.
     async fn start(
         self: &Arc<Self>,
-        options: Options,
+        mut options: Options,
         open: Open,
         epoch: SessionEpoch,
         projection: Option<Arc<Mutex<Projection>>>,
     ) -> Result<(ThreadId, Arc<Live>), rpc::Error> {
+        options.home.get_or_insert_with(|| self.home.clone());
         let shutdown = CancellationToken::new();
         let mut warnings = Vec::new();
         let prepared = prepare(
@@ -1379,6 +1380,7 @@ impl Server {
                 }
                 None => false,
             };
+            let _ = tiechui_workspace::prune_orphan_worktree_records(&home);
             Ok((moved, removed))
         })
         .await?;
@@ -1575,13 +1577,14 @@ impl Server {
             let cwd = PathBuf::from(&params.cwd)
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", params.cwd))?;
+            let trust_cwd = crate::trust::effective_cwd(&home, &cwd);
             let store = TrustStore::new(&home);
             if let Some(allow) = params.allow {
                 store
-                    .set(&cwd, Some(allow), cancel)
+                    .set(&trust_cwd, Some(allow), cancel)
                     .map_err(|e| e.to_string())?;
             }
-            store.get(&cwd, cancel).map_err(|e| e.to_string())
+            store.get(&trust_cwd, cancel).map_err(|e| e.to_string())
         })
         .await?;
         value(TrustResult { allowed })

@@ -340,31 +340,76 @@ fn expand_worktree_roots(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<R
     let Some(home) = home else {
         return roots.to_vec();
     };
-    let explicit: BTreeSet<PathBuf> = roots.iter().flat_map(|r| r.forms.iter().cloned()).collect();
-    let mut expanded = roots.to_vec();
+    let owner_raws = owner_raw_map(roots);
+    let mut expanded: Vec<RegisteredRoot> = roots
+        .iter()
+        .map(|item| remap_managed_root(item, home, &owner_raws))
+        .collect();
+    let mut seen: BTreeSet<PathBuf> = expanded
+        .iter()
+        .flat_map(|r| r.forms.iter().cloned())
+        .collect();
     for item in roots {
         let Ok(project_path) = root(&item.raw) else {
             continue;
         };
         for wt_path in crate::worktree::project_worktree_paths(home, &project_path) {
-            let lexical = clean_path(&wt_path);
-            let resolved = resolve_existing_prefix(&lexical);
-            if explicit.contains(&resolved) {
-                continue;
+            if wt_path.is_dir() {
+                push_worktree_root(&mut expanded, &mut seen, &item.raw, &wt_path);
             }
-            let score = (resolved.components().count(), resolved.as_os_str().len());
-            let mut forms = vec![resolved];
-            if !forms.contains(&lexical) {
-                forms.push(lexical);
-            }
-            expanded.push(RegisteredRoot {
-                raw: item.raw.clone(),
-                forms,
-                score,
-            });
         }
     }
     expanded
+}
+
+fn owner_raw_map(roots: &[RegisteredRoot]) -> BTreeMap<PathBuf, String> {
+    let mut map = BTreeMap::new();
+    for item in roots {
+        for form in &item.forms {
+            map.entry(form.clone()).or_insert_with(|| item.raw.clone());
+        }
+    }
+    map
+}
+
+fn remap_managed_root(
+    item: &RegisteredRoot,
+    home: &Path,
+    owner_raws: &BTreeMap<PathBuf, String>,
+) -> RegisteredRoot {
+    let Some(owner) = crate::worktree::worktree_project_root(home, Path::new(&item.raw)) else {
+        return item.clone();
+    };
+    let Some(owner_raw) = owner_raws.get(&owner) else {
+        return item.clone();
+    };
+    let mut remapped = item.clone();
+    remapped.raw = owner_raw.clone();
+    remapped
+}
+
+fn push_worktree_root(
+    expanded: &mut Vec<RegisteredRoot>,
+    seen: &mut BTreeSet<PathBuf>,
+    owner_raw: &str,
+    wt_path: &Path,
+) {
+    let lexical = clean_path(wt_path);
+    let resolved = resolve_existing_prefix(&lexical);
+    if !seen.insert(resolved.clone()) {
+        return;
+    }
+    let score = (resolved.components().count(), resolved.as_os_str().len());
+    let mut forms = vec![resolved];
+    if !forms.contains(&lexical) {
+        seen.insert(lexical.clone());
+        forms.push(lexical);
+    }
+    expanded.push(RegisteredRoot {
+        raw: owner_raw.to_owned(),
+        forms,
+        score,
+    });
 }
 
 fn scan_attributed(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<PortEntry> {

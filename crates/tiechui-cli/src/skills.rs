@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
-use tiechui_config::{ConfigPaths, LoadedConfig, TrustStore};
+use tiechui_config::{ConfigPaths, LoadedConfig};
 use tiechui_module_skills::SkillsModule;
 use tiechui_plugin_api::{CancellationToken, Registry};
 
@@ -35,10 +35,7 @@ pub(crate) fn discover(
     let paths = ConfigPaths::discover(&cwd).map_err(|error| error.to_string())?;
     let home = paths.user.parent().ok_or("missing config directory")?;
     let cancel = CancellationToken::new();
-    let trusted = TrustStore::new(home)
-        .get(&cwd, &cancel)
-        .map_err(|error| error.to_string())?
-        == Some(true);
+    let trusted = crate::trust::is_trusted(home, &cwd, &cancel)?;
     let loaded = tiechui_config::load(&paths, trusted, &toml::Table::new())
         .map_err(|error| error.to_string())?;
     let registry =

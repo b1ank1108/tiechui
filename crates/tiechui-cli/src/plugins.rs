@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
-use tiechui_config::{ConfigPaths, TrustStore};
+use tiechui_config::ConfigPaths;
 use tiechui_plugin_api::{CancellationToken, ModuleConfig, Registry};
 
 /// `registry`, printing what it reports, for the inspection commands.
@@ -176,10 +176,7 @@ pub(crate) async fn run(
             writeln!(stdout, "Removed plugin {name}.").map_err(|e| e.to_string())?;
         }
         "list" => {
-            let trusted = TrustStore::new(home)
-                .get(&cwd, cancel)
-                .map_err(|e| e.to_string())?
-                == Some(true);
+            let trusted = crate::trust::is_trusted(home, &cwd, cancel)?;
             let loaded = tiechui_config::load(&paths, trusted, &toml::Table::new())
                 .map_err(|e| e.to_string())?;
             let plugins =

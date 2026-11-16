@@ -29,8 +29,9 @@ use tiechui_protocol::workspace::{
 };
 pub use worktree::{
     CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
-    list_worktrees_with_env, managed_worktree_with_env, project_worktree_paths,
-    remove_worktree_with_env, session_worktree,
+    ensure_worktree_checkout, list_worktrees_with_env, managed_worktree_with_env,
+    project_worktree_paths, prune_orphan_worktree_records, remove_worktree_with_env,
+    session_worktree, worktree_project_root,
 };
 pub use worktree_cleanup::{
     LiveWorktreeSession, WorktreeCleanupPolicy, cleanup_worktrees, cleanup_worktrees_with_env,

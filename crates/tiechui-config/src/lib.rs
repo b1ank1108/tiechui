@@ -1109,6 +1109,7 @@ pub enum IgnoredReason {
     UntrustedProject,
     ProjectPermissionsInvalid,
     UserOnly,
+    ProjectOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

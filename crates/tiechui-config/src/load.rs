@@ -166,9 +166,17 @@ pub fn load_with_mandatory_modules(
     let mut project_rules = Vec::new();
     let mut project_invalid = false;
     if let Some(text) = read_optional(&paths.user)? {
+        let mut user_layer = parse_layer(&paths.user, parse_table(&paths.user, &text)?)?;
+        if user_layer.worktrees.post_create_script.take().is_some() {
+            diagnostics.push(Diagnostic {
+                file: paths.user.clone(),
+                key: "worktrees.post_create_script".into(),
+                reason: IgnoredReason::ProjectOnly,
+            });
+        }
         merge(
             &mut merged,
-            parse_layer(&paths.user, parse_table(&paths.user, &text)?)?,
+            user_layer,
             &paths.user,
             &mut mcp_origins,
             &mut diagnostics,

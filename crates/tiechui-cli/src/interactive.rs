@@ -383,9 +383,10 @@ fn trust(home: &Path, cwd: &Path, arguments: &str) -> String {
         _ => return "Usage: /trust [allow | deny]".into(),
     };
     let store = tiechui_config::TrustStore::new(home);
+    let target_cwd = crate::trust::effective_cwd(home, cwd);
     let cancel = tokio_util::sync::CancellationToken::new();
     if let Some(decision) = decision
-        && let Err(error) = store.set(cwd, Some(decision), &cancel)
+        && let Err(error) = store.set(&target_cwd, Some(decision), &cancel)
     {
         return error.to_string();
     }
@@ -394,7 +395,7 @@ fn trust(home: &Path, cwd: &Path, arguments: &str) -> String {
     } else {
         ""
     };
-    match store.get_entry(cwd, &cancel) {
+    match store.get_entry(&target_cwd, &cancel) {
         Ok(Some(entry)) => format!(
             "{}: {} (from {}){later}",
             if entry.decision { "allowed" } else { "denied" },

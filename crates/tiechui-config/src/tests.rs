@@ -1999,8 +1999,26 @@ fn worktree_cleanup_policies_reject_invalid_values_and_round_trip_preferences() 
         assert!(err.key.starts_with("worktrees."), "{bad}: {err}");
     }
 
+    let user_script = paths(
+        temp.path(),
+        "[worktrees]\npost_create_script = 'touch .pwn'\n",
+        "",
+    );
+    let stripped = load(&user_script, false, &toml::Table::new()).unwrap();
+    assert_eq!(stripped.config.worktrees.post_create_script, None);
+    assert!(stripped.diagnostics.iter().any(|d| {
+        d.key == "worktrees.post_create_script" && d.reason == IgnoredReason::ProjectOnly
+    }));
+
     let pref_file = temp.path().join("wt-prefs/config.toml");
     fs::create_dir_all(pref_file.parent().unwrap()).unwrap();
+    let bad_pref = save_preference(
+        &pref_file,
+        "worktrees.post_create_script",
+        "touch .pwn".into(),
+    )
+    .unwrap_err();
+    assert_eq!(bad_pref.key, "worktrees.post_create_script");
     save_preference(&pref_file, "worktrees.auto_clean_idle_days", 0.into()).unwrap();
     save_preference(
         &pref_file,

@@ -787,21 +787,34 @@ async fn upper_repo_writes_to_exempted_agent_working_dirs_succeed_and_checkpoint
 }
 
 fn run_git_test(root: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "Tiechui")
-        .env("GIT_AUTHOR_EMAIL", "tiechui@example.com")
-        .env("GIT_COMMITTER_NAME", "Tiechui")
-        .env("GIT_COMMITTER_EMAIL", "tiechui@example.com")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(root).args(args);
+    for (k, v) in [
+        ("GIT_AUTHOR_NAME", "Tiechui"),
+        ("GIT_AUTHOR_EMAIL", "tiechui@example.com"),
+        ("GIT_COMMITTER_NAME", "Tiechui"),
+        ("GIT_COMMITTER_EMAIL", "tiechui@example.com"),
+    ] {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn git");
+    if !output.status.success() {
+        panic!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    String::from_utf8(output.stdout).expect("utf-8 git stdout")
+}
+
+fn setup_managed_worktree_fixture(
+    temp: &tempfile::TempDir,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    init_worktree_test_repo(&repo);
+    let wt =
+        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
+    let wt_path = PathBuf::from(wt.path);
+    let rewind_dir = home.join("state/rewind");
+    (home, repo, wt_path, rewind_dir)
 }
 
 fn init_worktree_test_repo(repo: &std::path::Path) {
@@ -848,12 +861,7 @@ fn register_worktree_rewind_stack(
 #[tokio::test]
 async fn managed_worktree_turns_capture_hidden_tree_snapshots_before_bash_mutations() {
     let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let repo = temp.path().join("repo");
-    init_worktree_test_repo(&repo);
-    let wt =
-        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
-    let wt_path = PathBuf::from(&wt.path);
+    let (home, repo, wt_path, rewind_dir) = setup_managed_worktree_fixture(&temp);
 
     std::fs::write(wt_path.join("staged.txt"), "user-staged\n").unwrap();
     run_git_test(&wt_path, &["add", "staged.txt"]);
@@ -865,7 +873,6 @@ async fn managed_worktree_turns_capture_hidden_tree_snapshots_before_bash_mutati
     let branches_before = run_git_test(&wt_path, &["branch", "-a"]);
     let log_before = run_git_test(&wt_path, &["log", "--all", "--oneline"]);
 
-    let rewind_dir = home.join("state/rewind");
     let mut h = Harness::with_workspace(
         temp,
         home.clone(),
@@ -1025,13 +1032,7 @@ async fn run_turn_with_snapshot_options(
     options: tiechui_module_rewind::SnapshotOptions,
 ) -> (tiechui_module_rewind::store::SnapshotRecord, bool) {
     let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let repo = temp.path().join("repo");
-    init_worktree_test_repo(&repo);
-    let wt =
-        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
-    let wt_path = PathBuf::from(&wt.path);
-    let rewind_dir = home.join("state/rewind");
+    let (home, _repo, wt_path, rewind_dir) = setup_managed_worktree_fixture(&temp);
 
     let mut h = Harness::with_workspace(
         temp,
