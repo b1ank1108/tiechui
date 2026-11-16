@@ -248,7 +248,7 @@ fn safe_join_rel(wt_path: &Path, rel: &str) -> Result<PathBuf> {
     Ok(joined)
 }
 
-fn remove_worktree_path(wt_path: &Path, rel: &str) -> Result<()> {
+pub(crate) fn remove_worktree_path(wt_path: &Path, rel: &str) -> Result<()> {
     let target = safe_join_rel(wt_path, rel)?;
     if !delete_existing_entry(&target)? {
         return Ok(());
@@ -277,7 +277,7 @@ fn prune_empty_ancestors(wt_path: &Path, mut current: Option<&Path>) {
     }
 }
 
-fn prepare_checkout_target(wt_path: &Path, rel: &str) -> Result<()> {
+pub(crate) fn prepare_checkout_target(wt_path: &Path, rel: &str) -> Result<()> {
     let target = safe_join_rel(wt_path, rel)?;
     if let Some(parent) = Path::new(rel).parent() {
         clear_non_dir_ancestors(wt_path, parent)?;

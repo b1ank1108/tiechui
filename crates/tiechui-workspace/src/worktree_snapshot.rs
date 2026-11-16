@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -73,16 +73,256 @@ pub fn capture_worktree_snapshot_cancellable(
     env: &BTreeMap<String, String>,
     is_cancelled: Option<&dyn Fn() -> bool>,
 ) -> Result<WorktreeSnapshot> {
-    let runner = BoundedGit {
-        deadline: Instant::now() + timeout,
-        timeout,
-        is_cancelled,
-    };
+    let runner = BoundedGit::new(timeout, is_cancelled);
     let toplevel = resolve_toplevel(&runner, worktree_root, env)?;
     let tree = build_snapshot_tree(&runner, &toplevel, env)?;
     let reference = checkpoint_ref_name(session_id, anchor_id);
     runner.run(&toplevel, &["update-ref", &reference, &tree], None, env)?;
     Ok(WorktreeSnapshot { reference, tree })
+}
+
+pub fn has_worktree_snapshot_tree(
+    worktree_root: &Path,
+    tree: &str,
+    env: &BTreeMap<String, String>,
+) -> bool {
+    if !is_hex_oid(tree) {
+        return false;
+    }
+    let runner = BoundedGit::new(DEFAULT_SNAPSHOT_TIMEOUT, None);
+    let real_env = env_without_index(env);
+    resolve_toplevel(&runner, worktree_root, &real_env)
+        .and_then(|toplevel| verify_snapshot_tree(&runner, &toplevel, tree, &real_env))
+        .is_ok()
+}
+
+pub fn restore_worktree_snapshot(worktree_root: &Path, tree: &str) -> Result<()> {
+    restore_worktree_snapshot_with_env(
+        worktree_root,
+        tree,
+        DEFAULT_SNAPSHOT_TIMEOUT,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn restore_worktree_snapshot_with_env(
+    worktree_root: &Path,
+    tree: &str,
+    timeout: Duration,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    restore_worktree_snapshot_cancellable(worktree_root, tree, timeout, env, None)
+}
+
+pub fn restore_worktree_snapshot_cancellable(
+    worktree_root: &Path,
+    tree: &str,
+    timeout: Duration,
+    env: &BTreeMap<String, String>,
+    is_cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<()> {
+    let runner = BoundedGit::new(timeout, is_cancelled);
+    let real_env = env_without_index(env);
+    let toplevel = resolve_toplevel(&runner, worktree_root, &real_env)?;
+    verify_snapshot_tree(&runner, &toplevel, tree, &real_env)?;
+    let stale_candidates = collect_tracked_and_cached_paths(&runner, &toplevel, &real_env)?;
+    let (all_tree_paths, checkout_paths) =
+        list_snapshot_tree_entries(&runner, &toplevel, tree, &real_env)?;
+    checkout_snapshot_files(&runner, &toplevel, tree, &checkout_paths, &real_env)?;
+    seed_index(&runner, &toplevel, &real_env)?;
+    remove_paths_absent_from_tree(&toplevel, &stale_candidates, &all_tree_paths)?;
+    prune_untracked_non_ignored(&runner, &toplevel, &all_tree_paths, &real_env)?;
+    let _ = runner.run(
+        &toplevel,
+        &["update-index", "-q", "--refresh"],
+        None,
+        &real_env,
+    );
+    Ok(())
+}
+
+pub fn diff_worktree_snapshot_with_env(
+    worktree_root: &Path,
+    tree: &str,
+    timeout: Duration,
+    env: &BTreeMap<String, String>,
+    is_cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<Vec<String>> {
+    let runner = BoundedGit::new(timeout, is_cancelled);
+    let real_env = env_without_index(env);
+    let toplevel = resolve_toplevel(&runner, worktree_root, &real_env)?;
+    verify_snapshot_tree(&runner, &toplevel, tree, &real_env)?;
+    let temp_dir = worktree_carry::TempIndexDir::create()?;
+    let idx_env = worktree_carry::env_with_index(&real_env, &temp_dir.path.join("diff.index"))?;
+    runner.run(&toplevel, &["read-tree", tree], None, &idx_env)?;
+    let porcelain = read_porcelain_status(&runner, &toplevel, &idx_env)?;
+    let paths: BTreeSet<String> = porcelain
+        .split('\0')
+        .filter(|record| record.len() > 3 && record.as_bytes()[1] != b' ')
+        .map(|record| record[3..].to_owned())
+        .collect();
+    Ok(paths.into_iter().collect())
+}
+
+fn is_hex_oid(raw: &str) -> bool {
+    !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn env_without_index(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut clean = env.clone();
+    clean.remove("GIT_INDEX_FILE");
+    clean
+}
+
+fn verify_snapshot_tree(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    tree: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    if !is_hex_oid(tree) {
+        return fail(format!("invalid snapshot tree oid: {tree}"));
+    }
+    let spec = format!("{tree}^{{tree}}");
+    runner
+        .run(toplevel, &["rev-parse", "--verify", "-q", &spec], None, env)
+        .map(|_| ())
+}
+
+fn collect_tracked_and_cached_paths(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>> {
+    let cached = runner.run(toplevel, &["ls-files", "-z", "--cached"], None, env)?;
+    let mut paths: BTreeSet<String> = cached
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if runner
+        .run(
+            toplevel,
+            &["rev-parse", "--verify", "-q", "HEAD^{tree}"],
+            None,
+            env,
+        )
+        .is_ok()
+    {
+        let head_out = runner.run(
+            toplevel,
+            &["ls-tree", "-r", "-z", "--name-only", "HEAD"],
+            None,
+            env,
+        )?;
+        paths.extend(
+            head_out
+                .split('\0')
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    Ok(paths)
+}
+
+fn list_snapshot_tree_entries(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    tree: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let raw = runner.run(toplevel, &["ls-tree", "-r", "-z", tree], None, env)?;
+    let mut all_paths = BTreeSet::new();
+    let mut checkout_paths = Vec::new();
+    for record in raw.split('\0').filter(|entry| !entry.is_empty()) {
+        let Some((meta, path)) = record.split_once('\t') else {
+            continue;
+        };
+        all_paths.insert(path.to_owned());
+        if meta.split_whitespace().next() != Some("160000") {
+            checkout_paths.push(path.to_owned());
+        }
+    }
+    Ok((all_paths, checkout_paths))
+}
+
+fn checkout_snapshot_files(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    tree: &str,
+    checkout_paths: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    if checkout_paths.is_empty() {
+        return Ok(());
+    }
+    let temp_dir = worktree_carry::TempIndexDir::create()?;
+    let idx_env = worktree_carry::env_with_index(env, &temp_dir.path.join("restore.index"))?;
+    runner.run(toplevel, &["read-tree", tree], None, &idx_env)?;
+    for rel in checkout_paths {
+        worktree_carry::prepare_checkout_target(toplevel, rel)?;
+    }
+    let stdin_bytes = worktree_carry::encode_nul_paths(&[], checkout_paths);
+    runner.run(
+        toplevel,
+        &["checkout-index", "-f", "-z", "--stdin"],
+        Some(&stdin_bytes),
+        &idx_env,
+    )?;
+    Ok(())
+}
+
+fn remove_paths_absent_from_tree(
+    toplevel: &Path,
+    candidates: &BTreeSet<String>,
+    all_tree_paths: &BTreeSet<String>,
+) -> Result<()> {
+    for rel in candidates {
+        if !all_tree_paths.contains(rel) {
+            worktree_carry::remove_worktree_path(toplevel, rel)?;
+        }
+    }
+    Ok(())
+}
+
+fn prune_untracked_non_ignored(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    all_tree_paths: &BTreeSet<String>,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    if remove_other_files_once(runner, toplevel, all_tree_paths, env)? {
+        let _ = remove_other_files_once(runner, toplevel, all_tree_paths, env)?;
+    }
+    Ok(())
+}
+
+fn remove_other_files_once(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    all_tree_paths: &BTreeSet<String>,
+    env: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let others = runner.run(
+        toplevel,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+        None,
+        env,
+    )?;
+    let mut removed_gitignore = false;
+    for rel in others.split('\0').filter(|entry| !entry.is_empty()) {
+        if all_tree_paths.contains(rel) {
+            continue;
+        }
+        if Path::new(rel)
+            .file_name()
+            .is_some_and(|n| n == ".gitignore")
+        {
+            removed_gitignore = true;
+        }
+        worktree_carry::remove_worktree_path(toplevel, rel)?;
+    }
+    Ok(removed_gitignore)
 }
 
 fn build_snapshot_tree(
@@ -93,24 +333,33 @@ fn build_snapshot_tree(
     let temp_dir = worktree_carry::TempIndexDir::create()?;
     let idx_env = worktree_carry::env_with_index(env, &temp_dir.path.join("capture.index"))?;
     seed_index(runner, toplevel, &idx_env)?;
-    let porcelain = runner.run(
-        toplevel,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-        ],
-        None,
-        &idx_env,
-    )?;
+    let porcelain = read_porcelain_status(runner, toplevel, &idx_env)?;
     let (deleted, non_deleted) = worktree_carry::collect_status_paths(toplevel, &porcelain, false)?;
     stage_changes(runner, toplevel, &idx_env, &deleted, &non_deleted)?;
     Ok(runner
         .run(toplevel, &["write-tree"], None, &idx_env)?
         .trim()
         .to_owned())
+}
+
+fn read_porcelain_status(
+    runner: &BoundedGit<'_>,
+    toplevel: &Path,
+    idx_env: &BTreeMap<String, String>,
+) -> Result<String> {
+    runner.run(
+        toplevel,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ],
+        None,
+        idx_env,
+    )
 }
 
 fn resolve_toplevel(
@@ -176,7 +425,15 @@ struct BoundedGit<'a> {
     is_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
-impl BoundedGit<'_> {
+impl<'a> BoundedGit<'a> {
+    fn new(timeout: Duration, is_cancelled: Option<&'a dyn Fn() -> bool>) -> Self {
+        Self {
+            deadline: Instant::now() + timeout,
+            timeout,
+            is_cancelled,
+        }
+    }
+
     fn run(
         &self,
         root: &Path,

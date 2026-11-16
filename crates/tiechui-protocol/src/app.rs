@@ -221,6 +221,68 @@ pub struct RewindResult {
     pub conflicts: Vec<String>,
 }
 
+/// How `session/rewind` restores files after branching the conversation.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindMode {
+    Snapshot,
+    Patch,
+    ChatOnly,
+}
+
+/// Another non-deleted session whose working directory overlaps a managed worktree.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RewindConflictSession {
+    pub thread_id: ThreadId,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub archived: bool,
+}
+
+/// The `turn/rewind_check` result: available rewind mode, fallback or refusal reason, and preview.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RewindCheck {
+    pub mode: RewindMode,
+    /// Why whole-directory restore was refused (`chat_only`) or fell back to `patch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_session: Option<RewindConflictSession>,
+    /// Shell commands executed in the target turn and any subsequent turns on the branch.
+    pub commands: Vec<String>,
+    /// Tracked files that patch rewind would touch (`safe` and `unsafe`).
+    pub files: Vec<String>,
+    pub safe: Vec<String>,
+    pub r#unsafe: Vec<String>,
+}
+
+/// The `session/rewind` request.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRewindParams {
+    pub thread_id: ThreadId,
+    pub item_id: String,
+    pub mode: RewindMode,
+}
+
+/// The `session/rewind` result.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRewindResult {
+    pub mode: RewindMode,
+    /// Present when the conversation was branched; `None` when patch conflicts aborted before branching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_id: Option<SubmissionId>,
+    pub conflicts: Vec<String>,
+    pub commands: Vec<String>,
+}
+
 /// A provider declared in `providers.toml`. Its key is never sent.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

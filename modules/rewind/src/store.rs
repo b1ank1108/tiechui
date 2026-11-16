@@ -268,6 +268,97 @@ impl Store {
     pub fn snapshots(&self) -> Result<BTreeMap<String, SnapshotRecord>> {
         Ok(self.load()?.snapshots)
     }
+    fn ensure_ready_locked(&self, cancel: &CancellationToken) -> Result<File> {
+        let lock = self.lock(cancel)?;
+        self.no_writers()?;
+        if self.pending()? {
+            return Err(ToolError(
+                "An incomplete rewind needs recovery; run /rewind.".into(),
+            ));
+        }
+        Ok(lock)
+    }
+    fn validate_plan_locked(&self, plan: &Plan, cancel: &CancellationToken) -> Result<File> {
+        if plan.current.keys().ne(plan.target.keys()) {
+            return Err(ToolError("Invalid rewind plan".into()));
+        }
+        let lock = self.ensure_ready_locked(cancel)?;
+        for (file, current) in &plan.current {
+            if self.capture(file, cancel)? != *current {
+                return Err(ToolError(format!("File changed since preview: {file}")));
+            }
+            self.bytes(&plan.target[file])?;
+        }
+        Ok(lock)
+    }
+    pub fn ensure_ready_for_restore(&self, cancel: &CancellationToken) -> Result<()> {
+        let _lock = self.ensure_ready_locked(cancel)?;
+        Ok(())
+    }
+    pub fn precheck_plan(&self, plan: &Plan, cancel: &CancellationToken) -> Result<()> {
+        let _lock = self.validate_plan_locked(plan, cancel)?;
+        Ok(())
+    }
+    pub fn settle_snapshot_restore(
+        &self,
+        discarded: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _lock = self.ensure_ready_locked(cancel)?;
+        if !self.directory.join("manifest.json").try_exists()? {
+            return Ok(());
+        }
+        let mut data = self.load()?;
+        self.refresh_head_after_snapshot(&mut data, discarded, cancel)?;
+        reconcile_undone_after_snapshot(&mut data, discarded);
+        self.atomic("manifest.json", &data)
+    }
+    fn refresh_head_after_snapshot(
+        &self,
+        data: &mut Manifest,
+        discarded: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let mut tracked: std::collections::BTreeSet<String> = data.head.keys().cloned().collect();
+        for id in discarded {
+            if let Some(files) = data.checkpoints.get(id) {
+                tracked.extend(files.keys().cloned());
+            }
+        }
+        for file in tracked {
+            check(cancel)?;
+            match self.capture(&file, cancel) {
+                Ok(version) => {
+                    data.head.insert(file, version);
+                }
+                Err(_) => {
+                    data.head.remove(&file);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn patch_preview(
+        &self,
+        ids: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let data = self.load()?;
+        let mut safe = Vec::new();
+        let mut unsafe_files = Vec::new();
+        for (file, before) in earliest(&data, ids, cancel)? {
+            check(cancel)?;
+            match self.capture(&file, cancel) {
+                Ok(now) if data.head.get(&file) == Some(&now) => {
+                    if now != before {
+                        safe.push(file);
+                    }
+                }
+                _ => unsafe_files.push(file),
+            }
+        }
+        Ok((safe, unsafe_files))
+    }
     pub fn file_key(&self, path: &Path, cwd: &Path) -> Result<String> {
         // A session's cwd may itself be an alias. Keep checking links below it.
         let path = path
@@ -534,22 +625,7 @@ impl Store {
     }
     /// The caller retains this lock until navigation and finish have settled.
     pub fn restore(&self, plan: &Plan, cancel: &CancellationToken) -> Result<File> {
-        if plan.current.keys().ne(plan.target.keys()) {
-            return Err(ToolError("Invalid rewind plan".into()));
-        }
-        let lock = self.lock(cancel)?;
-        self.no_writers()?;
-        if self.pending()? {
-            return Err(ToolError(
-                "An incomplete rewind needs recovery; run /rewind.".into(),
-            ));
-        }
-        for (file, current) in &plan.current {
-            if self.capture(file, cancel)? != *current {
-                return Err(ToolError(format!("File changed since preview: {file}")));
-            }
-            self.bytes(&plan.target[file])?;
-        }
+        let lock = self.validate_plan_locked(plan, cancel)?;
         self.atomic("transaction.json", plan)?;
         for (file, target) in &plan.target {
             self.put(file, target, &[plan.current[file].clone()], cancel)?;
@@ -766,6 +842,17 @@ fn earliest(data: &Manifest, ids: &[String], cancel: &CancellationToken) -> Resu
         }
     }
     Ok(files)
+}
+
+fn reconcile_undone_after_snapshot(data: &mut Manifest, discarded: &[String]) {
+    for id in discarded {
+        data.undone.remove(id);
+    }
+    data.undone.retain(|_, after_files| {
+        !after_files
+            .iter()
+            .all(|(file, after)| data.head.get(file) == Some(after))
+    });
 }
 
 pub fn line_stats(before: &[u8], current: &[u8]) -> Option<LineStats> {

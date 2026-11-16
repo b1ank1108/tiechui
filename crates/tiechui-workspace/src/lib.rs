@@ -9,6 +9,7 @@ mod terminal;
 mod watch;
 mod worktree;
 mod worktree_carry;
+mod worktree_isolation;
 mod worktree_script;
 mod worktree_snapshot;
 
@@ -29,9 +30,14 @@ pub use worktree::{
     CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
     list_worktrees_with_env, project_worktree_paths, remove_worktree_with_env, session_worktree,
 };
+pub use worktree_isolation::{
+    LiveSessionCwd, PathOverlap, WorktreeIsolationConflict, check_worktree_isolation,
+};
 pub use worktree_snapshot::{
     DEFAULT_SNAPSHOT_TIMEOUT, WorktreeSnapshot, capture_worktree_snapshot,
     capture_worktree_snapshot_cancellable, capture_worktree_snapshot_with_env, checkpoint_ref_name,
+    diff_worktree_snapshot_with_env, has_worktree_snapshot_tree, restore_worktree_snapshot,
+    restore_worktree_snapshot_cancellable, restore_worktree_snapshot_with_env,
 };
 
 /// Receives a notification's method and params.

@@ -536,6 +536,24 @@ export type Resource = { id: string, kind: ResourceKind, name: string, descripti
 
 export type ResourceKind = "Plugin" | "Skill" | "Task";
 
+export type RewindCheck = { mode: RewindMode, 
+/**
+ * Why whole-directory restore was refused (`chat_only`) or fell back to `patch`.
+ */
+reason?: string | null, snapshot_ref?: string | null, conflicting_session?: RewindConflictSession | null, 
+/**
+ * Shell commands executed in the target turn and any subsequent turns on the branch.
+ */
+commands: Array<string>, 
+/**
+ * Tracked files that patch rewind would touch (`safe` and `unsafe`).
+ */
+files: Array<string>, safe: Array<string>, unsafe: Array<string>, };
+
+export type RewindConflictSession = { thread_id: ThreadId, cwd: string, title?: string | null, archived: boolean, };
+
+export type RewindMode = "snapshot" | "patch" | "chat_only";
+
 export type RewindPage = "messages" | "checking" | "actions" | "recovery";
 
 export type RewindPanel = { rows: Array<RewindRow>, selected: number, page: RewindPage, preview: CheckpointStats | null, };
@@ -591,6 +609,14 @@ model: string | null, thinking: ThinkingLevel | null,
  * `rules`, `auto` or `yolo`; otherwise the configured mode.
  */
 mode: string | null, };
+
+export type SessionRewindParams = { thread_id: ThreadId, item_id: string, mode: RewindMode, };
+
+export type SessionRewindResult = { mode: RewindMode, 
+/**
+ * Present when the conversation was branched; `None` when patch conflicts aborted before branching.
+ */
+submission_id?: SubmissionId | null, conflicts: Array<string>, commands: Array<string>, };
 
 export type SessionSummary = { thread_id: ThreadId, path: string, cwd: string, 
 /**

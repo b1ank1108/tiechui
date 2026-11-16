@@ -663,6 +663,7 @@ impl Server {
                 self.submit(&p.thread_id, p.op).await.and_then(value)
             }
             "session/branch" => self.branch(params).await,
+            "session/rewind" => self.session_rewind(params).await,
             "session/close" => {
                 let p: ThreadParams = parse(params)?;
                 self.close(&p.thread_id).await;
@@ -1295,7 +1296,99 @@ impl Server {
         let path = self.live(&params.thread_id)?.path.clone();
         let home = self.home.clone();
         let method = method.to_owned();
-        blocking(move |cancel| turns::handle(&home, &path, &method, &params.item_id, cancel)).await
+        let live_sessions = self.live_session_cwds();
+        blocking(move |cancel| {
+            turns::handle(
+                &home,
+                &path,
+                &method,
+                &params.item_id,
+                &live_sessions,
+                cancel,
+            )
+        })
+        .await
+    }
+
+    async fn session_rewind(&self, params: Value) -> Reply {
+        let params: SessionRewindParams = parse(params)?;
+        let live = self.live(&params.thread_id)?;
+        let before = lock(&live.projection).epoch;
+        let path = live.path.clone();
+        let home = self.home.clone();
+        let item_id = params.item_id.clone();
+        let mode = params.mode;
+        let live_sessions = self.live_session_cwds();
+        let prepared = blocking(move |cancel| {
+            turns::prepare_session_rewind(&home, &path, &item_id, mode, &live_sessions, cancel)
+        })
+        .await?;
+        let (at, discarded, snapshot_tree) = match prepared {
+            turns::PreparedRewind::PatchConflicts {
+                conflicts,
+                commands,
+            } => {
+                return value(SessionRewindResult {
+                    mode,
+                    submission_id: None,
+                    conflicts,
+                    commands,
+                });
+            }
+            turns::PreparedRewind::Proceed {
+                at,
+                discarded,
+                snapshot_tree,
+            } => (at, discarded, snapshot_tree),
+        };
+        let submitted = self
+            .submit(
+                &params.thread_id,
+                Op::Branch {
+                    entry_id: at.branch_target.clone(),
+                },
+            )
+            .await?;
+        live.started
+            .clone()
+            .wait_for(|epoch| epoch.is_some_and(|epoch| epoch.0 > before.0))
+            .await
+            .map_err(|_| internal("session ended"))?;
+        let commands = at.rewind_commands.clone();
+        let conflicts = blocking(move |cancel| {
+            turns::apply_session_rewind_files(
+                mode,
+                &at,
+                &discarded,
+                snapshot_tree.as_deref(),
+                cancel,
+            )
+        })
+        .await?;
+        value(SessionRewindResult {
+            mode,
+            submission_id: Some(submitted.submission_id),
+            conflicts,
+            commands,
+        })
+    }
+
+    fn live_session_cwds(&self) -> turns::LiveSessionList {
+        #[cfg(feature = "workspace")]
+        {
+            lock(&self.sessions)
+                .iter()
+                .map(|(thread, live)| tiechui_workspace::LiveSessionCwd {
+                    session_id: thread.0.clone(),
+                    cwd: live.cwd.clone(),
+                    path: Some(live.path.clone()),
+                })
+                .collect()
+        }
+        #[cfg(not(feature = "workspace"))]
+        {
+            Vec::new()
+        }
     }
 
     async fn trust(&self, params: Value) -> Reply {

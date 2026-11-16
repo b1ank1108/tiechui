@@ -73,6 +73,11 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::TurnChanges>();
                 d.visit::<app::UndoCheck>();
                 d.visit::<app::RewindResult>();
+                d.visit::<app::RewindMode>();
+                d.visit::<app::RewindConflictSession>();
+                d.visit::<app::RewindCheck>();
+                d.visit::<app::SessionRewindParams>();
+                d.visit::<app::SessionRewindResult>();
                 d.visit::<app::ProviderEntry>();
                 d.visit::<app::ModelEntry>();
                 d.visit::<app::ProviderSaveParams>();

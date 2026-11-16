@@ -1042,3 +1042,252 @@ fn snapshot_capture_enforces_timeout_reaps_process_group_and_fails_on_broken_rep
         }
     }
 }
+
+#[test]
+fn restores_whole_worktree_to_hidden_snapshot_preserving_ignored_files_and_resetting_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("restore-repo");
+    init_repo(&repo);
+    std::fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), "node_modules/\nignored.log\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "add fixture files"]);
+
+    let env = BTreeMap::new();
+    let wt = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_path = PathBuf::from(&wt.path);
+
+    std::fs::write(wt_path.join("README.md"), "turn1-readme\n").unwrap();
+    std::fs::write(wt_path.join("untouched_dirty.txt"), "turn1-untouched\n").unwrap();
+    std::fs::remove_file(wt_path.join("src/lib.rs")).unwrap();
+    std::fs::create_dir_all(wt_path.join("notes")).unwrap();
+    std::fs::write(wt_path.join("notes/todo.txt"), "turn1-note\n").unwrap();
+    std::fs::create_dir_all(wt_path.join("node_modules/pkg")).unwrap();
+    std::fs::write(wt_path.join("node_modules/pkg/index.js"), "cached-v1\n").unwrap();
+    std::fs::write(wt_path.join("ignored.log"), "keep-log\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = wt_path.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho turn1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("README.md", wt_path.join("readme-link")).unwrap();
+    }
+
+    let snap = ws::capture_worktree_snapshot_with_env(
+        &wt_path,
+        "sess-restore",
+        "turn-2",
+        Duration::from_secs(10),
+        &env,
+    )
+    .unwrap();
+    assert!(ws::has_worktree_snapshot_tree(&wt_path, &snap.tree, &env));
+    assert!(!ws::has_worktree_snapshot_tree(
+        &wt_path,
+        "0000000000000000000000000000000000000000",
+        &env
+    ));
+
+    let branches_before = git(&wt_path, &["branch", "-a"]);
+    let log_before = git(&wt_path, &["log", "--all", "--oneline"]);
+
+    std::fs::remove_file(wt_path.join("a.txt")).unwrap();
+    std::fs::write(wt_path.join("b.txt"), "x\n").unwrap();
+    git(&wt_path, &["add", "b.txt"]);
+    std::fs::create_dir_all(wt_path.join("deep/nested")).unwrap();
+    std::fs::write(wt_path.join("deep/nested/extra.txt"), "extra\n").unwrap();
+    std::fs::create_dir_all(wt_path.join("src")).unwrap();
+    std::fs::write(wt_path.join("src/lib.rs"), "recreated-in-turn2\n").unwrap();
+    std::fs::write(wt_path.join("README.md"), "manual-edit\n").unwrap();
+    std::fs::write(wt_path.join("notes/todo.txt"), "mutated-note\n").unwrap();
+    std::fs::write(wt_path.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir_all(wt_path.join("sub")).unwrap();
+    std::fs::write(wt_path.join("sub/.gitignore"), "*.gen\n").unwrap();
+    std::fs::write(wt_path.join("sub/hidden.gen"), "hidden-by-turn2-ignore\n").unwrap();
+    std::fs::write(wt_path.join("node_modules/pkg/index.js"), "cached-v2\n").unwrap();
+    std::fs::write(wt_path.join("node_modules/pkg/extra.js"), "keep-ignored\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            wt_path.join("run.sh"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::remove_file(wt_path.join("readme-link")).unwrap();
+        std::fs::create_dir_all(wt_path.join("readme-link")).unwrap();
+        std::fs::write(wt_path.join("readme-link/inside.txt"), "replaced-link\n").unwrap();
+    }
+
+    let diff_paths = ws::diff_worktree_snapshot_with_env(
+        &wt_path,
+        &snap.tree,
+        Duration::from_secs(10),
+        &env,
+        None,
+    )
+    .unwrap();
+    assert!(diff_paths.contains(&"a.txt".to_owned()), "{diff_paths:?}");
+    assert!(diff_paths.contains(&"b.txt".to_owned()), "{diff_paths:?}");
+    assert!(
+        !diff_paths.contains(&"untouched_dirty.txt".to_owned()),
+        "{diff_paths:?}"
+    );
+    assert!(
+        !diff_paths.iter().any(|p| p.starts_with("node_modules/")),
+        "{diff_paths:?}"
+    );
+
+    ws::restore_worktree_snapshot_with_env(&wt_path, &snap.tree, Duration::from_secs(10), &env)
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("a.txt")).unwrap(),
+        "initial-a\n"
+    );
+    assert!(!wt_path.join("b.txt").exists());
+    assert!(!wt_path.join("deep").exists());
+    assert!(!wt_path.join("sub").exists());
+    assert!(!wt_path.join("src/lib.rs").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("README.md")).unwrap(),
+        "turn1-readme\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("notes/todo.txt")).unwrap(),
+        "turn1-note\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join(".gitignore")).unwrap(),
+        "node_modules/\nignored.log\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("node_modules/pkg/index.js")).unwrap(),
+        "cached-v2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("node_modules/pkg/extra.js")).unwrap(),
+        "keep-ignored\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("ignored.log")).unwrap(),
+        "keep-log\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(wt_path.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "expected executable mode, got {mode:04o}");
+        assert!(
+            std::fs::symlink_metadata(wt_path.join("readme-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(wt_path.join("readme-link")).unwrap(),
+            Path::new("README.md")
+        );
+    }
+
+    assert_eq!(git(&wt_path, &["diff", "--cached"]), "");
+    let status_out = git(&wt_path, &["status"]);
+    assert!(!status_out.contains("checkpoints"), "{status_out}");
+    assert_eq!(git(&wt_path, &["branch", "-a"]), branches_before);
+    assert_eq!(git(&wt_path, &["log", "--all", "--oneline"]), log_before);
+}
+
+#[test]
+fn worktree_isolation_detects_equal_ancestor_descendant_archived_and_ignores_trashed_or_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("iso-repo");
+    init_repo(&repo);
+    let env = BTreeMap::new();
+    let wt1 = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt2 = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt1_path = PathBuf::from(&wt1.path);
+    let wt2_path = PathBuf::from(&wt2.path);
+
+    let write_session = |group: &str, id: &str, cwd: &Path, meta_json: Option<&str>| -> PathBuf {
+        let dir = home.join(group).join("bucket");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.jsonl"));
+        let header = serde_json::json!({
+            "format_version": 1,
+            "id": id,
+            "cwd": cwd,
+            "created_at": 1,
+        });
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+        if let Some(raw_meta) = meta_json {
+            std::fs::write(path.with_extension("meta.json"), raw_meta).unwrap();
+        }
+        path
+    };
+
+    write_session("sessions", "self-sess", &wt1_path, None);
+    write_session("sessions", "sibling-sess", &wt2_path, None);
+    write_session("trash", "trashed-sess", &wt1_path, None);
+    assert_eq!(
+        ws::check_worktree_isolation(&home, &wt1_path, "self-sess", &[]).unwrap(),
+        None
+    );
+
+    let eq_file = write_session(
+        "sessions",
+        "archived-peer",
+        &wt1_path,
+        Some(r#"{"title":"Archived Peer","archived_at":1700000000000}"#),
+    );
+    let conflict = ws::check_worktree_isolation(&home, &wt1_path, "self-sess", &[])
+        .unwrap()
+        .expect("archived equal-cwd session must block isolation");
+    assert_eq!(conflict.session_id, "archived-peer");
+    assert_eq!(conflict.title.as_deref(), Some("Archived Peer"));
+    assert!(conflict.archived);
+    assert_eq!(conflict.overlap, ws::PathOverlap::Equal);
+    assert!(conflict.reason.contains("Archived Peer"));
+    std::fs::remove_file(&eq_file).unwrap();
+    std::fs::remove_file(eq_file.with_extension("meta.json")).unwrap();
+
+    let anc_file = write_session("sessions", "ancestor-sess", &home, None);
+    let conflict = ws::check_worktree_isolation(&home, &wt1_path, "self-sess", &[])
+        .unwrap()
+        .expect("ancestor session must block isolation");
+    assert_eq!(conflict.session_id, "ancestor-sess");
+    assert_eq!(conflict.overlap, ws::PathOverlap::ContainsWorktree);
+    std::fs::remove_file(&anc_file).unwrap();
+
+    #[cfg(unix)]
+    let descendant_cwd = {
+        let alias = temp.path().join("wt-alias");
+        std::os::unix::fs::symlink(&wt1_path, &alias).unwrap();
+        alias.join("missing/subdir")
+    };
+    #[cfg(not(unix))]
+    let descendant_cwd = wt1_path.join("missing/subdir");
+
+    let conflict = ws::check_worktree_isolation(
+        &home,
+        &wt1_path,
+        "self-sess",
+        &[ws::LiveSessionCwd {
+            session_id: "live-descendant".into(),
+            cwd: descendant_cwd,
+            path: None,
+        }],
+    )
+    .unwrap()
+    .expect("descendant live session must block isolation");
+    assert_eq!(conflict.session_id, "live-descendant");
+    assert_eq!(conflict.overlap, ws::PathOverlap::InsideWorktree);
+}
