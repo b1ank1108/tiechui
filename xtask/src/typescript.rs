@@ -67,6 +67,9 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::RenameParams>();
                 d.visit::<app::ArchiveParams>();
                 d.visit::<app::PathParams>();
+                d.visit::<app::TrashWorktreePolicy>();
+                d.visit::<app::TrashParams>();
+                d.visit::<app::TrashResult>();
                 d.visit::<app::TrustParams>();
                 d.visit::<app::TrustResult>();
                 d.visit::<app::FileChange>();
@@ -147,6 +150,9 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::WorktreeListParams>();
                 d.visit::<workspace::WorktreeRemoveParams>();
                 d.visit::<workspace::WorktreeRemoveResult>();
+                d.visit::<workspace::WorktreeSkipReason>();
+                d.visit::<workspace::SkippedWorktree>();
+                d.visit::<workspace::WorktreeCleanupStatus>();
                 d.visit::<workspace::TerminalCreateParams>();
                 d.visit::<workspace::TerminalParams>();
                 d.visit::<workspace::TerminalAttached>();

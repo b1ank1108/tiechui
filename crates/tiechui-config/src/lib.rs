@@ -608,12 +608,21 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
+pub const MAX_WORKTREE_IDLE_DAYS: u32 = 3650;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorktreesConfig {
     /// Project configuration: shell command run once inside a newly created session worktree when the project is trusted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_create_script: Option<String>,
+    /// User configuration only: days of inactivity after which `chui app-server` removes clean idle session worktrees (`0` cleans immediately when idle); unset disables idle cleanup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 3650))]
+    pub auto_clean_idle_days: Option<u32>,
+    /// User configuration only: remove clean session worktrees whose sessions have all been deleted during `chui app-server` cleanup sweeps.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_clean_on_session_delete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

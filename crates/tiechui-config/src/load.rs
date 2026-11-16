@@ -47,6 +47,11 @@ struct Layer {
 struct WorktreesLayer {
     /// Project configuration: shell command run once inside a newly created session worktree when the project is trusted.
     post_create_script: Option<String>,
+    /// User configuration only: days of inactivity after which `chui app-server` removes clean idle session worktrees (`0` cleans immediately when idle); unset disables idle cleanup.
+    #[schemars(range(min = 0, max = 3650))]
+    auto_clean_idle_days: Option<u32>,
+    /// User configuration only: remove clean session worktrees whose sessions have all been deleted during `chui app-server` cleanup sweeps.
+    auto_clean_on_session_delete: Option<bool>,
 }
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
@@ -260,6 +265,11 @@ pub fn load_with_mandatory_modules(
         skills: merged.skills.unwrap_or_default(),
         worktrees: WorktreesConfig {
             post_create_script: merged.worktrees.post_create_script,
+            auto_clean_idle_days: merged.worktrees.auto_clean_idle_days,
+            auto_clean_on_session_delete: merged
+                .worktrees
+                .auto_clean_on_session_delete
+                .unwrap_or(false),
         },
         providers: load_providers(&paths.providers())?,
     };
@@ -290,6 +300,22 @@ fn strip_user_only(
         (project_layer.network.take().is_some(), "network"),
         (project_layer.sessions.take().is_some(), "sessions"),
         (project_layer.skills.take().is_some(), "skills"),
+        (
+            project_layer
+                .worktrees
+                .auto_clean_idle_days
+                .take()
+                .is_some(),
+            "worktrees.auto_clean_idle_days",
+        ),
+        (
+            project_layer
+                .worktrees
+                .auto_clean_on_session_delete
+                .take()
+                .is_some(),
+            "worktrees.auto_clean_on_session_delete",
+        ),
     ] {
         if present {
             user_only.push(key);
@@ -451,8 +477,27 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             "token settings must be non-negative safe integers",
         ));
     }
-    validate_models_and_permissions(&layer, path)?;
+    validate_layer_semantics(&layer, path)?;
     Ok(layer)
+}
+
+fn validate_layer_semantics(layer: &Layer, path: &Path) -> Result<(), ConfigError> {
+    validate_models_and_permissions(layer, path)?;
+    validate_worktrees(&layer.worktrees, path)
+}
+
+fn validate_worktrees(worktrees: &WorktreesLayer, path: &Path) -> Result<(), ConfigError> {
+    if worktrees
+        .auto_clean_idle_days
+        .is_some_and(|days| days > crate::MAX_WORKTREE_IDLE_DAYS)
+    {
+        return Err(ConfigError::new(
+            path,
+            "worktrees.auto_clean_idle_days",
+            format!("must be between 0 and {}", crate::MAX_WORKTREE_IDLE_DAYS),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_models_and_permissions(layer: &Layer, path: &Path) -> Result<(), ConfigError> {
@@ -523,6 +568,14 @@ fn merge(
         .worktrees
         .post_create_script
         .or(base.worktrees.post_create_script.take());
+    base.worktrees.auto_clean_idle_days = layer
+        .worktrees
+        .auto_clean_idle_days
+        .or(base.worktrees.auto_clean_idle_days);
+    base.worktrees.auto_clean_on_session_delete = layer
+        .worktrees
+        .auto_clean_on_session_delete
+        .or(base.worktrees.auto_clean_on_session_delete);
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);
     let (line, next) = (&mut base.tui.status_line, layer.tui.status_line);

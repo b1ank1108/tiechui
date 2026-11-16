@@ -170,6 +170,45 @@ pub struct PathParams {
     pub path: String,
 }
 
+/// How `session/trash` handles a `chui`-managed session worktree when no other session uses it.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrashWorktreePolicy {
+    /// Removes a clean sole worktree; keeps a dirty one on disk.
+    #[default]
+    Auto,
+    /// Removes a clean sole worktree; returns confirmation details without trashing when dirty.
+    AskIfDirty,
+    /// Trashes the session and leaves the worktree checkout and registry entry intact.
+    Keep,
+    /// Trashes the session and force-removes the worktree checkout even if dirty.
+    ForceRemove,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrashParams {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub worktree_policy: Option<TrashWorktreePolicy>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrashResult {
+    pub path: String,
+    #[serde(default)]
+    pub trashed: bool,
+    #[serde(default)]
+    pub needs_worktree_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::workspace::WorktreeEntry>,
+    #[serde(default)]
+    pub worktree_removed: bool,
+}
+
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrustParams {
@@ -363,7 +402,8 @@ pub struct ProviderTest {
 
 /// Sets one key of the user's `config.toml`: `model`, `lightweight_model`,
 /// `permissions.classifier_model`, `thinking`, `network.proxy`, `network.no_proxy`,
-/// `network.ca_cert`, `ask.auto_continue_after_sec` or `sessions.archive_after_days`; null
+/// `network.ca_cert`, `ask.auto_continue_after_sec`, `sessions.archive_after_days`,
+/// `worktrees.auto_clean_idle_days` or `worktrees.auto_clean_on_session_delete`; null
 /// removes optional keys.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -387,6 +427,10 @@ pub struct ConfigValues {
     pub ca_cert: Option<String>,
     pub auto_continue_after_sec: Option<u64>,
     pub archive_after_days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_clean_idle_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_clean_on_session_delete: bool,
 }
 
 /// A server of `[mcp_servers]` in the user's `config.toml`, as far as clients edit it; saving

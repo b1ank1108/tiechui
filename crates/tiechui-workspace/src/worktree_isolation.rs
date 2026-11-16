@@ -43,9 +43,16 @@ struct CandidateSession {
 }
 
 #[derive(Default)]
-struct DiskMeta {
-    title: Option<String>,
-    archived: bool,
+pub(crate) struct DiskMeta {
+    pub(crate) title: Option<String>,
+    pub(crate) archived: bool,
+}
+
+pub(crate) struct DiskSessionHeader {
+    pub(crate) path: PathBuf,
+    pub(crate) session_id: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) created_at: u64,
 }
 
 pub fn check_worktree_isolation(
@@ -66,11 +73,11 @@ pub fn check_worktree_isolation(
     Ok(None)
 }
 
-fn normalize_dir(path: &Path) -> PathBuf {
+pub(crate) fn normalize_dir(path: &Path) -> PathBuf {
     ports::resolve_existing_prefix(&ports::clean_path(path))
 }
 
-fn classify_overlap(worktree_dir: &Path, other_dir: &Path) -> Option<PathOverlap> {
+pub(crate) fn classify_overlap(worktree_dir: &Path, other_dir: &Path) -> Option<PathOverlap> {
     if worktree_dir == other_dir {
         Some(PathOverlap::Equal)
     } else if worktree_dir.starts_with(other_dir) {
@@ -118,6 +125,26 @@ fn collect_disk_sessions(
     current_session_id: &str,
 ) -> Result<BTreeMap<String, CandidateSession>> {
     let mut out = BTreeMap::new();
+    for header in list_disk_session_headers(home)? {
+        if header.session_id == current_session_id {
+            continue;
+        }
+        let meta = read_disk_meta(&header.path);
+        out.insert(
+            header.session_id.clone(),
+            CandidateSession {
+                session_id: header.session_id,
+                cwd: header.cwd,
+                title: meta.title,
+                archived: meta.archived,
+            },
+        );
+    }
+    Ok(out)
+}
+
+pub(crate) fn list_disk_session_headers(home: &Path) -> Result<Vec<DiskSessionHeader>> {
+    let mut out = Vec::new();
     let groups = match fs::read_dir(home.join("sessions")) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
@@ -126,17 +153,13 @@ fn collect_disk_sessions(
     for group in groups {
         let group = group?;
         if group.file_type()?.is_dir() {
-            scan_session_group(&group.path(), current_session_id, &mut out)?;
+            scan_session_group_headers(&group.path(), &mut out)?;
         }
     }
     Ok(out)
 }
 
-fn scan_session_group(
-    group_dir: &Path,
-    current_session_id: &str,
-    out: &mut BTreeMap<String, CandidateSession>,
-) -> Result<()> {
+fn scan_session_group_headers(group_dir: &Path, out: &mut Vec<DiskSessionHeader>) -> Result<()> {
     let entries = match fs::read_dir(group_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -145,24 +168,36 @@ fn scan_session_group(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "jsonl")
-            && let Some(candidate) = read_disk_session(&path, current_session_id)
+            && let Some(header) = read_disk_header(&path)
         {
-            out.insert(candidate.session_id.clone(), candidate);
+            out.push(header);
         }
     }
     Ok(())
 }
 
-fn read_disk_session(path: &Path, current_session_id: &str) -> Option<CandidateSession> {
+fn read_disk_header(path: &Path) -> Option<DiskSessionHeader> {
     let line = read_header_line(path)?;
-    let (session_id, cwd) = parse_peer_header(&line, current_session_id)?;
-    let meta = read_disk_meta(path);
-    Some(CandidateSession {
-        session_id,
-        cwd,
-        title: meta.title,
-        archived: meta.archived,
+    let header: Value = serde_json::from_str(&line).ok()?;
+    parse_disk_header(path, &header)
+}
+
+fn parse_disk_header(path: &Path, header: &Value) -> Option<DiskSessionHeader> {
+    let created_at = valid_header_created_at(header)?;
+    let id = header["id"].as_str()?;
+    let cwd_path = Path::new(header["cwd"].as_str()?);
+    (!id.is_empty() && cwd_path.is_absolute()).then(|| DiskSessionHeader {
+        path: path.to_path_buf(),
+        session_id: id.to_owned(),
+        cwd: cwd_path.to_path_buf(),
+        created_at,
     })
+}
+
+fn valid_header_created_at(header: &Value) -> Option<u64> {
+    (header["format_version"].as_u64() == Some(u64::from(SESSION_FORMAT_VERSION)))
+        .then(|| header["created_at"].as_u64())
+        .flatten()
 }
 
 fn read_header_line(path: &Path) -> Option<String> {
@@ -174,23 +209,7 @@ fn read_header_line(path: &Path) -> Option<String> {
     (n > 0 && line.ends_with('\n')).then_some(line)
 }
 
-fn parse_peer_header(line: &str, current_session_id: &str) -> Option<(String, PathBuf)> {
-    let header: Value = serde_json::from_str(line).ok()?;
-    if !has_valid_header_fields(&header) {
-        return None;
-    }
-    let id = header.get("id")?.as_str()?;
-    let cwd_path = Path::new(header.get("cwd")?.as_str()?);
-    (!id.is_empty() && id != current_session_id && cwd_path.is_absolute())
-        .then(|| (id.to_owned(), cwd_path.to_path_buf()))
-}
-
-fn has_valid_header_fields(header: &Value) -> bool {
-    header.get("format_version").and_then(Value::as_u64) == Some(u64::from(SESSION_FORMAT_VERSION))
-        && header.get("created_at").and_then(Value::as_u64).is_some()
-}
-
-fn read_disk_meta(session_path: &Path) -> DiskMeta {
+pub(crate) fn read_disk_meta(session_path: &Path) -> DiskMeta {
     let Some(val) = fs::read(session_path.with_extension("meta.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())

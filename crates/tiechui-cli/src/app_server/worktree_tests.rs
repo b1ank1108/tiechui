@@ -9,11 +9,12 @@ use serde_json::{Value, json};
 use tiechui_model::{Content, Message, ModelId, Role};
 use tiechui_module_rewind::store::{SnapshotRecord, Store as RewindStore};
 use tiechui_protocol::app::{
-    RewindCheck, RewindMode, SessionRewindResult, SessionSummary, SessionWorktree, Snapshot,
-    TrustResult, TurnChanges,
+    ConfigValues, RewindCheck, RewindMode, SessionRewindResult, SessionSummary, SessionWorktree,
+    Snapshot, TrashResult, TrustResult, TurnChanges,
 };
 use tiechui_protocol::workspace::{
-    Branches, PostCreateStatus, WorktreeEntry, WorktreeRemoveResult,
+    Branches, PostCreateStatus, WorktreeCleanupStatus, WorktreeEntry, WorktreeRemoveResult,
+    WorktreeSkipReason,
 };
 use tiechui_protocol::{EventKind, Item, KnownItem, ThreadId};
 use tiechui_session::{EntryKind, ModelRef, SessionStore};
@@ -1282,4 +1283,492 @@ async fn session_rewind_validates_and_branches_conversation_before_touching_any_
     );
 
     client.close().await;
+}
+
+async fn new_configured_client(home: &Path) -> TestClient {
+    let mut client = TestClient::new(Server::new(home.to_path_buf()));
+    let _: Value = client
+        .call_ok(
+            "providers/save",
+            json!({
+                "name": "fixture",
+                "wire": "openai-completions",
+                "base_url": "http://127.0.0.1:9",
+                "api_key": "sk-test"
+            }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok(
+            "providers/save_model",
+            json!({
+                "provider": "fixture",
+                "previous": null,
+                "model": {
+                    "id": "m1",
+                    "context_window": 128000,
+                    "max_output": 4096,
+                    "levels": ["off"],
+                    "mapping": {},
+                    "images": false
+                }
+            }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok(
+            "config/update",
+            json!({ "key": "model", "value": "fixture/m1" }),
+        )
+        .await;
+    client
+}
+
+async fn wait_until_removed(path: &Path, label: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+}
+
+#[tokio::test]
+async fn session_archive_and_trash_handle_clean_dirty_and_shared_worktrees_while_preserving_branches()
+ {
+    let Some(home) = isolated_home_child(
+        "TC_WT_TRASH_HOME",
+        "app_server::worktree_tests::session_archive_and_trash_handle_clean_dirty_and_shared_worktrees_while_preserving_branches",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let repo = workspace_dir.path().join("trash-repo");
+    init_repo(&repo);
+
+    let mut client = new_configured_client(&home).await;
+
+    let wt_arch: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let sess_arch: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_arch.path, "model": "fixture/m1" }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": sess_arch.thread_id }))
+        .await;
+    append_turn(Path::new(&sess_arch.path), "archive me");
+    let _: Value = client
+        .call_ok(
+            "session/archive",
+            json!({ "path": sess_arch.path, "archived": true }),
+        )
+        .await;
+    assert!(Path::new(&wt_arch.path).is_dir());
+    let listed_after_archive: Vec<WorktreeEntry> = client
+        .call_ok("worktree/list", json!({ "root": repo }))
+        .await;
+    assert!(listed_after_archive.iter().any(|w| w.path == wt_arch.path));
+
+    let sess_shared: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_arch.path, "model": "fixture/m1" }),
+        )
+        .await;
+    let shared_trash: TrashResult = client
+        .call_ok("session/trash", json!({ "path": sess_shared.path }))
+        .await;
+    assert!(shared_trash.trashed);
+    assert!(!shared_trash.needs_worktree_confirm);
+    assert!(!shared_trash.worktree_removed);
+    assert!(Path::new(&wt_arch.path).is_dir());
+
+    let sole_clean_trash: TrashResult = client
+        .call_ok(
+            "session/trash",
+            json!({ "path": sess_arch.path, "worktree_policy": "ask_if_dirty" }),
+        )
+        .await;
+    assert!(sole_clean_trash.trashed);
+    assert!(!sole_clean_trash.needs_worktree_confirm);
+    assert!(sole_clean_trash.worktree_removed);
+    assert!(!Path::new(&wt_arch.path).exists());
+    assert!(git(&repo, &["branch", "--list", "tiechui/*"]).contains(&wt_arch.branch));
+
+    let wt_dirty_keep: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let sess_dirty_keep: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_dirty_keep.path, "model": "fixture/m1" }),
+        )
+        .await;
+    std::fs::write(
+        Path::new(&wt_dirty_keep.path).join("uncommitted.txt"),
+        "keep me\n",
+    )
+    .unwrap();
+
+    let ask_res: TrashResult = client
+        .call_ok(
+            "session/trash",
+            json!({ "path": sess_dirty_keep.path, "worktree_policy": "ask_if_dirty" }),
+        )
+        .await;
+    assert!(!ask_res.trashed);
+    assert!(ask_res.needs_worktree_confirm);
+    assert!(!ask_res.worktree_removed);
+    assert_eq!(ask_res.path, sess_dirty_keep.path);
+    assert_eq!(
+        ask_res.worktree.as_ref().map(|w| w.path.as_str()),
+        Some(wt_dirty_keep.path.as_str())
+    );
+    assert!(ask_res.worktree.as_ref().is_some_and(|w| w.dirty));
+    assert!(Path::new(&sess_dirty_keep.path).is_file());
+    assert!(Path::new(&wt_dirty_keep.path).is_dir());
+    let _: Snapshot = client
+        .call_ok(
+            "session/snapshot",
+            json!({ "thread_id": sess_dirty_keep.thread_id }),
+        )
+        .await;
+
+    let keep_res: TrashResult = client
+        .call_ok(
+            "session/trash",
+            json!({ "path": sess_dirty_keep.path, "worktree_policy": "keep" }),
+        )
+        .await;
+    assert!(keep_res.trashed);
+    assert!(!keep_res.needs_worktree_confirm);
+    assert!(!keep_res.worktree_removed);
+    assert!(!Path::new(&sess_dirty_keep.path).exists());
+    assert!(Path::new(&keep_res.path).is_file());
+    assert!(Path::new(&wt_dirty_keep.path).is_dir());
+    let still_registered: Vec<WorktreeEntry> = client
+        .call_ok("worktree/list", json!({ "root": repo }))
+        .await;
+    assert!(
+        still_registered
+            .iter()
+            .any(|w| w.path == wt_dirty_keep.path)
+    );
+
+    let wt_dirty_force: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let sess_dirty_force: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_dirty_force.path, "model": "fixture/m1" }),
+        )
+        .await;
+    std::fs::write(Path::new(&wt_dirty_force.path).join("README.md"), "dirty\n").unwrap();
+
+    let force_res: TrashResult = client
+        .call_ok(
+            "session/trash",
+            json!({ "path": sess_dirty_force.path, "worktree_policy": "force_remove" }),
+        )
+        .await;
+    assert!(force_res.trashed);
+    assert!(!force_res.needs_worktree_confirm);
+    assert!(force_res.worktree_removed);
+    assert!(!Path::new(&sess_dirty_force.path).exists());
+    assert!(!Path::new(&wt_dirty_force.path).exists());
+    let branches = git(&repo, &["branch", "--list", "tiechui/*"]);
+    assert!(branches.contains(&wt_dirty_force.branch), "{branches}");
+
+    let wt_auto_clean: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let sess_auto_clean: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_auto_clean.path, "model": "fixture/m1" }),
+        )
+        .await;
+    let auto_clean_res: TrashResult = client
+        .call_ok("session/trash", json!({ "path": sess_auto_clean.path }))
+        .await;
+    assert!(auto_clean_res.trashed);
+    assert!(auto_clean_res.worktree_removed);
+    assert!(!Path::new(&wt_auto_clean.path).exists());
+    assert!(git(&repo, &["branch", "--list", "tiechui/*"]).contains(&wt_auto_clean.branch));
+
+    let wt_auto_dirty: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let sess_auto_dirty: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_auto_dirty.path, "model": "fixture/m1" }),
+        )
+        .await;
+    std::fs::write(Path::new(&wt_auto_dirty.path).join("auto.txt"), "dirty\n").unwrap();
+    let auto_dirty_res: TrashResult = client
+        .call_ok("session/trash", json!({ "path": sess_auto_dirty.path }))
+        .await;
+    assert!(auto_dirty_res.trashed);
+    assert!(!auto_dirty_res.needs_worktree_confirm);
+    assert!(!auto_dirty_res.worktree_removed);
+    assert!(Path::new(&wt_auto_dirty.path).is_dir());
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn worktree_cleanup_policies_sweep_on_demand_on_config_update_and_at_startup() {
+    let Some(home) = isolated_home_child(
+        "TC_WT_CLEANUP_HOME",
+        "app_server::worktree_tests::worktree_cleanup_policies_sweep_on_demand_on_config_update_and_at_startup",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let repo = workspace_dir.path().join("auto-clean-repo");
+    init_repo(&repo);
+
+    let mut client = new_configured_client(&home).await;
+
+    let initial_cfg: ConfigValues = client.call_ok("config/get", json!({})).await;
+    assert_eq!(initial_cfg.auto_clean_idle_days, None);
+    assert!(!initial_cfg.auto_clean_on_session_delete);
+
+    for (key, bad_val) in [
+        ("worktrees.auto_clean_idle_days", json!(-1)),
+        ("worktrees.auto_clean_idle_days", json!(3651)),
+        ("worktrees.auto_clean_idle_days", json!("0")),
+        ("worktrees.auto_clean_on_session_delete", json!("true")),
+    ] {
+        assert!(
+            client
+                .call("config/update", json!({ "key": key, "value": bad_val }))
+                .await
+                .is_err(),
+            "expected error for {key} = {bad_val}"
+        );
+    }
+
+    let wt_clean_idle: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let default_sweep: WorktreeCleanupStatus = client.call_ok("worktree/cleanup", json!({})).await;
+    assert!(default_sweep.removed.is_empty());
+    assert!(default_sweep.skipped.is_empty());
+    assert!(default_sweep.last_checked_at.is_some());
+    assert!(Path::new(&wt_clean_idle.path).is_dir());
+
+    let wt_dirty: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    std::fs::write(Path::new(&wt_dirty.path).join("dirty.txt"), "uncommitted\n").unwrap();
+
+    let wt_live: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let live_snap: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_live.path, "model": "fixture/m1" }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok(
+            "session/rename",
+            json!({ "path": live_snap.path, "title": "Running Feature" }),
+        )
+        .await;
+
+    let _: Value = client
+        .call_ok(
+            "config/update",
+            json!({ "key": "worktrees.auto_clean_idle_days", "value": 0 }),
+        )
+        .await;
+    let cfg_zero: ConfigValues = client.call_ok("config/get", json!({})).await;
+    assert_eq!(cfg_zero.auto_clean_idle_days, Some(0));
+
+    wait_until_removed(Path::new(&wt_clean_idle.path), "config/update wakeup").await;
+
+    let status_after_zero: WorktreeCleanupStatus =
+        client.call_ok("worktree/cleanup_status", json!({})).await;
+    assert!(!Path::new(&wt_clean_idle.path).exists());
+    assert!(git(&repo, &["branch", "--list", "tiechui/*"]).contains(&wt_clean_idle.branch));
+    assert!(Path::new(&wt_dirty.path).is_dir());
+    assert!(Path::new(&wt_live.path).is_dir());
+
+    let manual_sweep: WorktreeCleanupStatus = client.call_ok("worktree/cleanup", json!({})).await;
+    assert_dirty_and_live_skipped(&status_after_zero, &wt_dirty.path, &wt_live.path);
+    assert_dirty_and_live_skipped(&manual_sweep, &wt_dirty.path, &wt_live.path);
+
+    let _: Value = client
+        .call_ok(
+            "config/update",
+            json!({ "key": "worktrees.auto_clean_idle_days", "value": null }),
+        )
+        .await;
+    let _: Value = client
+        .call_ok("session/close", json!({ "thread_id": live_snap.thread_id }))
+        .await;
+
+    let wt_orphan = create_cleaned_orphan_worktree(&mut client, &repo).await;
+    let _: Value = client
+        .call_ok(
+            "config/update",
+            json!({ "key": "worktrees.auto_clean_on_session_delete", "value": true }),
+        )
+        .await;
+    let cfg_on_del: ConfigValues = client.call_ok("config/get", json!({})).await;
+    assert_eq!(cfg_on_del.auto_clean_idle_days, None);
+    assert!(cfg_on_del.auto_clean_on_session_delete);
+
+    let on_del_sweep: WorktreeCleanupStatus =
+        client.call_ok("worktree/cleanup_status", json!({})).await;
+    assert!(!Path::new(&wt_orphan.path).exists());
+    assert!(git(&repo, &["branch", "--list", "tiechui/*"]).contains(&wt_orphan.branch));
+    assert!(Path::new(&wt_live.path).is_dir());
+    assert!(Path::new(&wt_dirty.path).is_dir());
+    assert_has_dirty_skip(&on_del_sweep, &wt_dirty.path);
+
+    let wt_startup_clean: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    assert!(Path::new(&wt_startup_clean.path).is_dir());
+    client.close().await;
+
+    verify_startup_sweep_and_doctor(
+        &home,
+        &repo,
+        &wt_startup_clean,
+        &wt_live,
+        &wt_dirty,
+        &[&wt_clean_idle.branch, &wt_orphan.branch],
+    )
+    .await;
+}
+
+fn assert_dirty_and_live_skipped(
+    status: &WorktreeCleanupStatus,
+    dirty_path: &str,
+    live_path: &str,
+) {
+    let dirty_skip = status
+        .skipped
+        .iter()
+        .find(|s| s.path == dirty_path)
+        .expect("missing dirty skipped worktree");
+    assert_eq!(dirty_skip.reason_kind, WorktreeSkipReason::Dirty);
+    assert!(dirty_skip.reason.contains("存在未提交改动"));
+
+    let live_skip = status
+        .skipped
+        .iter()
+        .find(|s| s.path == live_path)
+        .expect("missing active_session skipped worktree");
+    assert_eq!(live_skip.reason_kind, WorktreeSkipReason::ActiveSession);
+    assert!(live_skip.reason.contains("仍有运行中的会话"));
+    assert!(live_skip.reason.contains("Running Feature"));
+}
+
+fn assert_has_dirty_skip(status: &WorktreeCleanupStatus, dirty_path: &str) {
+    assert!(
+        status
+            .skipped
+            .iter()
+            .any(|s| s.path == dirty_path && s.reason_kind == WorktreeSkipReason::Dirty)
+    );
+}
+
+async fn create_cleaned_orphan_worktree(client: &mut TestClient, repo: &Path) -> WorktreeEntry {
+    let wt_orphan: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    let orphan_sess: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": wt_orphan.path, "model": "fixture/m1" }),
+        )
+        .await;
+    let temp_dirty = Path::new(&wt_orphan.path).join("temp.txt");
+    std::fs::write(&temp_dirty, "temp\n").unwrap();
+    let kept_orphan: TrashResult = client
+        .call_ok(
+            "session/trash",
+            json!({ "path": orphan_sess.path, "worktree_policy": "keep" }),
+        )
+        .await;
+    assert!(kept_orphan.trashed);
+    assert!(Path::new(&wt_orphan.path).is_dir());
+    std::fs::remove_file(&temp_dirty).unwrap();
+    wt_orphan
+}
+
+async fn verify_startup_sweep_and_doctor(
+    home: &Path,
+    repo: &Path,
+    wt_startup_clean: &WorktreeEntry,
+    wt_live: &WorktreeEntry,
+    wt_dirty: &WorktreeEntry,
+    earlier_branches: &[&str],
+) {
+    tiechui_config::save_preference(
+        &home.join("config.toml"),
+        "worktrees.auto_clean_idle_days",
+        0.into(),
+    )
+    .unwrap();
+    tiechui_config::save_preference(
+        &home.join("config.toml"),
+        "worktrees.auto_clean_on_session_delete",
+        false.into(),
+    )
+    .unwrap();
+
+    let restarted_server = Server::new(home.to_path_buf());
+    wait_until_removed(Path::new(&wt_startup_clean.path), "startup sweep clean").await;
+    wait_until_removed(Path::new(&wt_live.path), "startup sweep idle").await;
+
+    let mut restarted = TestClient::new(restarted_server);
+    let startup_status: WorktreeCleanupStatus = restarted
+        .call_ok("worktree/cleanup_status", json!({}))
+        .await;
+    assert!(
+        startup_status
+            .removed
+            .iter()
+            .any(|r| r.path == wt_startup_clean.path)
+    );
+    assert!(Path::new(&wt_dirty.path).is_dir());
+    assert_has_dirty_skip(&startup_status, &wt_dirty.path);
+
+    let kept_branches = git(repo, &["branch", "--list", "tiechui/*"]);
+    for b in earlier_branches
+        .iter()
+        .copied()
+        .chain([wt_startup_clean.branch.as_str(), wt_live.branch.as_str()])
+    {
+        assert!(kept_branches.contains(b), "missing {b} in {kept_branches}");
+    }
+
+    let doctor_home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let matches = clap::Command::new("doctor")
+            .arg(clap::Arg::new("profile").long("profile"))
+            .arg(clap::Arg::new("prefix").long("prefix"))
+            .get_matches_from(["doctor", "--profile", doctor_home.to_str().unwrap()]);
+        crate::doctor::run(&matches).unwrap();
+    })
+    .await
+    .unwrap();
+
+    restarted.close().await;
 }

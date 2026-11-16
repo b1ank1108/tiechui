@@ -5,11 +5,46 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tiechui_protocol::app::TrashWorktreePolicy;
 use tiechui_protocol::rpc::Id;
 use tiechui_protocol::workspace::*;
 use tiechui_workspace::{self as ws, Sink, Workspace};
+use tokio_util::sync::CancellationToken;
 
 use super::{Reply, Server, internal, parse, value};
+
+#[derive(Default)]
+pub(super) struct TrashPlan {
+    pub(super) confirm_dirty: Option<WorktreeEntry>,
+    pub(super) worktree: Option<WorktreeEntry>,
+    pub(super) remove_force: Option<bool>,
+}
+
+impl TrashPlan {
+    fn keep(entry: WorktreeEntry) -> Self {
+        Self {
+            confirm_dirty: None,
+            worktree: Some(entry),
+            remove_force: None,
+        }
+    }
+
+    fn remove(entry: WorktreeEntry, force: bool) -> Self {
+        Self {
+            confirm_dirty: None,
+            worktree: Some(entry),
+            remove_force: Some(force),
+        }
+    }
+
+    fn confirm(entry: WorktreeEntry) -> Self {
+        Self {
+            confirm_dirty: Some(entry),
+            worktree: None,
+            remove_force: None,
+        }
+    }
+}
 
 pub(super) fn new(home: PathBuf, sink: Sink) -> Arc<Workspace> {
     Arc::new(Workspace::with_home(home, sink))
@@ -31,12 +66,95 @@ pub(super) async fn dispatch(
     if super::textgen::handles_git(method) {
         return super::textgen::dispatch_git(server, client_id, rpc_id, method, params).await;
     }
+    if method == "worktree/cleanup" {
+        return server.run_worktree_cleanup(true).await.and_then(value);
+    }
+    if method == "worktree/cleanup_status" {
+        return server.worktree_cleanup_status().await.and_then(value);
+    }
     let home = server.home.clone();
     let workspace = server.workspace.clone();
-    let method = method.to_owned();
-    tokio::task::spawn_blocking(move || handle(&home, &workspace, client_id, &method, params))
-        .await
-        .map_err(internal)?
+    let method_owned = method.to_owned();
+    let reply = tokio::task::spawn_blocking(move || {
+        handle(&home, &workspace, client_id, &method_owned, params)
+    })
+    .await
+    .map_err(internal)??;
+    if method == "worktree/remove" {
+        server.prune_worktree_cleanup_cache();
+    }
+    Ok(reply)
+}
+
+pub(super) fn sweep_worktrees(
+    home: &Path,
+    live: &[ws::LiveWorktreeSession],
+) -> Result<WorktreeCleanupStatus, String> {
+    let config = crate::setup::user_config(&home.join("config.toml"))?;
+    let policy = ws::WorktreeCleanupPolicy {
+        auto_clean_idle_days: config.worktrees.auto_clean_idle_days,
+        auto_clean_on_session_delete: config.worktrees.auto_clean_on_session_delete,
+    };
+    let env = config.network.subprocess_env();
+    ws::cleanup_worktrees(home, policy, live, &env).map_err(|e| e.0)
+}
+
+pub(super) fn plan_session_trash(
+    home: &Path,
+    session_path: &Path,
+    live_info: Option<(String, PathBuf)>,
+    policy: TrashWorktreePolicy,
+    live_sessions: &[ws::LiveSessionCwd],
+    cancel: &CancellationToken,
+) -> Result<TrashPlan, String> {
+    let Some((session_id, cwd)) = resolve_session_target(session_path, live_info, cancel) else {
+        return Ok(TrashPlan::default());
+    };
+    let env = git_env(home);
+    let Some(entry) = ws::managed_worktree_with_env(home, &cwd, &env).map_err(|e| e.0)? else {
+        return Ok(TrashPlan::default());
+    };
+    if ws::check_worktree_isolation(home, &cwd, &session_id, live_sessions)
+        .map_err(|e| e.0)?
+        .is_some()
+    {
+        return Ok(TrashPlan::keep(entry));
+    }
+    Ok(decide_sole_worktree_plan(entry, policy))
+}
+
+fn resolve_session_target(
+    session_path: &Path,
+    live_info: Option<(String, PathBuf)>,
+    cancel: &CancellationToken,
+) -> Option<(String, PathBuf)> {
+    if live_info.is_some() {
+        return live_info;
+    }
+    let store = tiechui_session::SessionStore::open_read_only(session_path, cancel).ok()?;
+    Some((store.header().id.clone(), store.header().cwd.clone()))
+}
+
+fn decide_sole_worktree_plan(entry: WorktreeEntry, policy: TrashWorktreePolicy) -> TrashPlan {
+    match (entry.dirty, policy) {
+        (false, TrashWorktreePolicy::Keep) => TrashPlan::keep(entry),
+        (false, _) => TrashPlan::remove(entry, false),
+        (true, TrashWorktreePolicy::AskIfDirty) => TrashPlan::confirm(entry),
+        (true, TrashWorktreePolicy::ForceRemove) => TrashPlan::remove(entry, true),
+        (true, TrashWorktreePolicy::Auto | TrashWorktreePolicy::Keep) => TrashPlan::keep(entry),
+    }
+}
+
+pub(super) fn remove_trashed_worktree(
+    home: &Path,
+    wt_path: &Path,
+    force: bool,
+) -> Result<bool, String> {
+    match ws::remove_worktree_with_env(home, wt_path, force, &git_env(home)) {
+        Ok(_) => Ok(true),
+        Err(err) if !force && err.0.contains("uncommitted changes") => Ok(false),
+        Err(err) => Err(err.0),
+    }
 }
 
 fn call<P: DeserializeOwned, R: Serialize>(

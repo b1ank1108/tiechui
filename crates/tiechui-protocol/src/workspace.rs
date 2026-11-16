@@ -422,6 +422,42 @@ pub struct WorktreeRemoveResult {
     pub branch: String,
 }
 
+/// Why a cleanup sweep kept an eligible managed session worktree.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeSkipReason {
+    Dirty,
+    ActiveSession,
+}
+
+/// A managed session worktree kept during cleanup because of uncommitted changes or an open session.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkippedWorktree {
+    pub name: String,
+    pub path: String,
+    pub project_root: String,
+    pub branch: String,
+    pub base_branch: String,
+    /// Unix milliseconds when the worktree was created.
+    pub created_at: u64,
+    /// Unix milliseconds of the latest session activity, or `created_at` when none.
+    pub last_active_at: u64,
+    pub reason_kind: WorktreeSkipReason,
+    pub reason: String,
+}
+
+/// The `worktree/cleanup` and `worktree/cleanup_status` result.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WorktreeCleanupStatus {
+    pub removed: Vec<WorktreeRemoveResult>,
+    pub skipped: Vec<SkippedWorktree>,
+    pub last_checked_at: Option<u64>,
+}
+
 /// Starts a shell in `cwd` under a client-chosen id.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

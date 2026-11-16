@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tiechui_config::TrustStore;
-use tiechui_protocol::workspace::{PortStopParams, PostCreateStatus};
+use tiechui_protocol::workspace::{PortStopParams, PostCreateStatus, WorktreeSkipReason};
 use tiechui_workspace as ws;
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -1290,4 +1290,187 @@ fn worktree_isolation_detects_equal_ancestor_descendant_archived_and_ignores_tra
     .expect("descendant live session must block isolation");
     assert_eq!(conflict.session_id, "live-descendant");
     assert_eq!(conflict.overlap, ws::PathOverlap::InsideWorktree);
+}
+
+#[test]
+fn worktree_cleanup_enforces_default_off_idle_days_deleted_sessions_dirty_skip_active_skip_and_branch_preservation()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("cleanup-repo");
+    init_repo(&repo);
+    let env = BTreeMap::new();
+
+    let wt_idle_clean = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_dirty = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_live = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_recent = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+
+    std::fs::write(Path::new(&wt_dirty.path).join("untracked.txt"), "dirty\n").unwrap();
+
+    let write_session = |group: &str,
+                         id: &str,
+                         cwd: &Path,
+                         created_at: u64,
+                         entry_ts: Option<u64>,
+                         meta: Option<&str>| {
+        let dir = home.join(group).join("bucket");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.jsonl"));
+        let header = serde_json::json!({
+            "format_version": 1,
+            "id": id,
+            "cwd": cwd,
+            "created_at": created_at,
+        });
+        let mut body = format!("{header}\n");
+        if let Some(ts) = entry_ts {
+            let entry = serde_json::json!({
+                "id": "e1",
+                "parent_id": null,
+                "timestamp": ts,
+                "kind": "message",
+                "message": { "role": "user", "content": [{ "kind": "text", "text": "hi" }] }
+            });
+            body.push_str(&format!("{entry}\n"));
+        }
+        std::fs::write(&path, body).unwrap();
+        if let Some(raw_meta) = meta {
+            std::fs::write(path.with_extension("meta.json"), raw_meta).unwrap();
+        }
+        path
+    };
+
+    let day_ms: u64 = 86_400_000;
+    let now = wt_recent.created_at.saturating_add(10 * day_ms);
+    let recent_ts = now - 2 * day_ms;
+    write_session(
+        "sessions",
+        "recent-sess",
+        Path::new(&wt_recent.path),
+        wt_recent.created_at,
+        Some(recent_ts),
+        Some(r#"{"archived_at":1700000000000}"#),
+    );
+    let live_path = write_session(
+        "sessions",
+        "live-sess",
+        Path::new(&wt_live.path),
+        wt_live.created_at,
+        None,
+        Some(r#"{"title":"Active Investigation"}"#),
+    );
+
+    let default_status =
+        ws::cleanup_worktrees_with_env(&home, ws::WorktreeCleanupPolicy::default(), &[], now, &env)
+            .unwrap();
+    assert!(default_status.removed.is_empty());
+    assert!(default_status.skipped.is_empty());
+    assert_eq!(default_status.last_checked_at, Some(now));
+    assert!(Path::new(&wt_idle_clean.path).is_dir());
+
+    let seven_day_status = ws::cleanup_worktrees_with_env(
+        &home,
+        ws::WorktreeCleanupPolicy {
+            auto_clean_idle_days: Some(7),
+            auto_clean_on_session_delete: false,
+        },
+        &[ws::LiveWorktreeSession {
+            session_id: "live-sess".into(),
+            cwd: PathBuf::from(&wt_live.path),
+            path: Some(live_path),
+            title: Some("Active Investigation".into()),
+        }],
+        now,
+        &env,
+    )
+    .unwrap();
+
+    assert_eq!(seven_day_status.removed.len(), 1);
+    assert_eq!(seven_day_status.removed[0].path, wt_idle_clean.path);
+    assert_eq!(seven_day_status.removed[0].branch, wt_idle_clean.branch);
+    assert!(!Path::new(&wt_idle_clean.path).exists());
+    assert!(Path::new(&wt_recent.path).is_dir());
+    assert!(Path::new(&wt_dirty.path).is_dir());
+    assert!(Path::new(&wt_live.path).is_dir());
+
+    assert_eq!(seven_day_status.skipped.len(), 2);
+    let skipped_dirty = seven_day_status
+        .skipped
+        .iter()
+        .find(|s| s.path == wt_dirty.path)
+        .expect("missing dirty skipped worktree");
+    assert_eq!(skipped_dirty.reason_kind, WorktreeSkipReason::Dirty);
+    assert!(skipped_dirty.reason.contains("存在未提交改动"));
+
+    let skipped_live = seven_day_status
+        .skipped
+        .iter()
+        .find(|s| s.path == wt_live.path)
+        .expect("missing active_session skipped worktree");
+    assert_eq!(skipped_live.reason_kind, WorktreeSkipReason::ActiveSession);
+    assert!(skipped_live.reason.contains("仍有运行中的会话"));
+    assert!(skipped_live.reason.contains("Active Investigation"));
+
+    let orphan_clean = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    write_session(
+        "trash",
+        "trashed-sess",
+        Path::new(&orphan_clean.path),
+        orphan_clean.created_at,
+        None,
+        None,
+    );
+    let delete_policy_status = ws::cleanup_worktrees_with_env(
+        &home,
+        ws::WorktreeCleanupPolicy {
+            auto_clean_idle_days: None,
+            auto_clean_on_session_delete: true,
+        },
+        &[],
+        orphan_clean.created_at,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(delete_policy_status.removed.len(), 1);
+    assert_eq!(delete_policy_status.removed[0].path, orphan_clean.path);
+    assert!(!Path::new(&orphan_clean.path).exists());
+    assert!(Path::new(&wt_recent.path).is_dir());
+    assert!(
+        delete_policy_status
+            .skipped
+            .iter()
+            .any(|s| s.path == wt_dirty.path && s.reason_kind == WorktreeSkipReason::Dirty)
+    );
+
+    let zero_day_status = ws::cleanup_worktrees_with_env(
+        &home,
+        ws::WorktreeCleanupPolicy {
+            auto_clean_idle_days: Some(0),
+            auto_clean_on_session_delete: false,
+        },
+        &[],
+        now,
+        &env,
+    )
+    .unwrap();
+    assert!(
+        zero_day_status
+            .removed
+            .iter()
+            .any(|r| r.path == wt_recent.path)
+    );
+    assert!(!Path::new(&wt_recent.path).exists());
+
+    let branches = git(&repo, &["branch", "--list", "tiechui/*"]);
+    for expected in [
+        &wt_idle_clean.branch,
+        &orphan_clean.branch,
+        &wt_recent.branch,
+    ] {
+        assert!(
+            branches.contains(expected),
+            "missing {expected} in {branches}"
+        );
+    }
 }

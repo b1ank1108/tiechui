@@ -126,7 +126,7 @@ behind: number, files: Array<CommitFile>, };
 
 export type ConfigUpdateParams = { key: string, value: JsonValue, };
 
-export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, };
+export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, auto_clean_idle_days?: number | null, auto_clean_on_session_delete?: boolean, };
 
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
@@ -698,6 +698,16 @@ export type SkillsListParams = {
  */
 cwd: string | null, };
 
+export type SkippedWorktree = { name: string, path: string, project_root: string, branch: string, base_branch: string, 
+/**
+ * Unix milliseconds when the worktree was created.
+ */
+created_at: number, 
+/**
+ * Unix milliseconds of the latest session activity, or `created_at` when none.
+ */
+last_active_at: number, reason_kind: WorktreeSkipReason, reason: string, };
+
 export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, 
 /**
  * Present when `cwd` is a `chui`-managed session worktree.
@@ -768,6 +778,12 @@ reasoning?: number, cache_write_1h?: number,
  */
 cost_nano_usd?: number | null, };
 
+export type TrashParams = { path: string, worktree_policy?: TrashWorktreePolicy, };
+
+export type TrashResult = { path: string, trashed: boolean, needs_worktree_confirm: boolean, worktree?: WorktreeEntry | null, worktree_removed: boolean, };
+
+export type TrashWorktreePolicy = "auto" | "ask_if_dirty" | "keep" | "force_remove";
+
 export type TrustParams = { cwd: string, 
 /**
  * None reads the current decision.
@@ -806,6 +822,8 @@ export type UndoCheck = { safe: Array<string>, unsafe: Array<string>, ignored: A
 
 export type Version = "2.0";
 
+export type WorktreeCleanupStatus = { removed: Array<WorktreeRemoveResult>, skipped: Array<SkippedWorktree>, last_checked_at: number | null, };
+
 export type WorktreeCreateParams = { root: string, 
 /**
  * Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
@@ -831,6 +849,8 @@ export type WorktreeRemoveParams = { path: string,
 force?: boolean, };
 
 export type WorktreeRemoveResult = { path: string, branch: string, };
+
+export type WorktreeSkipReason = "dirty" | "active_session";
 
 export type WriteParams = { root: string, path: string, text: string, 
 /**

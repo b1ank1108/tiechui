@@ -26,14 +26,14 @@ pub struct CreateWorktreeOptions {
 }
 
 #[derive(Clone)]
-struct Record {
-    name: String,
-    path: String,
-    project_root: String,
-    branch: String,
-    base_branch: String,
-    created_at: u64,
-    post_create: PostCreateResult,
+pub(crate) struct Record {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) project_root: String,
+    pub(crate) branch: String,
+    pub(crate) base_branch: String,
+    pub(crate) created_at: u64,
+    pub(crate) post_create: PostCreateResult,
 }
 
 impl Record {
@@ -65,7 +65,7 @@ impl Record {
         })
     }
 
-    fn live_branch(&self) -> String {
+    pub(crate) fn live_branch(&self) -> String {
         read_head_branch(Path::new(&self.path)).unwrap_or_else(|| self.branch.clone())
     }
 }
@@ -315,7 +315,7 @@ pub fn project_worktree_paths(home: &Path, project_root: &Path) -> Vec<PathBuf> 
 }
 
 pub fn session_worktree(home: &Path, cwd: &Path) -> Option<SessionWorktree> {
-    let expected = resolve_existing_prefix(cwd);
+    let expected = resolve_existing_prefix(&clean_path(cwd));
     let record = read_registry_unlocked(home)
         .into_iter()
         .find(|item| resolve_existing_prefix(Path::new(&item.path)) == expected)?;
@@ -326,6 +326,37 @@ pub fn session_worktree(home: &Path, cwd: &Path) -> Option<SessionWorktree> {
         branch,
         base_branch: record.base_branch,
     })
+}
+
+pub fn managed_worktree_with_env(
+    home: &Path,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<WorktreeEntry>> {
+    let expected = resolve_existing_prefix(&clean_path(cwd));
+    let Some(record) = read_registry_locked(home)?
+        .into_iter()
+        .find(|item| resolve_existing_prefix(Path::new(&item.path)) == expected)
+    else {
+        return Ok(None);
+    };
+    let wt_path = Path::new(&record.path);
+    let dirty = if wt_path.is_dir() {
+        is_worktree_dirty(wt_path, env)?
+    } else {
+        false
+    };
+    let branch = record.live_branch();
+    Ok(Some(WorktreeEntry {
+        name: record.name,
+        path: record.path,
+        project_root: record.project_root,
+        branch,
+        base_branch: record.base_branch,
+        dirty,
+        created_at: record.created_at,
+        post_create: record.post_create,
+    }))
 }
 
 fn validate_project_dir(project_root: &Path) -> Result<PathBuf> {
@@ -493,12 +524,36 @@ fn branch_exists(project_root: &Path, branch: &str, env: &BTreeMap<String, Strin
 }
 
 fn is_worktree_dirty(wt_path: &Path, env: &BTreeMap<String, String>) -> Result<bool> {
+    worktree_dirty_summary(wt_path, env).map(|summary| summary.is_some())
+}
+
+pub(crate) fn worktree_dirty_summary(
+    wt_path: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
     let out = git::git(
         wt_path,
         &["status", "--porcelain", "--untracked-files=all"],
         env,
     )?;
-    Ok(!out.trim().is_empty())
+    let lines: Vec<&str> = out.lines().filter(|line| !line.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    let untracked = lines.iter().filter(|line| line.starts_with("?? ")).count();
+    let tracked = lines.len().saturating_sub(untracked);
+    Ok(Some(format_dirty_reason(tracked, untracked)))
+}
+
+fn format_dirty_reason(tracked: usize, untracked: usize) -> String {
+    match (tracked > 0, untracked > 0) {
+        (true, true) => {
+            format!("存在未提交改动（{tracked} 处已跟踪修改，{untracked} 个未忽略新文件）")
+        }
+        (true, false) => format!("存在未提交改动（{tracked} 处已跟踪修改）"),
+        (false, true) => format!("存在未提交改动（{untracked} 个未忽略新文件）"),
+        (false, false) => "存在未提交改动".into(),
+    }
 }
 
 fn delete_checkout(
@@ -599,7 +654,7 @@ fn unregister_record(home: &Path, target_key: &Path) -> Result<()> {
     })
 }
 
-fn read_registry_locked(home: &Path) -> Result<Vec<Record>> {
+pub(crate) fn read_registry_locked(home: &Path) -> Result<Vec<Record>> {
     let wt_dir = worktrees_dir(home);
     if !wt_dir.exists() {
         return Ok(Vec::new());
@@ -609,7 +664,7 @@ fn read_registry_locked(home: &Path) -> Result<Vec<Record>> {
     })
 }
 
-fn read_registry_unlocked(home: &Path) -> Vec<Record> {
+pub(crate) fn read_registry_unlocked(home: &Path) -> Vec<Record> {
     load_registry_file(&worktrees_dir(home).join(REGISTRY_FILENAME)).unwrap_or_default()
 }
 
@@ -702,7 +757,7 @@ fn path_str(path: &Path) -> Result<&str> {
         .ok_or_else(|| crate::Error(format!("non-UTF-8 path {}", path.display())))
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
