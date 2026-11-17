@@ -15,6 +15,13 @@ use crate::{
 /// Edit one dotted TOML key, retaining surrounding comments and unrelated formatting.
 /// Quoted key segments are supported. Configuration validation happens when loading.
 pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), ConfigError> {
+    if key == "worktrees.post_create_script" {
+        return Err(ConfigError::new(
+            path,
+            key,
+            "post_create_script is only allowed in project configuration",
+        ));
+    }
     let mut force_private = false;
     if key == "network.proxy"
         && let Some(raw) = value.as_str()

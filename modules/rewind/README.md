@@ -24,9 +24,21 @@ existing version 1 checkpoints and upgrade on the next write. macOS system
 directory aliases (`/tmp`, `/var`, `/etc`) resolve to their canonical locations;
 other linked parents remain refused. Files over 20 MiB, protected metadata paths,
 symlinks, hard links, external conflicts, corrupt backups, and active writer leases
-are refused. A failed checkpoint still blocks the edit. Bash and external changes
-are not snapshots. Statistics describe
+are refused. A failed checkpoint still blocks the edit. Outside managed session
+worktrees, bash and external changes are not captured in patch checkpoints;
+rewinding turns that ran commands keeps patch or conversation restore and reports
+the un-reverted commands. Statistics describe
 `checkpoint → current`; binary, oversized, and expensive diffs are uncounted.
+
+In managed session worktrees (`$TIECHUI_HOME/worktrees/<bucket>/<name>`), a
+`BeforeRequest` hook also captures a per-turn hidden Git tree snapshot via a
+temporary index (`GIT_INDEX_FILE`) under `refs/tiechui/checkpoints/<session>/<anchor>`
+without touching user staging or `git log --all`. Snapshot capture timeouts or
+failures are recorded in `manifest.json` without blocking the turn. Whole-directory
+snapshot restore verifies directory isolation across live and persisted non-deleted
+sessions first, refuses when another session shares or nests the directory (leaving
+conversation-only rewind available), and commits the conversation branch before
+materializing files. Single-turn `turn/undo` always uses patch checkpoints.
 
 Private 0700 directories, 0600 content-hashed blobs, atomic manifests, and an
 explicit restore journal protect retained versions. The workspace lock uses

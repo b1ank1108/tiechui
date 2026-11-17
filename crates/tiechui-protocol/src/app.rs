@@ -24,7 +24,8 @@ pub struct InitializeResult {
     pub server_version: String,
     /// The Tiechui home, `$TIECHUI_HOME` or `~/.tiechui`.
     pub home: String,
-    /// Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
+    /// Optional method groups: `workspace` for `fs/*`, `git/*`, `worktree/*`, `terminal/*` and
+    /// `ports/*`.
     pub capabilities: Vec<String>,
 }
 
@@ -61,12 +62,25 @@ pub enum LiveState {
     Failed,
 }
 
+/// Managed worktree metadata for a session running inside `$TIECHUI_HOME/worktrees/`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWorktree {
+    pub path: String,
+    pub name: String,
+    pub branch: String,
+    pub base_branch: String,
+}
+
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSummary {
     pub thread_id: ThreadId,
     pub path: String,
     pub cwd: String,
+    /// Present when `cwd` is a `chui`-managed session worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SessionWorktree>,
     /// Unix milliseconds.
     pub created_at: u64,
     /// Unix milliseconds of the latest user or assistant message.
@@ -101,6 +115,9 @@ pub struct Snapshot {
     pub thread_id: ThreadId,
     pub path: String,
     pub cwd: String,
+    /// Present when `cwd` is a `chui`-managed session worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SessionWorktree>,
     pub seq: u64,
     pub events: Vec<Event>,
 }
@@ -153,6 +170,45 @@ pub struct PathParams {
     pub path: String,
 }
 
+/// How `session/trash` handles a `chui`-managed session worktree when no other session uses it.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrashWorktreePolicy {
+    /// Removes a clean sole worktree; keeps a dirty one on disk.
+    #[default]
+    Auto,
+    /// Removes a clean sole worktree; returns confirmation details without trashing when dirty.
+    AskIfDirty,
+    /// Trashes the session and leaves the worktree checkout and registry entry intact.
+    Keep,
+    /// Trashes the session and force-removes the worktree checkout even if dirty.
+    ForceRemove,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrashParams {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub worktree_policy: Option<TrashWorktreePolicy>,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrashResult {
+    pub path: String,
+    #[serde(default)]
+    pub trashed: bool,
+    #[serde(default)]
+    pub needs_worktree_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::workspace::WorktreeEntry>,
+    #[serde(default)]
+    pub worktree_removed: bool,
+}
+
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrustParams {
@@ -202,6 +258,68 @@ pub struct UndoCheck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RewindResult {
     pub conflicts: Vec<String>,
+}
+
+/// How `session/rewind` restores files after branching the conversation.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindMode {
+    Snapshot,
+    Patch,
+    ChatOnly,
+}
+
+/// Another non-deleted session whose working directory overlaps a managed worktree.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RewindConflictSession {
+    pub thread_id: ThreadId,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub archived: bool,
+}
+
+/// The `turn/rewind_check` result: available rewind mode, fallback or refusal reason, and preview.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RewindCheck {
+    pub mode: RewindMode,
+    /// Why whole-directory restore was refused (`chat_only`) or fell back to `patch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_session: Option<RewindConflictSession>,
+    /// Shell commands executed in the target turn and any subsequent turns on the branch.
+    pub commands: Vec<String>,
+    /// Tracked files that patch rewind would touch (`safe` and `unsafe`).
+    pub files: Vec<String>,
+    pub safe: Vec<String>,
+    pub r#unsafe: Vec<String>,
+}
+
+/// The `session/rewind` request.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRewindParams {
+    pub thread_id: ThreadId,
+    pub item_id: String,
+    pub mode: RewindMode,
+}
+
+/// The `session/rewind` result.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRewindResult {
+    pub mode: RewindMode,
+    /// Present when the conversation was branched; `None` when patch conflicts aborted before branching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_id: Option<SubmissionId>,
+    pub conflicts: Vec<String>,
+    pub commands: Vec<String>,
 }
 
 /// A provider declared in `providers.toml`. Its key is never sent.
@@ -284,7 +402,8 @@ pub struct ProviderTest {
 
 /// Sets one key of the user's `config.toml`: `model`, `lightweight_model`,
 /// `permissions.classifier_model`, `thinking`, `network.proxy`, `network.no_proxy`,
-/// `network.ca_cert`, `ask.auto_continue_after_sec` or `sessions.archive_after_days`; null
+/// `network.ca_cert`, `ask.auto_continue_after_sec`, `sessions.archive_after_days`,
+/// `worktrees.auto_clean_idle_days` or `worktrees.auto_clean_on_session_delete`; null
 /// removes optional keys.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -308,6 +427,10 @@ pub struct ConfigValues {
     pub ca_cert: Option<String>,
     pub auto_continue_after_sec: Option<u64>,
     pub archive_after_days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_clean_idle_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_clean_on_session_delete: bool,
 }
 
 /// A server of `[mcp_servers]` in the user's `config.toml`, as far as clients edit it; saving

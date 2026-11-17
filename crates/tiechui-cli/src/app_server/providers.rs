@@ -262,11 +262,13 @@ fn values(config: tiechui_config::Config) -> ConfigValues {
             .map(|path| path.display().to_string()),
         auto_continue_after_sec: config.ask.auto_continue_after_sec,
         archive_after_days: config.sessions.archive_after_days,
+        auto_clean_idle_days: config.worktrees.auto_clean_idle_days,
+        auto_clean_on_session_delete: config.worktrees.auto_clean_on_session_delete,
     }
 }
 
 /// Keys besides `model` and `thinking`, which null removes.
-const OPTIONAL: [&str; 7] = [
+const OPTIONAL: [&str; 9] = [
     "lightweight_model",
     "permissions.classifier_model",
     "network.proxy",
@@ -274,13 +276,19 @@ const OPTIONAL: [&str; 7] = [
     "network.ca_cert",
     "ask.auto_continue_after_sec",
     "sessions.archive_after_days",
+    "worktrees.auto_clean_idle_days",
+    "worktrees.auto_clean_on_session_delete",
 ];
 
 const MODEL_KEYS: [&str; 3] = ["model", "lightweight_model", "permissions.classifier_model"];
 
 const NETWORK_KEYS: [&str; 3] = ["network.proxy", "network.no_proxy", "network.ca_cert"];
 
-const NUMBER_KEYS: [&str; 2] = ["ask.auto_continue_after_sec", "sessions.archive_after_days"];
+const NUMBER_KEYS: [&str; 3] = [
+    "ask.auto_continue_after_sec",
+    "sessions.archive_after_days",
+    "worktrees.auto_clean_idle_days",
+];
 
 /// `config/update`: one key of the user's `config.toml`, kept only if the configuration still
 /// loads.
@@ -326,6 +334,10 @@ fn apply_preference(home: &Path, path: &Path, key: &str, value: Value) -> Result
     if save_string_preference(home, path, key, &value)? {
         return Ok(());
     }
+    save_scalar_preference(path, key, value)
+}
+
+fn save_scalar_preference(path: &Path, key: &str, value: Value) -> Result<(), String> {
     let save = |val| tiechui_config::save_preference(path, key, val).map_err(|e| e.to_string());
     if key == "thinking" {
         let level: ThinkingLevel = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -336,6 +348,12 @@ fn apply_preference(home: &Path, path: &Path, key: &str, value: Value) -> Result
             .as_i64()
             .ok_or_else(|| format!("{key} has the wrong type"))?;
         return save(number.into());
+    }
+    if key == "worktrees.auto_clean_on_session_delete" {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| format!("{key} has the wrong type"))?;
+        return save(enabled.into());
     }
     Err(format!("{key} cannot be set here"))
 }

@@ -60,6 +60,10 @@ impl TrustStore {
         self.set_many(&[(cwd.to_owned(), decision)], cancel)
     }
 
+    pub fn set_blocking(&self, cwd: &Path, decision: Option<bool>) -> Result<(), ConfigError> {
+        self.set(cwd, decision, &CancellationToken::new())
+    }
+
     /// `None` removes an explicit decision so the path inherits its nearest ancestor's.
     pub fn set_many(
         &self,

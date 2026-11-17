@@ -9,8 +9,16 @@ use toml::{Table, Value};
 
 use crate::{
     Config, ConfigError, ConfigPaths, Diagnostic, IgnoredReason, LoadedConfig, ProviderConfig,
-    StatusLineConfig, StatusLineItem, TuiConfig, Wire, validate_env_name,
+    StatusLineConfig, StatusLineItem, TuiConfig, Wire, WorktreesConfig, validate_env_name,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectPostCreate {
+    None,
+    Trusted(String),
+    Untrusted(String),
+    Invalid(ConfigError),
+}
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -31,6 +39,19 @@ struct Layer {
     ask: Option<crate::AskConfig>,
     sessions: Option<crate::SessionsConfig>,
     skills: Option<crate::SkillsConfig>,
+    worktrees: WorktreesLayer,
+}
+
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+struct WorktreesLayer {
+    /// Project configuration: shell command run once inside a newly created session worktree when the project is trusted.
+    post_create_script: Option<String>,
+    /// User configuration only: days of inactivity after which `chui app-server` removes clean idle session worktrees (`0` cleans immediately when idle); unset disables idle cleanup.
+    #[schemars(range(min = 0, max = 3650))]
+    auto_clean_idle_days: Option<u32>,
+    /// User configuration only: remove clean session worktrees whose sessions have all been deleted during `chui app-server` cleanup sweeps.
+    auto_clean_on_session_delete: Option<bool>,
 }
 
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
@@ -60,6 +81,68 @@ pub fn providers_schema() -> schemars::schema::RootSchema {
     schemars::schema_for!(BTreeMap<String, ProviderConfig>)
 }
 
+pub fn project_post_create_script(
+    home: &Path,
+    project_root: &Path,
+) -> Result<ProjectPostCreate, ConfigError> {
+    let paths = ConfigPaths::for_home(home, project_root)?;
+    let Some(project_path) = paths.project else {
+        return Ok(ProjectPostCreate::None);
+    };
+    let Some(text) = read_optional(&project_path)? else {
+        return Ok(ProjectPostCreate::None);
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let trusted = crate::TrustStore::new(home).get(project_root, &cancel)? == Some(true);
+    if trusted {
+        Ok(parse_trusted_post_create(&project_path, &text))
+    } else {
+        Ok(parse_untrusted_post_create(&project_path, &text))
+    }
+}
+
+fn parse_untrusted_post_create(path: &Path, text: &str) -> ProjectPostCreate {
+    let Ok(table) = parse_table(path, text) else {
+        return ProjectPostCreate::None;
+    };
+    let script = table
+        .get("worktrees")
+        .and_then(Value::as_table)
+        .and_then(|wt| wt.get("post_create_script"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty());
+    match script {
+        Some(raw) => ProjectPostCreate::Untrusted(raw.to_owned()),
+        None => ProjectPostCreate::None,
+    }
+}
+
+fn parse_trusted_post_create(path: &Path, text: &str) -> ProjectPostCreate {
+    let mut table = match parse_table(path, text) {
+        Ok(table) => table,
+        Err(err) => return ProjectPostCreate::Invalid(err),
+    };
+    let layer = match parse_layer(path, table.clone()) {
+        Ok(layer) => Ok(layer),
+        Err(err) if err.key.starts_with("permissions") => {
+            table.remove("permissions");
+            parse_layer(path, table)
+        }
+        Err(err) => Err(err),
+    };
+    match layer {
+        Ok(layer) => match layer
+            .worktrees
+            .post_create_script
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(script) => ProjectPostCreate::Trusted(script),
+            None => ProjectPostCreate::None,
+        },
+        Err(err) => ProjectPostCreate::Invalid(err),
+    }
+}
+
 /// Merge defaults, user, trusted project, then CLI settings; module keys merge
 /// individually. Providers are read from `providers.toml` alone.
 pub fn load(
@@ -83,9 +166,17 @@ pub fn load_with_mandatory_modules(
     let mut project_rules = Vec::new();
     let mut project_invalid = false;
     if let Some(text) = read_optional(&paths.user)? {
+        let mut user_layer = parse_layer(&paths.user, parse_table(&paths.user, &text)?)?;
+        if user_layer.worktrees.post_create_script.take().is_some() {
+            diagnostics.push(Diagnostic {
+                file: paths.user.clone(),
+                key: "worktrees.post_create_script".into(),
+                reason: IgnoredReason::ProjectOnly,
+            });
+        }
         merge(
             &mut merged,
-            parse_layer(&paths.user, parse_table(&paths.user, &text)?)?,
+            user_layer,
             &paths.user,
             &mut mcp_origins,
             &mut diagnostics,
@@ -180,6 +271,14 @@ pub fn load_with_mandatory_modules(
         ask: merged.ask.unwrap_or_default(),
         sessions: merged.sessions.unwrap_or_default(),
         skills: merged.skills.unwrap_or_default(),
+        worktrees: WorktreesConfig {
+            post_create_script: merged.worktrees.post_create_script,
+            auto_clean_idle_days: merged.worktrees.auto_clean_idle_days,
+            auto_clean_on_session_delete: merged
+                .worktrees
+                .auto_clean_on_session_delete
+                .unwrap_or(false),
+        },
         providers: load_providers(&paths.providers())?,
     };
     Ok(LoadedConfig {
@@ -209,6 +308,22 @@ fn strip_user_only(
         (project_layer.network.take().is_some(), "network"),
         (project_layer.sessions.take().is_some(), "sessions"),
         (project_layer.skills.take().is_some(), "skills"),
+        (
+            project_layer
+                .worktrees
+                .auto_clean_idle_days
+                .take()
+                .is_some(),
+            "worktrees.auto_clean_idle_days",
+        ),
+        (
+            project_layer
+                .worktrees
+                .auto_clean_on_session_delete
+                .take()
+                .is_some(),
+            "worktrees.auto_clean_on_session_delete",
+        ),
     ] {
         if present {
             user_only.push(key);
@@ -370,8 +485,27 @@ fn parse_layer(path: &Path, table: Table) -> Result<Layer, ConfigError> {
             "token settings must be non-negative safe integers",
         ));
     }
-    validate_models_and_permissions(&layer, path)?;
+    validate_layer_semantics(&layer, path)?;
     Ok(layer)
+}
+
+fn validate_layer_semantics(layer: &Layer, path: &Path) -> Result<(), ConfigError> {
+    validate_models_and_permissions(layer, path)?;
+    validate_worktrees(&layer.worktrees, path)
+}
+
+fn validate_worktrees(worktrees: &WorktreesLayer, path: &Path) -> Result<(), ConfigError> {
+    if worktrees
+        .auto_clean_idle_days
+        .is_some_and(|days| days > crate::MAX_WORKTREE_IDLE_DAYS)
+    {
+        return Err(ConfigError::new(
+            path,
+            "worktrees.auto_clean_idle_days",
+            format!("must be between 0 and {}", crate::MAX_WORKTREE_IDLE_DAYS),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_models_and_permissions(layer: &Layer, path: &Path) -> Result<(), ConfigError> {
@@ -438,6 +572,18 @@ fn merge(
     base.ask = layer.ask.or(base.ask.take());
     base.sessions = layer.sessions.or(base.sessions.take());
     base.skills = layer.skills.or(base.skills.take());
+    base.worktrees.post_create_script = layer
+        .worktrees
+        .post_create_script
+        .or(base.worktrees.post_create_script.take());
+    base.worktrees.auto_clean_idle_days = layer
+        .worktrees
+        .auto_clean_idle_days
+        .or(base.worktrees.auto_clean_idle_days);
+    base.worktrees.auto_clean_on_session_delete = layer
+        .worktrees
+        .auto_clean_on_session_delete
+        .or(base.worktrees.auto_clean_on_session_delete);
     base.tui.theme = layer.tui.theme.or(base.tui.theme.take());
     base.tui.copy_on_select = layer.tui.copy_on_select.or(base.tui.copy_on_select);
     let (line, next) = (&mut base.tui.status_line, layer.tui.status_line);

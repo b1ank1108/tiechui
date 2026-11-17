@@ -409,3 +409,539 @@ fn allows_working_subdirectories_under_agent_dirs_while_blocking_metadata() {
         assert!(store.before("two", blocked, &cancel).is_err(), "{blocked}");
     }
 }
+
+#[test]
+fn snapshot_records_persist_and_inherit_across_forked_sessions_without_file_checkpoints() {
+    use tiechui_module_rewind::store::SnapshotRecord;
+
+    let (root, parent, cancel) = fixture();
+    let ready = SnapshotRecord::Ready {
+        reference: "refs/tiechui/checkpoints/session/turn-1".into(),
+        tree: "0123456789abcdef0123456789abcdef01234567".into(),
+    };
+    let missing = SnapshotRecord::Missing {
+        reason: "git snapshot timed out after 100ms".into(),
+    };
+    parent
+        .record_snapshot("turn-1", ready.clone(), &cancel)
+        .unwrap();
+    parent
+        .record_snapshot("turn-2", missing.clone(), &cancel)
+        .unwrap();
+
+    let reloaded = Store::new(&root.path().join("state"), &parent.root, "session").unwrap();
+    assert_eq!(reloaded.snapshot("turn-1").unwrap(), Some(ready.clone()));
+    assert_eq!(reloaded.snapshot("turn-2").unwrap(), Some(missing));
+    assert_eq!(reloaded.snapshot("turn-3").unwrap(), None);
+    assert_eq!(reloaded.snapshots().unwrap().len(), 2);
+
+    let child = Store::new(&root.path().join("state"), &parent.root, "forked").unwrap();
+    child
+        .inherit(&reloaded, &["turn-1".into()], &cancel)
+        .unwrap();
+    assert_eq!(child.snapshot("turn-1").unwrap(), Some(ready));
+    assert_eq!(child.snapshot("turn-2").unwrap(), None);
+}
+
+#[test]
+fn tiechui_home_resolution_handles_production_and_test_rewind_directories() {
+    use tiechui_module_rewind::tiechui_home_from_rewind_dir;
+
+    let temp = tempfile::tempdir().unwrap();
+    let prod_home = temp.path().join("prod-home");
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&prod_home.join("state/rewind")),
+        Some(prod_home)
+    );
+
+    let test_home = temp.path().join("test-home");
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&test_home.join("rewind")),
+        Some(test_home)
+    );
+
+    let state_named_home = temp.path().join("state");
+    fs::create_dir_all(state_named_home.join("worktrees")).unwrap();
+    fs::write(state_named_home.join("worktrees/registry.json"), "{}").unwrap();
+    assert_eq!(
+        tiechui_home_from_rewind_dir(&state_named_home.join("rewind")),
+        Some(state_named_home)
+    );
+}
+
+#[test]
+fn settle_snapshot_restore_keeps_retained_turn_diffs_and_reconciles_discarded_head() {
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use tiechui_module_rewind::store::SnapshotRecord;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &["config", "user.name", "Tiechui"][..],
+        &["config", "user.email", "tiechui@example.com"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
+    fs::write(repo.join("kept.txt"), "v0\n").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&repo)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repo)
+            .args(["commit", "-m", "init"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let wt =
+        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
+    let wt_path = std::path::PathBuf::from(&wt.path);
+    let cancel = CancellationToken::new();
+    let store = Store::new(&home.join("state/rewind"), &wt_path, "sess-1").unwrap();
+
+    store.before("turn-1", "kept.txt", &cancel).unwrap();
+    fs::write(wt_path.join("kept.txt"), "v1\n").unwrap();
+    store.after("kept.txt", &cancel).unwrap();
+
+    let snap2 = tiechui_workspace::capture_worktree_snapshot(&wt_path, "sess-1", "turn-2").unwrap();
+    store
+        .record_snapshot(
+            "turn-2",
+            SnapshotRecord::Ready {
+                reference: snap2.reference.clone(),
+                tree: snap2.tree.clone(),
+            },
+            &cancel,
+        )
+        .unwrap();
+
+    store.before("turn-2", "kept.txt", &cancel).unwrap();
+    fs::write(wt_path.join("kept.txt"), "v2\n").unwrap();
+    store.after("kept.txt", &cancel).unwrap();
+    store.before("turn-2", "temp.txt", &cancel).unwrap();
+    fs::write(wt_path.join("temp.txt"), "created\n").unwrap();
+    store.after("temp.txt", &cancel).unwrap();
+
+    fs::remove_file(wt_path.join("a.txt")).unwrap();
+    fs::write(wt_path.join("bash_only.txt"), "from-bash\n").unwrap();
+    fs::write(wt_path.join("external.txt"), "manual\n").unwrap();
+
+    let (safe, unsafe_files) = store.patch_preview(&["turn-2".into()], &cancel).unwrap();
+    assert_eq!(safe, vec!["kept.txt".to_owned(), "temp.txt".to_owned()]);
+    assert!(unsafe_files.is_empty());
+
+    store.ensure_ready_for_restore(&cancel).unwrap();
+    tiechui_workspace::restore_worktree_snapshot(&wt_path, &snap2.tree).unwrap();
+    store
+        .settle_snapshot_restore(&["turn-2".into()], &cancel)
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join("a.txt")).unwrap(),
+        "initial-a\n"
+    );
+    assert!(!wt_path.join("bash_only.txt").exists());
+    assert!(!wt_path.join("external.txt").exists());
+    assert!(!wt_path.join("temp.txt").exists());
+    assert_eq!(
+        fs::read_to_string(wt_path.join("kept.txt")).unwrap(),
+        "v1\n"
+    );
+
+    let retained = store.turn(&["turn-1".into()], &[], &cancel).unwrap();
+    assert!(!retained.reverted);
+    assert_eq!(retained.files.len(), 1);
+    let undone = store.toggle(&["turn-1".into()], &[], &cancel).unwrap();
+    assert!(undone.reverted);
+    assert_eq!(
+        fs::read_to_string(wt_path.join("kept.txt")).unwrap(),
+        "v0\n"
+    );
+    let redone = store.toggle(&["turn-1".into()], &[], &cancel).unwrap();
+    assert!(!redone.reverted);
+    assert_eq!(
+        fs::read_to_string(wt_path.join("kept.txt")).unwrap(),
+        "v1\n"
+    );
+}
+
+#[tokio::test]
+async fn rewind_command_in_managed_worktree_restores_snapshot_conversation_first_and_enforces_isolation()
+ {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::process::Command as SysCommand;
+    use std::sync::{Arc, Mutex};
+    use tiechui_module_rewind::{RewindModule, store::SnapshotRecord};
+    use tiechui_plugin_api::{
+        BranchView, CommandHost, CommandSession, Module, ModuleConfig, Registry, SessionEffect,
+        ToolError, async_trait,
+        protocol::{
+            ApprovalDecision, ApprovalRequest, BranchEntry, InputContent, RewindPage, RewindPanel,
+        },
+        serde_json::json,
+    };
+
+    struct TestHost {
+        answers: Mutex<VecDeque<ApprovalDecision>>,
+        fail_navigate: bool,
+        effects: Mutex<Vec<String>>,
+        last_panel: Mutex<Option<RewindPanel>>,
+        actions_ready: tokio::sync::Notify,
+        wt_check_file: std::path::PathBuf,
+        a_existed_at_navigate: Mutex<Option<bool>>,
+    }
+
+    #[async_trait]
+    impl CommandHost for TestHost {
+        async fn ask(
+            &self,
+            request: ApprovalRequest,
+            _: CancellationToken,
+        ) -> Result<ApprovalDecision, ToolError> {
+            let mut wait_for_actions = false;
+            if let ApprovalRequest::Rewind { panel } = request {
+                wait_for_actions = panel.page == RewindPage::Checking;
+                *self.last_panel.lock().unwrap() = Some(panel);
+            }
+            if wait_for_actions {
+                self.actions_ready.notified().await;
+            }
+            Ok(self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ApprovalDecision::Cancel))
+        }
+
+        async fn update(&self, request: ApprovalRequest) -> Result<(), ToolError> {
+            if let ApprovalRequest::Rewind { panel } = request {
+                let is_actions = panel.page == RewindPage::Actions;
+                *self.last_panel.lock().unwrap() = Some(panel);
+                if is_actions {
+                    self.actions_ready.notify_waiters();
+                }
+            }
+            Ok(())
+        }
+
+        async fn apply(&self, effect: SessionEffect) -> Result<(), ToolError> {
+            match effect {
+                SessionEffect::Navigate { entry_id } => {
+                    *self.a_existed_at_navigate.lock().unwrap() = Some(self.wt_check_file.exists());
+                    self.effects.lock().unwrap().push(format!("nav:{entry_id}"));
+                    if self.fail_navigate {
+                        return Err(ToolError("simulated navigate failure".into()));
+                    }
+                }
+                SessionEffect::Refill { .. } => {
+                    self.effects.lock().unwrap().push("refill".into());
+                }
+                SessionEffect::Quiesce => {
+                    self.effects.lock().unwrap().push("quiesce".into());
+                }
+                SessionEffect::Validate { .. } => {
+                    self.effects.lock().unwrap().push("validate".into());
+                }
+                SessionEffect::Emit { kind, .. } => {
+                    self.effects.lock().unwrap().push(format!("emit:{kind}"));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("cmd-repo");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &["config", "user.name", "Tiechui"][..],
+        &["config", "user.email", "tiechui@example.com"][..],
+    ] {
+        assert!(
+            SysCommand::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
+    assert!(
+        SysCommand::new("git")
+            .current_dir(&repo)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        SysCommand::new("git")
+            .current_dir(&repo)
+            .args(["commit", "-m", "init"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let wt =
+        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
+    let wt_path = std::path::PathBuf::from(&wt.path);
+    let rewind_dir = home.join("state/rewind");
+    let cancel = CancellationToken::new();
+    let store = Store::new(&rewind_dir, &wt_path, "sess-cmd").unwrap();
+    let snap = tiechui_workspace::capture_worktree_snapshot(&wt_path, "sess-cmd", "u2").unwrap();
+    store
+        .record_snapshot(
+            "u2",
+            SnapshotRecord::Ready {
+                reference: snap.reference,
+                tree: snap.tree,
+            },
+            &cancel,
+        )
+        .unwrap();
+
+    fs::remove_file(wt_path.join("a.txt")).unwrap();
+    fs::write(wt_path.join("b.txt"), "x\n").unwrap();
+
+    let mut registry = Registry::default();
+    RewindModule {
+        directory: rewind_dir.clone(),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    let cmd = registry.commands()[0].clone();
+
+    let branch = BranchView {
+        session_id: "sess-cmd".into(),
+        cwd: wt_path.clone(),
+        parent_session: None,
+        leaf: "u2".into(),
+        entries: vec![
+            BranchEntry {
+                id: "u1".into(),
+                parent_id: None,
+                timestamp: 1,
+                content: Some(vec![InputContent::Text {
+                    text: "first".into(),
+                }]),
+                custom: None,
+            },
+            BranchEntry {
+                id: "u2".into(),
+                parent_id: Some("u1".into()),
+                timestamp: 2,
+                content: Some(vec![InputContent::Text {
+                    text: "second".into(),
+                }]),
+                custom: None,
+            },
+        ],
+    };
+
+    let failing_host = Arc::new(TestHost {
+        answers: Mutex::new(VecDeque::from([
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "preview"}),
+                ),
+            },
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "both"}),
+                ),
+            },
+        ])),
+        fail_navigate: true,
+        effects: Mutex::new(Vec::new()),
+        last_panel: Mutex::new(None),
+        actions_ready: tokio::sync::Notify::new(),
+        wt_check_file: wt_path.join("a.txt"),
+        a_existed_at_navigate: Mutex::new(None),
+    });
+    let err = cmd
+        .session_run(
+            "",
+            CommandSession {
+                branch: branch.clone(),
+                host: failing_host.clone(),
+            },
+            cancel.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.0.contains("Files: unchanged"), "unexpected err: {err}");
+    assert!(!wt_path.join("a.txt").exists());
+    assert!(wt_path.join("b.txt").exists());
+
+    let peer_dir = home.join("sessions/bucket");
+    fs::create_dir_all(&peer_dir).unwrap();
+    let peer_file = peer_dir.join("peer.jsonl");
+    fs::write(
+        &peer_file,
+        format!(
+            "{}\n",
+            json!({"format_version":1,"id":"peer","created_at":1,"cwd":wt_path})
+        ),
+    )
+    .unwrap();
+    let blocked_host = Arc::new(TestHost {
+        answers: Mutex::new(VecDeque::from([
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "preview"}),
+                ),
+            },
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "both"}),
+                ),
+            },
+        ])),
+        fail_navigate: false,
+        effects: Mutex::new(Vec::new()),
+        last_panel: Mutex::new(None),
+        actions_ready: tokio::sync::Notify::new(),
+        wt_check_file: wt_path.join("a.txt"),
+        a_existed_at_navigate: Mutex::new(None),
+    });
+    assert!(
+        cmd.session_run(
+            "",
+            CommandSession {
+                branch: branch.clone(),
+                host: blocked_host.clone(),
+            },
+            cancel.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        blocked_host
+            .last_panel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|p| p.preview.as_ref())
+            .and_then(|s| s.error.as_ref())
+            .is_some()
+    );
+    assert!(!wt_path.join("a.txt").exists());
+    fs::remove_file(&peer_file).unwrap();
+
+    let ok_host = Arc::new(TestHost {
+        answers: Mutex::new(VecDeque::from([
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "preview"}),
+                ),
+            },
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u2", "action": "both"}),
+                ),
+            },
+        ])),
+        fail_navigate: false,
+        effects: Mutex::new(Vec::new()),
+        last_panel: Mutex::new(None),
+        actions_ready: tokio::sync::Notify::new(),
+        wt_check_file: wt_path.join("a.txt"),
+        a_existed_at_navigate: Mutex::new(None),
+    });
+    let out = cmd
+        .session_run(
+            "",
+            CommandSession {
+                branch: branch.clone(),
+                host: ok_host.clone(),
+            },
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(out.contains("Files: restored"), "out: {out}");
+    assert_eq!(*ok_host.a_existed_at_navigate.lock().unwrap(), Some(false));
+    assert_eq!(
+        fs::read_to_string(wt_path.join("a.txt")).unwrap(),
+        "initial-a\n"
+    );
+    assert!(!wt_path.join("b.txt").exists());
+
+    store.before("u1", "a.txt", &cancel).unwrap();
+    fs::write(wt_path.join("a.txt"), "patched-u1\n").unwrap();
+    store.after("a.txt", &cancel).unwrap();
+    store
+        .record_snapshot(
+            "u1",
+            SnapshotRecord::Missing {
+                reason: "snapshot timed out".into(),
+            },
+            &cancel,
+        )
+        .unwrap();
+    let fallback_host = Arc::new(TestHost {
+        answers: Mutex::new(VecDeque::from([
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u1", "action": "preview"}),
+                ),
+            },
+            ApprovalDecision::Accept {
+                content: Some(
+                    json!({"session_id": "sess-cmd", "entry_id": "u1", "action": "both"}),
+                ),
+            },
+        ])),
+        fail_navigate: false,
+        effects: Mutex::new(Vec::new()),
+        last_panel: Mutex::new(None),
+        actions_ready: tokio::sync::Notify::new(),
+        wt_check_file: wt_path.join("a.txt"),
+        a_existed_at_navigate: Mutex::new(None),
+    });
+    let fallback_out = cmd
+        .session_run(
+            "",
+            CommandSession {
+                branch,
+                host: fallback_host,
+            },
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fallback_out.contains("Used patch rewind (snapshot timed out)"),
+        "fallback_out: {fallback_out}"
+    );
+    assert_eq!(
+        fs::read_to_string(wt_path.join("a.txt")).unwrap(),
+        "initial-a\n"
+    );
+}

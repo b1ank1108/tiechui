@@ -8,8 +8,8 @@ use serde_json::Value;
 use tiechui_model::{Content, Message, Role};
 use tokio_util::sync::CancellationToken;
 
-use crate::storage::list_all;
-use crate::{EntryKind, Header, Meta, SessionError, SessionStore, check_cancel};
+use crate::storage::{list_all, list_many};
+use crate::{EntryKind, Header, Meta, SessionError, SessionList, SessionStore, check_cancel};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
@@ -50,6 +50,25 @@ pub fn summaries(
         Some(cwd) => crate::list(home, cwd, cancel)?,
         None => list_all(home, cancel)?,
     };
+    summarize_list(home, list, cancel)
+}
+
+/// Sessions with a conversation across multiple working directories.
+/// The first directory must exist; secondary directories (such as removed worktrees) are
+/// resolved best-effort and deduplicated by canonical session directory.
+pub fn summaries_in(
+    home: &Path,
+    cwds: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Result<(Vec<Summary>, Vec<SessionError>), SessionError> {
+    summarize_list(home, list_many(home, cwds, cancel)?, cancel)
+}
+
+fn summarize_list(
+    home: &Path,
+    list: SessionList,
+    cancel: &CancellationToken,
+) -> Result<(Vec<Summary>, Vec<SessionError>), SessionError> {
     let mut summaries = Vec::new();
     let mut diagnostics = list.diagnostics;
     for session in list.sessions {

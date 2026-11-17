@@ -126,7 +126,7 @@ behind: number, files: Array<CommitFile>, };
 
 export type ConfigUpdateParams = { key: string, value: JsonValue, };
 
-export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, };
+export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, auto_clean_idle_days?: number | null, auto_clean_on_session_delete?: boolean, };
 
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
@@ -324,7 +324,8 @@ export type InitializeResult = { protocol_version: number, server_version: strin
  */
 home: string, 
 /**
- * Optional method groups: `workspace` for `fs/*`, `git/*`, `terminal/*` and `ports/*`.
+ * Optional method groups: `workspace` for `fs/*`, `git/*`, `worktree/*`, `terminal/*` and
+ * `ports/*`.
  */
 capabilities: Array<string>, };
 
@@ -441,6 +442,10 @@ export type PortsChanged = { ports: Array<PortEntry>, };
 
 export type PortsListParams = { roots: Array<string>, };
 
+export type PostCreateResult = { status: PostCreateStatus, command?: string | null, exit_code?: number | null, output: string, reason?: string | null, truncated?: boolean, };
+
+export type PostCreateStatus = "none" | "succeeded" | "failed" | "skipped_untrusted";
+
 export type PromptDeleteParams = { cwd: string | null, path: string, };
 
 export type PromptEntry = { name: string, description: string, argument_hint: string | null, 
@@ -531,6 +536,24 @@ export type Resource = { id: string, kind: ResourceKind, name: string, descripti
 
 export type ResourceKind = "Plugin" | "Skill" | "Task";
 
+export type RewindCheck = { mode: RewindMode, 
+/**
+ * Why whole-directory restore was refused (`chat_only`) or fell back to `patch`.
+ */
+reason?: string | null, snapshot_ref?: string | null, conflicting_session?: RewindConflictSession | null, 
+/**
+ * Shell commands executed in the target turn and any subsequent turns on the branch.
+ */
+commands: Array<string>, 
+/**
+ * Tracked files that patch rewind would touch (`safe` and `unsafe`).
+ */
+files: Array<string>, safe: Array<string>, unsafe: Array<string>, };
+
+export type RewindConflictSession = { thread_id: ThreadId, cwd: string, title?: string | null, archived: boolean, };
+
+export type RewindMode = "snapshot" | "patch" | "chat_only";
+
 export type RewindPage = "messages" | "checking" | "actions" | "recovery";
 
 export type RewindPanel = { rows: Array<RewindRow>, selected: number, page: RewindPage, preview: CheckpointStats | null, };
@@ -587,7 +610,19 @@ model: string | null, thinking: ThinkingLevel | null,
  */
 mode: string | null, };
 
+export type SessionRewindParams = { thread_id: ThreadId, item_id: string, mode: RewindMode, };
+
+export type SessionRewindResult = { mode: RewindMode, 
+/**
+ * Present when the conversation was branched; `None` when patch conflicts aborted before branching.
+ */
+submission_id?: SubmissionId | null, conflicts: Array<string>, commands: Array<string>, };
+
 export type SessionSummary = { thread_id: ThreadId, path: string, cwd: string, 
+/**
+ * Present when `cwd` is a `chui`-managed session worktree.
+ */
+worktree?: SessionWorktree | null, 
 /**
  * Unix milliseconds.
  */
@@ -604,6 +639,8 @@ parent: string | null,
  * Present while the session is open in this server.
  */
 live: LiveState | null, };
+
+export type SessionWorktree = { path: string, name: string, branch: string, base_branch: string, };
 
 export type ShellDetail = { id: string, output: string, log_path: string | null, };
 
@@ -661,7 +698,21 @@ export type SkillsListParams = {
  */
 cwd: string | null, };
 
-export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, seq: number, events: Array<Event>, };
+export type SkippedWorktree = { name: string, path: string, project_root: string, branch: string, base_branch: string, 
+/**
+ * Unix milliseconds when the worktree was created.
+ */
+created_at: number, 
+/**
+ * Unix milliseconds of the latest session activity, or `created_at` when none.
+ */
+last_active_at: number, reason_kind: WorktreeSkipReason, reason: string, };
+
+export type Snapshot = { thread_id: ThreadId, path: string, cwd: string, 
+/**
+ * Present when `cwd` is a `chui`-managed session worktree.
+ */
+worktree?: SessionWorktree | null, seq: number, events: Array<Event>, };
 
 export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };
 
@@ -727,6 +778,12 @@ reasoning?: number, cache_write_1h?: number,
  */
 cost_nano_usd?: number | null, };
 
+export type TrashParams = { path: string, worktree_policy?: TrashWorktreePolicy, };
+
+export type TrashResult = { path: string, trashed: boolean, needs_worktree_confirm: boolean, worktree?: WorktreeEntry | null, worktree_removed: boolean, };
+
+export type TrashWorktreePolicy = "auto" | "ask_if_dirty" | "keep" | "force_remove";
+
 export type TrustParams = { cwd: string, 
 /**
  * None reads the current decision.
@@ -764,6 +821,36 @@ export type TurnStatus = "in_progress" | "completed" | "interrupted" | "failed";
 export type UndoCheck = { safe: Array<string>, unsafe: Array<string>, ignored: Array<string>, };
 
 export type Version = "2.0";
+
+export type WorktreeCleanupStatus = { removed: Array<WorktreeRemoveResult>, skipped: Array<SkippedWorktree>, last_checked_at: number | null, };
+
+export type WorktreeCreateParams = { root: string, 
+/**
+ * Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
+ */
+base_branch?: string | null, 
+/**
+ * Carries uncommitted tracked and non-ignored untracked changes from `root` into the new worktree.
+ */
+carry_changes?: boolean, };
+
+export type WorktreeEntry = { name: string, path: string, project_root: string, branch: string, base_branch: string, dirty: boolean, 
+/**
+ * Unix milliseconds when the worktree was created.
+ */
+created_at: number, post_create: PostCreateResult, };
+
+export type WorktreeListParams = { root?: string | null, };
+
+export type WorktreeRemoveParams = { path: string, 
+/**
+ * Removes the worktree even when it has uncommitted or untracked changes.
+ */
+force?: boolean, };
+
+export type WorktreeRemoveResult = { path: string, branch: string, };
+
+export type WorktreeSkipReason = "dirty" | "active_session";
 
 export type WriteParams = { root: string, path: string, text: string, 
 /**

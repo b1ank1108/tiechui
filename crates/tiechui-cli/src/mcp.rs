@@ -1,28 +1,17 @@
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::ArgMatches;
-use tiechui_config::{ConfigPaths, TrustStore};
 use tiechui_module_mcp::{DeclineElicitation, McpModule};
 use tiechui_plugin_api::CancellationToken;
 
 pub(crate) async fn run(command: &str, args: &ArgMatches) -> Result<(), String> {
-    let cwd = args
-        .get_one::<String>("cwd")
-        .map_or_else(std::env::current_dir, |path| Ok(PathBuf::from(path)))
-        .and_then(|path| path.canonicalize())
-        .map_err(|e| e.to_string())?;
-    let paths = ConfigPaths::discover(&cwd).map_err(|e| e.to_string())?;
-    let home = paths.user.parent().ok_or("missing config directory")?;
+    let (cwd, paths, home) = crate::trust::command_locations(args)?;
     let cancel = CancellationToken::new();
-    let trusted = TrustStore::new(home)
-        .get(&cwd, &cancel)
-        .map_err(|e| e.to_string())?
-        == Some(true);
+    let trusted = crate::trust::is_trusted(&home, &cwd, &cancel)?;
     let loaded =
         tiechui_config::load(&paths, trusted, &toml::Table::new()).map_err(|e| e.to_string())?;
-    let registry = super::plugins::load(&cwd, home, trusted, &loaded.config, &cancel)?;
+    let registry = super::plugins::load(&cwd, &home, trusted, &loaded.config, &cancel)?;
     if command != "list" {
         use tiechui_module_mcp::oauth::{Login, OAuthStore};
         let name = args
@@ -47,7 +36,7 @@ pub(crate) async fn run(command: &str, args: &ArgMatches) -> Result<(), String> 
             .as_deref()
             .filter(|_| server.command.is_none())
             .ok_or("OAuth requires a Streamable HTTP server")?;
-        let store = OAuthStore::new(home, name, url, loaded.config.network.clone());
+        let store = OAuthStore::new(&home, name, url, loaded.config.network.clone());
         let operation = async {
             match command {
                 "login" => {
@@ -94,7 +83,7 @@ pub(crate) async fn run(command: &str, args: &ArgMatches) -> Result<(), String> 
         trusted,
         cancel.clone(),
         Arc::new(DeclineElicitation),
-        Some(home),
+        Some(&home),
     );
     tokio::select! {
         _ = module.wait_for_startup(cancel.clone()) => {},

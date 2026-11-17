@@ -20,6 +20,51 @@ impl ConfigPaths {
         Self::discover_with_env(cwd, |name| std::env::var_os(name))
     }
 
+    /// Discover user and project config paths using an explicit profile directory.
+    pub fn for_home(home: &Path, cwd: &Path) -> Result<Self, ConfigError> {
+        Self::discover_with_env(cwd, |name| {
+            (name == "TIECHUI_HOME").then(|| home.as_os_str().to_owned())
+        })
+    }
+
+    /// Discover the Tiechui profile directory (`$TIECHUI_HOME` or `~/.tiechui`).
+    pub fn discover_home() -> Result<PathBuf, ConfigError> {
+        let home = Self::resolve_home_with_env(|name| std::env::var_os(name))?;
+        if home.is_absolute() {
+            Ok(home)
+        } else {
+            let cwd = std::env::current_dir()
+                .map_err(|error| ConfigError::new(".", "<directory>", error.to_string()))?;
+            Ok(cwd.join(home))
+        }
+    }
+
+    fn resolve_home_with_env(
+        env: impl Fn(&str) -> Option<OsString>,
+    ) -> Result<PathBuf, ConfigError> {
+        match env("TIECHUI_HOME") {
+            Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+            Some(_) => Err(ConfigError::new(
+                "<environment>",
+                "TIECHUI_HOME",
+                "must not be empty",
+            )),
+            None => {
+                let home = env("HOME")
+                    .or_else(|| env("USERPROFILE"))
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        ConfigError::new(
+                            "<environment>",
+                            "HOME",
+                            "set TIECHUI_HOME or a home directory",
+                        )
+                    })?;
+                Ok(PathBuf::from(home).join(".tiechui"))
+            }
+        }
+    }
+
     pub(crate) fn discover_with_env(
         cwd: &Path,
         env: impl Fn(&str) -> Option<OsString>,
@@ -34,29 +79,7 @@ impl ConfigPaths {
                 "expected a directory",
             ));
         }
-        let home = match env("TIECHUI_HOME") {
-            Some(value) if !value.is_empty() => PathBuf::from(value),
-            Some(_) => {
-                return Err(ConfigError::new(
-                    "<environment>",
-                    "TIECHUI_HOME",
-                    "must not be empty",
-                ));
-            }
-            None => {
-                let home = env("HOME")
-                    .or_else(|| env("USERPROFILE"))
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        ConfigError::new(
-                            "<environment>",
-                            "HOME",
-                            "set TIECHUI_HOME or a home directory",
-                        )
-                    })?;
-                PathBuf::from(home).join(".tiechui")
-            }
-        };
+        let home = Self::resolve_home_with_env(env)?;
         let user = if home.is_absolute() {
             home
         } else {

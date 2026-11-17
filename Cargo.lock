@@ -3155,6 +3155,7 @@ dependencies = [
  "tiechui-providers",
  "tiechui-session",
  "tiechui-tools",
+ "tiechui-workspace",
  "tokio",
  "tokio-util",
  "wiremock",
@@ -3378,6 +3379,7 @@ dependencies = [
  "similar",
  "tempfile",
  "tiechui-plugin-api",
+ "tiechui-workspace",
  "tokio",
 ]
 

@@ -1,8 +1,8 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::ArgMatches;
-use tiechui_config::{ConfigPaths, TrustStore};
+use tiechui_config::ConfigPaths;
 use tiechui_module_hooks::{Hook, HooksModule};
 use tiechui_tui::consent::{Answer, Question, ask};
 use tokio_util::sync::CancellationToken;
@@ -11,29 +11,20 @@ use tokio_util::sync::CancellationToken;
 const REVIEWED: usize = 6;
 
 pub(crate) fn run(command: &str, args: &ArgMatches) -> Result<(), String> {
-    let cwd = args
-        .get_one::<String>("cwd")
-        .map_or_else(std::env::current_dir, |path| Ok(PathBuf::from(path)))
-        .and_then(|path| path.canonicalize())
-        .map_err(|e| e.to_string())?;
-    let paths = ConfigPaths::discover(&cwd).map_err(|e| e.to_string())?;
-    let home = paths.user.parent().ok_or("missing config directory")?;
+    let (cwd, paths, home) = crate::trust::command_locations(args)?;
     let cancel = CancellationToken::new();
-    let trusted = TrustStore::new(home)
-        .get(&cwd, &cancel)
-        .map_err(|e| e.to_string())?
-        == Some(true);
+    let trusted = crate::trust::is_trusted(&home, &cwd, &cancel)?;
     let mut stdout = std::io::stdout().lock();
     let loaded =
         tiechui_config::load(&paths, trusted, &toml::Table::new()).map_err(|e| e.to_string())?;
-    let registry = super::plugins::load(&cwd, home, trusted, &loaded.config, &cancel)?;
+    let registry = super::plugins::load(&cwd, &home, trusted, &loaded.config, &cancel)?;
     if command == "trust" {
         if !trusted && registry.hook_sources().is_empty() {
             return Err("Trust the project first with chui trust allow".into());
         }
         let count = tiechui_module_hooks::trust_with_sources(
             &cwd,
-            home,
+            &home,
             trusted,
             registry.hook_sources(),
             &cancel,
@@ -44,7 +35,7 @@ pub(crate) fn run(command: &str, args: &ArgMatches) -> Result<(), String> {
     } else {
         let hooks = HooksModule::load_with_sources(
             &cwd,
-            home,
+            &home,
             trusted,
             Default::default(),
             registry.hook_sources(),

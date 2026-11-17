@@ -65,6 +65,7 @@ pub(crate) async fn run(args: &ArgMatches) -> i32 {
 /// What the command line, or an app-server client, asks of the sessions it opens.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
+    pub home: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub resume: Option<String>,
     pub model: Option<String>,
@@ -79,6 +80,7 @@ impl Options {
         let get = |id: &str| args.try_get_one::<String>(id).ok().flatten().cloned();
         let yolo = args.try_get_one::<bool>("yolo").ok().flatten().copied() == Some(true);
         Self {
+            home: None,
             cwd: get("cwd").map(PathBuf::from),
             resume: get("resume"),
             model: get("model"),
@@ -97,20 +99,54 @@ impl Options {
 pub(crate) fn locations(
     options: &Options,
 ) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
-    locations_at(match &options.cwd {
+    let given = match &options.cwd {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(config_error)?,
-    })
+    };
+    locations_with_home(given, options.home.as_deref())
 }
 
-pub(crate) fn locations_at(
+#[cfg(feature = "workspace")]
+fn restore_missing_worktree(
     given: PathBuf,
+    explicit_home: Option<&std::path::Path>,
+) -> Result<PathBuf, Failure> {
+    if given.exists() {
+        return Ok(given);
+    }
+    let home = match explicit_home {
+        Some(h) => h.to_path_buf(),
+        None => match ConfigPaths::discover_home() {
+            Ok(h) => h,
+            Err(_) => return Ok(given),
+        },
+    };
+    let env = crate::setup::user_config(&home.join("config.toml"))
+        .map(|c| c.network.subprocess_env())
+        .unwrap_or_default();
+    match tiechui_workspace::ensure_worktree_checkout(&home, &given, &env)
+        .map_err(|e| config_error(e.0))?
+    {
+        Some(restored) => Ok(restored),
+        None => Ok(given),
+    }
+}
+
+pub(crate) fn locations_with_home(
+    given: PathBuf,
+    explicit_home: Option<&std::path::Path>,
 ) -> Result<(PathBuf, PathBuf, ConfigPaths, PathBuf), Failure> {
+    #[cfg(feature = "workspace")]
+    let given = restore_missing_worktree(given, explicit_home)?;
     let given = tiechui_session::resolve_cwd(&given).map_err(config_error)?;
     let cwd = given
         .canonicalize()
         .map_err(|error| config_error(format!("{}: {error}", given.display())))?;
-    let paths = ConfigPaths::discover(&cwd).map_err(config_error)?;
+    let paths = match explicit_home {
+        Some(home) => ConfigPaths::for_home(home, &cwd),
+        None => ConfigPaths::discover(&cwd),
+    }
+    .map_err(config_error)?;
     let home = paths
         .user
         .parent()
@@ -154,18 +190,29 @@ pub(crate) async fn prepare(
 ) -> Result<Prepared, Failure> {
     let (interactions, inbox) = Interactions::new();
     let (context_files_cwd, cwd, paths, home) = match &open {
-        Open::Args => locations(options)?,
-        Open::New(cwd) => locations_at(cwd.clone())?,
+        Open::Args => {
+            let opts = options.clone();
+            tokio::task::spawn_blocking(move || locations(&opts))
+                .await
+                .map_err(runtime_error)??
+        }
+        Open::New(cwd) => {
+            let (cwd, explicit_home) = (cwd.clone(), options.home.clone());
+            tokio::task::spawn_blocking(move || locations_with_home(cwd, explicit_home.as_deref()))
+                .await
+                .map_err(runtime_error)??
+        }
         Open::Path(path) => {
-            let (path, header_cancel) = (path.clone(), cancel.clone());
-            let cwd = tokio::task::spawn_blocking(move || {
-                SessionStore::open_read_only(&path, &header_cancel)
+            let (path, header_cancel, explicit_home) =
+                (path.clone(), cancel.clone(), options.home.clone());
+            tokio::task::spawn_blocking(move || {
+                let cwd = SessionStore::open_read_only(&path, &header_cancel)
                     .map(|store| store.header().cwd.clone())
+                    .map_err(runtime_error)?;
+                locations_with_home(cwd, explicit_home.as_deref())
             })
             .await
-            .map_err(runtime_error)?
-            .map_err(runtime_error)?;
-            locations_at(cwd)?
+            .map_err(runtime_error)??
         }
     };
     let given = context_files_cwd.clone();
@@ -173,14 +220,15 @@ pub(crate) async fn prepare(
     let trust_cwd = cwd.clone();
     let trust_cancel = cancel.clone();
     let project_config = paths.project.is_some();
-    let (trusted, agent_trusted) = tokio::task::spawn_blocking(move || {
+    let (trusted, agent_trusted, allow_dir) = tokio::task::spawn_blocking(move || {
+        let trust_target = super::trust::effective_cwd(&trust_home, &trust_cwd);
         let requires_trust =
             project_config || super::trust::has_project_resources(&trust_cwd, &trust_home);
         let allowed = TrustStore::new(&trust_home)
-            .get(&trust_cwd, &trust_cancel)
+            .get(&trust_target, &trust_cancel)
             .map_err(config_error)?
             == Some(true);
-        Ok::<_, Failure>((!requires_trust || allowed, allowed))
+        Ok::<_, Failure>((!requires_trust || allowed, allowed, trust_target))
     })
     .await
     .map_err(runtime_error)??;
@@ -188,7 +236,7 @@ pub(crate) async fn prepare(
         warnings.push(format!(
             "trust: skipping untrusted project content in {}; use chui trust --cwd {} allow",
             cwd.display(),
-            cwd.display()
+            allow_dir.display()
         ));
     }
     let approval = if interactive {
