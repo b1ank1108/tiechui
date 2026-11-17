@@ -533,6 +533,12 @@ impl SessionActor {
             {
                 add_usage(&mut total, *usage);
             }
+            if let EntryKind::Custom { kind, data } = &entry.kind
+                && kind == compaction::FAILED_SUMMARY_USAGE
+                && let Ok(usage) = serde_json::from_value(data.clone())
+            {
+                add_usage(&mut total, usage);
+            }
             if let EntryKind::Usage {
                 usage, request_id, ..
             } = &entry.kind

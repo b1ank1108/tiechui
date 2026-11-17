@@ -10,6 +10,9 @@ use tiechui_plugin_api::{
 const MAX_SHRINKS: u32 = 2;
 /// Consecutive automatic failures on one source state before automatic compaction pauses.
 const MAX_FAILURES: u32 = 3;
+/// Usage of a failed operation's summary requests; it counts toward the thread total but is
+/// no context anchor.
+pub(super) const FAILED_SUMMARY_USAGE: &str = "failed_summary_usage";
 
 pub(super) fn should_compact(tokens: u64, window: u64, config: &CompactionConfig) -> bool {
     config.enabled
@@ -62,9 +65,7 @@ struct Operation {
 
 impl SessionActor {
     fn compaction_settings(&self) -> CompactionConfig {
-        self.config
-            .compaction
-            .for_model(&format!("{}/{}", self.model.provider, self.model.model.0))
+        self.config.compaction.for_model(&self.model.model.0)
     }
 
     fn context_tokens(&self) -> Result<u64, String> {
@@ -168,6 +169,15 @@ impl SessionActor {
             Err("Nothing to compact (session too small)".into())
         };
         self.compacting = false;
+        if result.is_err() && operation.usage != Usage::default() {
+            self.append(EntryKind::Custom {
+                kind: FAILED_SUMMARY_USAGE.into(),
+                data: serde_json::to_value(operation.usage).map_err(|e| e.to_string())?,
+            })
+            .await?;
+            add_usage(&mut self.total, operation.usage);
+            self.publish_session();
+        }
         let aborted = self.cancel.is_cancelled()
             || result
                 .as_ref()
@@ -264,6 +274,12 @@ impl SessionActor {
                 CompactionOutcome::Cancel => return Err("Compaction cancelled".into()),
                 CompactionOutcome::Summary(result) => supplied = Some(result),
             }
+        }
+        if supplied
+            .as_ref()
+            .is_some_and(|result| result.summary.trim().is_empty())
+        {
+            return Err("Extension supplied an empty summary".into());
         }
         let from_extension = supplied.is_some();
         self.progress(operation, CompactionPhase::Summarize);
@@ -567,6 +583,7 @@ impl SessionActor {
                 .await?
             {
                 Ok((message, reason, usage)) => {
+                    add_usage(&mut operation.usage, usage);
                     if reason == StopReason::Length {
                         return Err(format!(
                             "{label} failed: generation hit the token cap and the summary is incomplete"
@@ -575,15 +592,7 @@ impl SessionActor {
                     if !tool_calls(&message).is_empty() {
                         return Err(format!("{label} attempted to call a tool"));
                     }
-                    add_usage(&mut operation.usage, usage);
-                    if omitted > 0 {
-                        let first = rounds[pinned].start;
-                        let end = rounds[pinned + omitted - 1].end;
-                        operation.omitted.push(serde_json::json!({
-                            "from": sources[first], "to": sources[end - 1], "messages": end - first,
-                        }));
-                    }
-                    return Ok(message
+                    let text = message
                         .content
                         .iter()
                         .filter_map(|part| match part {
@@ -591,7 +600,20 @@ impl SessionActor {
                             _ => None,
                         })
                         .collect::<Vec<_>>()
-                        .join("\n"));
+                        .join("\n");
+                    if text.trim().is_empty() {
+                        return Err(format!(
+                            "{label} failed: the model returned no summary text"
+                        ));
+                    }
+                    if omitted > 0 {
+                        let first = rounds[pinned].start;
+                        let end = rounds[pinned + omitted - 1].end;
+                        operation.omitted.push(serde_json::json!({
+                            "from": sources[first], "to": sources[end - 1], "messages": end - first,
+                        }));
+                    }
+                    return Ok(text);
                 }
                 Err(error) => error,
             };
