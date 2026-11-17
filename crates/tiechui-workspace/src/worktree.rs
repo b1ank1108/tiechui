@@ -591,31 +591,35 @@ fn bucket_name(clean_project: &Path, canonical_project: &Path) -> String {
     )
 }
 
+pub(crate) fn random_short_id(attempt: u32) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(pid.to_le_bytes());
+    hasher.update(seq.to_le_bytes());
+    hasher.update(attempt.to_le_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
+}
+
 fn pick_worktree_slot(
     project_root: &Path,
     bucket_dir: &Path,
     now_millis: u64,
     env: &BTreeMap<String, String>,
 ) -> Result<(String, String, PathBuf)> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let date = utc_yyyymmdd(now_millis);
-    let pid = std::process::id();
     for attempt in 0..64_u32 {
-        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let mut hasher = Sha256::new();
-        hasher.update(nanos.to_le_bytes());
-        hasher.update(pid.to_le_bytes());
-        hasher.update(seq.to_le_bytes());
-        hasher.update(attempt.to_le_bytes());
-        let digest = hasher.finalize();
-        let short_id = format!(
-            "{:02x}{:02x}{:02x}{:02x}",
-            digest[0], digest[1], digest[2], digest[3]
-        );
+        let short_id = random_short_id(attempt);
         let name = format!("{date}-{short_id}");
         let branch = format!("tiechui/{name}");
         let wt_path = bucket_dir.join(&name);
@@ -879,7 +883,7 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn utc_yyyymmdd(millis: u64) -> String {
+pub(crate) fn utc_ymd(millis: u64) -> (i64, i64, i64) {
     let days = (millis / 86_400_000) as i64 + 719_468;
     let era = days.div_euclid(146_097);
     let doe = days.rem_euclid(146_097);
@@ -890,5 +894,10 @@ fn utc_yyyymmdd(millis: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
+}
+
+fn utc_yyyymmdd(millis: u64) -> String {
+    let (year, m, d) = utc_ymd(millis);
     format!("{year:04}{m:02}{d:02}")
 }

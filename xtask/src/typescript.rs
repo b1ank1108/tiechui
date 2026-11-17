@@ -56,6 +56,8 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::InitializeResult>();
                 d.visit::<app::DaemonStatus>();
                 d.visit::<app::SessionListParams>();
+                d.visit::<app::ScratchListParams>();
+                d.visit::<app::ScratchOpenParams>();
                 d.visit::<app::SessionWorktree>();
                 d.visit::<app::SessionSummary>();
                 d.visit::<app::SessionOpenParams>();

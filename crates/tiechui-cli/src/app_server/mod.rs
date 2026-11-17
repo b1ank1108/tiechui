@@ -10,6 +10,9 @@ mod mcp;
 mod projection;
 mod prompts;
 mod providers;
+mod scratch;
+#[cfg(all(test, feature = "workspace"))]
+mod scratch_tests;
 mod skills;
 mod textgen;
 #[cfg(all(test, feature = "workspace"))]
@@ -646,10 +649,8 @@ impl Server {
             method,
             "session/open" | "session/fork" | "session/reload" | "session/snapshot"
         ) {
-            match self.open_snapshot(method, params).await {
-                Ok(live) => self.snapshot(out, id, &live),
-                Err(error) => respond(out, id, Err(error)),
-            }
+            let opened = self.open_snapshot(method, params).await;
+            self.respond_opened_snapshot(out, id, opened);
             return;
         }
         let reply = match method {
@@ -664,19 +665,38 @@ impl Server {
         respond(out, id, reply);
     }
 
+    fn respond_opened_snapshot(
+        &self,
+        out: &ClientOut,
+        id: Id,
+        opened: Result<(Arc<Live>, bool), rpc::Error>,
+    ) {
+        match opened {
+            Ok((live, changed)) => {
+                self.snapshot(out, id, &live);
+                if changed {
+                    self.notify("sessions/changed", Value::Null);
+                }
+            }
+            Err(error) => respond(out, id, Err(error)),
+        }
+    }
+
     async fn open_snapshot(
         self: &Arc<Self>,
         method: &str,
         params: Value,
-    ) -> Result<Arc<Live>, rpc::Error> {
+    ) -> Result<(Arc<Live>, bool), rpc::Error> {
         match method {
             "session/open" => self.open(params).await,
-            "session/fork" => self.fork(params).await,
+            "session/fork" => self.fork(params).await.map(|live| (live, false)),
             "session/reload" => {
                 let p: ThreadParams = parse(params)?;
-                self.reload(&p.thread_id).await
+                self.reload(&p.thread_id).await.map(|live| (live, false))
             }
-            _ => parse::<ThreadParams>(params).and_then(|p| self.live(&p.thread_id)),
+            _ => parse::<ThreadParams>(params)
+                .and_then(|p| self.live(&p.thread_id))
+                .map(|live| (live, false)),
         }
     }
 
@@ -722,6 +742,9 @@ impl Server {
         }
         if btw::handles(method) {
             return btw::handle(self, method, params).await;
+        }
+        if scratch::handles(method) {
+            return scratch::list(self, params).await;
         }
         if mcp::handles(method) {
             return self.dispatch_mcp(method, params).await;
@@ -887,58 +910,85 @@ impl Server {
         value(listed)
     }
 
-    async fn open(self: &Arc<Self>, params: Value) -> Result<Arc<Live>, rpc::Error> {
+    async fn open(self: &Arc<Self>, params: Value) -> Result<(Arc<Live>, bool), rpc::Error> {
         let params: SessionOpenParams = parse(params)?;
         let thinking = params
             .thinking
             .map(|level| json!(level).as_str().unwrap_or_default().to_owned());
-        match (params.path, params.cwd) {
-            (Some(path), None) => {
-                let path = PathBuf::from(path);
-                let live = match self.by_path(&path) {
-                    Some((_, live)) => live,
-                    None => {
-                        let options = Options {
-                            mode: params.mode,
-                            ..Default::default()
-                        };
-                        self.start(options, Open::Path(path), SessionEpoch(0), None)
-                            .await?
-                            .1
-                    }
-                };
-                // A resumed session keeps its own model unless the client asks otherwise.
-                let thread = self.thread_of(&live)?;
-                if let Some(model) = params.model {
-                    let model = crate::exec::parse_model(&model).map_err(|(_, m)| invalid(m))?;
-                    self.submit(
-                        &thread,
-                        Op::SetModel {
-                            provider: model.provider,
-                            model: model.model.0,
-                        },
+        match (params.path, params.cwd, params.scratch) {
+            (Some(path), None, None) => {
+                let live = self
+                    .open_existing(
+                        PathBuf::from(path),
+                        params.mode,
+                        params.model,
+                        params.thinking,
                     )
                     .await?;
-                }
-                if let Some(level) = params.thinking {
-                    self.submit(&thread, Op::SetThinking { level }).await?;
-                }
-                Ok(live)
+                Ok((live, false))
             }
-            (None, Some(cwd)) => {
+            (None, Some(cwd), None) => {
                 let options = Options {
                     model: params.model,
                     thinking,
                     mode: params.mode,
                     ..Default::default()
                 };
-                Ok(self
+                let (_, live) = self
                     .start(options, Open::New(cwd.into()), SessionEpoch(0), None)
-                    .await?
-                    .1)
+                    .await?;
+                Ok((live, false))
             }
-            _ => Err(invalid("give exactly one of path and cwd")),
+            (None, None, Some(scratch)) => {
+                let options = Options {
+                    model: params.model,
+                    thinking,
+                    mode: params.mode,
+                    ..Default::default()
+                };
+                let live = scratch::open_scratch(self, options, scratch).await?;
+                Ok((live, true))
+            }
+            _ => Err(invalid("give exactly one of path, cwd and scratch")),
         }
+    }
+
+    async fn open_existing(
+        self: &Arc<Self>,
+        path: PathBuf,
+        mode: Option<String>,
+        model: Option<String>,
+        thinking: Option<tiechui_protocol::ThinkingLevel>,
+    ) -> Result<Arc<Live>, rpc::Error> {
+        let live = match self.by_path(&path) {
+            Some((_, live)) => live,
+            None => {
+                let options = Options {
+                    mode,
+                    ..Default::default()
+                };
+                self.start(options, Open::Path(path), SessionEpoch(0), None)
+                    .await?
+                    .1
+            }
+        };
+        // A resumed session keeps its own model unless the client asks otherwise.
+        let thread = self.thread_of(&live)?;
+        if let Some(model) = model {
+            let model = crate::exec::parse_model(&model).map_err(|(_, m)| invalid(m))?;
+            self.submit(
+                &thread,
+                Op::SetModel {
+                    provider: model.provider,
+                    model: model.model.0,
+                },
+            )
+            .await?;
+        }
+        if let Some(level) = thinking {
+            self.submit(&thread, Op::SetThinking { level }).await?;
+        }
+        Ok(live)
     }
 
     fn thread_of(&self, live: &Arc<Live>) -> Result<ThreadId, rpc::Error> {
@@ -1331,13 +1381,17 @@ impl Server {
 
     async fn rename(&self, params: Value) -> Reply {
         let params: RenameParams = parse(params)?;
-        update_meta(params.path, move |meta| meta.title = params.title).await
+        let reply = update_meta(params.path, move |meta| meta.title = params.title).await?;
+        self.notify("sessions/changed", Value::Null);
+        Ok(reply)
     }
 
     async fn archive(&self, params: Value) -> Reply {
         let params: ArchiveParams = parse(params)?;
         let at = params.archived.then(tiechui_session::now_ms);
-        update_meta(params.path, move |meta| meta.archived_at = at).await
+        let reply = update_meta(params.path, move |meta| meta.archived_at = at).await?;
+        self.notify("sessions/changed", Value::Null);
+        Ok(reply)
     }
 
     async fn trash(&self, params: Value) -> Reply {
@@ -1368,13 +1422,15 @@ impl Server {
             let moved = blocking(move |cancel| move_session_to_trash(&home, &path, cancel)).await?;
             (moved, None, false)
         };
-        value(TrashResult {
+        let reply = value(TrashResult {
             path: moved.display().to_string(),
             trashed: true,
             needs_worktree_confirm: false,
             worktree,
             worktree_removed,
-        })
+        })?;
+        self.notify("sessions/changed", Value::Null);
+        Ok(reply)
     }
 
     #[cfg(feature = "workspace")]

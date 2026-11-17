@@ -588,6 +588,18 @@ export type RewindRow = { session_id: string, entry_id: string, text: string, ti
 
 export type RootParams = { root: string, };
 
+export type ScratchListParams = { 
+/**
+ * Include archived scratch sessions.
+ */
+archived: boolean, };
+
+export type ScratchOpenParams = { 
+/**
+ * Text from the first message used to derive the scratch directory's summary segment.
+ */
+summary?: string | null, };
+
 export type SearchGroup = { path: string, hits: Array<SearchHit>, };
 
 export type SearchHit = { 
@@ -624,7 +636,7 @@ export type SessionListParams = { cwd: string,
  */
 archived: boolean, };
 
-export type SessionOpenParams = { cwd: string | null, path: string | null, 
+export type SessionOpenParams = { cwd: string | null, path: string | null, scratch?: ScratchOpenParams | null, 
 /**
  * `<provider>/<model id>`.
  */
