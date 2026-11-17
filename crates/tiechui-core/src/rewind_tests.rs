@@ -785,3 +785,333 @@ async fn upper_repo_writes_to_exempted_agent_working_dirs_succeed_and_checkpoint
         assert!(!cwd.join(rel).exists(), "{rel}");
     }
 }
+
+fn run_git_test(root: &std::path::Path, args: &[&str]) -> String {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(root).args(args);
+    for (k, v) in [
+        ("GIT_AUTHOR_NAME", "Tiechui"),
+        ("GIT_AUTHOR_EMAIL", "tiechui@example.com"),
+        ("GIT_COMMITTER_NAME", "Tiechui"),
+        ("GIT_COMMITTER_EMAIL", "tiechui@example.com"),
+    ] {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn git");
+    if !output.status.success() {
+        panic!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    String::from_utf8(output.stdout).expect("utf-8 git stdout")
+}
+
+fn setup_managed_worktree_fixture(
+    temp: &tempfile::TempDir,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    init_worktree_test_repo(&repo);
+    let wt =
+        tiechui_workspace::create_worktree_with_env(&home, &repo, None, &BTreeMap::new()).unwrap();
+    let wt_path = PathBuf::from(wt.path);
+    let rewind_dir = home.join("state/rewind");
+    (home, repo, wt_path, rewind_dir)
+}
+
+fn init_worktree_test_repo(repo: &std::path::Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    run_git_test(repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "initial-a\n").unwrap();
+    std::fs::write(repo.join("staged.txt"), "initial-staged\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    run_git_test(repo, &["add", "."]);
+    run_git_test(repo, &["commit", "-m", "init"]);
+}
+
+fn user_entry_ids(store: &SessionStore) -> Vec<String> {
+    store
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Message { message, .. } if message.role == Role::User => {
+                Some(entry.id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn register_worktree_rewind_stack(
+    registry: &mut Registry,
+    rewind_dir: PathBuf,
+    options: tiechui_module_rewind::SnapshotOptions,
+) {
+    tiechui_module_editing::EditingModule
+        .register(registry, &ModuleConfig::default())
+        .unwrap();
+    tiechui_module_exec::ExecModule { background: false }
+        .register(registry, &ModuleConfig::default())
+        .unwrap();
+    tiechui_module_rewind::RewindModule {
+        directory: rewind_dir,
+    }
+    .register_with_options(registry, &ModuleConfig::default(), options)
+    .unwrap();
+}
+
+#[tokio::test]
+async fn managed_worktree_turns_capture_hidden_tree_snapshots_before_bash_mutations() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, repo, wt_path, rewind_dir) = setup_managed_worktree_fixture(&temp);
+
+    std::fs::write(wt_path.join("staged.txt"), "user-staged\n").unwrap();
+    run_git_test(&wt_path, &["add", "staged.txt"]);
+    std::fs::write(wt_path.join("pre_existing.txt"), "untracked-v1\n").unwrap();
+    std::fs::create_dir_all(wt_path.join("node_modules/pkg")).unwrap();
+    std::fs::write(wt_path.join("node_modules/pkg/index.js"), "ignored\n").unwrap();
+
+    let cached_before = run_git_test(&wt_path, &["diff", "--cached"]);
+    let branches_before = run_git_test(&wt_path, &["branch", "-a"]);
+    let log_before = run_git_test(&wt_path, &["log", "--all", "--oneline"]);
+
+    let mut h = Harness::with_workspace(
+        temp,
+        home.clone(),
+        wt_path.clone(),
+        vec![
+            answer("turn-1-ok"),
+            reply(vec![Content::ToolCall(ToolCall {
+                id: "bash-1".into(),
+                name: "bash".into(),
+                arguments: json!({
+                    "command": "rm a.txt && printf 'x\\n' > b.txt && printf 'untracked-v2\\n' > pre_existing.txt"
+                }),
+                opaque: None,
+            })]),
+            answer("turn-2-ok"),
+        ],
+        |registry| {
+            register_worktree_rewind_stack(registry, rewind_dir.clone(), Default::default());
+        },
+    )
+    .await;
+
+    h.input("inspect", InputDelivery::FollowUp).await;
+    h.request().await;
+    h.end(TurnStatus::Completed).await;
+
+    h.input("mutate with bash", InputDelivery::FollowUp).await;
+    h.request().await;
+    h.request().await;
+    h.end(TurnStatus::Completed).await;
+
+    assert!(!wt_path.join("a.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("b.txt")).unwrap(),
+        "x\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("pre_existing.txt")).unwrap(),
+        "untracked-v2\n"
+    );
+    assert_eq!(run_git_test(&wt_path, &["diff", "--cached"]), cached_before);
+    assert_eq!(run_git_test(&wt_path, &["branch", "-a"]), branches_before);
+    assert_eq!(
+        run_git_test(&wt_path, &["log", "--all", "--oneline"]),
+        log_before
+    );
+
+    let saved = h.snapshot().await;
+    let anchors = user_entry_ids(&saved);
+    assert_eq!(anchors.len(), 2);
+    let rewind_store =
+        tiechui_module_rewind::store::Store::new(&rewind_dir, &wt_path, &saved.header().id)
+            .unwrap();
+    let snap2 = rewind_store.snapshot(&anchors[1]).unwrap();
+    let Some(tiechui_module_rewind::store::SnapshotRecord::Ready { reference, tree }) = snap2
+    else {
+        panic!("expected Ready snapshot for turn 2, got {snap2:?}");
+    };
+    assert!(matches!(
+        rewind_store.snapshot(&anchors[0]).unwrap(),
+        Some(tiechui_module_rewind::store::SnapshotRecord::Ready { .. })
+    ));
+    assert!(reference.starts_with("refs/tiechui/checkpoints/"));
+
+    run_git_test(&repo, &["gc", "--prune=now", "-q"]);
+    run_git_test(&repo, &["fsck", "--full"]);
+    assert_eq!(
+        run_git_test(&wt_path, &["show", &format!("{tree}:a.txt")]),
+        "initial-a\n"
+    );
+    assert_eq!(
+        run_git_test(&wt_path, &["show", &format!("{tree}:pre_existing.txt")]),
+        "untracked-v1\n"
+    );
+    let tree_listing = run_git_test(&wt_path, &["ls-tree", "-r", "--name-only", &tree]);
+    assert!(!tree_listing.lines().any(|line| line == "b.txt"));
+    assert!(
+        !tree_listing
+            .lines()
+            .any(|line| line.starts_with("node_modules/"))
+    );
+    h.stop().await;
+}
+
+async fn run_single_turn_in_dir(
+    cwd: PathBuf,
+) -> BTreeMap<String, tiechui_module_rewind::store::SnapshotRecord> {
+    let home_holder = tempfile::tempdir().unwrap();
+    let home = home_holder.path().join("home");
+    let rewind_dir = home.join("state/rewind");
+    let mut h = Harness::with_workspace(
+        home_holder,
+        home,
+        cwd.clone(),
+        vec![answer("done")],
+        |registry| {
+            register_worktree_rewind_stack(registry, rewind_dir.clone(), Default::default());
+        },
+    )
+    .await;
+    h.input("hello", InputDelivery::FollowUp).await;
+    h.request().await;
+    h.end(TurnStatus::Completed).await;
+    let session_id = h.snapshot().await.header().id.clone();
+    h.stop().await;
+    tiechui_module_rewind::store::Store::new(&rewind_dir, &cwd, &session_id)
+        .unwrap()
+        .snapshots()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn non_managed_workspaces_do_not_capture_hidden_git_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("project-root");
+    init_worktree_test_repo(&repo);
+    let manual_wt = temp.path().join("manual-wt");
+    run_git_test(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "manual/branch",
+            manual_wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let plain = temp.path().join("plain-dir");
+    std::fs::create_dir_all(&plain).unwrap();
+
+    assert!(run_single_turn_in_dir(repo.clone()).await.is_empty());
+    assert!(run_single_turn_in_dir(manual_wt.clone()).await.is_empty());
+    assert!(run_single_turn_in_dir(plain).await.is_empty());
+    assert_eq!(
+        run_git_test(&repo, &["for-each-ref", "refs/tiechui/checkpoints/"]),
+        ""
+    );
+    assert_eq!(
+        run_git_test(&manual_wt, &["for-each-ref", "refs/tiechui/checkpoints/"]),
+        ""
+    );
+}
+
+#[cfg(unix)]
+fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+async fn run_turn_with_snapshot_options(
+    options: tiechui_module_rewind::SnapshotOptions,
+) -> (tiechui_module_rewind::store::SnapshotRecord, bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, _repo, wt_path, rewind_dir) = setup_managed_worktree_fixture(&temp);
+
+    let mut h = Harness::with_workspace(
+        temp,
+        home,
+        wt_path.clone(),
+        vec![
+            reply(vec![Content::ToolCall(ToolCall {
+                id: "write-after-fail".into(),
+                name: "write".into(),
+                arguments: json!({"path": "created.txt", "content": "ok\n"}),
+                opaque: None,
+            })]),
+            answer("completed despite snapshot failure"),
+        ],
+        |registry| {
+            register_worktree_rewind_stack(registry, rewind_dir.clone(), options);
+        },
+    )
+    .await;
+    h.input("proceed anyway", InputDelivery::FollowUp).await;
+    h.request().await;
+    h.request().await;
+    h.end(TurnStatus::Completed).await;
+
+    let had_error = h
+        .seen
+        .iter()
+        .any(|event| matches!(event.event, EventKind::Error { .. }));
+    assert_eq!(
+        std::fs::read_to_string(wt_path.join("created.txt")).unwrap(),
+        "ok\n"
+    );
+    let saved = h.snapshot().await;
+    let anchors = user_entry_ids(&saved);
+    let store = tiechui_module_rewind::store::Store::new(&rewind_dir, &wt_path, &saved.header().id)
+        .unwrap();
+    let record = store
+        .snapshot(&anchors[0])
+        .unwrap()
+        .expect("expected missing snapshot record");
+    h.stop().await;
+    (record, had_error)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_timeout_and_failure_do_not_block_managed_worktree_turns() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+
+    let slow_bin = scripts_dir.path().join("slow-bin");
+    write_executable_script(&slow_bin, "git", "#!/bin/sh\nsleep 5\n");
+    let (timeout_record, timeout_err) =
+        run_turn_with_snapshot_options(tiechui_module_rewind::SnapshotOptions {
+            timeout: Duration::from_millis(80),
+            env: BTreeMap::from([("PATH".into(), format!("{}:{orig_path}", slow_bin.display()))]),
+        })
+        .await;
+    assert!(!timeout_err);
+    assert!(
+        matches!(&timeout_record, tiechui_module_rewind::store::SnapshotRecord::Missing { reason } if reason.contains("timed out")),
+        "unexpected timeout record: {timeout_record:?}"
+    );
+
+    let fail_bin = scripts_dir.path().join("fail-bin");
+    write_executable_script(
+        &fail_bin,
+        "git",
+        "#!/bin/sh\necho 'simulated git failure' >&2\nexit 1\n",
+    );
+    let (fail_record, fail_err) =
+        run_turn_with_snapshot_options(tiechui_module_rewind::SnapshotOptions {
+            timeout: Duration::from_secs(2),
+            env: BTreeMap::from([("PATH".into(), format!("{}:{orig_path}", fail_bin.display()))]),
+        })
+        .await;
+    assert!(!fail_err);
+    assert!(
+        matches!(&fail_record, tiechui_module_rewind::store::SnapshotRecord::Missing { reason } if reason.contains("simulated git failure")),
+        "unexpected fail record: {fail_record:?}"
+    );
+}

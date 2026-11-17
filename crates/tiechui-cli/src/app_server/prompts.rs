@@ -5,7 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tiechui_config::TrustStore;
 use tiechui_module_prompts::{PromptsModule, render, roots};
 use tiechui_protocol::app::*;
 
@@ -37,10 +36,7 @@ pub(super) async fn handle(home: &Path, method: &str, params: Value) -> Reply {
             let dir = home.join("prompts").display().to_string();
             let module = blocking(move |cancel| {
                 let cwd = project(&home, p.cwd)?;
-                let trusted = TrustStore::new(&home)
-                    .get(&cwd, cancel)
-                    .map_err(|e| e.to_string())?
-                    == Some(true);
+                let trusted = crate::trust::is_trusted(&home, &cwd, cancel)?;
                 Ok(PromptsModule::load(&cwd, &home, trusted))
             })
             .await?;

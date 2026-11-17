@@ -339,6 +339,125 @@ pub struct CancelCommitMessageParams {
     pub request_id: String,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostCreateStatus {
+    #[default]
+    None,
+    Succeeded,
+    Failed,
+    SkippedUntrusted,
+}
+
+/// Outcome of the project's worktree post-create script.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PostCreateResult {
+    pub status: PostCreateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// A Git worktree created and registered by `chui` under `$TIECHUI_HOME/worktrees/`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeEntry {
+    pub name: String,
+    pub path: String,
+    pub project_root: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub dirty: bool,
+    /// Unix milliseconds when the worktree was created.
+    pub created_at: u64,
+    #[serde(default)]
+    pub post_create: PostCreateResult,
+}
+
+/// Creates a managed session worktree for `root` on branch `tiechui/<name>`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeCreateParams {
+    pub root: String,
+    /// Branch or commit to start from; defaults to `root`'s current branch or `HEAD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// Carries uncommitted tracked and non-ignored untracked changes from `root` into the new worktree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carry_changes: bool,
+}
+
+/// Lists managed session worktrees for `root`, or across all projects when `root` is absent.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WorktreeListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+/// Removes a managed session worktree checkout while keeping its `tiechui/<name>` branch.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeRemoveParams {
+    pub path: String,
+    /// Removes the worktree even when it has uncommitted or untracked changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeRemoveResult {
+    pub path: String,
+    pub branch: String,
+}
+
+/// Why a cleanup sweep kept an eligible managed session worktree.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeSkipReason {
+    Dirty,
+    ActiveSession,
+}
+
+/// A managed session worktree kept during cleanup because of uncommitted changes or an open session.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkippedWorktree {
+    pub name: String,
+    pub path: String,
+    pub project_root: String,
+    pub branch: String,
+    pub base_branch: String,
+    /// Unix milliseconds when the worktree was created.
+    pub created_at: u64,
+    /// Unix milliseconds of the latest session activity, or `created_at` when none.
+    pub last_active_at: u64,
+    pub reason_kind: WorktreeSkipReason,
+    pub reason: String,
+}
+
+/// The `worktree/cleanup` and `worktree/cleanup_status` result.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WorktreeCleanupStatus {
+    pub removed: Vec<WorktreeRemoveResult>,
+    pub skipped: Vec<SkippedWorktree>,
+    pub last_checked_at: Option<u64>,
+}
+
 /// Starts a shell in `cwd` under a client-chosen id.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

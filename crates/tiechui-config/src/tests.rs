@@ -1860,3 +1860,199 @@ fn lightweight_model_is_user_only_and_names_a_provider_model() {
     assert_eq!(reloaded.config.lightweight_model, None);
     assert_eq!(reloaded.config.permissions.classifier_model, None);
 }
+
+#[test]
+fn project_post_create_script_respects_trust_and_project_config_discovery() {
+    let temp = temp_dir();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("profile");
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".claude/config.toml",
+        "[worktrees]\npost_create_script = 'echo from-claude'\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Untrusted("echo from-claude".into())
+    );
+
+    write(&repo, ".agents/config.toml", "[modules]\nediting = true\n");
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\npost_create_script = 'touch .setup-done'\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Untrusted("touch .setup-done".into())
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    TrustStore::new(&home)
+        .set(&repo, Some(true), &cancel)
+        .unwrap();
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Trusted("touch .setup-done".into())
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\npost_create_script = '   '\n",
+    );
+    assert_eq!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::None
+    );
+
+    write(
+        &repo,
+        ".agents/config.toml",
+        "[worktrees]\nunknown_key = 1\n",
+    );
+    assert!(matches!(
+        project_post_create_script(&home, &repo).unwrap(),
+        ProjectPostCreate::Invalid(_)
+    ));
+}
+
+#[test]
+fn worktree_cleanup_policies_default_off_validate_bounds_and_strip_project_layer() {
+    assert_eq!(
+        Config::default().worktrees,
+        WorktreesConfig {
+            post_create_script: None,
+            auto_clean_idle_days: None,
+            auto_clean_on_session_delete: false,
+        }
+    );
+
+    let temp = temp_dir();
+    let zero_paths = paths(
+        temp.path(),
+        "[worktrees]\nauto_clean_idle_days = 0\nauto_clean_on_session_delete = true\n",
+        "[worktrees]\npost_create_script = 'touch .ok'\nauto_clean_idle_days = 30\nauto_clean_on_session_delete = false\n",
+    );
+    let loaded = load(&zero_paths, true, &toml::Table::new()).unwrap();
+    assert_eq!(
+        loaded.config.worktrees,
+        WorktreesConfig {
+            post_create_script: Some("touch .ok".into()),
+            auto_clean_idle_days: Some(0),
+            auto_clean_on_session_delete: true,
+        }
+    );
+    let user_only_keys: Vec<_> = loaded
+        .diagnostics
+        .iter()
+        .filter(|d| d.reason == IgnoredReason::UserOnly)
+        .map(|d| d.key.as_str())
+        .collect();
+    assert_eq!(
+        user_only_keys,
+        [
+            "worktrees.auto_clean_idle_days",
+            "worktrees.auto_clean_on_session_delete",
+        ]
+    );
+
+    let max_paths = paths(
+        temp.path(),
+        "[worktrees]\nauto_clean_idle_days = 3650\n",
+        "",
+    );
+    assert_eq!(
+        load(&max_paths, false, &toml::Table::new())
+            .unwrap()
+            .config
+            .worktrees
+            .auto_clean_idle_days,
+        Some(3650)
+    );
+}
+
+#[test]
+fn worktree_cleanup_policies_reject_invalid_values_and_round_trip_preferences() {
+    let temp = temp_dir();
+    for bad in [
+        "[worktrees]\nauto_clean_idle_days = 3651\n",
+        "[worktrees]\nauto_clean_idle_days = -1\n",
+        "[worktrees]\nauto_clean_idle_days = '0'\n",
+        "[worktrees]\nauto_clean_on_session_delete = 'yes'\n",
+    ] {
+        let invalid = paths(temp.path(), bad, "");
+        let err = load(&invalid, false, &toml::Table::new()).unwrap_err();
+        assert!(err.key.starts_with("worktrees."), "{bad}: {err}");
+    }
+
+    let user_script = paths(
+        temp.path(),
+        "[worktrees]\npost_create_script = 'touch .pwn'\n",
+        "",
+    );
+    let stripped = load(&user_script, false, &toml::Table::new()).unwrap();
+    assert_eq!(stripped.config.worktrees.post_create_script, None);
+    assert!(stripped.diagnostics.iter().any(|d| {
+        d.key == "worktrees.post_create_script" && d.reason == IgnoredReason::ProjectOnly
+    }));
+
+    let pref_file = temp.path().join("wt-prefs/config.toml");
+    fs::create_dir_all(pref_file.parent().unwrap()).unwrap();
+    let bad_pref = save_preference(
+        &pref_file,
+        "worktrees.post_create_script",
+        "touch .pwn".into(),
+    )
+    .unwrap_err();
+    assert_eq!(bad_pref.key, "worktrees.post_create_script");
+    save_preference(&pref_file, "worktrees.auto_clean_idle_days", 0.into()).unwrap();
+    save_preference(
+        &pref_file,
+        "worktrees.auto_clean_on_session_delete",
+        true.into(),
+    )
+    .unwrap();
+    let saved = load(
+        &ConfigPaths {
+            user: pref_file.clone(),
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap()
+    .config
+    .worktrees;
+    assert_eq!(saved.auto_clean_idle_days, Some(0));
+    assert!(saved.auto_clean_on_session_delete);
+
+    remove_preference(&pref_file, "worktrees.auto_clean_idle_days").unwrap();
+    remove_preference(&pref_file, "worktrees.auto_clean_on_session_delete").unwrap();
+    let cleared = load(
+        &ConfigPaths {
+            user: pref_file,
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap()
+    .config
+    .worktrees;
+    assert_eq!(cleared.auto_clean_idle_days, None);
+    assert!(!cleared.auto_clean_on_session_delete);
+}

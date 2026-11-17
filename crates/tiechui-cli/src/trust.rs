@@ -5,27 +5,62 @@ use tiechui_config::{ConfigPaths, TrustStore};
 use tiechui_tui::consent::{Answer, Question, ask};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) fn run(args: &ArgMatches) -> Result<(), String> {
+pub(crate) fn effective_cwd(home: &Path, cwd: &Path) -> PathBuf {
+    #[cfg(feature = "workspace")]
+    if let Some(project_root) = tiechui_workspace::worktree_project_root(home, cwd) {
+        return project_root.canonicalize().unwrap_or(project_root);
+    }
+    let _ = home;
+    cwd.to_path_buf()
+}
+
+pub(crate) fn is_trusted(
+    home: &Path,
+    cwd: &Path,
+    cancel: &CancellationToken,
+) -> Result<bool, String> {
+    let target = effective_cwd(home, cwd);
+    Ok(TrustStore::new(home)
+        .get(&target, cancel)
+        .map_err(|e| e.to_string())?
+        == Some(true))
+}
+
+pub(crate) fn command_locations(
+    args: &ArgMatches,
+) -> Result<(PathBuf, ConfigPaths, PathBuf), String> {
     let cwd = args
         .get_one::<String>("cwd")
         .map_or_else(std::env::current_dir, |path| Ok(PathBuf::from(path)))
         .and_then(|path| path.canonicalize())
         .map_err(|e| e.to_string())?;
     let paths = ConfigPaths::discover(&cwd).map_err(|e| e.to_string())?;
-    let home = paths.user.parent().ok_or("missing config directory")?;
-    let store = TrustStore::new(home);
+    let home = paths
+        .user
+        .parent()
+        .ok_or("missing config directory")?
+        .to_owned();
+    Ok((cwd, paths, home))
+}
+
+pub(crate) fn run(args: &ArgMatches) -> Result<(), String> {
+    let (cwd, _paths, home) = command_locations(args)?;
+    let target_cwd = effective_cwd(&home, &cwd);
+    let store = TrustStore::new(&home);
     let cancel = CancellationToken::new();
     match args
         .get_one::<String>("decision")
         .map(String::as_str)
         .unwrap_or("status")
     {
-        "allow" => store.set(&cwd, Some(true), &cancel),
-        "deny" => store.set(&cwd, Some(false), &cancel),
+        "allow" => store.set(&target_cwd, Some(true), &cancel),
+        "deny" => store.set(&target_cwd, Some(false), &cancel),
         _ => Ok(()),
     }
     .map_err(|e| e.to_string())?;
-    let entry = store.get_entry(&cwd, &cancel).map_err(|e| e.to_string())?;
+    let entry = store
+        .get_entry(&target_cwd, &cancel)
+        .map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout().lock();
     use std::io::Write;
     match entry {
@@ -46,11 +81,12 @@ pub(crate) fn run(args: &ArgMatches) -> Result<(), String> {
 pub(crate) fn consent(cwd: &Path, paths: &ConfigPaths, home: &Path) -> Result<bool, String> {
     let store = TrustStore::new(home);
     let cancel = CancellationToken::new();
-    let mut decision = store.get(cwd, &cancel).map_err(|e| e.to_string())?;
+    let trust_cwd = effective_cwd(home, cwd);
+    let mut decision = store.get(&trust_cwd, &cancel).map_err(|e| e.to_string())?;
     let user_home = tiechui_config::user_home().map(|path| path.canonicalize().unwrap_or(path));
     if decision.is_none()
         && (paths.project.is_some() || has_project_resources(cwd, home))
-        && let Some(target) = target(cwd, user_home.as_deref())
+        && let Some(target) = target(&trust_cwd, user_home.as_deref())
     {
         let allow = match ask(&question(cwd, &target)).map_err(|e| e.to_string())? {
             Answer::Choice(0) => true,

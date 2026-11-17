@@ -136,6 +136,18 @@
           "$ref": "#/definitions/TuiLayer"
         }
       ]
+    },
+    "worktrees": {
+      "default": {
+        "auto_clean_idle_days": null,
+        "auto_clean_on_session_delete": null,
+        "post_create_script": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorktreesLayer"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -903,6 +915,39 @@
           ]
         },
         "theme": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorktreesLayer": {
+      "type": "object",
+      "properties": {
+        "auto_clean_idle_days": {
+          "description": "User configuration only: days of inactivity after which `chui app-server` removes clean idle session worktrees (`0` cleans immediately when idle); unset disables idle cleanup.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "maximum": 3650.0,
+          "minimum": 0.0
+        },
+        "auto_clean_on_session_delete": {
+          "description": "User configuration only: remove clean session worktrees whose sessions have all been deleted during `chui app-server` cleanup sweeps.",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "post_create_script": {
+          "description": "Project configuration: shell command run once inside a newly created session worktree when the project is trusted.",
           "default": null,
           "type": [
             "string",

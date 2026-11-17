@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 tiechui-plugin-api.workspace = true
+tiechui-workspace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tiechui_config::{ConfigPaths, TrustStore};
+use tiechui_config::ConfigPaths;
 use tiechui_module_hooks::{Event, Handler, HooksModule, approve, edit};
 use tiechui_protocol::app::*;
 use tokio_util::sync::CancellationToken;
@@ -108,11 +108,8 @@ fn load(
     cwd: &Path,
     cancel: &CancellationToken,
 ) -> Result<(HooksModule, Vec<String>), String> {
-    let paths = ConfigPaths::discover(cwd).map_err(|e| e.to_string())?;
-    let trusted = TrustStore::new(home)
-        .get(cwd, cancel)
-        .map_err(|e| e.to_string())?
-        == Some(true);
+    let paths = ConfigPaths::for_home(home, cwd).map_err(|e| e.to_string())?;
+    let trusted = crate::trust::is_trusted(home, cwd, cancel)?;
     let loaded =
         tiechui_config::load(&paths, trusted, &toml::Table::new()).map_err(|e| e.to_string())?;
     let mut warnings = Vec::new();

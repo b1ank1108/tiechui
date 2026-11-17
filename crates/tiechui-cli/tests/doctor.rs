@@ -189,6 +189,87 @@ fn doctor_reports_broken_install_profile_and_schemas_without_changes() {
     assert_eq!(fs::read(prefix.join("bin/chui")).unwrap(), b"tampered");
 }
 
+#[test]
+fn doctor_accepts_managed_worktree_user_files_and_symlinks_while_checking_worktrees_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let debug = root.path().join("target/debug");
+    fs::create_dir_all(&debug).unwrap();
+    let binary = debug.join("chui");
+    fs::hard_link(env!("CARGO_BIN_EXE_chui"), &binary).unwrap();
+
+    let shared_env = root.path().join("shared.env");
+    fs::write(&shared_env, "APP_ENV=dev\n").unwrap();
+
+    let profile = root.path().join("profile");
+    let worktrees = profile.join("worktrees");
+    let bucket = worktrees.join("demo-repo-1234abcd");
+    let wt = bucket.join("20261116-ef012345");
+    fs::create_dir_all(&wt).unwrap();
+    for dir in [&profile, &worktrees, &bucket, &wt] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let registry = worktrees.join("registry.json");
+    fs::write(
+        &registry,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "worktrees": [{
+                "name": "20261116-ef012345",
+                "path": wt.display().to_string(),
+                "project_root": root.path().join("demo-repo").display().to_string(),
+                "branch": "tiechui/20261116-ef012345",
+                "base_branch": "main",
+                "created_at": 1
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let node_bin = wt.join("node_modules/.bin");
+    fs::create_dir_all(&node_bin).unwrap();
+    fs::set_permissions(wt.join("node_modules"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&node_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&shared_env, wt.join(".env")).unwrap();
+
+    let healthy = Command::new(&binary)
+        .env_clear()
+        .current_dir(&debug)
+        .args(["doctor", "--profile"])
+        .arg(&profile)
+        .output()
+        .unwrap();
+    let healthy_out = String::from_utf8(healthy.stdout).unwrap();
+    assert_eq!(healthy.status.code(), Some(0), "{healthy_out}");
+    assert!(healthy_out.contains("Doctor: OK"), "{healthy_out}");
+
+    fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o644)).unwrap();
+    let broken = Command::new(&binary)
+        .env_clear()
+        .current_dir(&debug)
+        .args(["doctor", "--profile"])
+        .arg(&profile)
+        .output()
+        .unwrap();
+    let broken_out = String::from_utf8(broken.stdout).unwrap();
+    assert_eq!(broken.status.code(), Some(2), "{broken_out}");
+    assert!(
+        broken_out.contains("worktrees: expected permissions 0700"),
+        "{broken_out}"
+    );
+    assert!(
+        broken_out.contains("registry.json: expected permissions 0600"),
+        "{broken_out}"
+    );
+    assert!(!broken_out.contains("node_modules"), "{broken_out}");
+    assert!(!broken_out.contains(".env"), "{broken_out}");
+}
+
 fn walk(path: &Path) -> Vec<(std::path::PathBuf, Vec<u8>, u32)> {
     let mut result = vec![];
     for entry in fs::read_dir(path).unwrap() {

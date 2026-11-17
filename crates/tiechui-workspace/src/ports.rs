@@ -69,14 +69,16 @@ impl State {
 }
 
 pub(crate) struct PortMonitor {
+    home: Option<PathBuf>,
     sink: Sink,
     state: Mutex<State>,
     wake: Condvar,
 }
 
 impl PortMonitor {
-    pub(crate) fn new(sink: Sink) -> Arc<Self> {
+    pub(crate) fn new(home: Option<PathBuf>, sink: Sink) -> Arc<Self> {
         Arc::new(Self {
+            home,
             sink,
             state: Mutex::default(),
             wake: Condvar::new(),
@@ -107,14 +109,14 @@ impl PortMonitor {
         let union_ports = if union_roots.is_empty() {
             Vec::new()
         } else {
-            scan_attributed(&union_roots)
+            scan_attributed(&union_roots, self.home.as_deref())
         };
         let caller_ports = if caller_roots.is_empty() {
             Vec::new()
         } else if same_roots(&caller_roots, &union_roots) {
             union_ports.clone()
         } else {
-            scan_attributed(&caller_roots)
+            scan_attributed(&caller_roots, self.home.as_deref())
         };
         let notify = {
             let mut state = lock(&self.state);
@@ -175,7 +177,7 @@ impl PortMonitor {
             }
             roots
         };
-        let current = scan_attributed(&candidate_roots);
+        let current = scan_attributed(&candidate_roots, self.home.as_deref());
         let owned = current.iter().any(|entry| {
             entry.pid == params.pid
                 && entry.root == params.root
@@ -225,7 +227,7 @@ impl PortMonitor {
     }
 
     fn apply_scan(&self, roots: &[RegisteredRoot]) {
-        let ports = scan_attributed(roots);
+        let ports = scan_attributed(roots, self.home.as_deref());
         let emit = {
             let mut state = lock(&self.state);
             let merged = state.merged_roots();
@@ -293,7 +295,7 @@ fn spawn_watcher(monitor: Arc<PortMonitor>) {
     });
 }
 
-fn clean_path(path: &Path) -> PathBuf {
+pub(crate) fn clean_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -307,7 +309,7 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-fn resolve_existing_prefix(path: &Path) -> PathBuf {
+pub(crate) fn resolve_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return clean_path(&canon);
     }
@@ -334,7 +336,84 @@ struct ListenerProcess {
     sockets: Vec<(u16, String)>,
 }
 
-fn scan_attributed(roots: &[RegisteredRoot]) -> Vec<PortEntry> {
+fn expand_worktree_roots(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<RegisteredRoot> {
+    let Some(home) = home else {
+        return roots.to_vec();
+    };
+    let owner_raws = owner_raw_map(roots);
+    let mut expanded: Vec<RegisteredRoot> = roots
+        .iter()
+        .map(|item| remap_managed_root(item, home, &owner_raws))
+        .collect();
+    let mut seen: BTreeSet<PathBuf> = expanded
+        .iter()
+        .flat_map(|r| r.forms.iter().cloned())
+        .collect();
+    for item in roots {
+        let Ok(project_path) = root(&item.raw) else {
+            continue;
+        };
+        for wt_path in crate::worktree::project_worktree_paths(home, &project_path) {
+            if wt_path.is_dir() {
+                push_worktree_root(&mut expanded, &mut seen, &item.raw, &wt_path);
+            }
+        }
+    }
+    expanded
+}
+
+fn owner_raw_map(roots: &[RegisteredRoot]) -> BTreeMap<PathBuf, String> {
+    let mut map = BTreeMap::new();
+    for item in roots {
+        for form in &item.forms {
+            map.entry(form.clone()).or_insert_with(|| item.raw.clone());
+        }
+    }
+    map
+}
+
+fn remap_managed_root(
+    item: &RegisteredRoot,
+    home: &Path,
+    owner_raws: &BTreeMap<PathBuf, String>,
+) -> RegisteredRoot {
+    let Some(owner) = crate::worktree::worktree_project_root(home, Path::new(&item.raw)) else {
+        return item.clone();
+    };
+    let Some(owner_raw) = owner_raws.get(&owner) else {
+        return item.clone();
+    };
+    let mut remapped = item.clone();
+    remapped.raw = owner_raw.clone();
+    remapped
+}
+
+fn push_worktree_root(
+    expanded: &mut Vec<RegisteredRoot>,
+    seen: &mut BTreeSet<PathBuf>,
+    owner_raw: &str,
+    wt_path: &Path,
+) {
+    let lexical = clean_path(wt_path);
+    let resolved = resolve_existing_prefix(&lexical);
+    if !seen.insert(resolved.clone()) {
+        return;
+    }
+    let score = (resolved.components().count(), resolved.as_os_str().len());
+    let mut forms = vec![resolved];
+    if !forms.contains(&lexical) {
+        seen.insert(lexical.clone());
+        forms.push(lexical);
+    }
+    expanded.push(RegisteredRoot {
+        raw: owner_raw.to_owned(),
+        forms,
+        score,
+    });
+}
+
+fn scan_attributed(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<PortEntry> {
+    let roots = expand_worktree_roots(roots, home);
     let listeners = collect_listeners();
     let mut dedup: BTreeMap<(u32, u16), PortEntry> = BTreeMap::new();
 
@@ -342,7 +421,7 @@ fn scan_attributed(roots: &[RegisteredRoot]) -> Vec<PortEntry> {
         if should_ignore_process(proc_info.pid, &proc_info.process, &proc_info.cmdline) {
             continue;
         }
-        let Some(root_idx) = attribute_process(&proc_info, roots) else {
+        let Some(root_idx) = attribute_process(&proc_info, &roots) else {
             continue;
         };
         let root = &roots[root_idx].raw;

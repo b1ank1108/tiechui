@@ -17,6 +17,8 @@ mod textgen_tests;
 mod turns;
 #[cfg(feature = "workspace")]
 mod workspace;
+#[cfg(all(test, feature = "workspace"))]
+mod worktree_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,11 +78,18 @@ struct Server {
     next: AtomicU64,
     /// Wakes the archiving of inactive sessions early.
     sweep: Notify,
+    worktree_sweep: Notify,
     activity: Arc<Notify>,
     activity_seq: Arc<AtomicU64>,
     shutdown: CancellationToken,
     cancels: Mutex<textgen::CancelRegistry>,
     title_tasks: Mutex<Vec<JoinHandle<()>>>,
+    #[cfg(feature = "workspace")]
+    cleanup_lock: tokio::sync::Mutex<()>,
+    #[cfg(feature = "workspace")]
+    cleanup_status: Mutex<Option<tiechui_protocol::workspace::WorktreeCleanupStatus>>,
+    #[cfg(feature = "workspace")]
+    cleanup_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "workspace")]
     workspace: Arc<tiechui_workspace::Workspace>,
 }
@@ -469,17 +478,20 @@ impl Server {
             let ws_clients = clients.clone();
             let ws_activity = activity.clone();
             let ws_seq = activity_seq.clone();
-            workspace::new(Arc::new(move |method, params| {
-                let line =
-                    json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
-                broadcast(&ws_clients, &line);
-                if matches!(method, "terminal/output" | "terminal/exit") {
-                    ws_seq.fetch_add(1, Ordering::Release);
-                    ws_activity.notify_one();
-                }
-            }))
+            workspace::new(
+                home.clone(),
+                Arc::new(move |method, params| {
+                    let line =
+                        json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
+                    broadcast(&ws_clients, &line);
+                    if matches!(method, "terminal/output" | "terminal/exit") {
+                        ws_seq.fetch_add(1, Ordering::Release);
+                        ws_activity.notify_one();
+                    }
+                }),
+            )
         };
-        Arc::new(Self {
+        let server = Arc::new(Self {
             home,
             clients,
             next_client: AtomicU64::new(1),
@@ -489,14 +501,24 @@ impl Server {
             schedules: Default::default(),
             next: AtomicU64::new(1),
             sweep: Notify::new(),
+            worktree_sweep: Notify::new(),
             activity,
             activity_seq,
             shutdown: CancellationToken::new(),
             cancels: Mutex::default(),
             title_tasks: Mutex::default(),
             #[cfg(feature = "workspace")]
+            cleanup_lock: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "workspace")]
+            cleanup_status: Mutex::default(),
+            #[cfg(feature = "workspace")]
+            cleanup_task: Mutex::default(),
+            #[cfg(feature = "workspace")]
             workspace,
-        })
+        });
+        #[cfg(feature = "workspace")]
+        server.spawn_worktree_cleanup();
+        server
     }
 
     fn touch(&self) {
@@ -569,6 +591,13 @@ impl Server {
 
     async fn shutdown_all(&self) {
         self.shutdown.cancel();
+        #[cfg(feature = "workspace")]
+        {
+            let cleanup = lock(&self.cleanup_task).take();
+            if let Some(handle) = cleanup {
+                let _ = handle.await;
+            }
+        }
         let open: Vec<_> = lock(&self.sessions).keys().cloned().collect();
         for thread in open {
             self.close(&thread).await;
@@ -662,6 +691,7 @@ impl Server {
                 self.submit(&p.thread_id, p.op).await.and_then(value)
             }
             "session/branch" => self.branch(params).await,
+            "session/rewind" => self.session_rewind(params).await,
             "session/close" => {
                 let p: ThreadParams = parse(params)?;
                 self.close(&p.thread_id).await;
@@ -775,6 +805,18 @@ impl Server {
             .map(|(thread, live)| (thread.clone(), live.clone()))
     }
 
+    fn session_worktree_info(&self, cwd: &Path) -> Option<SessionWorktree> {
+        #[cfg(feature = "workspace")]
+        {
+            tiechui_workspace::session_worktree(&self.home, cwd)
+        }
+        #[cfg(not(feature = "workspace"))]
+        {
+            let _ = cwd;
+            None
+        }
+    }
+
     /// Responds while holding the projection, so later events follow the snapshot.
     fn snapshot(&self, out: &ClientOut, id: Id, live: &Live) {
         let projection = lock(&live.projection);
@@ -789,6 +831,7 @@ impl Server {
                 thread_id,
                 path: live.path.display().to_string(),
                 cwd: live.cwd.display().to_string(),
+                worktree: self.session_worktree_info(&live.cwd),
                 seq: projection.seq,
                 events: projection.snapshot(),
             }),
@@ -799,15 +842,29 @@ impl Server {
         let params: SessionListParams = parse(params)?;
         let home = self.home.clone();
         let cwd = PathBuf::from(&params.cwd);
-        let (summaries, _) = blocking(move |cancel| {
-            tiechui_session::summaries(&home, Some(&cwd), cancel).map_err(|e| e.to_string())
+        let summaries = blocking(move |cancel| {
+            let mut cwds = vec![cwd.clone()];
+            #[cfg(feature = "workspace")]
+            cwds.extend(tiechui_workspace::project_worktree_paths(&home, &cwd));
+            let (summaries, _) =
+                tiechui_session::summaries_in(&home, &cwds, cancel).map_err(|e| e.to_string())?;
+            Ok(summaries
+                .into_iter()
+                .map(|s| {
+                    #[cfg(feature = "workspace")]
+                    let worktree = tiechui_workspace::session_worktree(&home, &s.header.cwd);
+                    #[cfg(not(feature = "workspace"))]
+                    let worktree = None;
+                    (s, worktree)
+                })
+                .collect::<Vec<_>>())
         })
         .await?;
         let sessions = lock(&self.sessions);
         let mut listed: Vec<_> = summaries
             .into_iter()
-            .filter(|s| params.archived || s.meta.archived_at.is_none())
-            .map(|s| {
+            .filter(|(s, _)| params.archived || s.meta.archived_at.is_none())
+            .map(|(s, worktree)| {
                 let thread_id = ThreadId(s.header.id);
                 SessionSummary {
                     live: sessions
@@ -816,6 +873,7 @@ impl Server {
                     thread_id,
                     path: s.path.display().to_string(),
                     cwd: s.header.cwd.display().to_string(),
+                    worktree,
                     created_at: s.header.created_at,
                     modified: s.modified,
                     first_message: s.first_message,
@@ -894,11 +952,12 @@ impl Server {
     /// Opens a session and waits for its thread to start.
     async fn start(
         self: &Arc<Self>,
-        options: Options,
+        mut options: Options,
         open: Open,
         epoch: SessionEpoch,
         projection: Option<Arc<Mutex<Projection>>>,
     ) -> Result<(ThreadId, Arc<Live>), rpc::Error> {
+        options.home.get_or_insert_with(|| self.home.clone());
         let shutdown = CancellationToken::new();
         let mut warnings = Vec::new();
         let prepared = prepare(
@@ -1118,6 +1177,7 @@ impl Server {
 
     async fn dispatch_providers(self: &Arc<Self>, method: &str, params: Value) -> Reply {
         let archiving = params["key"] == "sessions.archive_after_days";
+        let worktree_cleanup = method == "config/update" && worktree_cleanup_key(&params);
         let runtime_config = method == "config/update" && runtime_config_key(&params);
         let reply = providers::handle(&self.home, method, params).await;
         if reply.is_ok() {
@@ -1128,6 +1188,9 @@ impl Server {
             }
             if archiving {
                 self.sweep.notify_one();
+            }
+            if worktree_cleanup {
+                self.invalidate_and_wake_worktree_cleanup();
             }
         }
         reply
@@ -1278,25 +1341,175 @@ impl Server {
     }
 
     async fn trash(&self, params: Value) -> Reply {
-        let path = PathBuf::from(parse::<PathParams>(params)?.path);
+        let params: TrashParams = parse(params)?;
+        let path = PathBuf::from(&params.path);
+        let policy = params.worktree_policy.unwrap_or_default();
+        #[cfg(feature = "workspace")]
+        let plan = self.prepare_session_trash(&path, policy).await?;
+        #[cfg(feature = "workspace")]
+        if let Some(entry) = plan.confirm_dirty {
+            return value(TrashResult {
+                path: params.path,
+                trashed: false,
+                needs_worktree_confirm: true,
+                worktree: Some(entry),
+                worktree_removed: false,
+            });
+        }
         if let Some((thread, _)) = self.by_path(&path) {
             self.close(&thread).await;
         }
+        #[cfg(feature = "workspace")]
+        let (moved, worktree, worktree_removed) = self.execute_session_trash(path, plan).await?;
+        #[cfg(not(feature = "workspace"))]
+        let (moved, worktree, worktree_removed) = {
+            let _ = policy;
+            let home = self.home.clone();
+            let moved = blocking(move |cancel| move_session_to_trash(&home, &path, cancel)).await?;
+            (moved, None, false)
+        };
+        value(TrashResult {
+            path: moved.display().to_string(),
+            trashed: true,
+            needs_worktree_confirm: false,
+            worktree,
+            worktree_removed,
+        })
+    }
+
+    #[cfg(feature = "workspace")]
+    async fn prepare_session_trash(
+        &self,
+        path: &Path,
+        policy: TrashWorktreePolicy,
+    ) -> Result<workspace::TrashPlan, rpc::Error> {
         let home = self.home.clone();
-        // Rewind storage follows the session, next to it in the trash.
-        let moved = blocking(move |cancel| {
-            let rewind = turns::storage_of(&home, &path, cancel);
-            let moved = tiechui_session::trash(&home, &path).map_err(|e| e.to_string())?;
-            if let Some(rewind) = rewind {
-                std::fs::rename(&rewind, moved.with_extension("rewind"))
-                    .map_err(|e| format!("{}: {e}", rewind.display()))?;
-            }
-            Ok(moved)
+        let path = path.to_path_buf();
+        let live_info = self
+            .by_path(&path)
+            .map(|(thread, live)| (thread.0, live.cwd.clone()));
+        let live_sessions = self.live_session_cwds();
+        blocking(move |cancel| {
+            workspace::plan_session_trash(&home, &path, live_info, policy, &live_sessions, cancel)
+        })
+        .await
+    }
+
+    #[cfg(feature = "workspace")]
+    async fn execute_session_trash(
+        &self,
+        path: PathBuf,
+        plan: workspace::TrashPlan,
+    ) -> Result<
+        (
+            PathBuf,
+            Option<tiechui_protocol::workspace::WorktreeEntry>,
+            bool,
+        ),
+        rpc::Error,
+    > {
+        let home = self.home.clone();
+        let remove_target = plan.remove_force.and_then(|force| {
+            plan.worktree
+                .as_ref()
+                .map(|w| (PathBuf::from(&w.path), force))
+        });
+        let (moved, removed) = blocking(move |cancel| {
+            let moved = move_session_to_trash(&home, &path, cancel)?;
+            let removed = match remove_target {
+                Some((wt_path, force)) => {
+                    workspace::remove_trashed_worktree(&home, &wt_path, force)?
+                }
+                None => false,
+            };
+            let _ = tiechui_workspace::prune_orphan_worktree_records(&home);
+            Ok((moved, removed))
         })
         .await?;
-        value(PathParams {
-            path: moved.display().to_string(),
-        })
+        if removed {
+            self.prune_worktree_cleanup_cache();
+        } else if plan.worktree.as_ref().is_some_and(|w| w.dirty) {
+            self.invalidate_and_wake_worktree_cleanup();
+        }
+        Ok((moved, plan.worktree, removed))
+    }
+
+    fn invalidate_and_wake_worktree_cleanup(&self) {
+        #[cfg(feature = "workspace")]
+        {
+            *lock(&self.cleanup_status) = None;
+        }
+        self.worktree_sweep.notify_one();
+    }
+
+    #[cfg(feature = "workspace")]
+    pub(super) fn prune_worktree_cleanup_cache(&self) {
+        let mut guard = lock(&self.cleanup_status);
+        if let Some(status) = guard.as_mut() {
+            tiechui_workspace::prune_cleanup_status(&self.home, status);
+        }
+    }
+
+    #[cfg(feature = "workspace")]
+    fn spawn_worktree_cleanup(self: &Arc<Self>) {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let server = self.clone();
+            *lock(&self.cleanup_task) = Some(rt.spawn(server.clean_worktrees_loop()));
+        }
+    }
+
+    #[cfg(feature = "workspace")]
+    async fn clean_worktrees_loop(self: Arc<Self>) {
+        let mut force = false;
+        loop {
+            if let Err(error) = self.run_worktree_cleanup(force).await {
+                eprintln!("chui app-server: worktree cleanup: {}", error.message);
+            }
+            tokio::select! {
+                () = self.shutdown.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_secs(60 * 60)) => force = true,
+                () = self.worktree_sweep.notified() => force = false,
+            }
+        }
+    }
+
+    #[cfg(feature = "workspace")]
+    pub(super) async fn run_worktree_cleanup(
+        &self,
+        force: bool,
+    ) -> Result<tiechui_protocol::workspace::WorktreeCleanupStatus, rpc::Error> {
+        let _guard = self.cleanup_lock.lock().await;
+        if !force && let Some(cached) = lock(&self.cleanup_status).clone() {
+            return Ok(cached);
+        }
+        let home = self.home.clone();
+        let live = self.live_worktree_sessions();
+        let status = blocking(move |_| workspace::sweep_worktrees(&home, &live)).await?;
+        *lock(&self.cleanup_status) = Some(status.clone());
+        Ok(status)
+    }
+
+    #[cfg(feature = "workspace")]
+    pub(super) async fn worktree_cleanup_status(
+        &self,
+    ) -> Result<tiechui_protocol::workspace::WorktreeCleanupStatus, rpc::Error> {
+        let mut status = self.run_worktree_cleanup(false).await?;
+        tiechui_workspace::prune_cleanup_status(&self.home, &mut status);
+        *lock(&self.cleanup_status) = Some(status.clone());
+        Ok(status)
+    }
+
+    #[cfg(feature = "workspace")]
+    fn live_worktree_sessions(&self) -> Vec<tiechui_workspace::LiveWorktreeSession> {
+        lock(&self.sessions)
+            .iter()
+            .map(|(thread, live)| tiechui_workspace::LiveWorktreeSession {
+                session_id: thread.0.clone(),
+                cwd: live.cwd.clone(),
+                path: Some(live.path.clone()),
+                title: None,
+            })
+            .collect()
     }
 
     async fn turn(&self, method: &str, params: Value) -> Reply {
@@ -1304,7 +1517,99 @@ impl Server {
         let path = self.live(&params.thread_id)?.path.clone();
         let home = self.home.clone();
         let method = method.to_owned();
-        blocking(move |cancel| turns::handle(&home, &path, &method, &params.item_id, cancel)).await
+        let live_sessions = self.live_session_cwds();
+        blocking(move |cancel| {
+            turns::handle(
+                &home,
+                &path,
+                &method,
+                &params.item_id,
+                &live_sessions,
+                cancel,
+            )
+        })
+        .await
+    }
+
+    async fn session_rewind(&self, params: Value) -> Reply {
+        let params: SessionRewindParams = parse(params)?;
+        let live = self.live(&params.thread_id)?;
+        let before = lock(&live.projection).epoch;
+        let path = live.path.clone();
+        let home = self.home.clone();
+        let item_id = params.item_id.clone();
+        let mode = params.mode;
+        let live_sessions = self.live_session_cwds();
+        let prepared = blocking(move |cancel| {
+            turns::prepare_session_rewind(&home, &path, &item_id, mode, &live_sessions, cancel)
+        })
+        .await?;
+        let (at, discarded, snapshot_tree) = match prepared {
+            turns::PreparedRewind::PatchConflicts {
+                conflicts,
+                commands,
+            } => {
+                return value(SessionRewindResult {
+                    mode,
+                    submission_id: None,
+                    conflicts,
+                    commands,
+                });
+            }
+            turns::PreparedRewind::Proceed {
+                at,
+                discarded,
+                snapshot_tree,
+            } => (at, discarded, snapshot_tree),
+        };
+        let submitted = self
+            .submit(
+                &params.thread_id,
+                Op::Branch {
+                    entry_id: at.branch_target.clone(),
+                },
+            )
+            .await?;
+        live.started
+            .clone()
+            .wait_for(|epoch| epoch.is_some_and(|epoch| epoch.0 > before.0))
+            .await
+            .map_err(|_| internal("session ended"))?;
+        let commands = at.rewind_commands.clone();
+        let conflicts = blocking(move |cancel| {
+            turns::apply_session_rewind_files(
+                mode,
+                &at,
+                &discarded,
+                snapshot_tree.as_deref(),
+                cancel,
+            )
+        })
+        .await?;
+        value(SessionRewindResult {
+            mode,
+            submission_id: Some(submitted.submission_id),
+            conflicts,
+            commands,
+        })
+    }
+
+    fn live_session_cwds(&self) -> turns::LiveSessionList {
+        #[cfg(feature = "workspace")]
+        {
+            lock(&self.sessions)
+                .iter()
+                .map(|(thread, live)| tiechui_workspace::LiveSessionCwd {
+                    session_id: thread.0.clone(),
+                    cwd: live.cwd.clone(),
+                    path: Some(live.path.clone()),
+                })
+                .collect()
+        }
+        #[cfg(not(feature = "workspace"))]
+        {
+            Vec::new()
+        }
     }
 
     async fn trust(&self, params: Value) -> Reply {
@@ -1314,13 +1619,14 @@ impl Server {
             let cwd = PathBuf::from(&params.cwd)
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", params.cwd))?;
+            let trust_cwd = crate::trust::effective_cwd(&home, &cwd);
             let store = TrustStore::new(&home);
             if let Some(allow) = params.allow {
                 store
-                    .set(&cwd, Some(allow), cancel)
+                    .set(&trust_cwd, Some(allow), cancel)
                     .map_err(|e| e.to_string())?;
             }
-            store.get(&cwd, cancel).map_err(|e| e.to_string())
+            store.get(&trust_cwd, cancel).map_err(|e| e.to_string())
         })
         .await?;
         value(TrustResult { allowed })
@@ -1332,6 +1638,27 @@ fn is_settled_event(kind: &EventKind) -> bool {
         kind,
         EventKind::TurnCompleted { .. } | EventKind::CompactionEnded { .. }
     ) || projection::is_btw_settled(kind)
+}
+
+fn move_session_to_trash(
+    home: &Path,
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<PathBuf, String> {
+    let rewind = turns::storage_of(home, path, cancel);
+    let moved = tiechui_session::trash(home, path).map_err(|e| e.to_string())?;
+    if let Some(rewind) = rewind {
+        std::fs::rename(&rewind, moved.with_extension("rewind"))
+            .map_err(|e| format!("{}: {e}", rewind.display()))?;
+    }
+    Ok(moved)
+}
+
+fn worktree_cleanup_key(params: &Value) -> bool {
+    matches!(
+        params["key"].as_str(),
+        Some("worktrees.auto_clean_idle_days" | "worktrees.auto_clean_on_session_delete")
+    )
 }
 
 fn runtime_config_key(params: &Value) -> bool {

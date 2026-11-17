@@ -7,6 +7,12 @@ mod ports;
 mod search;
 mod terminal;
 mod watch;
+mod worktree;
+mod worktree_carry;
+mod worktree_cleanup;
+mod worktree_isolation;
+mod worktree_script;
+mod worktree_snapshot;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +26,25 @@ pub use git::{
 pub use search::search;
 use tiechui_protocol::workspace::{
     PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
+};
+pub use worktree::{
+    CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
+    ensure_worktree_checkout, list_worktrees_with_env, managed_worktree_with_env,
+    project_worktree_paths, prune_orphan_worktree_records, remove_worktree_with_env,
+    session_worktree, worktree_project_root,
+};
+pub use worktree_cleanup::{
+    LiveWorktreeSession, WorktreeCleanupPolicy, cleanup_worktrees, cleanup_worktrees_with_env,
+    prune_cleanup_status,
+};
+pub use worktree_isolation::{
+    LiveSessionCwd, PathOverlap, WorktreeIsolationConflict, check_worktree_isolation,
+};
+pub use worktree_snapshot::{
+    DEFAULT_SNAPSHOT_TIMEOUT, WorktreeSnapshot, capture_worktree_snapshot,
+    capture_worktree_snapshot_cancellable, capture_worktree_snapshot_with_env, checkpoint_ref_name,
+    diff_worktree_snapshot_with_env, has_worktree_snapshot_tree, restore_worktree_snapshot,
+    restore_worktree_snapshot_cancellable, restore_worktree_snapshot_with_env,
 };
 
 /// Receives a notification's method and params.
@@ -62,7 +87,15 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(sink: Sink) -> Self {
-        let ports = ports::PortMonitor::new(sink.clone());
+        Self::new_inner(None, sink)
+    }
+
+    pub fn with_home(home: PathBuf, sink: Sink) -> Self {
+        Self::new_inner(Some(home), sink)
+    }
+
+    fn new_inner(home: Option<PathBuf>, sink: Sink) -> Self {
+        let ports = ports::PortMonitor::new(home, sink.clone());
         Self {
             sink,
             watches: Mutex::default(),
