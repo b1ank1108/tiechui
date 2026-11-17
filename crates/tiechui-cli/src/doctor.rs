@@ -152,6 +152,10 @@ fn is_managed_worktree_dir(relative: &Path) -> bool {
     relative.starts_with("worktrees") && relative.components().count() == 3
 }
 
+fn is_scratch_workspace_dir(relative: &Path) -> bool {
+    relative.starts_with("scratch") && relative.components().count() == 2
+}
+
 fn check_worktree_registry(path: &Path, findings: &mut Vec<String>) -> Result<()> {
     mode(path, 0o600, findings)?;
     let value = json(path)?;
@@ -169,7 +173,7 @@ fn walk_dir(
     cancel: &CancellationToken,
 ) -> Result<()> {
     mode(path, 0o700, findings)?;
-    if is_managed_worktree_dir(relative) {
+    if is_managed_worktree_dir(relative) || is_scratch_workspace_dir(relative) {
         return Ok(());
     }
     for entry in fs::read_dir(path)? {

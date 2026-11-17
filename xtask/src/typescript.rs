@@ -56,6 +56,8 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::InitializeResult>();
                 d.visit::<app::DaemonStatus>();
                 d.visit::<app::SessionListParams>();
+                d.visit::<app::ScratchListParams>();
+                d.visit::<app::ScratchOpenParams>();
                 d.visit::<app::SessionWorktree>();
                 d.visit::<app::SessionSummary>();
                 d.visit::<app::SessionOpenParams>();
@@ -119,6 +121,10 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::HookApproveParams>();
                 d.visit::<app::SessionEvent>();
                 d.visit::<app::SessionClosed>();
+                d.visit::<app::BtwOpenParams>();
+                d.visit::<app::BtwAskParams>();
+                d.visit::<app::BtwModelParams>();
+                d.visit::<app::ApprovalParams>();
                 d.visit::<workspace::RootParams>();
                 d.visit::<workspace::FileParams>();
                 d.visit::<workspace::FileTree>();
@@ -167,6 +173,10 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<tiechui_protocol::ContextSnapshot>();
                 d.visit::<tiechui_protocol::ShellsView>();
                 d.visit::<tiechui_protocol::SubagentsView>();
+                d.visit::<tiechui_protocol::BtwView>();
+                d.visit::<tiechui_protocol::BtwMessage>();
+                d.visit::<tiechui_protocol::BtwEvent>();
+                d.visit::<tiechui_protocol::BtwAction>();
             }),
         ),
     ];
