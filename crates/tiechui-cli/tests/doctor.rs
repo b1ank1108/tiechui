@@ -270,6 +270,65 @@ fn doctor_accepts_managed_worktree_user_files_and_symlinks_while_checking_worktr
     assert!(!broken_out.contains(".env"), "{broken_out}");
 }
 
+#[test]
+fn doctor_checks_scratch_root_and_entries_while_ignoring_interior_user_files() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let debug = root.path().join("target/debug");
+    fs::create_dir_all(&debug).unwrap();
+    let binary = debug.join("chui");
+    fs::hard_link(env!("CARGO_BIN_EXE_chui"), &binary).unwrap();
+
+    let external_file = root.path().join("external.txt");
+    fs::write(&external_file, "hello\n").unwrap();
+
+    let profile = root.path().join("profile");
+    let scratch = profile.join("scratch");
+    let entry = scratch.join("2026-11-17-测试脚本-0123abcd");
+    let sub = entry.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    for dir in [&profile, &scratch, &entry] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&external_file, entry.join("linked.txt")).unwrap();
+
+    let run_doctor = || {
+        let out = Command::new(&binary)
+            .env_clear()
+            .current_dir(&debug)
+            .args(["doctor", "--profile"])
+            .arg(&profile)
+            .output()
+            .unwrap();
+        (out.status.code(), String::from_utf8(out.stdout).unwrap())
+    };
+
+    let (code, ok_out) = run_doctor();
+    assert_eq!(code, Some(0), "{ok_out}");
+    assert!(ok_out.contains("Doctor: OK"), "{ok_out}");
+
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, bad_entry_out) = run_doctor();
+    assert_eq!(code, Some(2), "{bad_entry_out}");
+    assert!(
+        bad_entry_out.contains("2026-11-17-测试脚本-0123abcd: expected permissions 0700"),
+        "{bad_entry_out}"
+    );
+    assert!(!bad_entry_out.contains("/sub:"), "{bad_entry_out}");
+    assert!(!bad_entry_out.contains("linked.txt"), "{bad_entry_out}");
+
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, bad_root_out) = run_doctor();
+    assert_eq!(code, Some(2), "{bad_root_out}");
+    assert!(
+        bad_root_out.contains("scratch: expected permissions 0700"),
+        "{bad_root_out}"
+    );
+}
+
 fn walk(path: &Path) -> Vec<(std::path::PathBuf, Vec<u8>, u32)> {
     let mut result = vec![];
     for entry in fs::read_dir(path).unwrap() {

@@ -51,6 +51,14 @@ pub struct SessionListParams {
     pub archived: bool,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ScratchListParams {
+    /// Include archived scratch sessions.
+    #[serde(default)]
+    pub archived: bool,
+}
+
 /// What an open session is doing.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -96,13 +104,25 @@ pub struct SessionSummary {
     pub live: Option<LiveState>,
 }
 
-/// Opens the session file at `path`, or starts a new session in `cwd`.
+/// Allocates a new `$TIECHUI_HOME/scratch/<YYYY-MM-DD>-<summary>-<short_id>` directory for `session/open`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ScratchOpenParams {
+    /// Text from the first message used to derive the scratch directory's summary segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Opens the session file at `path`, starts a new session in `cwd`, or allocates a new scratch
+/// directory when `scratch` is set.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SessionOpenParams {
     pub cwd: Option<String>,
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<ScratchOpenParams>,
     /// `<provider>/<model id>`.
     pub model: Option<String>,
     pub thinking: Option<ThinkingLevel>,

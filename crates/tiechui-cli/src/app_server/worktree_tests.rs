@@ -43,7 +43,7 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn init_repo(root: &Path) {
+pub(super) fn init_repo(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
     git(root, &["init", "-b", "main"]);
     std::fs::write(root.join("README.md"), "hello\n").unwrap();
@@ -70,7 +70,7 @@ fn chat_entry(role: Role, body: &str, origin: Option<ModelRef>) -> EntryKind {
     }
 }
 
-fn append_turn(path: &Path, prompt: &str) {
+pub(super) fn append_turn(path: &Path, prompt: &str) {
     let cancel = CancellationToken::new();
     let mut store = SessionStore::open(path, &cancel).unwrap();
     store
@@ -315,7 +315,7 @@ impl wiremock::Respond for SequenceSse {
     }
 }
 
-fn sse_tool_calls(calls: &[(&str, &str, Value)]) -> String {
+pub(super) fn sse_tool_calls(calls: &[(&str, &str, Value)]) -> String {
     let wire_calls: Vec<Value> = calls
         .iter()
         .enumerate()
@@ -343,7 +343,7 @@ fn sse_tool_calls(calls: &[(&str, &str, Value)]) -> String {
     )
 }
 
-async fn setup_mock_server_and_client(
+pub(super) async fn setup_mock_server_and_client(
     home: &Path,
     replies: Vec<String>,
 ) -> (MockServer, TestClient) {
@@ -366,7 +366,11 @@ async fn setup_mock_server_and_client(
     (mock, client)
 }
 
-async fn run_user_turn(client: &mut TestClient, thread_id: &ThreadId, prompt: &str) -> String {
+pub(super) async fn run_user_turn(
+    client: &mut TestClient,
+    thread_id: &ThreadId,
+    prompt: &str,
+) -> String {
     let _: Value = client
         .call_ok(
             "session/submit",
@@ -1195,7 +1199,7 @@ async fn open_yolo_two_turns(client: &mut TestClient, cwd: &Path) -> (Snapshot, 
     (opened, turn1, turn2)
 }
 
-async fn assert_doctor_ok(home: &Path) {
+pub(super) async fn assert_doctor_ok(home: &Path) {
     let doctor_home = home.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let matches = clap::Command::new("doctor")
@@ -1208,7 +1212,7 @@ async fn assert_doctor_ok(home: &Path) {
     .unwrap();
 }
 
-async fn new_configured_client(home: &Path) -> TestClient {
+pub(super) async fn new_configured_client(home: &Path) -> TestClient {
     let mut client = TestClient::new(Server::new(home.to_path_buf()));
     let _: Value = client
         .call_ok(
