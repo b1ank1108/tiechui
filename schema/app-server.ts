@@ -594,11 +594,7 @@ export type ScratchListParams = {
  */
 archived: boolean, };
 
-export type ScratchOpenParams = { 
-/**
- * Text from the first message used to derive the scratch directory's summary segment.
- */
-summary?: string | null, };
+export type ScratchOpenParams = Record<symbol, never>;
 
 export type SearchGroup = { path: string, hits: Array<SearchHit>, };
 

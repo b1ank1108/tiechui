@@ -24,9 +24,7 @@ pub use git::{
     branches_with_env, commit_diff_with_env, compare_with_env, log_with_env, pull_request_with_env,
     run_with_env, show_with_env, status_with_env,
 };
-pub use scratch::{
-    allocate_scratch_dir, is_scratch_dir, list_scratch_dirs, sanitize_scratch_summary,
-};
+pub use scratch::{default_scratch_dir, is_scratch_dir, list_scratch_dirs};
 pub use search::search;
 use tiechui_protocol::workspace::{
     PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,

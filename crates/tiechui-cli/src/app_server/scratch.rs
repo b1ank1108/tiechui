@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tiechui_protocol::app::ScratchOpenParams;
 #[cfg(feature = "workspace")]
 use tiechui_protocol::app::{LiveState, ScratchListParams, SessionSummary};
 use tiechui_protocol::rpc;
@@ -29,36 +28,21 @@ pub(super) fn handles(method: &str) -> bool {
 pub(super) async fn open_scratch(
     server: &Arc<Server>,
     options: Options,
-    scratch: ScratchOpenParams,
 ) -> Result<Arc<Live>, rpc::Error> {
     #[cfg(not(feature = "workspace"))]
     {
-        let _ = (server, options, scratch);
+        let _ = (server, options);
         Err(super::internal("workspace feature is disabled"))
     }
     #[cfg(feature = "workspace")]
     {
         let home = server.home.clone();
-        let summary = scratch.summary;
-        let scratch_cwd = blocking(move |_| {
-            tiechui_workspace::allocate_scratch_dir(&home, summary.as_deref()).map_err(|e| e.0)
-        })
-        .await?;
-        match server
-            .start(
-                options,
-                Open::New(scratch_cwd.clone()),
-                SessionEpoch(0),
-                None,
-            )
-            .await
-        {
-            Ok((_, live)) => Ok(live),
-            Err(error) => {
-                let _ = std::fs::remove_dir(&scratch_cwd);
-                Err(error)
-            }
-        }
+        let cwd = blocking(move |_| tiechui_workspace::default_scratch_dir(&home).map_err(|e| e.0))
+            .await?;
+        let (_, live) = server
+            .start(options, Open::New(cwd), SessionEpoch(0), None)
+            .await?;
+        Ok(live)
     }
 }
 
