@@ -939,14 +939,14 @@ impl Server {
                     .await?;
                 Ok((live, false))
             }
-            (None, None, Some(scratch)) => {
+            (None, None, Some(_)) => {
                 let options = Options {
                     model: params.model,
                     thinking,
                     mode: params.mode,
                     ..Default::default()
                 };
-                let live = scratch::open_scratch(self, options, scratch).await?;
+                let live = scratch::open_scratch(self, options).await?;
                 Ok((live, true))
             }
             _ => Err(invalid("give exactly one of path, cwd and scratch")),

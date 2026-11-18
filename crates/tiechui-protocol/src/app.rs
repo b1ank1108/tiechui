@@ -104,17 +104,13 @@ pub struct SessionSummary {
     pub live: Option<LiveState>,
 }
 
-/// Allocates a new `$TIECHUI_HOME/scratch/<YYYY-MM-DD>-<summary>-<short_id>` directory for `session/open`.
+/// Starts `session/open` in the shared `$TIECHUI_HOME/scratch/default` directory.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ScratchOpenParams {
-    /// Text from the first message used to derive the scratch directory's summary segment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-}
+pub struct ScratchOpenParams {}
 
-/// Opens the session file at `path`, starts a new session in `cwd`, or allocates a new scratch
-/// directory when `scratch` is set.
+/// Opens the session file at `path`, starts a new session in `cwd`, or starts one in the shared
+/// scratch directory when `scratch` is set.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

@@ -14,29 +14,6 @@ use super::worktree_tests::{
     setup_mock_server_and_client, sse_tool_calls,
 };
 
-fn assert_scratch_dir_shape(home: &Path, cwd: &str, expected_summary: &str) {
-    let path = Path::new(cwd);
-    assert_eq!(path.parent(), Some(home.join("scratch").as_path()));
-    let name = path.file_name().unwrap().to_str().unwrap();
-    let parts: Vec<&str> = name.split('-').collect();
-    let expected_parts: Vec<&str> = expected_summary.split('-').collect();
-    assert_eq!(parts.len(), 3 + expected_parts.len() + 1, "name: {name}");
-    assert_eq!(parts[0].len(), 4);
-    assert_eq!(parts[1].len(), 2);
-    assert_eq!(parts[2].len(), 2);
-    assert_eq!(
-        &parts[3..3 + expected_parts.len()],
-        expected_parts.as_slice()
-    );
-    let short_id = *parts.last().unwrap();
-    assert_eq!(short_id.len(), 8);
-    assert!(
-        short_id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    );
-}
-
 #[cfg(unix)]
 fn assert_mode_0700(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -56,31 +33,26 @@ async fn verify_invalid_and_failed_scratch_opens(client: &mut TestClient, home: 
     ] {
         assert!(client.call("session/open", bad).await.is_err());
     }
-    let before: Vec<_> = std::fs::read_dir(home.join("scratch"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
     assert!(
         client
             .call(
                 "session/open",
-                json!({ "scratch": { "summary": "bad-model" }, "model": "missing/model" })
+                json!({ "scratch": {}, "model": "missing/model" })
             )
             .await
             .is_err()
     );
-    let after: Vec<_> = std::fs::read_dir(home.join("scratch"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    assert_eq!(before.len(), after.len(), "failed open leaked scratch dir");
+    assert!(
+        home.join("scratch/default").is_dir(),
+        "failed open removed the shared scratch dir"
+    );
 }
 
 #[tokio::test]
-async fn scratch_open_allocates_private_dirs_executes_bash_in_scratch_cwd_and_passes_doctor() {
+async fn scratch_open_shares_private_default_dir_executes_bash_there_and_passes_doctor() {
     let Some(home) = isolated_home_child(
         "TC_SCRATCH_OPEN_BASH_HOME",
-        "app_server::scratch_tests::scratch_open_allocates_private_dirs_executes_bash_in_scratch_cwd_and_passes_doctor",
+        "app_server::scratch_tests::scratch_open_shares_private_default_dir_executes_bash_there_and_passes_doctor",
     ) else {
         return;
     };
@@ -107,31 +79,18 @@ async fn scratch_open_allocates_private_dirs_executes_bash_in_scratch_cwd_and_pa
 
     client.drain_notices();
     let first: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "scratch": { "summary": "分析 CSV 报表！" }, "mode": "yolo" }),
-        )
+        .call_ok("session/open", json!({ "scratch": {}, "mode": "yolo" }))
         .await;
     client.wait_sessions_changed().await;
-
     let second: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "scratch": { "summary": "分析 CSV 报表！" } }),
-        )
-        .await;
-    let fallback: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "scratch": { "summary": "???..." } }),
-        )
+        .call_ok("session/open", json!({ "scratch": {} }))
         .await;
 
-    assert_ne!(first.cwd, second.cwd);
+    let default = home.join("scratch/default");
+    assert_eq!(Path::new(&first.cwd), default);
+    assert_eq!(second.cwd, first.cwd);
+    assert_ne!(second.thread_id, first.thread_id);
     assert_eq!(first.worktree, None);
-    assert_scratch_dir_shape(&home, &first.cwd, "分析-CSV-报表");
-    assert_scratch_dir_shape(&home, &second.cwd, "分析-CSV-报表");
-    assert_scratch_dir_shape(&home, &fallback.cwd, "scratch");
 
     #[cfg(unix)]
     {
@@ -142,9 +101,7 @@ async fn scratch_open_allocates_private_dirs_executes_bash_in_scratch_cwd_and_pa
         )
         .unwrap();
         assert_mode_0700(&home.join("scratch"));
-        assert_mode_0700(Path::new(&first.cwd));
-        assert_mode_0700(Path::new(&second.cwd));
-        assert_mode_0700(Path::new(&fallback.cwd));
+        assert_mode_0700(&default);
     }
 
     verify_invalid_and_failed_scratch_opens(&mut client, &home).await;
@@ -220,7 +177,7 @@ async fn attach_lightweight_title_mock(client: &mut TestClient) -> MockServer {
     light
 }
 
-async fn seed_project_and_worktree_sessions(home: &Path, repo: &Path) {
+async fn seed_project_worktree_and_legacy_scratch_sessions(home: &Path, repo: &Path) -> Snapshot {
     let mut setup = new_configured_client(home).await;
     let wt: WorktreeEntry = setup
         .call_ok("worktree/create", json!({ "root": repo }))
@@ -237,9 +194,19 @@ async fn seed_project_and_worktree_sessions(home: &Path, repo: &Path) {
             json!({ "cwd": wt.path, "model": "fixture/m1" }),
         )
         .await;
+    let legacy_dir = home.join("scratch/2026-11-14-legacy-aaaa1111");
+    tiechui_config::private::create_dir_all(&legacy_dir).unwrap();
+    let legacy: Snapshot = setup
+        .call_ok(
+            "session/open",
+            json!({ "cwd": legacy_dir, "model": "fixture/m1" }),
+        )
+        .await;
     setup.close().await;
     append_turn(Path::new(&proj_snap.path), "project turn");
     append_turn(Path::new(&wt_snap.path), "worktree turn");
+    append_turn(Path::new(&legacy.path), "legacy scratch turn");
+    legacy
 }
 
 #[tokio::test]
@@ -254,23 +221,21 @@ async fn scratch_list_isolates_from_projects_tracks_live_and_archived_and_emits_
     let workspace_dir = tempfile::tempdir().unwrap();
     let repo = workspace_dir.path().join("normal-repo");
     init_repo(&repo);
-    seed_project_and_worktree_sessions(&home, &repo).await;
+    let legacy = seed_project_worktree_and_legacy_scratch_sessions(&home, &repo).await;
 
     let (_main_mock, mut client) =
         setup_mock_server_and_client(&home, vec![sse_chat("reply 1"), sse_chat("reply 2")]).await;
     let _light_mock = attach_lightweight_title_mock(&mut client).await;
 
     let s1: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "scratch": { "summary": "第一条临时" } }),
-        )
+        .call_ok("session/open", json!({ "scratch": {} }))
         .await;
     let live_before_turn: Vec<SessionSummary> = client.call_ok("scratch/list", json!({})).await;
-    assert_eq!(live_before_turn.len(), 1);
+    assert_eq!(live_before_turn.len(), 2);
     assert_eq!(live_before_turn[0].thread_id, s1.thread_id);
     assert_eq!(live_before_turn[0].cwd, s1.cwd);
     assert_eq!(live_before_turn[0].live, Some(LiveState::Idle));
+    assert_eq!(live_before_turn[1].thread_id, legacy.thread_id);
 
     client.drain_notices();
     let _ = run_user_turn(&mut client, &s1.thread_id, "帮我整理一段 JSON").await;
@@ -279,11 +244,9 @@ async fn scratch_list_isolates_from_projects_tracks_live_and_archived_and_emits_
 
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let s2: Snapshot = client
-        .call_ok(
-            "session/open",
-            json!({ "scratch": { "summary": "第二条临时" } }),
-        )
+        .call_ok("session/open", json!({ "scratch": {} }))
         .await;
+    assert_eq!(s2.cwd, s1.cwd);
     let _ = run_user_turn(&mut client, &s2.thread_id, "算一下磁盘占用").await;
     client.drain_title_tasks().await;
     let _: Value = client
@@ -291,12 +254,14 @@ async fn scratch_list_isolates_from_projects_tracks_live_and_archived_and_emits_
         .await;
 
     let listed: Vec<SessionSummary> = client.call_ok("scratch/list", json!({})).await;
-    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.len(), 3);
     assert_eq!(listed[0].thread_id, s2.thread_id);
     assert_eq!(listed[0].live, Some(LiveState::Idle));
     assert_eq!(listed[1].thread_id, s1.thread_id);
     assert_eq!(listed[1].live, None);
     assert_eq!(listed[1].title.as_deref(), Some("自动生成的临时标题"));
+    assert_eq!(listed[2].thread_id, legacy.thread_id);
+    assert_eq!(listed[2].cwd, legacy.cwd);
 
     let proj_sessions: Vec<SessionSummary> =
         client.call_ok("session/list", json!({ "cwd": repo })).await;
@@ -326,14 +291,14 @@ async fn scratch_list_isolates_from_projects_tracks_live_and_archived_and_emits_
     client.wait_sessions_changed().await;
 
     let active_only: Vec<SessionSummary> = client.call_ok("scratch/list", json!({})).await;
-    assert_eq!(active_only.len(), 1);
+    assert_eq!(active_only.len(), 2);
     assert_eq!(active_only[0].thread_id, s2.thread_id);
     assert_eq!(active_only[0].title.as_deref(), Some("手动重命名临时会话"));
 
     let with_archived: Vec<SessionSummary> = client
         .call_ok("scratch/list", json!({ "archived": true }))
         .await;
-    assert_eq!(with_archived.len(), 2);
+    assert_eq!(with_archived.len(), 3);
     assert!(
         with_archived
             .iter()
@@ -352,7 +317,8 @@ async fn scratch_list_isolates_from_projects_tracks_live_and_archived_and_emits_
     );
 
     let after_trash: Vec<SessionSummary> = client.call_ok("scratch/list", json!({})).await;
-    assert!(after_trash.is_empty());
+    assert_eq!(after_trash.len(), 1);
+    assert_eq!(after_trash[0].thread_id, legacy.thread_id);
 
     client.close().await;
 }
