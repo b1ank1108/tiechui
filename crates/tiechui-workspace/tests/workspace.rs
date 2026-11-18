@@ -172,6 +172,23 @@ fn search_reports_utf16_ranges_and_filters_paths() {
 }
 
 #[test]
+fn search_caps_hits_within_a_single_file() {
+    let dir = repo();
+    let root = dir.path();
+    write(root, "big.txt", &"needle\n".repeat(3000));
+    let result = ws::search(
+        root,
+        &SearchParams {
+            query: "needle".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((result.total, result.truncated), (2000, true));
+    assert_eq!(result.groups[0].hits.len(), 2000);
+}
+
+#[test]
 fn status_splits_staged_and_unstaged_changes() {
     let dir = repo();
     let root = dir.path();

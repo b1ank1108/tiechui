@@ -80,12 +80,11 @@ pub fn search(root: &Path, params: &SearchParams) -> Result<SearchResult> {
                 let hits = std::fs::read(entry.path())
                     .ok()
                     .and_then(fs::text)
-                    .map(|text| hits(&matcher, &text))
+                    .map(|text| hits(&matcher, &text, &total))
                     .unwrap_or_default();
                 if hits.is_empty() {
                     return WalkState::Continue;
                 }
-                total.fetch_add(hits.len() as u32, Ordering::Relaxed);
                 if let Ok(path) = entry.path().strip_prefix(root) {
                     lock(&groups).push(SearchGroup {
                         path: path.to_string_lossy().replace('\\', "/"),
@@ -105,7 +104,8 @@ pub fn search(root: &Path, params: &SearchParams) -> Result<SearchResult> {
     })
 }
 
-fn hits(matcher: &Regex, text: &str) -> Vec<SearchHit> {
+/// Each hit takes one slot of the shared `MAX_HITS` budget; the file stops when none is left.
+fn hits(matcher: &Regex, text: &str, budget: &AtomicU32) -> Vec<SearchHit> {
     let utf16 = |s: &str| s.encode_utf16().count() as u32;
     let mut hits = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -120,6 +120,14 @@ fn hits(matcher: &Regex, text: &str) -> Vec<SearchHit> {
             .map(|m| (utf16(&line[..m.start()]), utf16(&line[..m.end()])))
             .collect();
         if !ranges.is_empty() {
+            if budget
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    (n < MAX_HITS).then_some(n + 1)
+                })
+                .is_err()
+            {
+                break;
+            }
             hits.push(SearchHit {
                 line: index as u32 + 1,
                 text: line.to_owned(),

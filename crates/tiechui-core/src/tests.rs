@@ -468,6 +468,50 @@ impl Harness {
             .unwrap()
             .unwrap();
     }
+
+    /// Stops the actor and spawns a new one on the persisted session file.
+    async fn resume(
+        &mut self,
+        scripts: Vec<Script>,
+        model: ModelRef,
+        epoch: SessionEpoch,
+    ) -> (
+        SessionHandle,
+        CancellationToken,
+        mpsc::UnboundedReceiver<ModelRequest>,
+    ) {
+        self.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), &mut self.handle.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let path = self.path.clone();
+        let store = tokio::task::spawn_blocking(move || {
+            SessionStore::open(&path, &CancellationToken::new()).unwrap()
+        })
+        .await
+        .unwrap();
+        let (requests, received) = mpsc::unbounded_channel();
+        let provider = Arc::new(FakeProvider {
+            scripts: Mutex::new(scripts.into()),
+            requests,
+        });
+        let config = SessionConfig {
+            compaction: Default::default(),
+            model,
+            thinking: None,
+            providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
+            registry: Registry::default(),
+            retry: Arc::new(BoundedRetry::default()),
+            interactions: None,
+            epoch,
+            short_cache: false,
+        };
+        let shutdown = CancellationToken::new();
+        let handle = SessionActor::spawn(store, config, shutdown.clone());
+        (handle, shutdown, received)
+    }
 }
 
 async fn recv<T>(receiver: &mut mpsc::UnboundedReceiver<T>) -> T {
@@ -1839,36 +1883,13 @@ async fn model_and_thinking_changes_survive_reload_and_resume_without_changing_o
     assert_eq!(reloaded.model, ModelId("b".into()));
     assert_eq!(reloaded.reasoning, Some(ReasoningLevel::High));
     // Reopen in a new actor with conflicting defaults; persisted settings must win.
-    h.shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(5), &mut h.handle.task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let path = h.path.clone();
-    let store = tokio::task::spawn_blocking(move || {
-        SessionStore::open(&path, &CancellationToken::new()).unwrap()
-    })
-    .await
-    .unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(FakeProvider {
-        scripts: Mutex::new(vec![answer("resumed")].into()),
-        requests: tx,
-    });
-    let config = SessionConfig {
-        compaction: Default::default(),
-        model: origin("wrong-default"),
-        thinking: None,
-        providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
-        registry: Registry::default(),
-        retry: Arc::new(BoundedRetry::default()),
-        interactions: None,
-        epoch: SessionEpoch(4),
-        short_cache: false,
-    };
-    let shutdown = CancellationToken::new();
-    let mut resumed = SessionActor::spawn(store, config, shutdown.clone());
+    let (mut resumed, shutdown, mut rx) = h
+        .resume(
+            vec![answer("resumed")],
+            origin("wrong-default"),
+            SessionEpoch(4),
+        )
+        .await;
     let initial = resumed.events.recv().await.unwrap();
     let EventKind::ThreadStarted { thread, .. } = initial.event else {
         panic!("expected ThreadStarted");

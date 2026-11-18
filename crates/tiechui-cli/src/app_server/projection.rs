@@ -194,6 +194,21 @@ impl Projection {
                 self.latest.remove("compaction");
             }
             EventKind::SessionUpdated { .. } => self.keep("session", event),
+            EventKind::TokenUsageUpdated { last, total, .. } => {
+                if let Some(Event {
+                    event:
+                        EventKind::SessionUpdated {
+                            context,
+                            total: kept,
+                            ..
+                        },
+                    ..
+                }) = self.latest.get_mut("session")
+                {
+                    *context = Some(*last);
+                    *kept = *total;
+                }
+            }
             EventKind::ModelsUpdated { .. } => self.keep("models", event),
             EventKind::CommandsUpdated { .. } => self.keep("commands", event),
             EventKind::ResourcesUpdated { .. } => self.keep("resources", event),
@@ -417,6 +432,43 @@ mod tests {
             json!({"kind": "retry_available", "available": true})
         );
         assert!(matches!(&snapshot[3].event, EventKind::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    fn snapshot_session_carries_the_latest_usage() {
+        use tiechui_protocol::{ModelInfo, ThinkingLevel, TokenUsage};
+
+        let usage = |input| TokenUsage {
+            input,
+            output: input / 50,
+            ..Default::default()
+        };
+        let mut p = Projection::default();
+        p.apply(&event(EventKind::SessionUpdated {
+            model: ModelInfo {
+                provider: "fixture".into(),
+                id: "model".into(),
+                context_window: 200000,
+                reasoning: false,
+                thinking_levels: vec![ThinkingLevel::Off],
+            },
+            thinking: ThinkingLevel::Off,
+            context: None,
+            total: TokenUsage::default(),
+        }));
+        for total in [100, 200] {
+            p.apply(&event(EventKind::TokenUsageUpdated {
+                turn_id: TurnId("turn".into()),
+                last: usage(100),
+                total: usage(total),
+            }));
+        }
+        let snapshot = p.snapshot();
+        assert!(matches!(
+            &snapshot[..],
+            [Event { event: EventKind::SessionUpdated { context: Some(context), total, .. }, .. }]
+                if *context == usage(100) && *total == usage(200)
+        ));
     }
 
     fn user(id: &str, parts: &[&str]) -> Item {

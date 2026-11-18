@@ -37,6 +37,28 @@ async fn conversation(h: &mut Harness) {
     }
 }
 
+async fn split_turn(turn_summary: &str) -> Harness {
+    let mut h = Harness::with_compaction(
+        vec![
+            answer("first"),
+            answer("second"),
+            answer("HISTORY_SUMMARY"),
+            answer(turn_summary),
+        ],
+        Arc::new(BoundedRetry::default()),
+        json!({"type":"object"}),
+        |_| {},
+        CompactionConfig {
+            enabled: false,
+            keep_recent_tokens: 0,
+            ..Default::default()
+        },
+    )
+    .await;
+    conversation(&mut h).await;
+    h
+}
+
 fn text(request: &ModelRequest) -> String {
     request
         .messages
@@ -219,33 +241,63 @@ async fn automatic_threshold_uses_usage_and_drains_queued_input_after_summary() 
     h.stop().await;
 }
 
-#[tokio::test]
-async fn cancellation_and_incomplete_or_tool_summaries_leave_session_unchanged() {
-    for failure in ["cancel", "length", "tool", "error"] {
-        let (_release, gate) = oneshot::channel();
-        let script = match failure {
-            "cancel" => Script {
-                error: None,
-                steps: VecDeque::from([Step::Wait(gate)]),
+/// Entries appended after the first `from`, which must all record failed summary usage.
+async fn failed_usage(h: &Harness, from: usize) -> Vec<Usage> {
+    h.snapshot().await.entries()[from..]
+        .iter()
+        .map(|entry| match &entry.kind {
+            EntryKind::Custom { kind, data } if kind == compaction::FAILED_SUMMARY_USAGE => {
+                serde_json::from_value(data.clone()).unwrap()
+            }
+            other => panic!("unexpected entry {other:?}"),
+        })
+        .collect()
+}
+
+fn failing_summary(failure: &str, gate: oneshot::Receiver<()>) -> Script {
+    match failure {
+        "cancel" => Script {
+            error: None,
+            steps: VecDeque::from([Step::Wait(gate)]),
+        },
+        "length" => Script::events(vec![
+            StreamEvent::TextDelta {
+                index: 0,
+                delta: "partial".into(),
             },
-            "length" => Script::events(vec![
-                StreamEvent::TextDelta {
-                    index: 0,
-                    delta: "partial".into(),
-                },
-                finish(StopReason::Length),
-            ]),
-            "tool" => reply(vec![call("unexpected")]),
-            _ => Script::error(ErrorKind::Auth),
-        };
+            finish(StopReason::Length),
+        ]),
+        "tool" => reply(vec![call("unexpected")]),
+        "empty" => answer(""),
+        "blank" => answer(" \n\t "),
+        "thinking" => reply(vec![Content::Thinking {
+            text: "only thoughts".into(),
+            redacted: false,
+            opaque: None,
+        }]),
+        _ => Script::error(ErrorKind::Auth),
+    }
+}
+
+#[tokio::test]
+async fn cancelled_incomplete_tool_or_empty_summaries_leave_context_unchanged() {
+    for failure in [
+        "cancel", "length", "tool", "error", "empty", "blank", "thinking",
+    ] {
+        let (_release, gate) = oneshot::channel();
         let mut h = harness(
-            vec![answer("first"), answer("second"), script],
+            vec![
+                answer("first"),
+                answer("second"),
+                failing_summary(failure, gate),
+            ],
             false,
             |_| {},
         )
         .await;
         conversation(&mut h).await;
         let before = std::fs::read(&h.path).unwrap();
+        let entries = h.snapshot().await.entries().len();
         h.send(Op::Compact { instructions: None }).await;
         let turn = h.started_turn().await;
         h.request().await;
@@ -258,7 +310,13 @@ async fn cancellation_and_incomplete_or_tool_summaries_leave_session_unchanged()
             TurnStatus::Failed
         })
         .await;
-        assert_eq!(std::fs::read(&h.path).unwrap(), before, "{failure}");
+        assert!(std::fs::read(&h.path).unwrap().starts_with(&before));
+        let metered = !matches!(failure, "cancel" | "error");
+        assert_eq!(
+            failed_usage(&h, entries).await.len(),
+            usize::from(metered),
+            "{failure}"
+        );
         assert_eq!(h.tool.runs.load(Ordering::SeqCst), 0);
         assert!(h.seen.iter().any(|event| matches!(
             &event.event,
@@ -269,7 +327,8 @@ async fn cancellation_and_incomplete_or_tool_summaries_leave_session_unchanged()
     }
 }
 
-struct Contributor(bool);
+/// Cancels when `None`, otherwise supplies the summary.
+struct Contributor(Option<&'static str>);
 #[async_trait]
 impl Compactor for Contributor {
     async fn before_compact(
@@ -278,37 +337,37 @@ impl Compactor for Contributor {
         _: CancellationToken,
     ) -> Result<CompactionOutcome, ToolError> {
         assert_eq!(ctx.reason, CompactionReason::Manual);
-        Ok(if self.0 {
-            CompactionOutcome::Cancel
-        } else {
-            CompactionOutcome::Summary(CompactionResult {
-                summary: "MODULE_SUMMARY".into(),
+        Ok(match self.0 {
+            None => CompactionOutcome::Cancel,
+            Some(summary) => CompactionOutcome::Summary(CompactionResult {
+                summary: summary.into(),
                 first_kept_entry_id: ctx.preparation.first_kept_entry_id.clone(),
                 tokens_before: ctx.preparation.tokens_before,
                 usage: None,
                 details: json!({"module": true}),
-            })
+            }),
         })
     }
 }
 
 #[tokio::test]
-async fn contributors_cancel_or_supply_without_model_calls() {
-    for cancel in [true, false] {
+async fn contributors_cancel_supply_or_fail_empty_without_model_calls() {
+    for supplied in [None, Some("  "), Some("MODULE_SUMMARY")] {
         let mut h = harness(vec![answer("first"), answer("second")], false, |registry| {
-            registry.register_compactor(Arc::new(Contributor(cancel)))
+            registry.register_compactor(Arc::new(Contributor(supplied)))
         })
         .await;
         conversation(&mut h).await;
         let before = std::fs::read(&h.path).unwrap();
         h.send(Op::Compact { instructions: None }).await;
-        h.end(if cancel {
+        let fails = supplied.is_none_or(|summary| summary.trim().is_empty());
+        h.end(if fails {
             TurnStatus::Failed
         } else {
             TurnStatus::Completed
         })
         .await;
-        if cancel {
+        if fails {
             assert_eq!(std::fs::read(&h.path).unwrap(), before);
         } else {
             assert!(h.snapshot().await.entries().iter().any(|entry| matches!(&entry.kind, EntryKind::Compaction { summary, from_extension: true, .. } if summary == "MODULE_SUMMARY")));
@@ -343,24 +402,7 @@ async fn summary_retries_transient_failure_without_persisting_partial_attempt() 
 
 #[tokio::test]
 async fn split_turn_generates_separate_checkpoints_with_the_same_custom_focus() {
-    let mut h = Harness::with_compaction(
-        vec![
-            answer("first"),
-            answer("second"),
-            answer("HISTORY_SUMMARY"),
-            answer("TURN_SUMMARY"),
-        ],
-        Arc::new(BoundedRetry::default()),
-        json!({"type":"object"}),
-        |_| {},
-        CompactionConfig {
-            enabled: false,
-            keep_recent_tokens: 0,
-            ..Default::default()
-        },
-    )
-    .await;
-    conversation(&mut h).await;
+    let mut h = split_turn("TURN_SUMMARY").await;
     h.send(Op::Compact {
         instructions: Some("keep decisions".into()),
     })
@@ -378,6 +420,61 @@ async fn split_turn_generates_separate_checkpoints_with_the_same_custom_focus() 
     let store = h.snapshot().await;
     assert!(store.entries().iter().any(|entry| matches!(&entry.kind, EntryKind::Compaction { summary, .. } if summary == "HISTORY_SUMMARY\n\n---\n\n**Turn Context (split turn):**\n\nTURN_SUMMARY")));
     h.stop().await;
+}
+
+#[tokio::test]
+async fn empty_split_turn_summary_fails_without_a_checkpoint() {
+    let mut h = split_turn("").await;
+    h.send(Op::Compact { instructions: None }).await;
+    h.request().await;
+    h.request().await;
+    h.end(TurnStatus::Failed).await;
+    let store = h.snapshot().await;
+    assert!(
+        !store
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn failed_summary_usage_counts_toward_the_total_and_survives_resume() {
+    let mut h = harness(
+        vec![
+            answer("first"),
+            answer("second"),
+            Script::events(vec![finish(StopReason::Length)]),
+        ],
+        false,
+        |_| {},
+    )
+    .await;
+    conversation(&mut h).await;
+    h.send(Op::Compact { instructions: None }).await;
+    h.request().await;
+    h.end(TurnStatus::Failed).await;
+    let total = |events: &[Event]| {
+        events.iter().rev().find_map(|event| match &event.event {
+            EventKind::SessionUpdated { total, .. } => Some((total.input, total.output)),
+            _ => None,
+        })
+    };
+    assert_eq!(total(&h.seen), Some((9, 6)));
+    let (mut resumed, shutdown, _requests) =
+        h.resume(Vec::new(), origin("a"), SessionEpoch(1)).await;
+    let mut events = vec![];
+    while total(&events).is_none() {
+        events.push(
+            tokio::time::timeout(Duration::from_secs(5), resumed.events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(total(&events), Some((9, 6)));
+    shutdown.cancel();
 }
 
 #[tokio::test]
