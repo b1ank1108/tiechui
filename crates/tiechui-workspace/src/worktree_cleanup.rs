@@ -91,11 +91,13 @@ pub fn prune_cleanup_status(home: &Path, status: &mut WorktreeCleanupStatus) {
         .into_iter()
         .map(|rec| PathBuf::from(rec.path))
         .filter(|path| path.is_dir())
-        .map(|path| normalize_dir(&path))
+        .map(|path| crate::win_path::path_key(&normalize_dir(&path)))
         .collect();
-    status
-        .skipped
-        .retain(|item| active_paths.contains(&normalize_dir(Path::new(&item.path))));
+    status.skipped.retain(|item| {
+        active_paths.contains(&crate::win_path::path_key(&normalize_dir(Path::new(
+            &item.path,
+        ))))
+    });
 }
 
 fn init_states(records: &[Record]) -> Vec<WorktreeState> {

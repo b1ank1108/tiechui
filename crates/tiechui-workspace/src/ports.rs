@@ -25,23 +25,56 @@ impl RegisteredRoot {
         let path = root(&raw)?;
         let lexical = clean_path(&path);
         let resolved = resolve_existing_prefix(&lexical);
-        let score = (resolved.components().count(), resolved.as_os_str().len());
+        let score = score_for_path(&resolved);
         let mut forms = vec![resolved];
-        if !forms.contains(&lexical) {
+        if !forms
+            .iter()
+            .any(|existing| crate::win_path::paths_equal(existing, &lexical))
+        {
             forms.push(lexical);
         }
         Ok(Self { raw, forms, score })
     }
 
     fn matches_path(&self, candidate: &Path) -> bool {
+        if self
+            .forms
+            .iter()
+            .any(|f| crate::win_path::looks_like_windows_root(f))
+        {
+            let cand_norm =
+                crate::win_path::normalize_windows_path_key(&candidate.to_string_lossy());
+            return self.forms.iter().any(|form| {
+                let form_norm =
+                    crate::win_path::normalize_windows_path_key(&form.to_string_lossy());
+                crate::win_path::windows_path_starts_with(&cand_norm, &form_norm)
+            });
+        }
         self.forms.iter().any(|form| candidate.starts_with(form))
     }
 
     fn contains_root(&self, child: &Self) -> bool {
-        child
-            .forms
-            .iter()
-            .any(|cf| self.forms.iter().any(|sf| cf.starts_with(sf)))
+        child.forms.iter().any(|cf| self.matches_path(cf))
+    }
+
+    fn same_target(&self, other: &Self) -> bool {
+        self.raw == other.raw
+            || self.forms.iter().any(|sf| {
+                other
+                    .forms
+                    .iter()
+                    .any(|of| crate::win_path::paths_equal(sf, of))
+            })
+    }
+}
+
+fn score_for_path(path: &Path) -> (usize, usize) {
+    if crate::win_path::looks_like_windows_root(path) {
+        let norm = crate::win_path::normalize_windows_path_key(&path.to_string_lossy());
+        let depth = norm.split('\\').filter(|s| !s.is_empty()).count();
+        (depth, norm.len())
+    } else {
+        (path.components().count(), path.as_os_str().len())
     }
 }
 
@@ -172,15 +205,19 @@ impl PortMonitor {
         let candidate_roots = {
             let state = lock(&self.state);
             let mut roots = state.merged_roots();
-            if !roots.iter().any(|r| r.raw == target_root.raw) {
-                roots.push(target_root);
+            if !roots.iter().any(|r| r.same_target(&target_root)) {
+                roots.push(target_root.clone());
             }
             roots
         };
         let current = scan_attributed(&candidate_roots, self.home.as_deref());
         let owned = current.iter().any(|entry| {
             entry.pid == params.pid
-                && entry.root == params.root
+                && (entry.root == params.root
+                    || crate::win_path::paths_equal(
+                        Path::new(&entry.root),
+                        Path::new(&params.root),
+                    ))
                 && params.port.is_none_or(|port| entry.port == port)
         });
         if !owned {
@@ -296,6 +333,10 @@ fn spawn_watcher(monitor: Arc<PortMonitor>) {
 }
 
 pub(crate) fn clean_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let stripped = crate::win_path::strip_verbatim_path(path);
+    #[cfg(windows)]
+    let path = stripped.as_path();
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -310,6 +351,10 @@ pub(crate) fn clean_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn resolve_existing_prefix(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let stripped = crate::win_path::strip_verbatim_path(path);
+    #[cfg(windows)]
+    let path = stripped.as_path();
     if let Ok(canon) = path.canonicalize() {
         return clean_path(&canon);
     }
@@ -347,7 +392,7 @@ fn expand_worktree_roots(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<R
         .collect();
     let mut seen: BTreeSet<PathBuf> = expanded
         .iter()
-        .flat_map(|r| r.forms.iter().cloned())
+        .flat_map(|r| r.forms.iter().map(|f| crate::win_path::path_key(f)))
         .collect();
     for item in roots {
         let Ok(project_path) = root(&item.raw) else {
@@ -366,7 +411,8 @@ fn owner_raw_map(roots: &[RegisteredRoot]) -> BTreeMap<PathBuf, String> {
     let mut map = BTreeMap::new();
     for item in roots {
         for form in &item.forms {
-            map.entry(form.clone()).or_insert_with(|| item.raw.clone());
+            map.entry(crate::win_path::path_key(form))
+                .or_insert_with(|| item.raw.clone());
         }
     }
     map
@@ -380,7 +426,7 @@ fn remap_managed_root(
     let Some(owner) = crate::worktree::worktree_project_root(home, Path::new(&item.raw)) else {
         return item.clone();
     };
-    let Some(owner_raw) = owner_raws.get(&owner) else {
+    let Some(owner_raw) = owner_raws.get(&crate::win_path::path_key(&owner)) else {
         return item.clone();
     };
     let mut remapped = item.clone();
@@ -396,13 +442,16 @@ fn push_worktree_root(
 ) {
     let lexical = clean_path(wt_path);
     let resolved = resolve_existing_prefix(&lexical);
-    if !seen.insert(resolved.clone()) {
+    if !seen.insert(crate::win_path::path_key(&resolved)) {
         return;
     }
-    let score = (resolved.components().count(), resolved.as_os_str().len());
+    let score = score_for_path(&resolved);
     let mut forms = vec![resolved];
-    if !forms.contains(&lexical) {
-        seen.insert(lexical.clone());
+    if !forms
+        .iter()
+        .any(|existing| crate::win_path::paths_equal(existing, &lexical))
+    {
+        seen.insert(crate::win_path::path_key(&lexical));
         forms.push(lexical);
     }
     expanded.push(RegisteredRoot {
@@ -518,6 +567,8 @@ fn should_ignore_process(pid: u32, process: &str, cmdline: &str) -> bool {
         || cmdline.contains("--type=extensionHost")
         || cmdline.contains("/.vscode-server/")
         || cmdline.contains("/.cursor-server/")
+        || cmdline.contains(r"\.vscode-server\")
+        || cmdline.contains(r"\.cursor-server\")
 }
 
 fn attribute_process(proc_info: &ListenerProcess, roots: &[RegisteredRoot]) -> Option<usize> {
@@ -536,7 +587,12 @@ fn attribute_process(proc_info: &ListenerProcess, roots: &[RegisteredRoot]) -> O
     for idx in roots_in_cmdline_text(&proc_info.cmdline, roots) {
         consider_idx(idx);
     }
-    for token in candidate_arg_tokens(&proc_info.args, &proc_info.cmdline) {
+    let win_roots = roots.iter().any(|r| {
+        r.forms
+            .iter()
+            .any(|f| crate::win_path::looks_like_windows_root(f))
+    });
+    for token in candidate_arg_tokens(&proc_info.args, &proc_info.cmdline, win_roots) {
         if let Some(path) = resolve_token_path(&token, proc_info.cwd.as_deref())
             && let Some(idx) = best_root_for_path(&path, roots)
         {
@@ -571,27 +627,23 @@ fn roots_in_cmdline_text(cmdline: &str, roots: &[RegisteredRoot]) -> Vec<usize> 
     if cmdline.is_empty() {
         return Vec::new();
     }
-    let bytes = cmdline.as_bytes();
-    let is_left_boundary = |pos: usize| -> bool {
-        pos == 0 || matches!(bytes[pos - 1], b' ' | b'\t' | b'=' | b'"' | b'\'' | b':')
-    };
-    let is_right_boundary = |end: usize| -> bool {
-        end >= bytes.len()
-            || matches!(
-                bytes[end],
-                b'/' | b'\\' | b' ' | b'\t' | b'"' | b'\'' | b':'
-            )
-    };
-
+    let has_win = roots.iter().any(|r| {
+        r.forms
+            .iter()
+            .any(|f| crate::win_path::looks_like_windows_root(f))
+    });
+    let win_cmdline =
+        has_win.then(|| crate::win_path::normalize_windows_cmdline_for_search(cmdline));
     let mut matched = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
         let hit = root.forms.iter().any(|form| {
-            let Some(needle) = form.to_str().filter(|s| s.len() > 1) else {
-                return false;
-            };
-            cmdline
-                .match_indices(needle)
-                .any(|(pos, _)| is_left_boundary(pos) && is_right_boundary(pos + needle.len()))
+            if let Some(norm_cmd) = &win_cmdline
+                && crate::win_path::looks_like_windows_root(form)
+            {
+                let needle = crate::win_path::normalize_windows_path_key(&form.to_string_lossy());
+                return crate::win_path::windows_cmdline_contains_root(norm_cmd, &needle);
+            }
+            posix_cmdline_contains_root(cmdline, form)
         });
         if hit {
             matched.push(idx);
@@ -600,7 +652,27 @@ fn roots_in_cmdline_text(cmdline: &str, roots: &[RegisteredRoot]) -> Vec<usize> 
     matched
 }
 
-fn candidate_arg_tokens(args: &[String], cmdline: &str) -> Vec<String> {
+fn posix_cmdline_contains_root(cmdline: &str, form: &Path) -> bool {
+    let Some(needle) = form.to_str().filter(|s| s.len() > 1) else {
+        return false;
+    };
+    let bytes = cmdline.as_bytes();
+    let is_left = |pos: usize| -> bool {
+        pos == 0 || matches!(bytes[pos - 1], b' ' | b'\t' | b'=' | b'"' | b'\'' | b':')
+    };
+    let is_right = |end: usize| -> bool {
+        end >= bytes.len()
+            || matches!(
+                bytes[end],
+                b'/' | b'\\' | b' ' | b'\t' | b'"' | b'\'' | b':'
+            )
+    };
+    cmdline
+        .match_indices(needle)
+        .any(|(pos, _)| is_left(pos) && is_right(pos + needle.len()))
+}
+
+fn candidate_arg_tokens(args: &[String], cmdline: &str, win_roots: bool) -> Vec<String> {
     let mut out = Vec::new();
     let push_cleaned = |raw: &str, out: &mut Vec<String>| {
         let trimmed = raw.trim_matches(|c| c == '"' || c == '\'');
@@ -617,6 +689,11 @@ fn candidate_arg_tokens(args: &[String], cmdline: &str) -> Vec<String> {
     for arg in args {
         push_cleaned(arg, &mut out);
     }
+    if win_roots && args.is_empty() {
+        for parsed in crate::win_path::parse_windows_cmdline(cmdline) {
+            push_cleaned(&parsed, &mut out);
+        }
+    }
     for part in cmdline.split_whitespace() {
         push_cleaned(part, &mut out);
     }
@@ -628,7 +705,7 @@ fn resolve_token_path(token: &str, cwd: Option<&Path>) -> Option<PathBuf> {
         return None;
     }
     let path = Path::new(token);
-    if path.is_absolute() {
+    if path.is_absolute() || crate::win_path::looks_like_windows_root(path) {
         return Some(path.to_path_buf());
     }
     if token.contains('/') || (cfg!(windows) && token.contains('\\')) {
@@ -637,7 +714,7 @@ fn resolve_token_path(token: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn normalize_listen_endpoint(raw: &str) -> Option<(String, u16)> {
     let endpoint = raw.split(" (").next().unwrap_or(raw).trim();
     if endpoint.contains("->") {
@@ -672,7 +749,15 @@ fn process_display_name(comm: &str, args: &[String], cmdline: &str) -> String {
     } else {
         from_arg0.unwrap_or("unknown")
     };
-    chosen.trim_end_matches(".exe").to_owned()
+    strip_exe_suffix(chosen).to_owned()
+}
+
+fn strip_exe_suffix(name: &str) -> &str {
+    if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -959,80 +1044,340 @@ fn collect_listeners() -> Vec<ListenerProcess> {
 
 #[cfg(windows)]
 fn collect_listeners() -> Vec<ListenerProcess> {
-    let mut by_pid: BTreeMap<u32, Vec<(u16, String)>> = BTreeMap::new();
-    let self_pid = std::process::id();
-    for proto in ["TCP", "TCPv6"] {
-        let Ok(out) = Command::new("netstat").args(["-ano", "-p", proto]).output() else {
-            continue;
-        };
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 5 || !cols[3].eq_ignore_ascii_case("LISTENING") {
-                continue;
-            }
-            let Ok(pid) = cols[4].parse::<u32>() else {
-                continue;
-            };
-            if pid <= 4 || pid == self_pid {
-                continue;
-            }
-            if let Some((addr, port)) = normalize_listen_endpoint(cols[1]) {
-                by_pid.entry(pid).or_default().push((port, addr));
+    win_listeners::collect()
+}
+
+#[cfg(windows)]
+mod win_listeners {
+    use std::collections::{BTreeMap, HashMap};
+    use std::ffi::OsString;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::windows::ffi::OsStringExt;
+    use std::sync::{Mutex, OnceLock};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, GetLastError, HANDLE, NO_ERROR,
+    };
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCP_STATE_LISTEN, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+
+    use super::{ListenerProcess, lock, process_display_name};
+
+    const PROCESS_COMMAND_LINE_INFORMATION: i32 = 60;
+    const MAX_CMDLINE_BYTES: u32 = 1024 * 1024;
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtQueryInformationProcess(
+            process_handle: HANDLE,
+            process_information_class: i32,
+            process_information: *mut core::ffi::c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+
+    struct WinHandle(HANDLE);
+
+    impl Drop for WinHandle {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` was opened via `OpenProcess` and is owned exclusively here.
+            unsafe {
+                let _ = CloseHandle(self.0);
             }
         }
     }
-    if by_pid.is_empty() {
-        return Vec::new();
+
+    #[derive(Clone)]
+    struct CachedProcess {
+        creation_time: u64,
+        image_path: String,
+        cmdline: String,
+        args: Vec<String>,
     }
 
-    let filter = by_pid
-        .keys()
-        .map(|pid| format!("ProcessId={pid}"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let script = format!(
-        "Get-CimInstance Win32_Process -Filter '{filter}' | Select-Object ProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Compress"
-    );
-    let mut details: BTreeMap<u32, (String, String, Vec<String>)> = BTreeMap::new();
-    if let Ok(out) = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-    {
-        let items = match val {
-            serde_json::Value::Array(arr) => arr,
-            obj @ serde_json::Value::Object(_) => vec![obj],
-            _ => Vec::new(),
+    fn process_cache() -> &'static Mutex<HashMap<u32, CachedProcess>> {
+        static CACHE: OnceLock<Mutex<HashMap<u32, CachedProcess>>> = OnceLock::new();
+        CACHE.get_or_init(Mutex::default)
+    }
+
+    pub(super) fn collect() -> Vec<ListenerProcess> {
+        let self_pid = std::process::id();
+        let mut by_pid: BTreeMap<u32, Vec<(u16, String)>> = BTreeMap::new();
+        collect_ipv4(self_pid, &mut by_pid);
+        collect_ipv6(self_pid, &mut by_pid);
+        prune_cache(&by_pid);
+        if by_pid.is_empty() {
+            return Vec::new();
+        }
+        by_pid
+            .into_iter()
+            .map(|(pid, sockets)| {
+                let (image_path, cmdline, args) = resolve_process_meta(pid);
+                let process = process_display_name(&image_path, &args, &cmdline);
+                ListenerProcess {
+                    pid,
+                    process,
+                    cwd: None,
+                    cmdline,
+                    args,
+                    sockets,
+                }
+            })
+            .collect()
+    }
+
+    fn prune_cache(active: &BTreeMap<u32, Vec<(u16, String)>>) {
+        lock(process_cache()).retain(|pid, _| active.contains_key(pid));
+    }
+
+    fn fetch_tcp_table(af: u32) -> Option<(Vec<u32>, usize)> {
+        let mut size: u32 = 0;
+        // SAFETY: querying required byte count with a null buffer is documented by IpHlpApi.
+        let status = unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                af,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
         };
-        for item in items {
-            let Some(pid) = item["ProcessId"].as_u64().map(|n| n as u32) else {
-                continue;
+        if status != ERROR_INSUFFICIENT_BUFFER && status != NO_ERROR {
+            return None;
+        }
+        for _ in 0..4 {
+            let words = (size as usize).div_ceil(4).max(1);
+            let mut buf = vec![0_u32; words];
+            let mut actual = (words * 4) as u32;
+            // SAFETY: `buf` is 4-byte aligned and holds `actual` writable bytes.
+            let rc = unsafe {
+                GetExtendedTcpTable(
+                    buf.as_mut_ptr().cast(),
+                    &mut actual,
+                    0,
+                    af,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
             };
-            let name = item["Name"].as_str().unwrap_or_default().to_owned();
-            let cmd = item["CommandLine"].as_str().unwrap_or_default().to_owned();
-            let mut args = Vec::new();
-            if let Some(exe) = item["ExecutablePath"].as_str().filter(|s| !s.is_empty()) {
-                args.push(exe.to_owned());
+            if rc == NO_ERROR {
+                return Some((buf, (actual as usize).min(words * 4)));
             }
-            details.insert(pid, (name, cmd, args));
+            if rc != ERROR_INSUFFICIENT_BUFFER {
+                return None;
+            }
+            size = actual.saturating_add(256);
+        }
+        None
+    }
+
+    fn collect_ipv4(self_pid: u32, by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>) {
+        let Some((buf, byte_len)) = fetch_tcp_table(u32::from(AF_INET)) else {
+            return;
+        };
+        let rows_offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
+        if byte_len < rows_offset {
+            return;
+        }
+        let max_rows = (byte_len - rows_offset) / std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        let count = (buf[0] as usize).min(max_rows);
+        // SAFETY: `rows_offset + count * sizeof(row) <= byte_len` and alignment is 4 bytes.
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                buf.as_ptr()
+                    .byte_add(rows_offset)
+                    .cast::<MIB_TCPROW_OWNER_PID>(),
+                count,
+            )
+        };
+        for row in rows {
+            if row.dwState != MIB_TCP_STATE_LISTEN as u32 {
+                continue;
+            }
+            let pid = row.dwOwningPid;
+            let port = u16::from_be(row.dwLocalPort as u16);
+            if pid <= 4 || pid == self_pid || port == 0 {
+                continue;
+            }
+            let addr = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()).to_string();
+            by_pid.entry(pid).or_default().push((port, addr));
         }
     }
 
-    by_pid
-        .into_iter()
-        .map(|(pid, sockets)| {
-            let (name, cmdline, args) = details.remove(&pid).unwrap_or_default();
-            let process = process_display_name(&name, &args, &cmdline);
-            ListenerProcess {
+    fn collect_ipv6(self_pid: u32, by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>) {
+        let Some((buf, byte_len)) = fetch_tcp_table(u32::from(AF_INET6)) else {
+            return;
+        };
+        let rows_offset = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
+        if byte_len < rows_offset {
+            return;
+        }
+        let max_rows = (byte_len - rows_offset) / std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+        let count = (buf[0] as usize).min(max_rows);
+        // SAFETY: `rows_offset + count * sizeof(row) <= byte_len` and alignment is 4 bytes.
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                buf.as_ptr()
+                    .byte_add(rows_offset)
+                    .cast::<MIB_TCP6ROW_OWNER_PID>(),
+                count,
+            )
+        };
+        for row in rows {
+            if row.dwState != MIB_TCP_STATE_LISTEN as u32 {
+                continue;
+            }
+            let pid = row.dwOwningPid;
+            let port = u16::from_be(row.dwLocalPort as u16);
+            if pid <= 4 || pid == self_pid || port == 0 {
+                continue;
+            }
+            let v6 = Ipv6Addr::from(row.ucLocalAddr);
+            let addr = match v6.to_ipv4_mapped() {
+                Some(v4) => v4.to_string(),
+                None => v6.to_string(),
+            };
+            by_pid.entry(pid).or_default().push((port, addr));
+        }
+    }
+
+    fn resolve_process_meta(pid: u32) -> (String, String, Vec<String>) {
+        // SAFETY: `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION` does not touch target VM.
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if raw.is_null() {
+            return (String::new(), String::new(), Vec::new());
+        }
+        let handle = WinHandle(raw);
+        let creation_time = query_creation_time(handle.0);
+        if let Some(ct) = creation_time
+            && let Some(hit) = lock(process_cache())
+                .get(&pid)
+                .filter(|entry| entry.creation_time == ct)
+                .cloned()
+        {
+            return (hit.image_path, hit.cmdline, hit.args);
+        }
+        let image_path = query_image_path(handle.0).unwrap_or_default();
+        let cmdline = query_command_line(handle.0).unwrap_or_default();
+        let mut args = crate::win_path::parse_windows_cmdline(&cmdline);
+        if !image_path.is_empty() && !args.iter().any(|a| a == &image_path) {
+            args.insert(0, image_path.clone());
+        }
+        if let Some(ct) = creation_time {
+            lock(process_cache()).insert(
                 pid,
-                process,
-                cwd: None,
-                cmdline,
-                args,
-                sockets,
+                CachedProcess {
+                    creation_time: ct,
+                    image_path: image_path.clone(),
+                    cmdline: cmdline.clone(),
+                    args: args.clone(),
+                },
+            );
+        }
+        (image_path, cmdline, args)
+    }
+
+    fn query_creation_time(handle: HANDLE) -> Option<u64> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: `handle` is valid and all `FILETIME` pointers are writable stack locals.
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+        (ok != 0)
+            .then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    fn query_image_path(handle: HANDLE) -> Option<String> {
+        let mut cap: u32 = 512;
+        while cap <= 32_768 {
+            let mut buf = vec![0_u16; cap as usize];
+            let mut len = cap;
+            // SAFETY: `buf` has `len` writable `u16` elements.
+            let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len) };
+            if ok != 0 {
+                let raw = OsString::from_wide(&buf[..len as usize])
+                    .to_string_lossy()
+                    .into_owned();
+                return Some(crate::win_path::strip_windows_verbatim_str(&raw));
             }
-        })
-        .collect()
+            // SAFETY: reads thread-local Win32 error code immediately after failed call.
+            if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+                return None;
+            }
+            cap *= 2;
+        }
+        None
+    }
+
+    fn query_command_line(handle: HANDLE) -> Option<String> {
+        let mut needed: u32 = 1024;
+        for _ in 0..3 {
+            let words = (needed as usize).div_ceil(8).max(4);
+            let byte_cap = words * 8;
+            let mut buf = vec![0_u64; words];
+            let mut ret_len: u32 = 0;
+            // SAFETY: `buf` is 8-byte aligned and holds `byte_cap` writable bytes; queries kernel
+            // `ProcessCommandLineInformation` (60) without reading target PEB memory.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    handle,
+                    PROCESS_COMMAND_LINE_INFORMATION,
+                    buf.as_mut_ptr().cast(),
+                    byte_cap as u32,
+                    &mut ret_len,
+                )
+            };
+            if status >= 0 {
+                return decode_unicode_string(&buf, byte_cap);
+            }
+            if ret_len <= byte_cap as u32 || ret_len > MAX_CMDLINE_BYTES {
+                return None;
+            }
+            needed = ret_len.saturating_add(64);
+        }
+        None
+    }
+
+    fn decode_unicode_string(buf: &[u64], byte_cap: usize) -> Option<String> {
+        if byte_cap < std::mem::size_of::<UnicodeString>() {
+            return None;
+        }
+        // SAFETY: `buf` is 8-byte aligned and at least `size_of::<UnicodeString>()` bytes long.
+        let ustr = unsafe { std::ptr::read(buf.as_ptr().cast::<UnicodeString>()) };
+        if ustr.length == 0 {
+            return Some(String::new());
+        }
+        let base = buf.as_ptr() as usize;
+        let ptr = ustr.buffer as usize;
+        let len_bytes = usize::from(ustr.length);
+        if ustr.buffer.is_null()
+            || !ptr.is_multiple_of(std::mem::align_of::<u16>())
+            || ptr < base
+            || ptr.saturating_add(len_bytes) > base.saturating_add(byte_cap)
+        {
+            return None;
+        }
+        // SAFETY: bounds and `u16` alignment within `buf` were verified above.
+        let wide = unsafe { std::slice::from_raw_parts(ustr.buffer, len_bytes / 2) };
+        Some(String::from_utf16_lossy(wide))
+    }
 }
 
 #[cfg(unix)]
@@ -1127,8 +1472,13 @@ fn unix_process_running(pid: i32) -> bool {
 
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
     let out = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1137,4 +1487,69 @@ fn terminate_process(pid: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn fake_win_root(raw: &str) -> RegisteredRoot {
+        let norm = crate::win_path::normalize_windows_path_key(raw);
+        let depth = norm.split('\\').filter(|s| !s.is_empty()).count();
+        RegisteredRoot {
+            raw: raw.to_owned(),
+            forms: vec![PathBuf::from(raw)],
+            score: (depth, norm.len()),
+        }
+    }
+
+    #[test]
+    fn windows_attribution_matches_verbatim_mixed_case_forward_slashes_and_longest_prefix() {
+        let roots = vec![
+            fake_win_root(r"C:\Users\Alice\My Repo"),
+            fake_win_root(r"C:\Users\Alice\My Repo\packages\web"),
+            fake_win_root(r"C:\Users\Alice\My Repo-extra"),
+        ];
+        let proc_nested = ListenerProcess {
+            pid: 4200,
+            process: "node".into(),
+            cwd: None,
+            cmdline: r#""C:\Program Files\nodejs\node.exe" "\\?\c:/users/alice/my repo/packages/web/vite.js" --port 5173"#.into(),
+            args: crate::win_path::parse_windows_cmdline(
+                r#""C:\Program Files\nodejs\node.exe" "\\?\c:/users/alice/my repo/packages/web/vite.js" --port 5173"#,
+            ),
+            sockets: vec![(5173, "127.0.0.1".into())],
+        };
+        assert_eq!(
+            roots_in_cmdline_text(&proc_nested.cmdline, &roots),
+            vec![0, 1]
+        );
+        assert_eq!(attribute_process(&proc_nested, &roots), Some(1));
+
+        let proc_sibling = ListenerProcess {
+            pid: 4201,
+            process: "node".into(),
+            cwd: None,
+            cmdline: r#"node.exe c:\users\alice\my repo-extra\server.js"#.into(),
+            args: vec![],
+            sockets: vec![(3000, "127.0.0.1".into())],
+        };
+        assert_eq!(
+            roots_in_cmdline_text(&proc_sibling.cmdline, &roots),
+            vec![2]
+        );
+        assert_eq!(attribute_process(&proc_sibling, &roots), Some(2));
+
+        let proc_parent_dotdot = ListenerProcess {
+            pid: 4202,
+            process: "node".into(),
+            cwd: None,
+            cmdline: r#"node.exe --script="c:\users\alice\my repo\packages\web\..\..\server.js""#
+                .into(),
+            args: vec![],
+            sockets: vec![(8080, "127.0.0.1".into())],
+        };
+        assert_eq!(attribute_process(&proc_parent_dotdot, &roots), Some(0));
+    }
 }

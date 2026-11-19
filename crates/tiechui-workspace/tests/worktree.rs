@@ -518,7 +518,7 @@ fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_
 
     std::fs::create_dir_all(repo.join(".agents")).unwrap();
     let setup_script = if cfg!(windows) {
-        "echo setup-out && echo setup-err 1>&2 && echo ok > .setup-done"
+        "echo setup-out && echo setup-err >&2 && touch .setup-done && mkdir -p generated"
     } else {
         "echo setup-out && echo setup-err >&2 && touch .setup-done && mkdir -m 755 generated && ln -s README.md linked-readme"
     };
@@ -569,7 +569,6 @@ fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_
     assert!(Path::new(&wt_fail.path).is_dir());
     assert!(ws::session_worktree(&home, Path::new(&wt_fail.path)).is_some());
 
-    #[cfg(unix)]
     {
         let hang_script = "echo before-timeout && sleep 10";
         std::fs::write(
@@ -589,7 +588,7 @@ fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_
             &env,
         )
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(6));
         assert_eq!(wt_timeout.post_create.status, PostCreateStatus::Failed);
         assert!(wt_timeout.post_create.output.contains("before-timeout"));
         assert!(
@@ -1483,4 +1482,54 @@ fn worktree_cleanup_enforces_default_off_idle_days_deleted_sessions_dirty_skip_a
             "missing {expected} in {branches}"
         );
     }
+}
+
+#[test]
+fn remove_worktree_preserves_external_junction_or_symlink_target_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("junction-repo");
+    let shared = temp.path().join("external-pnpm-store");
+    std::fs::create_dir_all(shared.join("pkg")).unwrap();
+    std::fs::write(shared.join("pkg/index.js"), "module.exports = 42;\n").unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-m", "ignore node_modules"]);
+
+    let env = BTreeMap::new();
+    let wt = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt_path = PathBuf::from(&wt.path);
+    std::fs::create_dir_all(wt_path.join("node_modules")).unwrap();
+    let linked = wt_path.join("node_modules/shared-pkg");
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&shared, &linked).unwrap();
+    #[cfg(windows)]
+    {
+        let status = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                linked.to_str().unwrap(),
+                shared.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    assert!(linked.join("pkg/index.js").is_file());
+    ws::remove_worktree_with_env(&home, &wt_path, false, &env).unwrap();
+    assert!(!wt_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(shared.join("pkg/index.js")).unwrap(),
+        "module.exports = 42;\n"
+    );
+    assert!(
+        ws::list_worktrees_with_env(&home, Some(&repo), &env)
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -38,13 +38,12 @@ pub(crate) struct Watch {
 impl Watch {
     pub(crate) fn start(root: &Path, sink: Sink) -> Result<Self> {
         let canonical = root.canonicalize()?;
-        let mut git_cmd = std::process::Command::new("git");
-        git_cmd
-            .current_dir(root)
-            .args(["rev-parse", "--absolute-git-dir"]);
-        for name in tiechui_config::scrubbed_secret_env_vars() {
-            git_cmd.env_remove(name);
-        }
+        let mut git_cmd = crate::git::command(
+            "git",
+            root,
+            &["rev-parse", "--absolute-git-dir"],
+            &std::collections::BTreeMap::new(),
+        );
         let git_dir = git_cmd
             .output()
             .ok()

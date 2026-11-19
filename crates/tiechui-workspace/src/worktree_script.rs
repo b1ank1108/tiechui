@@ -81,7 +81,15 @@ fn execute_script(
             );
         }
     };
-    let mut cmd = shell_command(script, wt_path, env);
+    let mut cmd = match shell_command(script, wt_path, env) {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            return failed_without_run(
+                Some(script.to_owned()),
+                format!("failed to resolve post-create shell: {err}"),
+            );
+        }
+    };
     cmd.stdout(Stdio::from(writer))
         .stderr(Stdio::from(writer_err));
     let mut child = match cmd.spawn() {
@@ -100,7 +108,11 @@ fn execute_script(
     build_script_result(script, outcome, timeout, output, truncated)
 }
 
-fn shell_command(script: &str, wt_path: &Path, env: &BTreeMap<String, String>) -> Command {
+fn shell_command(
+    script: &str,
+    wt_path: &Path,
+    env: &BTreeMap<String, String>,
+) -> std::io::Result<Command> {
     #[cfg(unix)]
     let mut cmd = {
         use std::os::unix::process::CommandExt;
@@ -110,15 +122,24 @@ fn shell_command(script: &str, wt_path: &Path, env: &BTreeMap<String, String>) -
     };
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", script]);
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let bash = tiechui_exec::resolve_git_bash_with_env(env)?;
+        let mut c = Command::new(bash);
+        c.args(["-lc", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .env("CHERE_INVOKING", "1");
         c
     };
     cmd.current_dir(wt_path).stdin(Stdio::null()).envs(env);
+    #[cfg(windows)]
+    if let Some(path_val) = crate::git::find_env_var(env, "PATH") {
+        cmd.env("PATH", path_val);
+    }
     for name in tiechui_config::scrubbed_secret_env_vars() {
         cmd.env_remove(name);
     }
-    cmd
+    Ok(cmd)
 }
 
 pub(crate) enum WaitOutcome {
@@ -175,8 +196,11 @@ fn terminate_process_group(child: &mut Child) {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

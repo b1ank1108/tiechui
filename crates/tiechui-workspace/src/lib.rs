@@ -8,6 +8,7 @@ mod scratch;
 mod search;
 mod terminal;
 mod watch;
+mod win_path;
 mod worktree;
 mod worktree_carry;
 mod worktree_cleanup;

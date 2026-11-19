@@ -109,26 +109,10 @@ impl ProcessGroup {
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
             // Only a small default environment plus explicitly requested variables pass through.
-            for key in [
-                "HOME",
-                "USER",
-                "LOGNAME",
-                "PATH",
-                "SHELL",
-                "TMPDIR",
-                "TEMP",
-                "TMP",
-                "SYSTEMROOT",
-                "WINDIR",
-            ]
-            .into_iter()
-            .chain(env_vars.iter().map(String::as_str))
+            for (key, value) in collect_child_env(std::env::vars_os(), env_vars, env, cfg!(windows))
             {
-                if let Some(value) = std::env::var_os(key) {
-                    process.env(key, value);
-                }
+                process.env(key, value);
             }
-            process.envs(env);
             tiechui_tools::exec::Tree::spawn(&mut process)
         };
         let spawned = spawn(command);
@@ -145,6 +129,105 @@ impl ProcessGroup {
         let (child, tree) = spawned?;
         Ok(Self { child, _tree: tree })
     }
+}
+
+const DEFAULT_POSIX_ENV_VARS: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "WINDIR",
+];
+
+const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "SYSTEMDRIVE",
+    "USERNAME",
+    "COMPUTERNAME",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+];
+
+fn is_allowed_host_env(key: &std::ffi::OsStr, env_vars: &[String], windows: bool) -> bool {
+    let Some(name) = key.to_str() else {
+        return false;
+    };
+    let matches_key = |candidate: &str| {
+        if windows {
+            name.eq_ignore_ascii_case(candidate)
+        } else {
+            name == candidate
+        }
+    };
+    DEFAULT_POSIX_ENV_VARS.iter().any(|k| matches_key(k))
+        || (windows && WINDOWS_SYSTEM_ENV_VARS.iter().any(|k| matches_key(k)))
+        || env_vars.iter().any(|k| matches_key(k))
+}
+
+fn upsert_child_env(
+    out: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    key: std::ffi::OsString,
+    value: std::ffi::OsString,
+    windows: bool,
+) {
+    if let Some(slot) = out.iter_mut().find(|(existing, _)| {
+        if windows && let (Some(a), Some(b)) = (existing.to_str(), key.to_str()) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            *existing == key
+        }
+    }) {
+        *slot = (key, value);
+    } else {
+        out.push((key, value));
+    }
+}
+
+fn collect_child_env<K, V>(
+    host_env: impl IntoIterator<Item = (K, V)>,
+    env_vars: &[String],
+    explicit_env: &BTreeMap<String, String>,
+    windows: bool,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)>
+where
+    K: Into<std::ffi::OsString>,
+    V: Into<std::ffi::OsString>,
+{
+    let mut out = Vec::new();
+    for (raw_key, raw_val) in host_env {
+        let key = raw_key.into();
+        if is_allowed_host_env(&key, env_vars, windows) {
+            upsert_child_env(&mut out, key, raw_val.into(), windows);
+        }
+    }
+    for (key, value) in explicit_env {
+        upsert_child_env(
+            &mut out,
+            std::ffi::OsString::from(key),
+            std::ffi::OsString::from(value),
+            windows,
+        );
+    }
+    out
 }
 
 #[cfg(windows)]
@@ -207,7 +290,7 @@ mod tests {
             let script = directory.join(format!("tiechui-fixture.{extension}"));
             std::fs::write(
                 &script,
-                "@echo off\r\n@echo %1\r\n@if defined APPDATA echo leaked\r\n",
+                "@echo off\r\n@echo %1\r\n@if defined CARGO_MANIFEST_DIR echo leaked\r\n@if not defined SystemRoot echo missing-sysroot\r\n",
             )
             .unwrap();
             let mut group = ProcessGroup::spawn(
@@ -370,5 +453,74 @@ mod tests {
             .unwrap()
             .unwrap();
         cancel.cancel();
+    }
+
+    #[test]
+    fn windows_child_env_preserves_system_vars_case_insensitively_and_strips_unlisted_secrets() {
+        let host = [
+            ("Path", r"C:\Windows\System32;C:\Program Files\nodejs"),
+            ("SystemRoot", r"C:\Windows"),
+            ("windir", r"C:\Windows"),
+            ("ComSpec", r"C:\Windows\System32\cmd.exe"),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            ("USERPROFILE", r"C:\Users\Alice"),
+            ("APPDATA", r"C:\Users\Alice\AppData\Roaming"),
+            ("LocalAppData", r"C:\Users\Alice\AppData\Local"),
+            ("ProgramData", r"C:\ProgramData"),
+            ("ProgramFiles", r"C:\Program Files"),
+            ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            ("ProgramW6432", r"C:\Program Files"),
+            ("CommonProgramFiles", r"C:\Program Files\Common Files"),
+            (
+                "CommonProgramFiles(x86)",
+                r"C:\Program Files (x86)\Common Files",
+            ),
+            ("CommonProgramW6432", r"C:\Program Files\Common Files"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\Alice"),
+            ("SYSTEMDRIVE", "C:"),
+            ("TEMP", r"C:\Users\Alice\AppData\Local\Temp"),
+            ("TMP", r"C:\Users\Alice\AppData\Local\Temp"),
+            ("Custom_Token", "from-host"),
+            ("OPENAI_API_KEY", "sk-secret"),
+            ("UNLISTED_VAR", "should-drop"),
+        ];
+        let explicit = BTreeMap::from([("PATH".into(), r"D:\override\bin".into())]);
+        let collected = collect_child_env(host, &["custom_token".to_owned()], &explicit, true);
+        let lookup = |target: &str| -> Vec<String> {
+            collected
+                .iter()
+                .filter(|(k, _)| k.to_str().is_some_and(|s| s.eq_ignore_ascii_case(target)))
+                .filter_map(|(_, v)| v.to_str().map(str::to_owned))
+                .collect()
+        };
+
+        for required in [
+            "SystemRoot",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PROGRAMDATA",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "CommonProgramFiles",
+            "CommonProgramFiles(x86)",
+            "CommonProgramW6432",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "SYSTEMDRIVE",
+            "TEMP",
+            "TMP",
+            "CUSTOM_TOKEN",
+        ] {
+            assert_eq!(lookup(required).len(), 1, "missing or duplicate {required}");
+        }
+        assert_eq!(lookup("PATH"), vec![r"D:\override\bin".to_owned()]);
+        assert!(lookup("OPENAI_API_KEY").is_empty());
+        assert!(lookup("UNLISTED_VAR").is_empty());
     }
 }
