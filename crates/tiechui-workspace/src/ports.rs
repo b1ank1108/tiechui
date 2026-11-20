@@ -1186,74 +1186,72 @@ mod win_listeners {
         None
     }
 
-    fn collect_ipv4(self_pid: u32, by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>) {
-        let Some((buf, byte_len)) = fetch_tcp_table(u32::from(AF_INET)) else {
+    fn collect_tcp_rows<Row>(
+        af: u32,
+        rows_offset: usize,
+        self_pid: u32,
+        by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>,
+        extract: impl Fn(&Row) -> (u32, u32, u16, String),
+    ) {
+        assert!(std::mem::align_of::<Row>() <= std::mem::align_of::<u32>());
+        let Some((buf, byte_len)) = fetch_tcp_table(af) else {
             return;
         };
-        let rows_offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
         if byte_len < rows_offset {
             return;
         }
-        let max_rows = (byte_len - rows_offset) / std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        let max_rows = (byte_len - rows_offset) / std::mem::size_of::<Row>();
         let count = (buf[0] as usize).min(max_rows);
-        // SAFETY: `rows_offset + count * sizeof(row) <= byte_len` and alignment is 4 bytes.
+        // SAFETY: `rows_offset + count * sizeof(Row) <= byte_len` and `Row` alignment <= `u32` (4).
         let rows = unsafe {
-            std::slice::from_raw_parts(
-                buf.as_ptr()
-                    .byte_add(rows_offset)
-                    .cast::<MIB_TCPROW_OWNER_PID>(),
-                count,
-            )
+            std::slice::from_raw_parts(buf.as_ptr().byte_add(rows_offset).cast::<Row>(), count)
         };
         for row in rows {
-            if row.dwState != MIB_TCP_STATE_LISTEN as u32 {
+            let (state, pid, port, addr) = extract(row);
+            if state != MIB_TCP_STATE_LISTEN as u32 || pid <= 4 || pid == self_pid || port == 0 {
                 continue;
             }
-            let pid = row.dwOwningPid;
-            let port = u16::from_be(row.dwLocalPort as u16);
-            if pid <= 4 || pid == self_pid || port == 0 {
-                continue;
-            }
-            let addr = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()).to_string();
             by_pid.entry(pid).or_default().push((port, addr));
         }
     }
 
+    fn collect_ipv4(self_pid: u32, by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>) {
+        collect_tcp_rows::<MIB_TCPROW_OWNER_PID>(
+            u32::from(AF_INET),
+            std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table),
+            self_pid,
+            by_pid,
+            |row| {
+                (
+                    row.dwState,
+                    row.dwOwningPid,
+                    u16::from_be(row.dwLocalPort as u16),
+                    Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()).to_string(),
+                )
+            },
+        );
+    }
+
     fn collect_ipv6(self_pid: u32, by_pid: &mut BTreeMap<u32, Vec<(u16, String)>>) {
-        let Some((buf, byte_len)) = fetch_tcp_table(u32::from(AF_INET6)) else {
-            return;
-        };
-        let rows_offset = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
-        if byte_len < rows_offset {
-            return;
-        }
-        let max_rows = (byte_len - rows_offset) / std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
-        let count = (buf[0] as usize).min(max_rows);
-        // SAFETY: `rows_offset + count * sizeof(row) <= byte_len` and alignment is 4 bytes.
-        let rows = unsafe {
-            std::slice::from_raw_parts(
-                buf.as_ptr()
-                    .byte_add(rows_offset)
-                    .cast::<MIB_TCP6ROW_OWNER_PID>(),
-                count,
-            )
-        };
-        for row in rows {
-            if row.dwState != MIB_TCP_STATE_LISTEN as u32 {
-                continue;
-            }
-            let pid = row.dwOwningPid;
-            let port = u16::from_be(row.dwLocalPort as u16);
-            if pid <= 4 || pid == self_pid || port == 0 {
-                continue;
-            }
-            let v6 = Ipv6Addr::from(row.ucLocalAddr);
-            let addr = match v6.to_ipv4_mapped() {
-                Some(v4) => v4.to_string(),
-                None => v6.to_string(),
-            };
-            by_pid.entry(pid).or_default().push((port, addr));
-        }
+        collect_tcp_rows::<MIB_TCP6ROW_OWNER_PID>(
+            u32::from(AF_INET6),
+            std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table),
+            self_pid,
+            by_pid,
+            |row| {
+                let v6 = Ipv6Addr::from(row.ucLocalAddr);
+                let addr = match v6.to_ipv4_mapped() {
+                    Some(v4) => v4.to_string(),
+                    None => v6.to_string(),
+                };
+                (
+                    row.dwState,
+                    row.dwOwningPid,
+                    u16::from_be(row.dwLocalPort as u16),
+                    addr,
+                )
+            },
+        );
     }
 
     fn resolve_process_meta(pid: u32) -> (String, String, Vec<String>) {

@@ -29,7 +29,11 @@ pub fn resolve_git_bash_with_env(env: &BTreeMap<String, String>) -> io::Result<P
     })
 }
 
-fn find_env_case_insensitive<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
+/// Case-insensitive lookup for an environment variable stored in a `BTreeMap`.
+pub fn find_env_case_insensitive<'a>(
+    env: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
     env.get(name).map(String::as_str).or_else(|| {
         env.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -151,24 +155,36 @@ fn trim_os_quotes(raw: &OsStr) -> PathBuf {
     }
 }
 
-fn split_search_paths(raw: &OsStr) -> Vec<PathBuf> {
-    #[cfg(not(windows))]
+/// Split a `PATH`-like `OsStr`, handling semicolon-delimited Windows lists on non-Windows hosts.
+pub fn split_search_paths(raw: &OsStr) -> Vec<PathBuf> {
     if let Some(text) = raw.to_str()
         && looks_like_windows_path_list(text)
     {
-        return text
-            .split(';')
-            .map(|entry| entry.trim().trim_matches('"'))
-            .filter(|entry| !entry.is_empty())
-            .map(PathBuf::from)
-            .collect();
+        return split_windows_path_entries(text);
     }
     std::env::split_paths(raw)
         .filter(|p| !p.as_os_str().is_empty())
         .collect()
 }
 
-#[cfg(not(windows))]
+/// Split a UTF-8 `PATH` string, forcing semicolon splitting when `windows` is true.
+pub fn split_windows_path_str(raw: &str, windows: bool) -> Vec<PathBuf> {
+    if windows || looks_like_windows_path_list(raw) {
+        return split_windows_path_entries(raw);
+    }
+    std::env::split_paths(raw)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+}
+
+fn split_windows_path_entries(text: &str) -> Vec<PathBuf> {
+    text.split(';')
+        .map(|entry| entry.trim().trim_matches('"'))
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 fn looks_like_windows_path_list(text: &str) -> bool {
     let trimmed = text.trim().trim_matches('"');
     let bytes = trimmed.as_bytes();
@@ -199,7 +215,8 @@ fn split_parent(path: &Path) -> Option<(PathBuf, String)> {
     Some((parent.to_path_buf(), name))
 }
 
-pub(crate) fn is_wsl_launcher(path: &Path) -> bool {
+/// Return `true` when `path` points into WSL launcher system directories rather than Git for Windows.
+pub fn is_wsl_launcher(path: &Path) -> bool {
     let normalized = path
         .to_string_lossy()
         .replace('\\', "/")

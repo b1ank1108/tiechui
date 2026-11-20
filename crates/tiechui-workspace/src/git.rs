@@ -28,7 +28,7 @@ pub(crate) fn command(
         .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0");
     if program == "git"
-        && find_env_var(env, "GIT_CONFIG_COUNT").is_none()
+        && tiechui_exec::find_env_case_insensitive(env, "GIT_CONFIG_COUNT").is_none()
         && std::env::var_os("GIT_CONFIG_COUNT").is_none()
     {
         command
@@ -48,14 +48,6 @@ pub(crate) fn command(
     command
 }
 
-pub(crate) fn find_env_var<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
-    env.get(name).map(String::as_str).or_else(|| {
-        env.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    })
-}
-
 fn resolve_program(program: &str, env: &BTreeMap<String, String>) -> PathBuf {
     resolve_program_for_platform(program, env, cfg!(windows))
 }
@@ -69,26 +61,15 @@ fn resolve_program_for_platform(
         && !program.contains('/')
         && (!windows || (!program.contains('\\') && !program.contains(':')))
         && Path::new(program).components().count() == 1;
-    let Some(path_var) = find_env_var(env, "PATH").filter(|_| is_bare) else {
+    let Some(path_var) = tiechui_exec::find_env_case_insensitive(env, "PATH").filter(|_| is_bare)
+    else {
         return program.into();
     };
-    split_path_entries(path_var, windows)
+    tiechui_exec::split_windows_path_str(path_var, windows)
         .into_iter()
         .flat_map(|dir| program_candidates(&dir, program, windows))
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| program.into())
-}
-
-fn split_path_entries(path_var: &str, windows: bool) -> Vec<PathBuf> {
-    if windows && !cfg!(windows) {
-        return path_var
-            .split(';')
-            .map(|entry| entry.trim().trim_matches('"'))
-            .filter(|entry| !entry.is_empty())
-            .map(PathBuf::from)
-            .collect();
-    }
-    std::env::split_paths(path_var).collect()
 }
 
 fn program_candidates(dir: &Path, program: &str, windows: bool) -> Vec<PathBuf> {

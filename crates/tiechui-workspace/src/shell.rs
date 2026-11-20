@@ -224,7 +224,7 @@ fn discover_windows_shells(
 ) -> TerminalShellsResult {
     let search_dirs = lookup("PATH")
         .as_deref()
-        .map(split_windows_paths)
+        .map(tiechui_exec::split_search_paths)
         .unwrap_or_default();
     let mut shells = Vec::new();
 
@@ -367,37 +367,63 @@ fn join_windows_path(base: &str, rel: &str) -> PathBuf {
     }
 }
 
-fn split_windows_paths(raw: &OsStr) -> Vec<PathBuf> {
-    if let Some(text) = raw.to_str()
-        && (cfg!(windows)
-            || text.contains(';')
-            || text.contains('\\')
-            || (text.len() >= 2
-                && text.as_bytes()[0].is_ascii_alphabetic()
-                && text.as_bytes()[1] == b':'))
-    {
-        return text
-            .split(';')
-            .map(|entry| entry.trim().trim_matches('"'))
-            .filter(|entry| !entry.is_empty())
-            .map(PathBuf::from)
-            .collect();
-    }
-    std::env::split_paths(raw)
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect()
-}
+const WINDOWS_SHELL_ALIASES: &[(&str, &str)] = &[
+    ("pwsh", "pwsh"),
+    ("pwsh.exe", "pwsh"),
+    ("powershell", "powershell"),
+    ("powershell.exe", "powershell"),
+    ("git-bash", "git-bash"),
+    ("gitbash", "git-bash"),
+    ("bash", "git-bash"),
+    ("bash.exe", "git-bash"),
+    ("cmd", "cmd"),
+    ("cmd.exe", "cmd"),
+];
 
 fn is_wsl_bash_path(path: &Path) -> bool {
-    let normalized = path
+    let lower = path
         .to_string_lossy()
         .replace('\\', "/")
         .to_ascii_lowercase();
-    normalized.ends_with("/bash.exe")
-        && (normalized.contains("/system32/")
-            || normalized.contains("/sysnative/")
-            || normalized.contains("/syswow64/")
-            || normalized.contains("/windowsapps/"))
+    lower.ends_with("/bash.exe") && tiechui_exec::is_wsl_launcher(path)
+}
+
+fn find_windows_discovered_entry<'a>(
+    requested: &str,
+    discovered: &'a TerminalShellsResult,
+) -> Option<&'a TerminalShellEntry> {
+    let lower = requested.to_ascii_lowercase();
+    if let Some((_, target_id)) = WINDOWS_SHELL_ALIASES
+        .iter()
+        .find(|&&(alias, _)| alias == lower)
+        && let Some(entry) = discovered.shells.iter().find(|s| s.id == *target_id)
+    {
+        return Some(entry);
+    }
+    discovered
+        .shells
+        .iter()
+        .find(|s| s.path.eq_ignore_ascii_case(requested))
+}
+
+fn find_windows_executable_in_path(
+    expanded: &str,
+    lookup: &impl Fn(&str) -> Option<OsString>,
+    is_file: &impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let search_dirs = lookup("PATH")
+        .as_deref()
+        .map(tiechui_exec::split_search_paths)
+        .unwrap_or_default();
+    let names = if expanded.to_ascii_lowercase().ends_with(".exe") {
+        vec![expanded.to_owned()]
+    } else {
+        vec![format!("{expanded}.exe"), expanded.to_owned()]
+    };
+    names.into_iter().find_map(|exe_name| {
+        find_in_windows_dirs(&search_dirs, &exe_name, is_file)
+            .filter(|found| !is_wsl_bash_path(found))
+    })
 }
 
 fn resolve_windows_configured(
@@ -406,23 +432,7 @@ fn resolve_windows_configured(
     lookup: &impl Fn(&str) -> Option<OsString>,
     is_file: &impl Fn(&Path) -> bool,
 ) -> Option<ResolvedShell> {
-    let alias = match requested.to_ascii_lowercase().as_str() {
-        "pwsh" | "pwsh.exe" => Some("pwsh"),
-        "powershell" | "powershell.exe" => Some("powershell"),
-        "git-bash" | "gitbash" | "bash" | "bash.exe" => Some("git-bash"),
-        "cmd" | "cmd.exe" => Some("cmd"),
-        _ => None,
-    };
-    if let Some(target_id) = alias
-        && let Some(entry) = discovered.shells.iter().find(|s| s.id == target_id)
-    {
-        return Some(entry_to_resolved(ShellPlatform::Windows, entry));
-    }
-    if let Some(entry) = discovered
-        .shells
-        .iter()
-        .find(|s| s.path.eq_ignore_ascii_case(requested))
-    {
+    if let Some(entry) = find_windows_discovered_entry(requested, discovered) {
         return Some(entry_to_resolved(ShellPlatform::Windows, entry));
     }
 
@@ -430,30 +440,14 @@ fn resolve_windows_configured(
     if expanded.contains(['\\', '/', ':']) {
         let path = PathBuf::from(&expanded);
         if !is_wsl_bash_path(&path) && is_file(&path) {
-            let stem = windows_stem(&expanded);
-            return Some(windows_spec_for(&stem, path));
+            return Some(windows_spec_for(&windows_stem(&expanded), path));
         }
         return None;
     }
 
-    let search_dirs = lookup("PATH")
-        .as_deref()
-        .map(split_windows_paths)
-        .unwrap_or_default();
-    let names = if expanded.to_ascii_lowercase().ends_with(".exe") {
-        vec![expanded.clone()]
-    } else {
-        vec![format!("{expanded}.exe"), expanded.clone()]
-    };
-    for exe_name in names {
-        if let Some(found) = find_in_windows_dirs(&search_dirs, &exe_name, is_file)
-            && !is_wsl_bash_path(&found)
-        {
-            let stem = windows_stem(&found.to_string_lossy());
-            return Some(windows_spec_for(&stem, found));
-        }
-    }
-    None
+    let found = find_windows_executable_in_path(&expanded, lookup, is_file)?;
+    let stem = windows_stem(&found.to_string_lossy());
+    Some(windows_spec_for(&stem, found))
 }
 
 fn windows_stem(raw_path: &str) -> String {
@@ -530,6 +524,22 @@ fn discover_posix_shells(
     }
 }
 
+fn find_posix_executable_in_path(
+    expanded: &str,
+    lookup: &impl Fn(&str) -> Option<OsString>,
+    is_executable: &impl Fn(&Path) -> bool,
+) -> Option<(String, PathBuf)> {
+    let path_var = lookup("PATH")?;
+    std::env::split_paths(&path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| {
+            let candidate = dir.join(expanded);
+            is_executable(&candidate)
+                .then(|| posix_stem(&candidate).map(|stem| (stem, candidate)))
+                .flatten()
+        })
+}
+
 fn resolve_posix_configured(
     requested: &str,
     discovered: &TerminalShellsResult,
@@ -547,26 +557,13 @@ fn resolve_posix_configured(
     let expanded = expand_tilde_shell(requested, lookup);
     if expanded.contains('/') {
         let path = PathBuf::from(&expanded);
-        if is_executable(&path) {
-            let stem = posix_stem(&path)?;
-            return Some(posix_spec_for(&stem, path));
-        }
-        return None;
+        return is_executable(&path)
+            .then(|| posix_stem(&path).map(|stem| posix_spec_for(&stem, path)))
+            .flatten();
     }
 
-    let path_var = lookup("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let candidate = dir.join(&expanded);
-        if is_executable(&candidate)
-            && let Some(stem) = posix_stem(&candidate)
-        {
-            return Some(posix_spec_for(&stem, candidate));
-        }
-    }
-    None
+    let (stem, candidate) = find_posix_executable_in_path(&expanded, lookup, is_executable)?;
+    Some(posix_spec_for(&stem, candidate))
 }
 
 fn posix_stem(path: &Path) -> Option<String> {

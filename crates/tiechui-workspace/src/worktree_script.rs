@@ -133,7 +133,7 @@ fn shell_command(
     };
     cmd.current_dir(wt_path).stdin(Stdio::null()).envs(env);
     #[cfg(windows)]
-    if let Some(path_val) = crate::git::find_env_var(env, "PATH") {
+    if let Some(path_val) = tiechui_exec::find_env_case_insensitive(env, "PATH") {
         cmd.env("PATH", path_val);
     }
     for name in tiechui_config::scrubbed_secret_env_vars() {

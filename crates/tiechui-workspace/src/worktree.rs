@@ -738,31 +738,10 @@ fn delete_checkout(
 }
 
 fn remove_worktree_dir_safely(wt_path: &Path) -> std::io::Result<()> {
-    let meta = match fs::symlink_metadata(wt_path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    if is_link_or_reparse(&meta) || !meta.is_dir() {
-        return unlink_single_entry(wt_path, &meta);
-    }
-    clear_readonly(wt_path, &meta);
-    let mut deferred_dot_git = false;
-    for entry in fs::read_dir(wt_path)? {
-        let entry = entry?;
-        if entry.file_name() == ".git" {
-            deferred_dot_git = true;
-            continue;
-        }
-        unlink_tree_entry(&entry.path())?;
-    }
-    if deferred_dot_git {
-        unlink_tree_entry(&wt_path.join(".git"))?;
-    }
-    remove_with_readonly_retry(wt_path, true)
+    remove_tree_entry(wt_path, true)
 }
 
-fn unlink_tree_entry(path: &Path) -> std::io::Result<()> {
+fn remove_tree_entry(path: &Path, defer_dot_git: bool) -> std::io::Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -772,10 +751,24 @@ fn unlink_tree_entry(path: &Path) -> std::io::Result<()> {
         return unlink_single_entry(path, &meta);
     }
     clear_readonly(path, &meta);
-    for entry in fs::read_dir(path)? {
-        unlink_tree_entry(&entry?.path())?;
-    }
+    unlink_dir_children(path, defer_dot_git)?;
     remove_with_readonly_retry(path, true)
+}
+
+fn unlink_dir_children(dir: &Path, defer_dot_git: bool) -> std::io::Result<()> {
+    let mut deferred_dot_git = false;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if defer_dot_git && entry.file_name() == ".git" {
+            deferred_dot_git = true;
+            continue;
+        }
+        remove_tree_entry(&entry.path(), false)?;
+    }
+    if deferred_dot_git {
+        remove_tree_entry(&dir.join(".git"), false)?;
+    }
+    Ok(())
 }
 
 fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
