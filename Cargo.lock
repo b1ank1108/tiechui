@@ -3547,8 +3547,10 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tiechui-config",
+ "tiechui-exec",
  "tiechui-protocol",
  "trash",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

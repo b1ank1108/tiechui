@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use tiechui_protocol::workspace::{
@@ -23,40 +23,66 @@ pub(crate) fn command(
         .envs(env)
         // Nothing can answer a prompt or an editor.
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GH_PROMPT_DISABLED", "1")
         .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0");
+    if program == "git"
+        && tiechui_exec::find_env_case_insensitive(env, "GIT_CONFIG_COUNT").is_none()
+        && std::env::var_os("GIT_CONFIG_COUNT").is_none()
+    {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.interactive")
+            .env("GIT_CONFIG_VALUE_0", "false");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     for name in tiechui_config::scrubbed_secret_env_vars() {
         command.env_remove(name);
     }
     command
 }
 
-fn resolve_program(program: &str, env: &BTreeMap<String, String>) -> std::path::PathBuf {
-    let Some(path_var) = env
-        .get("PATH")
-        .filter(|_| Path::new(program).components().count() == 1)
+fn resolve_program(program: &str, env: &BTreeMap<String, String>) -> PathBuf {
+    resolve_program_for_platform(program, env, cfg!(windows))
+}
+
+fn resolve_program_for_platform(
+    program: &str,
+    env: &BTreeMap<String, String>,
+    windows: bool,
+) -> PathBuf {
+    let is_bare = !program.is_empty()
+        && !program.contains('/')
+        && (!windows || (!program.contains('\\') && !program.contains(':')))
+        && Path::new(program).components().count() == 1;
+    let Some(path_var) = tiechui_exec::find_env_case_insensitive(env, "PATH").filter(|_| is_bare)
     else {
         return program.into();
     };
-    std::env::split_paths(path_var)
-        .flat_map(|dir| program_candidates(&dir, program))
+    tiechui_exec::split_windows_path_str(path_var, windows)
+        .into_iter()
+        .flat_map(|dir| program_candidates(&dir, program, windows))
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| program.into())
 }
 
-#[cfg(unix)]
-fn program_candidates(dir: &Path, program: &str) -> [std::path::PathBuf; 1] {
-    [dir.join(program)]
-}
-
-#[cfg(windows)]
-fn program_candidates(dir: &Path, program: &str) -> [std::path::PathBuf; 4] {
-    [
-        dir.join(format!("{program}.exe")),
-        dir.join(format!("{program}.cmd")),
-        dir.join(format!("{program}.bat")),
-        dir.join(program),
-    ]
+fn program_candidates(dir: &Path, program: &str, windows: bool) -> Vec<PathBuf> {
+    if windows {
+        vec![
+            dir.join(format!("{program}.exe")),
+            dir.join(format!("{program}.cmd")),
+            dir.join(format!("{program}.bat")),
+            dir.join(program),
+        ]
+    } else {
+        vec![dir.join(program)]
+    }
 }
 
 /// Stdout and stderr of a successful run.
@@ -779,5 +805,59 @@ mod tests {
         );
         assert!(!staged_only.contains("hello unstaged"), "{staged_only}");
         assert!(!staged_only.contains("new untracked line"), "{staged_only}");
+    }
+
+    #[test]
+    fn resolve_program_reads_case_insensitive_path_and_command_disables_gcm_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
+        let fake_git = bin.join(exe_name);
+        std::fs::write(&fake_git, "").unwrap();
+
+        let env = BTreeMap::from([("Path".into(), bin.display().to_string())]);
+        assert_eq!(resolve_program("git", &env), fake_git);
+
+        let git_cmd = command("git", temp.path(), &["status"], &env);
+        let envs: BTreeMap<_, _> = git_cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned())))
+            .collect();
+        assert_eq!(
+            envs.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            envs.get("GCM_INTERACTIVE").map(String::as_str),
+            Some("never")
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("credential.interactive")
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_0").map(String::as_str),
+            Some("false")
+        );
+        let git_args: Vec<_> = git_cmd.get_args().filter_map(|a| a.to_str()).collect();
+        assert_eq!(git_args, vec!["status"]);
+
+        let gh_cmd = command("gh", temp.path(), &["pr", "view"], &env);
+        let gh_args: Vec<_> = gh_cmd.get_args().filter_map(|a| a.to_str()).collect();
+        assert_eq!(gh_args, vec!["pr", "view"]);
+
+        let win_bin = temp.path().join("win-bin");
+        std::fs::create_dir_all(&win_bin).unwrap();
+        let gh_cmd_shim = win_bin.join("gh.cmd");
+        std::fs::write(&gh_cmd_shim, "").unwrap();
+        let win_env = BTreeMap::from([("path".into(), format!("\"{}\"", win_bin.display()))]);
+        assert_eq!(
+            resolve_program_for_platform("gh", &win_env, true),
+            gh_cmd_shim
+        );
+        let gh_exe = win_bin.join("gh.exe");
+        std::fs::write(&gh_exe, "").unwrap();
+        assert_eq!(resolve_program_for_platform("gh", &win_env, true), gh_exe);
     }
 }

@@ -344,10 +344,17 @@ fn terminals_replay_output_after_attach() {
     };
     workspace.create_terminal(create.clone()).unwrap();
     assert!(workspace.create_terminal(create).is_err());
-    let command = if cfg!(windows) {
-        "set /a tc=40+2\r\necho tiechui-%tc%\r\n"
-    } else {
-        "echo tiechui-$((40 + 2))\n"
+    let initial = workspace.attach_terminal("t").unwrap();
+    let launched_shell = initial
+        .shell
+        .as_deref()
+        .expect("attached terminal reports shell name");
+    assert!(!launched_shell.is_empty());
+    let command = match launched_shell {
+        "pwsh" | "powershell" => "Write-Output \"tiechui-$(40 + 2)\"\r\n",
+        "cmd" => "set /a tc=40+2\r\necho tiechui-%tc%\r\n",
+        _ if cfg!(windows) => "echo tiechui-$((40 + 2))\r\n",
+        _ => "echo tiechui-$((40 + 2))\n",
     };
     workspace.write_terminal("t", command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -406,6 +413,70 @@ fn terminals_replay_output_after_attach() {
         .unwrap();
     workspace.kill_terminal("t");
     assert!(workspace.attach_terminal("t").is_err());
+}
+
+#[test]
+fn terminal_shells_and_home_config_switch_shell_for_new_terminals() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let work = temp.path().join("work");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let workspace = ws::Workspace::with_home(home.clone(), Arc::new(|_, _| {}));
+    let discovered = workspace.terminal_shells();
+    assert!(!discovered.shells.is_empty());
+    assert!(
+        discovered
+            .shells
+            .iter()
+            .any(|entry| entry.id == discovered.default_shell),
+        "default_shell {} missing from {:?}",
+        discovered.default_shell,
+        discovered.shells
+    );
+
+    let explicit_id = if cfg!(windows) { "cmd" } else { "sh" };
+    std::fs::write(
+        home.join("config.toml"),
+        format!("[terminal]\nshell = \"{explicit_id}\"\n"),
+    )
+    .unwrap();
+    workspace
+        .create_terminal(TerminalCreateParams {
+            id: "t-explicit".into(),
+            cwd: work.display().to_string(),
+            cols: 80,
+            rows: 24,
+            env: None,
+        })
+        .unwrap();
+    assert_eq!(
+        workspace.attach_terminal("t-explicit").unwrap().shell,
+        Some(explicit_id.into())
+    );
+    workspace.kill_terminal("t-explicit");
+
+    std::fs::write(
+        home.join("config.toml"),
+        "[terminal]\nshell = \"/nonexistent/missing-shell-binary\"\n",
+    )
+    .unwrap();
+    workspace
+        .create_terminal(TerminalCreateParams {
+            id: "t-fallback".into(),
+            cwd: work.display().to_string(),
+            cols: 80,
+            rows: 24,
+            env: None,
+        })
+        .unwrap();
+    assert_eq!(
+        workspace.attach_terminal("t-fallback").unwrap().shell,
+        Some(discovered.default_shell)
+    );
+    workspace.kill_terminal("t-fallback");
+    workspace.close();
 }
 
 #[test]

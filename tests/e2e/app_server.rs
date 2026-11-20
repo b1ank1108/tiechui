@@ -403,12 +403,20 @@ async fn workspace_services_through_app_server() {
         })
         .await;
 
+    let shells = client.ok("terminal/shells", json!({})).await;
+    assert!(!shells["shells"].as_array().unwrap().is_empty());
+    assert!(!shells["default_shell"].as_str().unwrap().is_empty());
+
     let terminal = json!({"id": "t", "cwd": root, "cols": 80, "rows": 24});
     client.ok("terminal/create", terminal).await;
-    let command = if cfg!(windows) {
-        "set /a tc=40+2\r\necho tiechui-%tc%\r\n"
-    } else {
-        "echo tiechui-$((40 + 2))\n"
+    let initial = client.ok("terminal/attach", json!({"id": "t"})).await;
+    let launched_shell = initial["shell"].as_str().unwrap();
+    assert!(!launched_shell.is_empty());
+    let command = match launched_shell {
+        "pwsh" | "powershell" => "Write-Output \"tiechui-$(40 + 2)\"\r\n",
+        "cmd" => "set /a tc=40+2\r\necho tiechui-%tc%\r\n",
+        _ if cfg!(windows) => "echo tiechui-$((40 + 2))\r\n",
+        _ => "echo tiechui-$((40 + 2))\n",
     };
     let echo = json!({"id": "t", "data": command});
     client.ok("terminal/write", echo).await;

@@ -78,6 +78,14 @@ pub(crate) fn normalize_dir(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn classify_overlap(worktree_dir: &Path, other_dir: &Path) -> Option<PathOverlap> {
+    if crate::win_path::looks_like_windows_root(worktree_dir)
+        || crate::win_path::looks_like_windows_root(other_dir)
+    {
+        return crate::win_path::classify_windows_overlap(
+            &worktree_dir.to_string_lossy(),
+            &other_dir.to_string_lossy(),
+        );
+    }
     if worktree_dir == other_dir {
         Some(PathOverlap::Equal)
     } else if worktree_dir.starts_with(other_dir) {

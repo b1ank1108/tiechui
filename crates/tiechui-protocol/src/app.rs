@@ -421,8 +421,8 @@ pub struct ProviderTest {
 /// Sets one key of the user's `config.toml`: `model`, `lightweight_model`,
 /// `permissions.classifier_model`, `thinking`, `network.proxy`, `network.no_proxy`,
 /// `network.ca_cert`, `ask.auto_continue_after_sec`, `sessions.archive_after_days`,
-/// `worktrees.auto_clean_idle_days` or `worktrees.auto_clean_on_session_delete`; null
-/// removes optional keys.
+/// `terminal.shell`, `worktrees.auto_clean_idle_days` or `worktrees.auto_clean_on_session_delete`;
+/// null removes optional keys.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigUpdateParams {
@@ -449,6 +449,8 @@ pub struct ConfigValues {
     pub auto_clean_idle_days: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_clean_on_session_delete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_shell: Option<String>,
 }
 
 /// A server of `[mcp_servers]` in the user's `config.toml`, as far as clients edit it; saving

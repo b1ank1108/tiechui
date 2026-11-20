@@ -150,7 +150,7 @@ behind: number, files: Array<CommitFile>, };
 
 export type ConfigUpdateParams = { key: string, value: JsonValue, };
 
-export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, auto_clean_idle_days?: number | null, auto_clean_on_session_delete?: boolean, };
+export type ConfigValues = { model: string | null, lightweight_model?: string | null, classifier_model?: string | null, thinking: ThinkingLevel | null, proxy: string | null, no_proxy: string | null, ca_cert: string | null, auto_continue_after_sec: number | null, archive_after_days: number | null, auto_clean_idle_days?: number | null, auto_clean_on_session_delete?: boolean, terminal_shell?: string | null, };
 
 export type ContextItem = { label: string, category: string, source: string, tokens: number, text: string, group: string, json: boolean, };
 
@@ -770,7 +770,11 @@ seq: number,
 /**
  * The shell has exited with this code.
  */
-exit: number | null, };
+exit: number | null, 
+/**
+ * Short name of the shell started for this terminal.
+ */
+shell?: string, };
 
 export type TerminalCreateParams = { id: string, cwd: string, cols: number, rows: number, env?: { [key in string]: string }, };
 
@@ -785,6 +789,10 @@ seq: number, data: string, };
 export type TerminalParams = { id: string, };
 
 export type TerminalResizeParams = { id: string, cols: number, rows: number, };
+
+export type TerminalShellEntry = { id: string, label: string, path: string, };
+
+export type TerminalShellsResult = { shells: Array<TerminalShellEntry>, default_shell: string, };
 
 export type TerminalWriteParams = { id: string, data: string, };
 

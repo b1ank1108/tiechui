@@ -21,6 +21,7 @@ struct Output {
 }
 
 pub(crate) struct Terminal {
+    shell: String,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -61,23 +62,54 @@ fn complete(bytes: &[u8]) -> usize {
     }
 }
 
-impl Terminal {
-    /// Starts the user's login shell.
-    pub(crate) fn spawn(params: &TerminalCreateParams, sink: Sink) -> Result<Arc<Self>> {
-        let pair = native_pty_system().openpty(size(params.cols, params.rows))?;
-        let mut command = CommandBuilder::new_default_prog();
-        command.cwd(&params.cwd);
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        if let Some(env) = &params.env {
-            for (key, value) in env {
-                command.env(key, value);
-            }
+fn build_command(
+    spec: &crate::shell::ResolvedShell,
+    params: &TerminalCreateParams,
+) -> CommandBuilder {
+    let mut command = CommandBuilder::new(&spec.path);
+    command.args(&spec.args);
+    command.cwd(&params.cwd);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    if let Some(env) = &params.env {
+        for (key, value) in env {
+            command.env(key, value);
         }
-        let child = pair.slave.spawn_command(command)?;
+    }
+    command
+}
+
+impl Terminal {
+    pub(crate) fn spawn(
+        params: &TerminalCreateParams,
+        configured_shell: Option<&str>,
+        sink: Sink,
+    ) -> Result<Arc<Self>> {
+        let pair = native_pty_system().openpty(size(params.cols, params.rows))?;
+        // Shells inherit an ignore-Ctrl+C flag from launchers such as CI agents and
+        // services, which leaves `\x03` in the pseudoconsole interrupting nothing.
+        #[cfg(windows)]
+        // SAFETY: a null handler only clears this process's inherited ignore flag.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
+        }
+        let (primary, fallback) = crate::shell::resolve_shell(configured_shell);
+        let (child, launched_name) = match pair.slave.spawn_command(build_command(&primary, params))
+        {
+            Ok(child) => (child, primary.name),
+            Err(_) if primary != fallback => (
+                pair.slave.spawn_command(build_command(&fallback, params))?,
+                fallback.name,
+            ),
+            Err(err) => return Err(err.into()),
+        };
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader()?;
         let terminal = Arc::new(Self {
+            shell: launched_name,
             writer: Mutex::new(pair.master.take_writer()?),
             master: Mutex::new(Some(pair.master)),
             child: Mutex::new(child),
@@ -167,6 +199,7 @@ impl Terminal {
             buffer: String::from_utf8_lossy(&bytes[start..]).into_owned(),
             seq: output.seq,
             exit: output.exit,
+            shell: Some(self.shell.clone()),
         }
     }
 
@@ -212,5 +245,41 @@ mod tests {
             assert_eq!(startup_query(&mut pending), Some(false));
             assert_eq!(pending, output);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_c_interrupts_the_foreground_program_under_a_launcher_that_ignores_it() {
+        use std::time::{Duration, Instant};
+
+        // SAFETY: a null handler only sets this process's ignore flag, as CI agents do.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1) };
+        let params = TerminalCreateParams {
+            id: "ctrl-c".into(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            cols: 120,
+            rows: 30,
+            env: None,
+        };
+        let terminal = Terminal::spawn(&params, Some("cmd"), Arc::new(|_, _| {})).unwrap();
+        let wait_for = |needle: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !terminal.attached().buffer.contains(needle) {
+                let buffer = terminal.attached().buffer;
+                assert!(Instant::now() < deadline, "no {needle:?} in {buffer:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        terminal.write(b"ping -t 127.0.0.1\r").unwrap();
+        wait_for("TTL=");
+        terminal.write(b"\x03").unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        // cmd reads this line only once ping exits; the empty substring keeps the
+        // typed text from matching.
+        terminal
+            .write(b"echo ping%COMSPEC:~0,0%-stopped\r")
+            .unwrap();
+        wait_for("ping-stopped");
+        terminal.kill();
     }
 }

@@ -39,6 +39,7 @@ struct Layer {
     ask: Option<crate::AskConfig>,
     sessions: Option<crate::SessionsConfig>,
     skills: Option<crate::SkillsConfig>,
+    terminal: Option<crate::TerminalConfig>,
     worktrees: WorktreesLayer,
 }
 
@@ -271,6 +272,11 @@ pub fn load_with_mandatory_modules(
         ask: merged.ask.unwrap_or_default(),
         sessions: merged.sessions.unwrap_or_default(),
         skills: merged.skills.unwrap_or_default(),
+        terminal: crate::TerminalConfig {
+            shell: crate::normalize_terminal_shell(
+                merged.terminal.and_then(|t| t.shell).as_deref(),
+            ),
+        },
         worktrees: WorktreesConfig {
             post_create_script: merged.worktrees.post_create_script,
             auto_clean_idle_days: merged.worktrees.auto_clean_idle_days,
@@ -308,6 +314,7 @@ fn strip_user_only(
         (project_layer.network.take().is_some(), "network"),
         (project_layer.sessions.take().is_some(), "sessions"),
         (project_layer.skills.take().is_some(), "skills"),
+        (project_layer.terminal.take().is_some(), "terminal"),
         (
             project_layer
                 .worktrees
@@ -572,6 +579,7 @@ fn merge(
     base.ask = layer.ask.or(base.ask.take());
     base.sessions = layer.sessions.or(base.sessions.take());
     base.skills = layer.skills.or(base.skills.take());
+    base.terminal = layer.terminal.or(base.terminal.take());
     base.worktrees.post_create_script = layer
         .worktrees
         .post_create_script

@@ -2056,3 +2056,91 @@ fn worktree_cleanup_policies_reject_invalid_values_and_round_trip_preferences() 
     assert_eq!(cleared.auto_clean_idle_days, None);
     assert!(!cleared.auto_clean_on_session_delete);
 }
+
+#[test]
+fn terminal_shell_is_user_only_normalizes_blank_and_auto_and_round_trips_preferences() {
+    assert_eq!(Config::default().terminal, TerminalConfig { shell: None });
+
+    let temp = temp_dir();
+    let layered = paths(
+        temp.path(),
+        "[terminal]\nshell = 'pwsh'\n",
+        "[terminal]\nshell = '/tmp/project-shell'\n",
+    );
+    let loaded = load(&layered, true, &toml::Table::new()).unwrap();
+    assert_eq!(loaded.config.terminal.shell.as_deref(), Some("pwsh"));
+    assert!(loaded.diagnostics.iter().any(|d| {
+        d.file == *layered.project.as_ref().unwrap()
+            && d.key == "terminal"
+            && d.reason == IgnoredReason::UserOnly
+    }));
+
+    for blank_or_auto in [
+        "[terminal]\nshell = ''\n",
+        "[terminal]\nshell = '   '\n",
+        "[terminal]\nshell = 'auto'\n",
+        "[terminal]\nshell = 'AUTO'\n",
+    ] {
+        let p = paths(temp.path(), blank_or_auto, "");
+        assert_eq!(
+            load(&p, false, &toml::Table::new())
+                .unwrap()
+                .config
+                .terminal
+                .shell,
+            None,
+            "{blank_or_auto}"
+        );
+    }
+
+    for invalid in ["[terminal]\nshell = 42\n", "[terminal]\nunknown = true\n"] {
+        let p = paths(temp.path(), invalid, "");
+        let err = load(&p, false, &toml::Table::new()).unwrap_err();
+        assert!(err.key.starts_with("terminal"), "{invalid}: {err}");
+    }
+
+    let pref_file = temp.path().join("term-prefs/config.toml");
+    fs::create_dir_all(pref_file.parent().unwrap()).unwrap();
+    save_preference(&pref_file, "terminal.shell", "  git-bash  ".into()).unwrap();
+    let saved = load(
+        &ConfigPaths {
+            user: pref_file.clone(),
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap();
+    assert_eq!(saved.config.terminal.shell.as_deref(), Some("git-bash"));
+
+    save_preference(&pref_file, "terminal.shell", "   ".into()).unwrap();
+    let cleared_blank = load(
+        &ConfigPaths {
+            user: pref_file.clone(),
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap();
+    assert_eq!(cleared_blank.config.terminal.shell, None);
+
+    save_preference(&pref_file, "terminal.shell", "/bin/zsh".into()).unwrap();
+    save_preference(&pref_file, "terminal.shell", "auto".into()).unwrap();
+    let cleared_auto = load(
+        &ConfigPaths {
+            user: pref_file,
+            project: None,
+        },
+        false,
+        &toml::Table::new(),
+    )
+    .unwrap();
+    assert_eq!(cleared_auto.config.terminal.shell, None);
+
+    let root_schema = serde_json::to_value(schema()).unwrap();
+    assert!(
+        root_schema["definitions"]["TerminalConfig"]["properties"]["shell"]["description"]
+            .is_string()
+    );
+}

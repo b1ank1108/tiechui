@@ -1,8 +1,8 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,8 +16,6 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 
-pub const GIT_BASH_ENV: &str = "TIECHUI_GIT_BASH_PATH";
-
 #[link(name = "ntdll")]
 unsafe extern "system" {
     // Resumes every thread of a process created with CREATE_SUSPENDED.
@@ -26,59 +24,7 @@ unsafe extern "system" {
 
 /// Git for Windows bash; WSL's System32 bash runs a different filesystem view and is skipped.
 pub fn resolve_shell() -> io::Result<PathBuf> {
-    resolve_shell_from(
-        std::env::var_os(GIT_BASH_ENV).as_deref(),
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("ProgramFiles").as_deref(),
-    )
-    .ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "Git Bash was not found. Install Git for Windows (https://git-scm.com/downloads/win) or set {GIT_BASH_ENV} to bash.exe"
-            ),
-        )
-    })
-}
-
-fn resolve_shell_from(
-    explicit: Option<&OsStr>,
-    path: Option<&OsStr>,
-    program_files: Option<&OsStr>,
-) -> Option<PathBuf> {
-    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(explicit)).filter(|path| path.is_file());
-    }
-    let directories: Vec<_> = path
-        .map(|path| std::env::split_paths(path).collect())
-        .unwrap_or_default();
-    let on_path = |name: &str| {
-        directories
-            .iter()
-            .map(|directory| directory.join(name))
-            .filter(|candidate| candidate.is_file())
-            .find(|candidate| !is_wsl_launcher(candidate))
-    };
-    if let Some(bash) = on_path("bash.exe") {
-        return Some(bash);
-    }
-    let from_git = on_path("git.exe").into_iter().flat_map(|git| {
-        let root = git.parent().and_then(Path::parent).map(Path::to_path_buf);
-        [
-            root.as_ref().map(|root| root.join(r"bin\bash.exe")),
-            root.map(|root| root.join(r"usr\bin\bash.exe")),
-        ]
-    });
-    let installed = program_files.map(|root| Path::new(root).join(r"Git\bin\bash.exe"));
-    from_git
-        .flatten()
-        .chain(installed)
-        .find(|candidate| candidate.is_file())
-}
-
-fn is_wsl_launcher(path: &Path) -> bool {
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    lower.contains(r"\system32\") || lower.contains(r"\windowsapps\")
+    crate::git_bash::resolve_git_bash()
 }
 
 /// A named pipe carries merged stdout/stderr; the child gets a synchronous write handle.
@@ -275,6 +221,21 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn shell_resolution_prefers_override_then_path_then_git_layout() {
+        use std::ffi::OsStr;
+        use std::path::Path;
+
+        let resolve =
+            |explicit: Option<&OsStr>, path: Option<&OsStr>, program_files: Option<&OsStr>| {
+                crate::git_bash::resolve_git_bash_from(
+                    |name| match name {
+                        crate::GIT_BASH_ENV => explicit.map(OsString::from),
+                        "PATH" => path.map(OsString::from),
+                        "ProgramFiles" => program_files.map(OsString::from),
+                        _ => None,
+                    },
+                    Path::is_file,
+                )
+            };
         let root = tempfile::tempdir().unwrap();
         let make = |relative: &str| {
             let path = root.path().join(relative);
@@ -286,10 +247,7 @@ mod tests {
         let git_bash = make(r"Git\bin\bash.exe");
         let wsl = make(r"Windows\System32\bash.exe");
         let path = std::env::join_paths([wsl.parent().unwrap(), git.parent().unwrap()]).unwrap();
-        assert_eq!(
-            resolve_shell_from(None, Some(&path), None),
-            Some(git_bash.clone())
-        );
+        assert_eq!(resolve(None, Some(&path), None), Some(git_bash.clone()));
         let custom = make(r"custom\bash.exe");
         let path = std::env::join_paths([
             wsl.parent().unwrap(),
@@ -297,23 +255,17 @@ mod tests {
             git.parent().unwrap(),
         ])
         .unwrap();
+        assert_eq!(resolve(None, Some(&path), None), Some(custom.clone()));
         assert_eq!(
-            resolve_shell_from(None, Some(&path), None),
-            Some(custom.clone())
-        );
-        assert_eq!(
-            resolve_shell_from(Some(git_bash.as_os_str()), Some(&path), None),
+            resolve(Some(git_bash.as_os_str()), Some(&path), None),
             Some(git_bash.clone())
         );
         assert_eq!(
-            resolve_shell_from(Some(OsStr::new(r"C:\missing\bash.exe")), Some(&path), None),
+            resolve(Some(OsStr::new(r"C:\missing\bash.exe")), Some(&path), None),
             None
         );
         let programs = root.path().as_os_str();
-        assert_eq!(
-            resolve_shell_from(None, None, Some(programs)),
-            Some(git_bash)
-        );
-        assert_eq!(resolve_shell_from(None, None, None), None);
+        assert_eq!(resolve(None, None, Some(programs)), Some(git_bash));
+        assert_eq!(resolve(None, None, None), None);
     }
 }

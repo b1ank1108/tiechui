@@ -229,7 +229,10 @@ pub fn list_worktrees_with_env(
     let mut entries = Vec::new();
     for record in records {
         if let Some(expected) = &filter_key
-            && resolve_existing_prefix(Path::new(&record.project_root)) != *expected
+            && !crate::win_path::paths_equal(
+                &resolve_existing_prefix(Path::new(&record.project_root)),
+                expected,
+            )
         {
             continue;
         }
@@ -275,7 +278,12 @@ fn find_managed_record(home: &Path, path: &Path) -> Result<(PathBuf, Record)> {
     let target_key = resolve_existing_prefix(path);
     let record = read_registry_locked(home)?
         .into_iter()
-        .find(|item| resolve_existing_prefix(Path::new(&item.path)) == target_key)
+        .find(|item| {
+            crate::win_path::paths_equal(
+                &resolve_existing_prefix(Path::new(&item.path)),
+                &target_key,
+            )
+        })
         .ok_or_else(|| crate::Error(format!("{} is not a managed worktree", path.display())))?;
     Ok((target_key, record))
 }
@@ -342,8 +350,7 @@ pub fn worktree_project_root(home: &Path, cwd: &Path) -> Option<PathBuf> {
     let candidate = resolve_existing_prefix(&clean_path(cwd));
     read_registry_unlocked(home).into_iter().find_map(|item| {
         let wt_key = resolve_existing_prefix(Path::new(&item.path));
-        candidate
-            .starts_with(&wt_key)
+        crate::win_path::path_starts_with(&candidate, &wt_key)
             .then(|| resolve_existing_prefix(Path::new(&item.project_root)))
     })
 }
@@ -355,10 +362,12 @@ pub fn ensure_worktree_checkout(
 ) -> Result<Option<PathBuf>> {
     let cleaned = clean_path(cwd);
     let target_key = resolve_existing_prefix(&cleaned);
-    let Some(record) = read_registry_locked(home)?
-        .into_iter()
-        .find(|item| target_key.starts_with(resolve_existing_prefix(Path::new(&item.path))))
-    else {
+    let Some(record) = read_registry_locked(home)?.into_iter().find(|item| {
+        crate::win_path::path_starts_with(
+            &target_key,
+            &resolve_existing_prefix(Path::new(&item.path)),
+        )
+    }) else {
         return Ok(None);
     };
     let wt_path = PathBuf::from(&record.path);
@@ -407,7 +416,7 @@ fn recheckout_locked(
 fn resolve_restored_subdir(wt_path: &Path, requested: &Path) -> PathBuf {
     let wt_resolved = resolve_existing_prefix(&clean_path(wt_path));
     let req_resolved = resolve_existing_prefix(requested);
-    if let Ok(rel) = req_resolved.strip_prefix(&wt_resolved)
+    if let Some(rel) = crate::win_path::path_strip_prefix(&req_resolved, &wt_resolved)
         && !rel.as_os_str().is_empty()
     {
         let sub = wt_path.join(rel);
@@ -422,16 +431,24 @@ pub fn project_worktree_paths(home: &Path, project_root: &Path) -> Vec<PathBuf> 
     let expected = resolve_existing_prefix(project_root);
     read_registry_unlocked(home)
         .into_iter()
-        .filter(|item| resolve_existing_prefix(Path::new(&item.project_root)) == expected)
+        .filter(|item| {
+            crate::win_path::paths_equal(
+                &resolve_existing_prefix(Path::new(&item.project_root)),
+                &expected,
+            )
+        })
         .map(|item| PathBuf::from(item.path))
         .collect()
 }
 
 pub fn session_worktree(home: &Path, cwd: &Path) -> Option<SessionWorktree> {
     let expected = resolve_existing_prefix(&clean_path(cwd));
-    let record = read_registry_unlocked(home)
-        .into_iter()
-        .find(|item| expected.starts_with(resolve_existing_prefix(Path::new(&item.path))))?;
+    let record = read_registry_unlocked(home).into_iter().find(|item| {
+        crate::win_path::path_starts_with(
+            &expected,
+            &resolve_existing_prefix(Path::new(&item.path)),
+        )
+    })?;
     let branch = record.live_branch();
     Some(SessionWorktree {
         path: record.path,
@@ -447,10 +464,12 @@ pub fn managed_worktree_with_env(
     env: &BTreeMap<String, String>,
 ) -> Result<Option<WorktreeEntry>> {
     let expected = resolve_existing_prefix(&clean_path(cwd));
-    let Some(record) = read_registry_locked(home)?
-        .into_iter()
-        .find(|item| expected.starts_with(resolve_existing_prefix(Path::new(&item.path))))
-    else {
+    let Some(record) = read_registry_locked(home)?.into_iter().find(|item| {
+        crate::win_path::path_starts_with(
+            &expected,
+            &resolve_existing_prefix(Path::new(&item.path)),
+        )
+    }) else {
         return Ok(None);
     };
     let wt_path = Path::new(&record.path);
@@ -503,7 +522,9 @@ fn git_common_dir(root: &Path, env: &BTreeMap<String, String>) -> Result<PathBuf
     } else {
         root.join(common)
     };
-    Ok(joined.canonicalize()?)
+    Ok(crate::win_path::strip_verbatim_path(
+        &joined.canonicalize()?,
+    ))
 }
 
 fn locate_common_dir(
@@ -678,21 +699,155 @@ fn delete_checkout(
     project_path: &Path,
     env: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let anchor = if project_path.is_dir() {
-        project_path
-    } else {
-        wt_path
-    };
-    if let Some(wt_str) = wt_path.to_str() {
-        let _ = git::git(anchor, &["worktree", "remove", "--force", wt_str], env);
-    }
-    if wt_path.exists() {
-        fs::remove_dir_all(wt_path)?;
+    #[cfg(windows)]
+    {
+        remove_worktree_dir_safely(wt_path)?;
         if project_path.is_dir() {
-            let _ = git::git(project_path, &["worktree", "prune"], env);
+            let removed = wt_path.to_str().is_some_and(|wt_str| {
+                git::git(
+                    project_path,
+                    &["worktree", "remove", "--force", "--force", "--", wt_str],
+                    env,
+                )
+                .is_ok()
+            });
+            if !removed {
+                let _ = git::git(project_path, &["worktree", "prune"], env);
+            }
         }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let anchor = if project_path.is_dir() {
+            project_path
+        } else {
+            wt_path
+        };
+        if let Some(wt_str) = wt_path.to_str() {
+            let _ = git::git(anchor, &["worktree", "remove", "--force", wt_str], env);
+        }
+        if wt_path.exists() {
+            remove_worktree_dir_safely(wt_path)?;
+            if project_path.is_dir() {
+                let _ = git::git(project_path, &["worktree", "prune"], env);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn remove_worktree_dir_safely(wt_path: &Path) -> std::io::Result<()> {
+    remove_tree_entry(wt_path, true)
+}
+
+fn remove_tree_entry(path: &Path, defer_dot_git: bool) -> std::io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if is_link_or_reparse(&meta) || !meta.is_dir() {
+        return unlink_single_entry(path, &meta);
+    }
+    clear_readonly(path, &meta);
+    unlink_dir_children(path, defer_dot_git)?;
+    remove_with_readonly_retry(path, true)
+}
+
+fn unlink_dir_children(dir: &Path, defer_dot_git: bool) -> std::io::Result<()> {
+    let mut deferred_dot_git = false;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if defer_dot_git && entry.file_name() == ".git" {
+            deferred_dot_git = true;
+            continue;
+        }
+        remove_tree_entry(&entry.path(), false)?;
+    }
+    if deferred_dot_git {
+        remove_tree_entry(&dir.join(".git"), false)?;
     }
     Ok(())
+}
+
+fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            || meta.file_type().is_symlink()
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+fn unlink_single_entry(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+        let is_dir_entry = (meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        remove_with_readonly_retry(path, is_dir_entry)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        remove_with_readonly_retry(path, false)
+    }
+}
+
+fn remove_with_readonly_retry(path: &Path, is_dir: bool) -> std::io::Result<()> {
+    let remove = || {
+        if is_dir {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
+    };
+    match remove() {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => {
+            if let Ok(meta) = fs::symlink_metadata(path) {
+                clear_readonly(path, &meta);
+            }
+            match remove() {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            }
+        }
+    }
+}
+
+fn clear_readonly(path: &Path, meta: &fs::Metadata) {
+    #[cfg(windows)]
+    if !is_link_or_reparse(meta) {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, SetFileAttributesW,
+        };
+        let attrs = meta.file_attributes();
+        if (attrs & FILE_ATTRIBUTE_READONLY) != 0 {
+            let next = attrs & !FILE_ATTRIBUTE_READONLY;
+            let next = if next == 0 {
+                FILE_ATTRIBUTE_NORMAL
+            } else {
+                next
+            };
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: `wide` is a null-terminated UTF-16 buffer valid for the duration of the call.
+            unsafe {
+                let _ = SetFileAttributesW(wide.as_ptr(), next);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (path, meta);
 }
 
 fn rollback_checkout(
@@ -736,7 +891,9 @@ fn register_record(home: &Path, record: Record) -> Result<()> {
     with_file_lock(&wt_dir.join(REGISTRY_LOCK_FILENAME), || {
         let mut records = load_registry_file(&wt_dir.join(REGISTRY_FILENAME))?;
         let key = resolve_existing_prefix(Path::new(&record.path));
-        records.retain(|item| resolve_existing_prefix(Path::new(&item.path)) != key);
+        records.retain(|item| {
+            !crate::win_path::paths_equal(&resolve_existing_prefix(Path::new(&item.path)), &key)
+        });
         records.push(record);
         save_registry_file(&wt_dir, &records)
     })
@@ -750,10 +907,9 @@ fn update_record_post_create(home: &Path, updated: &Record) -> Result<()> {
     with_file_lock(&wt_dir.join(REGISTRY_LOCK_FILENAME), || {
         let mut records = load_registry_file(&wt_dir.join(REGISTRY_FILENAME))?;
         let key = resolve_existing_prefix(Path::new(&updated.path));
-        if let Some(slot) = records
-            .iter_mut()
-            .find(|item| resolve_existing_prefix(Path::new(&item.path)) == key)
-        {
+        if let Some(slot) = records.iter_mut().find(|item| {
+            crate::win_path::paths_equal(&resolve_existing_prefix(Path::new(&item.path)), &key)
+        }) {
             slot.post_create = updated.post_create.clone();
             save_registry_file(&wt_dir, &records)?;
         }
@@ -766,7 +922,12 @@ fn unregister_record(home: &Path, target_key: &Path) -> Result<()> {
     with_file_lock(&wt_dir.join(REGISTRY_LOCK_FILENAME), || {
         let reg_path = wt_dir.join(REGISTRY_FILENAME);
         let mut records = load_registry_file(&reg_path)?;
-        records.retain(|item| resolve_existing_prefix(Path::new(&item.path)) != target_key);
+        records.retain(|item| {
+            !crate::win_path::paths_equal(
+                &resolve_existing_prefix(Path::new(&item.path)),
+                target_key,
+            )
+        });
         save_registry_file(&wt_dir, &records)
     })
 }
@@ -850,7 +1011,7 @@ fn with_optional_lock<T>(lock_path: Option<&Path>, work: impl FnOnce() -> Result
 }
 
 fn with_file_lock<T>(lock_path: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
-    let key = resolve_existing_prefix(lock_path);
+    let key = crate::win_path::path_key(&resolve_existing_prefix(lock_path));
     let mutex = process_mutex(&key);
     let _guard = lock(&mutex);
     let file = tiechui_config::private::open_lock(lock_path)?;
@@ -900,4 +1061,53 @@ pub(crate) fn utc_ymd(millis: u64) -> (i64, i64, i64) {
 fn utc_yyyymmdd(millis: u64) -> String {
     let (year, m, d) = utc_ymd(millis);
     format!("{year:04}{m:02}{d:02}")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_worktree_dir_safely_unlinks_directory_links_and_readonly_files_without_entering_targets()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("external-shared");
+        fs::create_dir_all(external.join("nested")).unwrap();
+        fs::write(external.join("nested/keep.txt"), "do-not-delete\n").unwrap();
+
+        let wt = temp.path().join("fake-wt");
+        fs::create_dir_all(wt.join("node_modules")).unwrap();
+        fs::write(wt.join(".git"), "gitdir: /tmp/nowhere\n").unwrap();
+        let ro_file = wt.join("readonly.dat");
+        fs::write(&ro_file, "ro").unwrap();
+        let mut perms = fs::metadata(&ro_file).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&ro_file, perms).unwrap();
+
+        let link_path = wt.join("node_modules").join("shared-pkg");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&external, &link_path).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    link_path.to_str().unwrap(),
+                    external.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        remove_worktree_dir_safely(&wt).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(
+            fs::read_to_string(external.join("nested/keep.txt")).unwrap(),
+            "do-not-delete\n"
+        );
+    }
 }
