@@ -2356,6 +2356,311 @@ async fn user_shell_runs_as_a_tool_call_and_enters_the_context_between_turns() {
     harness.stop().await;
 }
 
+#[tokio::test]
+async fn interrupt_starts_single_queued_turn_and_demotes_remaining_steering_to_follow_up() {
+    let mut h = Harness::new(vec![
+        reply(vec![call("slow")]),
+        reply(vec![call("s1_tool")]),
+        answer("s1_done"),
+        answer("s2_done"),
+        answer("f1_done"),
+    ])
+    .await;
+    let _slow = h.gate_tool("slow");
+    let release_s1_tool = h.gate_tool("s1_tool");
+    h.input("task", InputDelivery::Steer).await;
+    let turn1 = h.started_turn().await;
+    assert_eq!(recv(&mut h.started).await, "slow");
+
+    h.input("s1", InputDelivery::Steer).await;
+    h.input("s2", InputDelivery::Steer).await;
+    h.input("s3", InputDelivery::Steer).await;
+    h.input("f1", InputDelivery::FollowUp).await;
+    h.until(|event| {
+        matches!(
+            event,
+            EventKind::QueueUpdated {
+                steering,
+                follow_up,
+            } if steering.len() == 3 && follow_up.len() == 1
+        )
+    })
+    .await;
+
+    h.send(Op::Interrupt { turn_id: turn1 }).await;
+    h.end(TurnStatus::Interrupted).await;
+
+    let _turn2 = h.started_turn().await;
+    assert_eq!(recv(&mut h.started).await, "s1_tool");
+
+    let queue_after_pop = h
+        .seen
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            EventKind::QueueUpdated {
+                steering,
+                follow_up,
+            } => Some((steering.clone(), follow_up.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(queue_after_pop.0.is_empty());
+    assert_eq!(
+        queue_after_pop
+            .1
+            .iter()
+            .map(|item| (item.submission_id.0.as_str(), &item.content[0]))
+            .collect::<Vec<_>>(),
+        [
+            ("3", &InputContent::Text { text: "s2".into() }),
+            ("4", &InputContent::Text { text: "s3".into() }),
+            ("5", &InputContent::Text { text: "f1".into() }),
+        ]
+    );
+
+    h.send(Op::Retract {
+        submission_ids: vec![SubmissionId("4".into())],
+    })
+    .await;
+    let retracted = h
+        .until(|event| matches!(event, EventKind::InputRetracted { .. }))
+        .await;
+    assert_eq!(
+        retracted.event,
+        EventKind::InputRetracted {
+            inputs: vec![QueuedInput {
+                submission_id: SubmissionId("4".into()),
+                content: vec![InputContent::Text { text: "s3".into() }],
+            }],
+        }
+    );
+    let updated = h
+        .until(|event| {
+            matches!(
+                event,
+                EventKind::QueueUpdated {
+                    steering,
+                    follow_up,
+                } if steering.is_empty() && follow_up.len() == 2
+            )
+        })
+        .await;
+    let EventKind::QueueUpdated { follow_up, .. } = updated.event else {
+        unreachable!()
+    };
+    assert_eq!(
+        follow_up
+            .iter()
+            .map(|item| item.submission_id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["3", "5"]
+    );
+
+    release_s1_tool.send(()).unwrap();
+    let _req_task = h.request().await;
+    let req_s1_first = h.request().await;
+    let req_s1_second = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(users(&req_s1_first), ["task", "s1"]);
+    assert_eq!(users(&req_s1_second), ["task", "s1"]);
+
+    let req_s2 = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(users(&req_s2), ["task", "s1", "s2"]);
+
+    let req_f1 = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(users(&req_f1), ["task", "s1", "s2", "f1"]);
+
+    h.valid_transcript().await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn interrupt_retains_immediate_shell_command_while_turn_winds_down() {
+    struct SlowCancelTool {
+        spec: ToolSpec,
+        started: mpsc::UnboundedSender<()>,
+        cancelling: mpsc::UnboundedSender<()>,
+        finish: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Tool for SlowCancelTool {
+        fn spec(&self) -> &ToolSpec {
+            &self.spec
+        }
+        fn concurrency(&self, _: &serde_json::Value) -> Concurrency {
+            Concurrency::Shared
+        }
+        async fn run(&self, _: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
+            self.started.send(()).unwrap();
+            ctx.cancel.cancelled().await;
+            self.cancelling.send(()).unwrap();
+            let finish = self.finish.lock().unwrap().take().unwrap();
+            let _ = finish.await;
+            Err(ToolError("Operation aborted".into()))
+        }
+    }
+
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (cancelling_tx, mut cancelling_rx) = mpsc::unbounded_channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let slow_call = Content::ToolCall(ToolCall {
+        id: "slow-1".into(),
+        name: "slow_cancel".into(),
+        arguments: json!({}),
+        opaque: None,
+    });
+    let mut h = Harness::with_contributions(
+        vec![reply(vec![slow_call]), answer("after shell")],
+        Arc::new(BoundedRetry::default()),
+        json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}),
+        |registry| {
+            registry
+                .register_tool(Arc::new(SlowCancelTool {
+                    spec: ToolSpec {
+                        name: "slow_cancel".into(),
+                        description: "Tool with gated cancellation".into(),
+                        input_schema: json!({"type":"object"}),
+                    },
+                    started: started_tx,
+                    cancelling: cancelling_tx,
+                    finish: Mutex::new(Some(finish_rx)),
+                }))
+                .unwrap();
+            registry
+                .register_tool(Arc::new(Shell(ToolSpec {
+                    name: "bash".into(),
+                    description: "Offline shell".into(),
+                    input_schema: json!({"type":"object"}),
+                })))
+                .unwrap();
+        },
+    )
+    .await;
+
+    h.input("task", InputDelivery::Steer).await;
+    let turn1 = h.started_turn().await;
+    recv(&mut started_rx).await;
+
+    h.send(Op::Interrupt { turn_id: turn1 }).await;
+    h.send(Op::RunShell {
+        command: "echo immediate".into(),
+    })
+    .await;
+    h.send(Op::SetThinking {
+        level: ThinkingLevel::Low,
+    })
+    .await;
+
+    recv(&mut cancelling_rx).await;
+    h.until(|event| {
+        matches!(
+            event,
+            EventKind::SessionUpdated {
+                thinking: ThinkingLevel::Low,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        !h.seen
+            .iter()
+            .any(|event| matches!(event.event, EventKind::TurnCompleted { .. }))
+    );
+
+    finish_tx.send(()).unwrap();
+    h.end(TurnStatus::Interrupted).await;
+
+    let shell_turn = h.started_turn().await;
+    h.end(TurnStatus::Completed).await;
+    assert!(
+        !h.seen
+            .iter()
+            .any(|event| matches!(event.event, EventKind::Error { .. }))
+    );
+    let shell_items: Vec<&KnownItem> = h
+        .seen
+        .iter()
+        .filter_map(|event| match &event.event {
+            EventKind::ItemCompleted {
+                turn_id,
+                item: Item::Known(item),
+            } if *turn_id == shell_turn => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(
+        shell_items[0],
+        KnownItem::ToolCall { name, arguments, .. }
+            if name == "bash" && arguments["command"] == "echo immediate"
+    ));
+    assert!(matches!(
+        shell_items[1],
+        KnownItem::ToolResult { output, is_error: false, .. }
+            if output["content"][0]["text"] == "ran echo immediate"
+    ));
+
+    h.input("after", InputDelivery::Steer).await;
+    let _req_task = h.request().await;
+    let req_after = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(
+        users(&req_after),
+        [
+            "task",
+            "Ran `echo immediate`\n```\nran echo immediate\n```",
+            "after"
+        ]
+    );
+
+    h.valid_transcript().await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn interrupt_with_non_empty_queue_still_refuses_shell_command() {
+    let (_release, gate) = oneshot::channel();
+    let held = Script {
+        error: None,
+        steps: vec![Step::Wait(gate)].into(),
+    };
+    let mut h = commanded(vec![held, answer("queued reply")]).await;
+    h.input("task", InputDelivery::Steer).await;
+    let turn1 = h.started_turn().await;
+    h.request().await;
+    h.input("queued", InputDelivery::Steer).await;
+    h.until(|event| {
+        matches!(
+            event,
+            EventKind::QueueUpdated { steering, .. } if steering.len() == 1
+        )
+    })
+    .await;
+
+    h.send(Op::Interrupt { turn_id: turn1 }).await;
+    h.send(Op::RunShell {
+        command: "pwd".into(),
+    })
+    .await;
+
+    h.end(TurnStatus::Interrupted).await;
+    let req_queued = h.request().await;
+    h.end(TurnStatus::Completed).await;
+    assert_eq!(users(&req_queued), ["task", "queued"]);
+    assert!(h.seen.iter().any(|event| {
+        matches!(
+            &event.event,
+            EventKind::Error { message } if message == "shell commands run between turns"
+        )
+    }));
+    h.valid_transcript().await;
+    h.stop().await;
+}
+
 #[path = "replay_resume_tests.rs"]
 mod replay_resume;
 
