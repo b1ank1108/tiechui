@@ -577,6 +577,8 @@ fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_
             format!("[worktrees]\npost_create_script = {hang_script:?}\n"),
         )
         .unwrap();
+        // Git Bash on a cold Windows runner can take longer than 200 ms to print anything.
+        let timeout = Duration::from_millis(if cfg!(windows) { 2000 } else { 200 });
         let started = Instant::now();
         let wt_timeout = ws::create_worktree_with_options(
             &home,
@@ -584,7 +586,7 @@ fn post_create_script_respects_project_trust_captures_output_and_keeps_worktree_
             ws::CreateWorktreeOptions {
                 base_branch: None,
                 carry_changes: false,
-                post_create_timeout: Some(Duration::from_millis(200)),
+                post_create_timeout: Some(timeout),
             },
             &env,
         )
