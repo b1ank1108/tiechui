@@ -1085,7 +1085,7 @@ mod tests {
         perms.set_readonly(true);
         fs::set_permissions(&ro_file, perms).unwrap();
 
-        let link_path = wt.join("node_modules/shared-pkg");
+        let link_path = wt.join("node_modules").join("shared-pkg");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&external, &link_path).unwrap();
         #[cfg(windows)]

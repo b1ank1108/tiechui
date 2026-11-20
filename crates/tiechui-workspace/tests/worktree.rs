@@ -35,6 +35,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 fn init_repo(root: &Path) {
     std::fs::create_dir_all(root.join("src")).unwrap();
     git(root, &["init", "-b", "main"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     std::fs::write(root.join("README.md"), "hello\n").unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn v() -> u32 { 1 }\n").unwrap();
     git(root, &["add", "."]);
@@ -1501,7 +1502,7 @@ fn remove_worktree_preserves_external_junction_or_symlink_target_files() {
     let wt = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
     let wt_path = PathBuf::from(&wt.path);
     std::fs::create_dir_all(wt_path.join("node_modules")).unwrap();
-    let linked = wt_path.join("node_modules/shared-pkg");
+    let linked = wt_path.join("node_modules").join("shared-pkg");
 
     #[cfg(unix)]
     std::os::unix::fs::symlink(&shared, &linked).unwrap();

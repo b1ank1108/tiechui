@@ -58,6 +58,8 @@ async fn scratch_open_shares_private_default_dir_executes_bash_there_and_passes_
     };
     tiechui_config::private::create_dir_all(&home).unwrap();
 
+    // Git Bash prints `/c/...` for `pwd`; `-W` gives the Windows form `canonicalize` accepts.
+    let pwd = if cfg!(windows) { "pwd -W" } else { "pwd" };
     let (_mock, mut client) = setup_mock_server_and_client(
         &home,
         vec![
@@ -65,7 +67,7 @@ async fn scratch_open_shares_private_default_dir_executes_bash_there_and_passes_
                 "call-scratch-bash",
                 "bash",
                 json!({
-                    "command": "pwd > pwd.txt && mkdir -m 0755 sub && printf 'scratch-ok\\n' > sub/out.txt"
+                    "command": format!("{pwd} > pwd.txt && mkdir -m 0755 sub && printf 'scratch-ok\\n' > sub/out.txt")
                 }),
             )]),
             sse_chat("scratch command finished"),

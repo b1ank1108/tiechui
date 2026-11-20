@@ -46,6 +46,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 pub(super) fn init_repo(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
     git(root, &["init", "-b", "main"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     std::fs::write(root.join("README.md"), "hello\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "init"]);
