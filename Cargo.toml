@@ -38,7 +38,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 ratatui-core = { version = "0.1.2", features = ["std"] }
 jsonschema = { version = "0.33", default-features = false }
 libc = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "json", "stream", "zstd", "rustls-tls-native-roots", "socks"] }
 regex = "1.12"
 rmcp = { version = "=3.9.0", default-features = false, features = ["client", "elicitation", "transport-async-rw", "transport-streamable-http-client"] }

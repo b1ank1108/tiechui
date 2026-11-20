@@ -89,6 +89,13 @@ impl Terminal {
         sink: Sink,
     ) -> Result<Arc<Self>> {
         let pair = native_pty_system().openpty(size(params.cols, params.rows))?;
+        // Shells inherit an ignore-Ctrl+C flag from launchers such as CI agents and
+        // services, which leaves `\x03` in the pseudoconsole interrupting nothing.
+        #[cfg(windows)]
+        // SAFETY: a null handler only clears this process's inherited ignore flag.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
+        }
         let (primary, fallback) = crate::shell::resolve_shell(configured_shell);
         let (child, launched_name) = match pair.slave.spawn_command(build_command(&primary, params))
         {
@@ -238,5 +245,41 @@ mod tests {
             assert_eq!(startup_query(&mut pending), Some(false));
             assert_eq!(pending, output);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_c_interrupts_the_foreground_program_under_a_launcher_that_ignores_it() {
+        use std::time::{Duration, Instant};
+
+        // SAFETY: a null handler only sets this process's ignore flag, as CI agents do.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1) };
+        let params = TerminalCreateParams {
+            id: "ctrl-c".into(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            cols: 120,
+            rows: 30,
+            env: None,
+        };
+        let terminal = Terminal::spawn(&params, Some("cmd"), Arc::new(|_, _| {})).unwrap();
+        let wait_for = |needle: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !terminal.attached().buffer.contains(needle) {
+                let buffer = terminal.attached().buffer;
+                assert!(Instant::now() < deadline, "no {needle:?} in {buffer:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        terminal.write(b"ping -t 127.0.0.1\r").unwrap();
+        wait_for("TTL=");
+        terminal.write(b"\x03").unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        // cmd reads this line only once ping exits; the empty substring keeps the
+        // typed text from matching.
+        terminal
+            .write(b"echo ping%COMSPEC:~0,0%-stopped\r")
+            .unwrap();
+        wait_for("ping-stopped");
+        terminal.kill();
     }
 }
