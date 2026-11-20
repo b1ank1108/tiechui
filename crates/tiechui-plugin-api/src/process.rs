@@ -196,7 +196,7 @@ fn upsert_child_env(
             *existing == key
         }
     }) {
-        *slot = (key, value);
+        slot.1 = value;
     } else {
         out.push((key, value));
     }
@@ -520,6 +520,11 @@ mod tests {
             assert_eq!(lookup(required).len(), 1, "missing or duplicate {required}");
         }
         assert_eq!(lookup("PATH"), vec![r"D:\override\bin".to_owned()]);
+        assert!(
+            collected
+                .iter()
+                .any(|(k, v)| k == "Path" && v == r"D:\override\bin")
+        );
         assert!(lookup("OPENAI_API_KEY").is_empty());
         assert!(lookup("UNLISTED_VAR").is_empty());
     }
