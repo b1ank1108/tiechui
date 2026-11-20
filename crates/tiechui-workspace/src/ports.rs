@@ -705,7 +705,7 @@ fn resolve_token_path(token: &str, cwd: Option<&Path>) -> Option<PathBuf> {
         return None;
     }
     let path = Path::new(token);
-    if path.is_absolute() || crate::win_path::looks_like_windows_root(path) {
+    if path.is_absolute() || crate::win_path::is_windows_absolute(token) {
         return Some(path.to_path_buf());
     }
     if token.contains('/') || (cfg!(windows) && token.contains('\\')) {
@@ -1549,5 +1549,19 @@ mod tests {
             sockets: vec![(8080, "127.0.0.1".into())],
         };
         assert_eq!(attribute_process(&proc_parent_dotdot, &roots), Some(0));
+    }
+
+    #[test]
+    fn token_paths_without_process_cwd_resolve_only_absolute_windows_forms() {
+        assert_eq!(resolve_token_path("server.js", None), None);
+        assert_eq!(resolve_token_path("C:", None), None);
+        assert_eq!(
+            resolve_token_path(r"C:\repo\server.js", None),
+            Some(PathBuf::from(r"C:\repo\server.js"))
+        );
+        assert_eq!(
+            resolve_token_path(r"\\?\C:\repo", None),
+            Some(PathBuf::from(r"\\?\C:\repo"))
+        );
     }
 }

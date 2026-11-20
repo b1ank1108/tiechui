@@ -283,6 +283,10 @@ pub(crate) fn looks_like_windows_root(path: &Path) -> bool {
         })
 }
 
+pub(crate) fn is_windows_absolute(s: &str) -> bool {
+    (s.len() > 2 && has_drive_prefix(s)) || s.starts_with(r"\\")
+}
+
 pub(crate) fn parse_windows_cmdline(cmdline: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut chars = cmdline.chars().peekable();

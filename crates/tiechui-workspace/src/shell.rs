@@ -62,7 +62,7 @@ pub(crate) fn discover_shells() -> TerminalShellsResult {
         HOST_PLATFORM,
         |name| std::env::var_os(name),
         is_host_executable,
-        || tiechui_exec::resolve_git_bash().ok(),
+        probe_host_shell,
     )
 }
 
@@ -72,8 +72,22 @@ pub(crate) fn resolve_shell(configured: Option<&str>) -> (ResolvedShell, Resolve
         configured,
         |name| std::env::var_os(name),
         is_host_executable,
-        || tiechui_exec::resolve_git_bash().ok(),
+        probe_host_shell,
     )
+}
+
+/// Git Bash on Windows; elsewhere `$SHELL`, then the passwd login shell, then `/bin/sh`.
+fn probe_host_shell() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        tiechui_exec::resolve_git_bash().ok()
+    }
+    #[cfg(unix)]
+    {
+        Some(PathBuf::from(
+            portable_pty::CommandBuilder::new_default_prog().get_shell(),
+        ))
+    }
 }
 
 fn is_host_executable(path: &Path) -> bool {
@@ -93,11 +107,13 @@ fn discover_for_platform(
     platform: ShellPlatform,
     lookup: impl Fn(&str) -> Option<OsString>,
     is_executable: impl Fn(&Path) -> bool,
-    git_bash: impl FnOnce() -> Option<PathBuf>,
+    probed_shell: impl FnOnce() -> Option<PathBuf>,
 ) -> TerminalShellsResult {
     match platform {
-        ShellPlatform::Windows => discover_windows_shells(&lookup, &is_executable, git_bash()),
-        ShellPlatform::Posix => discover_posix_shells(lookup("SHELL").as_deref(), &is_executable),
+        ShellPlatform::Windows => discover_windows_shells(&lookup, &is_executable, probed_shell()),
+        ShellPlatform::Posix => {
+            discover_posix_shells(lookup("SHELL").as_deref(), probed_shell(), &is_executable)
+        }
     }
 }
 
@@ -106,9 +122,9 @@ fn resolve_for_platform(
     configured: Option<&str>,
     lookup: impl Fn(&str) -> Option<OsString>,
     is_executable: impl Fn(&Path) -> bool,
-    git_bash: impl FnOnce() -> Option<PathBuf>,
+    probed_shell: impl FnOnce() -> Option<PathBuf>,
 ) -> (ResolvedShell, ResolvedShell) {
-    let discovered = discover_for_platform(platform, &lookup, &is_executable, git_bash);
+    let discovered = discover_for_platform(platform, &lookup, &is_executable, probed_shell);
     let fallback = default_resolved_shell(platform, &discovered);
     let Some(requested) = normalize_requested_shell(configured) else {
         return (fallback.clone(), fallback);
@@ -468,24 +484,27 @@ fn windows_stem(raw_path: &str) -> String {
 
 fn discover_posix_shells(
     shell_env: Option<&OsStr>,
+    login_shell: Option<PathBuf>,
     is_executable: &impl Fn(&Path) -> bool,
 ) -> TerminalShellsResult {
     let mut shells = Vec::new();
     let mut seen_ids = HashSet::new();
-    let mut env_default_id = None;
+    let mut preferred_id = None;
 
-    if let Some(raw_env) = shell_env
-        && let Some(trimmed) = raw_env
-            .to_str()
-            .map(|s| s.trim().trim_matches('"'))
-            .filter(|s| !s.is_empty())
-    {
-        let candidate = Path::new(trimmed);
-        if is_executable(candidate)
-            && let Some(stem) = posix_stem(candidate)
-        {
-            seen_ids.insert(stem.clone());
-            env_default_id = Some(stem.clone());
+    let env_shell = shell_env
+        .and_then(OsStr::to_str)
+        .map(|s| s.trim().trim_matches('"'))
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    for candidate in env_shell.into_iter().chain(login_shell) {
+        if !is_executable(&candidate) {
+            continue;
+        }
+        let Some(stem) = posix_stem(&candidate) else {
+            continue;
+        };
+        if seen_ids.insert(stem.clone()) {
+            preferred_id.get_or_insert_with(|| stem.clone());
             shells.push(TerminalShellEntry {
                 id: stem.clone(),
                 label: stem,
@@ -513,7 +532,7 @@ fn discover_posix_shells(
         }
     }
 
-    let default_shell = env_default_id
+    let default_shell = preferred_id
         .or_else(|| shells.iter().find(|s| s.id == "sh").map(|s| s.id.clone()))
         .or_else(|| shells.first().map(|s| s.id.clone()))
         .unwrap_or_else(|| "sh".into());
@@ -736,6 +755,15 @@ mod tests {
             || None,
         );
         assert_eq!(unset_env.default_shell, "sh");
+
+        let login_fallback = discover_for_platform(
+            ShellPlatform::Posix,
+            env_from(&[("SHELL", "/missing/custom-shell")]),
+            exec_set(&["/bin/zsh", "/bin/bash", "/bin/sh"]),
+            || Some(PathBuf::from("/bin/zsh")),
+        );
+        assert_eq!(login_fallback.default_shell, "zsh");
+        assert_eq!(login_fallback.shells[0].path, "/bin/zsh");
 
         let (resolved_zsh, fallback_sh) = resolve_for_platform(
             ShellPlatform::Posix,
