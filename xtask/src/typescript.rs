@@ -161,6 +161,8 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::WorktreeCleanupStatus>();
                 d.visit::<workspace::TerminalCreateParams>();
                 d.visit::<workspace::TerminalParams>();
+                d.visit::<workspace::TerminalShellEntry>();
+                d.visit::<workspace::TerminalShellsResult>();
                 d.visit::<workspace::TerminalAttached>();
                 d.visit::<workspace::TerminalWriteParams>();
                 d.visit::<workspace::TerminalResizeParams>();

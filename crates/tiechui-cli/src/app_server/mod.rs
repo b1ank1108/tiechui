@@ -2442,6 +2442,116 @@ pub(super) mod tests {
         client.close().await;
     }
 
+    #[cfg(feature = "workspace")]
+    #[tokio::test]
+    async fn terminal_shells_and_terminal_shell_config_apply_to_next_terminal_without_restart() {
+        use tiechui_protocol::workspace::{TerminalAttached, TerminalShellsResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let server = Server::new(home.clone());
+        let mut client = TestClient::new(server.clone());
+
+        let (submissions, _rx) = mpsc::channel(1);
+        let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
+        let live = Arc::new(Live {
+            path: dir.path().join("session.jsonl"),
+            cwd: work.clone(),
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection: Arc::new(Mutex::new(Projection::default())),
+            applied: Arc::new(Notify::new()),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        });
+        lock(&server.sessions).insert(ThreadId("t-open".into()), live.clone());
+
+        let discovered: TerminalShellsResult = client.call_ok("terminal/shells", json!({})).await;
+        assert!(!discovered.shells.is_empty());
+        assert!(
+            discovered
+                .shells
+                .iter()
+                .any(|s| s.id == discovered.default_shell)
+        );
+
+        let initial_raw: Value = client.call_ok("config/get", json!({})).await;
+        assert!(initial_raw.get("terminal_shell").is_none());
+
+        let target_shell = if cfg!(windows) { "cmd" } else { "sh" };
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "terminal.shell", "value": target_shell }),
+            )
+            .await;
+        assert!(!live.stale.load(Ordering::Relaxed));
+
+        let updated: ConfigValues = client.call_ok("config/get", json!({})).await;
+        assert_eq!(updated.terminal_shell.as_deref(), Some(target_shell));
+
+        let _: Value = client
+            .call_ok(
+                "terminal/create",
+                json!({
+                    "id": "term-configured",
+                    "cwd": work,
+                    "cols": 80,
+                    "rows": 24
+                }),
+            )
+            .await;
+        let attached: TerminalAttached = client
+            .call_ok("terminal/attach", json!({ "id": "term-configured" }))
+            .await;
+        assert_eq!(attached.shell.as_deref(), Some(target_shell));
+        let _: Value = client
+            .call_ok("terminal/kill", json!({ "id": "term-configured" }))
+            .await;
+
+        for bad in [json!(42), json!(true), json!(["sh"])] {
+            assert!(
+                client
+                    .call(
+                        "config/update",
+                        json!({ "key": "terminal.shell", "value": bad })
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "terminal.shell", "value": "" }),
+            )
+            .await;
+        let after_empty: Value = client.call_ok("config/get", json!({})).await;
+        assert!(after_empty.get("terminal_shell").is_none());
+
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "terminal.shell", "value": target_shell }),
+            )
+            .await;
+        let _: Value = client
+            .call_ok(
+                "config/update",
+                json!({ "key": "terminal.shell", "value": null }),
+            )
+            .await;
+        let after_null: ConfigValues = client.call_ok("config/get", json!({})).await;
+        assert_eq!(after_null.terminal_shell, None);
+
+        client.close().await;
+    }
+
     #[tokio::test]
     async fn providers_reload_updates_open_session_models_without_reopening() {
         let Some(home) = isolated_home_child(

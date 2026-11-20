@@ -477,6 +477,23 @@ pub struct TerminalParams {
     pub id: String,
 }
 
+/// A candidate shell available for built-in terminals on this host.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalShellEntry {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+}
+
+/// The `terminal/shells` result: available candidate shells in priority order and the auto-detected default `id`.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalShellsResult {
+    pub shells: Vec<TerminalShellEntry>,
+    pub default_shell: String,
+}
+
 /// The output kept for a terminal, after which `terminal/output` continues.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -487,6 +504,10 @@ pub struct TerminalAttached {
     pub seq: u64,
     /// The shell has exited with this code.
     pub exit: Option<i32>,
+    /// Short name of the shell started for this terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub shell: Option<String>,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

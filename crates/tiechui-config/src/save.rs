@@ -22,6 +22,14 @@ pub fn save_preference(path: &Path, key: &str, mut value: Value) -> Result<(), C
             "post_create_script is only allowed in project configuration",
         ));
     }
+    if key == "terminal.shell"
+        && let Some(raw) = value.as_str()
+    {
+        match crate::normalize_terminal_shell(Some(raw)) {
+            Some(normalized) => value = Value::from(normalized),
+            None => return remove_preference(path, key),
+        }
+    }
     let mut force_private = false;
     if key == "network.proxy"
         && let Some(raw) = value.as_str()

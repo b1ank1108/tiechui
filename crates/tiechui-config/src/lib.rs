@@ -127,6 +127,8 @@ pub struct Config {
     pub sessions: SessionsConfig,
     /// User configuration only.
     pub skills: SkillsConfig,
+    /// User configuration only.
+    pub terminal: TerminalConfig,
     pub worktrees: WorktreesConfig,
     #[serde(skip)]
     #[schemars(skip)]
@@ -606,6 +608,20 @@ pub struct SessionsConfig {
 pub struct SkillsConfig {
     /// Names of discovered skills that sessions leave out.
     pub disabled: Vec<String>,
+}
+
+/// User configuration only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// Shell id or executable path for built-in terminals; unset auto-detects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
+pub fn normalize_terminal_shell(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    (!trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto")).then(|| trimmed.to_owned())
 }
 
 pub const MAX_WORKTREE_IDLE_DAYS: u32 = 3650;

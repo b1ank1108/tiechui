@@ -264,11 +264,12 @@ fn values(config: tiechui_config::Config) -> ConfigValues {
         archive_after_days: config.sessions.archive_after_days,
         auto_clean_idle_days: config.worktrees.auto_clean_idle_days,
         auto_clean_on_session_delete: config.worktrees.auto_clean_on_session_delete,
+        terminal_shell: config.terminal.shell,
     }
 }
 
 /// Keys besides `model` and `thinking`, which null removes.
-const OPTIONAL: [&str; 9] = [
+const OPTIONAL: [&str; 10] = [
     "lightweight_model",
     "permissions.classifier_model",
     "network.proxy",
@@ -276,13 +277,19 @@ const OPTIONAL: [&str; 9] = [
     "network.ca_cert",
     "ask.auto_continue_after_sec",
     "sessions.archive_after_days",
+    "terminal.shell",
     "worktrees.auto_clean_idle_days",
     "worktrees.auto_clean_on_session_delete",
 ];
 
 const MODEL_KEYS: [&str; 3] = ["model", "lightweight_model", "permissions.classifier_model"];
 
-const NETWORK_KEYS: [&str; 3] = ["network.proxy", "network.no_proxy", "network.ca_cert"];
+const STRING_KEYS: [&str; 4] = [
+    "network.proxy",
+    "network.no_proxy",
+    "network.ca_cert",
+    "terminal.shell",
+];
 
 const NUMBER_KEYS: [&str; 3] = [
     "ask.auto_continue_after_sec",
@@ -364,7 +371,7 @@ fn save_string_preference(
     key: &str,
     value: &Value,
 ) -> Result<bool, String> {
-    if !MODEL_KEYS.contains(&key) && !NETWORK_KEYS.contains(&key) {
+    if !MODEL_KEYS.contains(&key) && !STRING_KEYS.contains(&key) {
         return Ok(false);
     }
     let text = value

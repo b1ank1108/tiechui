@@ -6,6 +6,7 @@ mod git;
 mod ports;
 mod scratch;
 mod search;
+mod shell;
 mod terminal;
 mod watch;
 mod win_path;
@@ -29,6 +30,7 @@ pub use scratch::{default_scratch_dir, is_scratch_dir, list_scratch_dirs};
 pub use search::search;
 use tiechui_protocol::workspace::{
     PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
+    TerminalShellsResult,
 };
 pub use worktree::{
     CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
@@ -82,6 +84,7 @@ pub fn root(root: &str) -> Result<PathBuf> {
 }
 
 pub struct Workspace {
+    home: Option<PathBuf>,
     sink: Sink,
     watches: Mutex<HashMap<PathBuf, watch::Watch>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Terminal>>>,
@@ -98,13 +101,25 @@ impl Workspace {
     }
 
     fn new_inner(home: Option<PathBuf>, sink: Sink) -> Self {
-        let ports = ports::PortMonitor::new(home, sink.clone());
+        let ports = ports::PortMonitor::new(home.clone(), sink.clone());
         Self {
+            home,
             sink,
             watches: Mutex::default(),
             terminals: Mutex::default(),
             ports,
         }
+    }
+
+    fn configured_terminal_shell(&self) -> Option<String> {
+        let home = self.home.as_ref()?;
+        let paths = tiechui_config::ConfigPaths {
+            user: home.join("config.toml"),
+            project: None,
+        };
+        tiechui_config::load(&paths, false, &Default::default())
+            .ok()
+            .and_then(|loaded| loaded.config.terminal.shell)
     }
 
     /// Sends `fs/changed` and `git/changed` for the root until [`Self::unwatch`].
@@ -123,12 +138,18 @@ impl Workspace {
         lock(&self.watches).remove(root);
     }
 
+    pub fn terminal_shells(&self) -> TerminalShellsResult {
+        shell::discover_shells()
+    }
+
     pub fn create_terminal(&self, params: TerminalCreateParams) -> Result<()> {
+        let configured = self.configured_terminal_shell();
         let mut terminals = lock(&self.terminals);
         if terminals.contains_key(&params.id) {
             return fail(format!("terminal {} exists", params.id));
         }
-        let terminal = terminal::Terminal::spawn(&params, self.sink.clone())?;
+        let terminal =
+            terminal::Terminal::spawn(&params, configured.as_deref(), self.sink.clone())?;
         terminals.insert(params.id, terminal);
         Ok(())
     }

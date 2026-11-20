@@ -233,6 +233,7 @@ fn handle(
                 .map(|output| GitRunResult { output })
         }),
         _ if method.starts_with("worktree/") => handle_worktree(home, method, params),
+        "terminal/shells" => value(workspace.terminal_shells()),
         "terminal/create" => call(params, |p: TerminalCreateParams| {
             workspace.create_terminal(p)
         }),

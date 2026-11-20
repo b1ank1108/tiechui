@@ -170,6 +170,10 @@ icons = []
 # Names of discovered skills that sessions leave out. User config only.
 # disabled = ["release-notes"]
 
+[terminal]
+# Shell id or executable path for built-in chui app-server terminals; omission auto-detects. User config only.
+# shell = "zsh"
+
 [worktrees]
 # Shell command run once inside each newly created session worktree. Project config only; requires project trust.
 # post_create_script = "ln -sf ../../.env .env"

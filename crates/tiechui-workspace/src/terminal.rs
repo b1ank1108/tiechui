@@ -21,6 +21,7 @@ struct Output {
 }
 
 pub(crate) struct Terminal {
+    shell: String,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -61,23 +62,47 @@ fn complete(bytes: &[u8]) -> usize {
     }
 }
 
-impl Terminal {
-    /// Starts the user's login shell.
-    pub(crate) fn spawn(params: &TerminalCreateParams, sink: Sink) -> Result<Arc<Self>> {
-        let pair = native_pty_system().openpty(size(params.cols, params.rows))?;
-        let mut command = CommandBuilder::new_default_prog();
-        command.cwd(&params.cwd);
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        if let Some(env) = &params.env {
-            for (key, value) in env {
-                command.env(key, value);
-            }
+fn build_command(
+    spec: &crate::shell::ResolvedShell,
+    params: &TerminalCreateParams,
+) -> CommandBuilder {
+    let mut command = CommandBuilder::new(&spec.path);
+    command.args(&spec.args);
+    command.cwd(&params.cwd);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    if let Some(env) = &params.env {
+        for (key, value) in env {
+            command.env(key, value);
         }
-        let child = pair.slave.spawn_command(command)?;
+    }
+    command
+}
+
+impl Terminal {
+    pub(crate) fn spawn(
+        params: &TerminalCreateParams,
+        configured_shell: Option<&str>,
+        sink: Sink,
+    ) -> Result<Arc<Self>> {
+        let pair = native_pty_system().openpty(size(params.cols, params.rows))?;
+        let (primary, fallback) = crate::shell::resolve_shell(configured_shell);
+        let (child, launched_name) = match pair.slave.spawn_command(build_command(&primary, params))
+        {
+            Ok(child) => (child, primary.name),
+            Err(_) if primary != fallback => (
+                pair.slave.spawn_command(build_command(&fallback, params))?,
+                fallback.name,
+            ),
+            Err(err) => return Err(err.into()),
+        };
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader()?;
         let terminal = Arc::new(Self {
+            shell: launched_name,
             writer: Mutex::new(pair.master.take_writer()?),
             master: Mutex::new(Some(pair.master)),
             child: Mutex::new(child),
@@ -167,6 +192,7 @@ impl Terminal {
             buffer: String::from_utf8_lossy(&bytes[start..]).into_owned(),
             seq: output.seq,
             exit: output.exit,
+            shell: Some(self.shell.clone()),
         }
     }
 

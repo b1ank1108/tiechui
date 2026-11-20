@@ -110,6 +110,17 @@
         }
       ]
     },
+    "terminal": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TerminalConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "thinking": {
       "default": null,
       "anyOf": [
@@ -874,6 +885,20 @@
           "default": null,
           "type": [
             "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TerminalConfig": {
+      "description": "User configuration only.",
+      "type": "object",
+      "properties": {
+        "shell": {
+          "description": "Shell id or executable path for built-in terminals; unset auto-detects.",
+          "type": [
+            "string",
             "null"
           ]
         }
