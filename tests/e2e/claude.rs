@@ -163,6 +163,17 @@ fn result_error(subtype: &str, errors: &[&str]) -> Value {
     )
 }
 
+fn recorded_script(frames: &str) -> Vec<Value> {
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(
+        frames
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+    );
+    steps
+}
+
 /// A turn that answers with one short text.
 fn simple_turn(msg: &str, text: &str, usage: Value) -> Vec<Value> {
     let mut steps = vec![
@@ -200,7 +211,6 @@ impl Fixture {
             .arg("--version")
             .output()
             .unwrap();
-        std::fs::remove_file(root.path().join("fake.log")).ok();
         Self { root, cwd }
     }
 
@@ -673,11 +683,7 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
     );
     assert_eq!(used[1].output, 10);
     assert_eq!(used[2].output, 5);
-    assert!(
-        fixture.mismatches().is_empty(),
-        "{:?}",
-        fixture.mismatches()
-    );
+    assert_script_followed(&fixture);
 }
 
 /// Frames of a real 2.1.322 turn (thinking summary, Write, Bash, Read, Edit, final text) as
@@ -685,15 +691,9 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
 #[tokio::test]
 async fn a_recorded_turn_maps_like_the_synthetic_ones() {
     let fixture = Fixture::new();
-    let mut steps = handshake();
-    steps.push(user_message("go"));
-    let recorded = include_str!("fixtures/claude-tools-turn.ndjson");
-    steps.extend(
-        recorded
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap()),
-    );
-    fixture.script(steps);
+    fixture.script(recorded_script(include_str!(
+        "fixtures/claude-tools-turn.ndjson"
+    )));
     let mut client = fixture.client();
     let opened = open(&mut client, &fixture, None).await;
     submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
@@ -754,11 +754,7 @@ async fn control_requests_without_a_mapping_are_answered_so_claude_never_waits()
     submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Completed);
-    assert!(
-        fixture.mismatches().is_empty(),
-        "{:?}",
-        fixture.mismatches()
-    );
+    assert_script_followed(&fixture);
 }
 
 /// A `can_use_tool` request as Claude 2.1.322 sends it (recorded shape).
@@ -829,16 +825,12 @@ async fn next_approval(client: &mut Client) -> (Vec<SessionEvent>, String, Appro
     (seen, id, request)
 }
 
-fn approval_response(thread: &str, approval: &str, decision: Value) -> Value {
-    json!({"thread_id": thread, "op": {"kind": "approval_response",
-        "approval_id": approval, "decision": decision}})
-}
-
 async fn answer(client: &mut Client, thread: &str, approval: &str, decision: Value) {
     client
         .ok(
             "session/submit",
-            approval_response(thread, approval, decision),
+            json!({"thread_id": thread, "op": {"kind": "approval_response",
+                "approval_id": approval, "decision": decision}}),
         )
         .await;
 }
@@ -1687,15 +1679,9 @@ async fn a_recorded_foreground_subagent_folds_under_its_agent_call() {
     const SPAWN: &str = "toolu_017Umw5jiSeU16kfK4MGLL91";
     const BASH: &str = "toolu_01MZ1aHnrFuDiJiuQtFV6chq";
     let fixture = Fixture::new();
-    let mut steps = handshake();
-    steps.push(user_message("go"));
-    let recorded = include_str!("fixtures/claude-subagent-foreground.ndjson");
-    steps.extend(
-        recorded
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap()),
-    );
-    fixture.script(steps);
+    fixture.script(recorded_script(include_str!(
+        "fixtures/claude-subagent-foreground.ndjson"
+    )));
     let mut client = fixture.client();
     let opened = open(&mut client, &fixture, Some("manual")).await;
     let thread = opened.thread_id.0.clone();
@@ -1785,15 +1771,9 @@ async fn a_recorded_background_subagent_asks_after_the_turn_and_claude_then_star
     const SPAWN: &str = "toolu_01J3nzKk11UiMAwxacu8vxeQ";
     const BASH: &str = "toolu_01SF2XZpjY3cCQfB9iqnoPvx";
     let fixture = Fixture::new();
-    let mut steps = handshake();
-    steps.push(user_message("go"));
-    let recorded = include_str!("fixtures/claude-subagent-background.ndjson");
-    steps.extend(
-        recorded
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap()),
-    );
-    fixture.script(steps);
+    fixture.script(recorded_script(include_str!(
+        "fixtures/claude-subagent-background.ndjson"
+    )));
     fixture.script_for_launch(1, handshake());
     let mut client = fixture.client();
     let opened = open(&mut client, &fixture, Some("manual")).await;
@@ -2346,11 +2326,7 @@ async fn reopening_resumes_the_same_session_and_usage_is_not_counted_twice() {
     };
     assert_eq!((total.output, total.cache_read), (10, 300), "{total:?}");
     assert_eq!(saved_thread(&path), id, "resume keeps the id");
-    assert!(
-        fixture.mismatches().is_empty(),
-        "{:?}",
-        fixture.mismatches()
-    );
+    assert_script_followed(&fixture);
 }
 
 #[tokio::test]
@@ -2440,27 +2416,7 @@ async fn a_message_written_during_a_turn_joins_it_and_does_not_start_another() {
         .filter(|line| line["type"] == "user")
         .count();
     assert_eq!(writes, 2);
-    assert!(
-        fixture.mismatches().is_empty(),
-        "{:?}",
-        fixture.mismatches()
-    );
-}
-
-#[cfg(unix)]
-async fn running_turn(fixture: &Fixture) -> (Client, String, TurnId) {
-    let mut client = fixture.client();
-    let opened = open(&mut client, fixture, None).await;
-    let thread = opened.thread_id.0.clone();
-    submit(&mut client, &thread, "go", "follow_up").await;
-    let started = client
-        .until(|kind| matches!(kind, EventKind::TurnStarted { .. }))
-        .await;
-    let EventKind::TurnStarted { turn } = &started.last().unwrap().event.event else {
-        unreachable!()
-    };
-    let turn_id = turn.id.clone();
-    (client, thread, turn_id)
+    assert_script_followed(&fixture);
 }
 
 fn interrupt(thread: &str, turn: &TurnId) -> Value {
@@ -2489,8 +2445,19 @@ async fn an_interrupt_is_a_control_request_and_the_aborted_result_ends_the_turn_
     ]);
     steps.extend(simple_turn("msg_2", "after", usage_json(1, 1, 0, 0)));
     fixture.script(steps);
-    let (mut client, thread, turn) = running_turn(&fixture).await;
-    client.ok("session/submit", interrupt(&thread, &turn)).await;
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let started = client
+        .until(|kind| matches!(kind, EventKind::TurnStarted { .. }))
+        .await;
+    let EventKind::TurnStarted { turn } = &started.last().unwrap().event.event else {
+        unreachable!()
+    };
+    client
+        .ok("session/submit", interrupt(&thread, &turn.id))
+        .await;
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Interrupted);
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
@@ -2501,11 +2468,7 @@ async fn an_interrupt_is_a_control_request_and_the_aborted_result_ends_the_turn_
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Completed);
     assert_eq!(fixture.launches().len(), 1);
-    assert!(
-        fixture.mismatches().is_empty(),
-        "{:?}",
-        fixture.mismatches()
-    );
+    assert_script_followed(&fixture);
 }
 
 #[tokio::test]

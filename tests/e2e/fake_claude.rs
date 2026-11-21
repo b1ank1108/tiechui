@@ -7,7 +7,7 @@
 //!
 //! Script steps, one JSON object per line:
 //! - `{"expect": {..}}`: read one inbound line; it must contain every key of the object
-//!   (objects match by subset, `"*"` matches anything). A mismatch is logged and exits with 3.
+//!   (objects match by subset). A mismatch is logged and exits with 3.
 //! - `{"emit": {..}}`: write the frame; any string `"$id"` takes the `request_id` of the last
 //!   inbound control request.
 //! - `{"sleep_ms": n}`, `{"hang": true}`, `{"exit": code}`, `{"stderr": "text"}`.
@@ -29,7 +29,6 @@ use serde_json::Value;
 
 fn matches(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
-        (Value::String(text), _) if text == "*" => true,
         (Value::Object(expected), Value::Object(actual)) => expected
             .iter()
             .all(|(key, value)| actual.get(key).is_some_and(|found| matches(value, found))),
@@ -61,11 +60,7 @@ fn main() {
             println!("{version} (Claude Code)");
         }
         Some("--sleeper") => std::thread::sleep(Duration::from_secs(600)),
-        Some(_) => serve(&args),
-        None => {
-            eprintln!("fake claude: no arguments");
-            std::process::exit(2);
-        }
+        _ => serve(&args),
     }
 }
 
@@ -153,8 +148,6 @@ fn serve(args: &[String]) {
                 write["content"].as_str().unwrap(),
             )
             .unwrap();
-        } else if let Some(path) = step.get("remove").and_then(Value::as_str) {
-            std::fs::remove_file(path).unwrap();
         } else if let Some(file) = step.get("grandchild").and_then(Value::as_str) {
             let child = Command::new(std::env::current_exe().unwrap())
                 .arg("--sleeper")
