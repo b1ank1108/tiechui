@@ -246,12 +246,13 @@ fn parts(content: &[InputContent]) -> (String, Vec<(String, String)>) {
     (texts.join("\n"), images)
 }
 
-const SHORTCUTS: [(&str, &str); 12] = [
+const SHORTCUTS: [(&str, &str); 13] = [
     (
         "enter",
         "send; while working, steer after the next tool call",
     ),
     ("tab", "queue a follow-up while working"),
+    ("ctrl+enter", "send; while working, interrupt and send next"),
     ("shift+enter", "new line (also ctrl+j)"),
     ("esc", "interrupt; twice to clear the draft"),
     ("", "edit the last queued follow-up"),
@@ -263,6 +264,14 @@ const SHORTCUTS: [(&str, &str); 12] = [
     ("ctrl+d", "quit when empty"),
     ("ctrl+z", "suspend"),
 ];
+
+fn is_ctrl_enter(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+}
 
 impl App {
     pub fn new(mut theme: Theme, width: usize, options: Options) -> Self {
@@ -1141,50 +1150,61 @@ impl App {
         self.refresh_mention();
     }
 
-    fn submit(&mut self, delivery: InputDelivery) {
-        self.main_view.follow();
-        if self.thread.is_none() {
-            return;
+    fn try_submit_command(&mut self, text: &str, has_images: bool) -> bool {
+        if has_images && !(self.refilled && text.trim() == "/rewind detach") {
+            return false;
         }
-        let (text, images) = if self.refilled {
-            self.composer.submission_without_image_labels()
-        } else {
-            self.composer.submission()
+        let Some((command, arguments)) = commands::parse(&self.commands, text) else {
+            return false;
         };
-        if text.trim().is_empty() && images.is_empty() {
+        let (name, action, arguments) = (
+            command.info.name.clone(),
+            command.action.clone(),
+            arguments.to_owned(),
+        );
+        self.main_view.follow();
+        self.remember(text);
+        self.composer.clear();
+        self.resource_picker = None;
+        self.clear_saved_refill();
+        self.refilled = false;
+        self.run_command(name, action, arguments);
+        true
+    }
+
+    fn submit_shell(&mut self, text: &str, interrupt_first: bool) {
+        if self.running() && !interrupt_first {
+            self.notice = Some("Shell commands run after the current turn".into());
             return;
         }
-        if (images.is_empty() || (self.refilled && text.trim() == "/rewind detach"))
-            && let Some((command, arguments)) = commands::parse(&self.commands, &text)
-        {
-            let (name, action, arguments) = (
-                command.info.name.clone(),
-                command.action.clone(),
-                arguments.to_owned(),
-            );
-            self.remember(&text);
-            self.composer.clear();
-            self.clear_saved_refill();
-            self.refilled = false;
-            self.run_command(name, action, arguments);
+        let command = text.trim_start()[1..].trim().to_owned();
+        if command.is_empty() {
             return;
         }
-        if images.is_empty() && text.trim_start().starts_with('!') {
-            if self.running() {
-                self.notice = Some("Shell commands run after the current turn".into());
-                return;
-            }
-            let command = text.trim_start()[1..].trim().to_owned();
-            if command.is_empty() {
-                return;
-            }
-            self.remember(&text);
-            self.composer.clear();
-            self.send(Op::RunShell { command });
-            return;
+        self.main_view.follow();
+        self.remember(text);
+        self.composer.clear();
+        self.resource_picker = None;
+        if let Some(stash) = self.stash.take() {
+            self.composer.restore(stash);
         }
+        if interrupt_first {
+            self.interrupt();
+        }
+        self.send(Op::RunShell { command });
+    }
+
+    fn submit_user_input(
+        &mut self,
+        text: String,
+        images: Vec<(String, String)>,
+        delivery: InputDelivery,
+        interrupt_first: bool,
+    ) {
+        self.main_view.follow();
         self.refilled = false;
         self.saved_refill = false;
+        self.resource_picker = None;
         let draft = self.composer.clear();
         self.remember(&text);
         let mut content = Vec::new();
@@ -1197,12 +1217,73 @@ impl App {
                 .map(|(mime_type, data)| InputContent::Image { mime_type, data }),
         );
         let running = self.running();
+        if interrupt_first {
+            self.interrupt();
+        }
         let id = self.send(Op::UserInput { content, delivery });
         if running {
             self.drafts.insert(id, (draft, false));
         }
         if let Some(stash) = self.stash.take() {
             self.composer.restore(stash);
+        }
+    }
+
+    fn submit_with(&mut self, delivery: InputDelivery, interrupt_first: bool) {
+        if !interrupt_first {
+            self.main_view.follow();
+        }
+        if self.thread.is_none() {
+            return;
+        }
+        let (text, images) = if self.refilled {
+            self.composer.submission_without_image_labels()
+        } else {
+            self.composer.submission()
+        };
+        if text.trim().is_empty() && images.is_empty() {
+            return;
+        }
+        if self.try_submit_command(&text, !images.is_empty()) {
+            return;
+        }
+        if images.is_empty() && text.trim_start().starts_with('!') {
+            self.submit_shell(&text, interrupt_first);
+            return;
+        }
+        self.submit_user_input(text, images, delivery, interrupt_first);
+    }
+
+    fn submit(&mut self, delivery: InputDelivery) {
+        self.submit_with(delivery, false);
+    }
+
+    fn ctrl_enter(&mut self) {
+        if self.thread.is_none() {
+            return;
+        }
+        if !self.running() {
+            self.submit(InputDelivery::FollowUp);
+        } else if !self.steering.is_empty() || !self.follow_up.is_empty() {
+            self.main_view.follow();
+            self.interrupt();
+        } else {
+            self.submit_with(InputDelivery::FollowUp, true);
+        }
+    }
+
+    fn enter_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.composer.newline();
+        } else if is_ctrl_enter(&key) {
+            self.ctrl_enter();
+        } else if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            let delivery = if self.running() && !key.modifiers.contains(KeyModifiers::ALT) {
+                InputDelivery::Steer
+            } else {
+                InputDelivery::FollowUp
+            };
+            self.submit(delivery);
         }
     }
 
@@ -1694,6 +1775,7 @@ impl App {
         }
         if self.resource_picker.is_some()
             && self.mention.is_none()
+            && !is_ctrl_enter(key)
             && matches!(key.code, KeyCode::Enter | KeyCode::Tab)
         {
             return Some(());
@@ -2624,12 +2706,10 @@ impl App {
             KeyCode::Char('y') if alt => c.yank_pop(),
             KeyCode::Char('s') if alt => self.stash(),
             KeyCode::Esc => self.escape(armed, now),
-            KeyCode::Enter if shift => c.newline(),
-            KeyCode::Enter if alt => self.submit(InputDelivery::FollowUp),
-            KeyCode::Enter if running => self.submit(InputDelivery::Steer),
+            KeyCode::Enter => self.enter_key(key),
             // Shell drafts run on Enter only.
             KeyCode::Tab if c.text().trim_start().starts_with('!') => {}
-            KeyCode::Enter | KeyCode::Tab => self.submit(InputDelivery::FollowUp),
+            KeyCode::Tab => self.submit(InputDelivery::FollowUp),
             KeyCode::Backspace if alt || control => c.delete_word_backward(),
             KeyCode::Backspace => c.backspace(),
             KeyCode::Delete if alt => c.delete_word_forward(),

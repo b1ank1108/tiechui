@@ -254,6 +254,7 @@ background commands. Modules, plugins and MCP servers add more.
 | --- | --- |
 | Enter | Send. While a turn is running, this queues steering for after the next tool call |
 | Tab | Queue a follow-up; complete a menu item |
+| Ctrl+Enter | Send now, skipping menu completion. While a turn is running, interrupt it and send the first queued message (keeping the draft) or the current draft |
 | Shift+Enter, Ctrl+J | New line |
 | Up / Down | Input history |
 | Alt+S | Stash or restore the draft |

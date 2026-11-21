@@ -83,6 +83,18 @@ Ctrl+/ uses the kitty protocol or legacy `0x1f` (Ctrl+7). BTW does not enable
 xterm modifyOtherKeys: crossterm cannot decode its CSI 27 form, which tmux may
 send even when CSI-u format is requested. Support is left to terminal input work.
 
+Ctrl+Enter requires the kitty keyboard protocol (`CSI u`) or Windows ConPTY;
+xterm modifyOtherKeys is not enabled. When idle, it submits immediately in the
+main composer and in BTW, skipping `/`, `@` and `$` menu completion (while BTW
+is busy, concurrent sends are still refused). While a main turn is running,
+Enter steers after the next tool call and Tab or Alt+Enter queues a follow-up.
+Ctrl+Enter interrupts the active turn instead. When queued messages exist, the
+draft stays in the composer, the first queued message starts the next turn, and
+any remaining steering items move to the follow-up queue. When the queue is
+empty, a non-blank draft or `!command` clears the composer and runs once the
+interrupted turn settles; if both the queue and the draft are empty, Ctrl+Enter
+does nothing.
+
 Escape priority, from the currently focused surface to the idle composer:
 
 | State | Escape behavior |

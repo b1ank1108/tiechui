@@ -763,12 +763,201 @@ fn question_mark_on_empty_input_shows_shortcuts() {
     let mut app = ready(60);
     app.key(key(KeyCode::Char('?')));
     let lines = text(&app.live().0);
+    assert!(lines.iter().any(|l| l.starts_with("  ctrl+enter")));
     assert!(lines.iter().any(|l| l.starts_with("  alt+s")));
     assert_eq!(draft(&mut app), ["›"]);
     app.key(key(KeyCode::Esc));
     assert!(!text(&app.live().0).iter().any(|l| l.starts_with("  alt+s")));
     typed(&mut app, "a?");
     assert_eq!(draft(&mut app), ["› a?"]);
+}
+
+#[test]
+fn ctrl_enter_idle_submits_literally_and_skips_popups() {
+    let ctrl_enter = with(KeyCode::Enter, KeyModifiers::CONTROL);
+    let mut app = ready(80);
+    app.event(event(EventKind::CommandsUpdated {
+        commands: vec![CommandInfo {
+            name: "status".into(),
+            description: "Show status".into(),
+            argument_hint: None,
+        }],
+    }));
+    app.event(event(EventKind::ResourcesUpdated {
+        resources: vec![Resource {
+            id: "skill:review".into(),
+            kind: ResourceKind::Skill,
+            name: "review".into(),
+            description: "Review code".into(),
+            source: Some("user".into()),
+            owner: None,
+            search_terms: vec![],
+            manual: false,
+            reference: "/skills/review/SKILL.md".into(),
+            path: Some("/skills/review/SKILL.md".into()),
+        }],
+    }));
+    app.set_index(Index::from_paths(["notes target.txt".into()]));
+
+    typed(&mut app, "idle send");
+    app.key(with(
+        KeyCode::Enter,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    typed(&mut app, "line two");
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [user("idle send\nline two", InputDelivery::FollowUp)]
+    );
+
+    typed(&mut app, "!ls -la");
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [Op::RunShell {
+            command: "ls -la".into()
+        }]
+    );
+
+    typed(&mut app, "/st");
+    assert!(screen(&mut app).contains("/statusline"));
+    app.key(ctrl_enter);
+    assert_eq!(ops(&mut app), [user("/st", InputDelivery::FollowUp)]);
+
+    typed(&mut app, "/status");
+    assert!(screen(&mut app).contains("/statusline"));
+    app.key(key(KeyCode::Down));
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [Op::RunCommand {
+            name: "status".into(),
+            arguments: String::new(),
+        }]
+    );
+
+    typed(&mut app, "check @notes");
+    finish_search(&mut app);
+    assert!(screen(&mut app).contains("notes target.txt"));
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [user("check @notes", InputDelivery::FollowUp)]
+    );
+    assert!(!screen(&mut app).contains("notes target.txt"));
+
+    typed(&mut app, "run $rev");
+    assert!(screen(&mut app).contains("Review code"));
+    app.key(ctrl_enter);
+    assert_eq!(ops(&mut app), [user("run $rev", InputDelivery::FollowUp)]);
+
+    app.event(event(EventKind::Extension {
+        name: RESOURCE_PICKER_EVENT.into(),
+        data: serde_json::to_value(ResourcePickerRequest {
+            kind: ResourceKind::Skill,
+        })
+        .unwrap(),
+    }));
+    typed(&mut app, "123");
+    app.key(ctrl_enter);
+    assert_eq!(ops(&mut app), [user("$123", InputDelivery::FollowUp)]);
+
+    typed(&mut app, "@notes");
+    finish_search(&mut app);
+    assert!(
+        screen(&mut app).contains("notes target.txt"),
+        "submitting from resource_picker must exit picker mode so file mentions work again"
+    );
+}
+
+#[test]
+fn ctrl_enter_running_empty_queue_interrupts_first_or_ignores_blank() {
+    let ctrl_enter = with(KeyCode::Enter, KeyModifiers::CONTROL);
+    let mut app = running(60);
+
+    app.key(ctrl_enter);
+    assert!(ops(&mut app).is_empty());
+    app.paste("   ");
+    app.key(ctrl_enter);
+    assert!(ops(&mut app).is_empty());
+
+    app.key(with(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    typed(&mut app, "!   ");
+    app.key(ctrl_enter);
+    assert!(ops(&mut app).is_empty());
+    assert_eq!(draft(&mut app), ["!"]);
+
+    app.key(with(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.event(event(EventKind::CommandsUpdated {
+        commands: vec![CommandInfo {
+            name: "mcp".into(),
+            description: "Show MCP servers".into(),
+            argument_hint: None,
+        }],
+    }));
+    typed(&mut app, "/mcp");
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [Op::RunCommand {
+            name: "mcp".into(),
+            arguments: String::new(),
+        }]
+    );
+
+    app.paste("stashed draft");
+    app.key(with(KeyCode::Char('s'), KeyModifiers::ALT));
+    typed(&mut app, "!echo immediate");
+    app.key(ctrl_enter);
+    assert_eq!(
+        ops(&mut app),
+        [
+            interrupt(),
+            Op::RunShell {
+                command: "echo immediate".into()
+            },
+        ]
+    );
+    assert_eq!(draft(&mut app), ["› stashed draft"]);
+
+    let mut app = running(60);
+    app.paste("saved for later");
+    app.key(with(KeyCode::Char('s'), KeyModifiers::ALT));
+    app.paste(&"z".repeat(1100));
+    app.key(ctrl_enter);
+    let sent = ids(&mut app);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].1, interrupt());
+    assert_eq!(sent[1].1, user(&"z".repeat(1100), InputDelivery::FollowUp));
+    assert_eq!(draft(&mut app), ["› saved for later"]);
+
+    let sub_id = sent[1].0.clone();
+    app.event(queue(&[], &[(&sub_id, &"z".repeat(1100))]));
+    app.key(key(KeyCode::Esc));
+    assert_eq!(ops(&mut app), [retract(&[&sub_id])]);
+    app.event(retracted(&[(&sub_id, &"z".repeat(1100))]));
+    assert_eq!(
+        draft(&mut app),
+        ["› [Pasted Content 1100 chars]", "  saved for later"]
+    );
+}
+
+#[test]
+fn ctrl_enter_running_non_empty_queue_interrupts_only_and_keeps_draft() {
+    let ctrl_enter = with(KeyCode::Enter, KeyModifiers::CONTROL);
+    let mut app = running(80);
+    app.set_index(Index::from_paths(["notes target.txt".into()]));
+    app.event(queue(&[("s1", "first"), ("s2", "second")], &[]));
+
+    typed(&mut app, "keep @notes");
+    finish_search(&mut app);
+    assert!(screen(&mut app).contains("notes target.txt"));
+
+    app.key(ctrl_enter);
+    assert_eq!(ops(&mut app), [interrupt()]);
+    assert_eq!(draft(&mut app), ["› keep @notes"]);
+    assert!(screen(&mut app).contains("notes target.txt"));
 }
 
 fn screen(app: &mut App) -> String {

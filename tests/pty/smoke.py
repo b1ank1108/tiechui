@@ -957,6 +957,109 @@ def selection_scroll(f):
     s.exit()
 
 
+def ctrl_enter_send(f):
+    ctrl_enter = ESC + "[13;5u"
+    (f.cwd / "notes target.txt").write_text("NOTES_FILE\n")
+    (f.cwd / "sample.txt").write_text("SAMPLE_BODY\n")
+    f.config.write_text(
+        f.config.read_text()
+        + '\n[tui.status_line]\nitems = ["model", "run-state"]\n'
+        + '[[permissions.rules]]\nsurface = "*"\npattern = "*"\naction = "allow"\n'
+    )
+    s = f.start()
+    s.wait("Ready")
+
+    s.draft("IDLE_MAIN_PROMPT")
+    s.wait("› IDLE_MAIN_PROMPT")
+    s.send(ctrl_enter)
+    s.wait("IDLE_MAIN_DONE")
+    s.wait("Ready")
+    s.check(message_text(f.mock.requests[0]["messages"][-1]) == "IDLE_MAIN_PROMPT",
+            "Idle Ctrl+Enter did not send main prompt")
+
+    s.command("/btw", "Ask a follow-up question")
+    s.draft("IDLE_SIDE_PROMPT")
+    s.wait("› IDLE_SIDE_PROMPT")
+    s.send(ctrl_enter)
+    s.wait("SIDE_HOLD")
+    s.draft("SIDE_BUSY_KEEP")
+    s.wait("SIDE_BUSY_KEEP")
+    s.send(ctrl_enter)
+    s.wait("Side reply is still running")
+    s.check("SIDE_BUSY_KEEP" in s.screen.text(), "Busy /btw Ctrl+Enter lost draft")
+    s.check(len(f.mock.requests) == 2, "Busy /btw Ctrl+Enter issued another request")
+    s.send("\x03")
+    f.mock.replies[1].release.set()
+    s.wait("IDLE_SIDE_DONE")
+    s.send("\x1f")
+    s.wait("ctrl+/ for side", absent="── Side ──")
+
+    s.command("SLOW_ONE", "HOLD_ONE")
+    s.send(ctrl_enter)
+    s.pump(0.2)
+    s.check("Conversation interrupted" not in s.screen.text() and len(f.mock.requests) == 3,
+            "Empty composer + empty queue Ctrl+Enter interrupted the running turn")
+
+    s.draft("LITERAL_AT @notes")
+    s.wait("notes target.txt")
+    s.wait("› LITERAL_AT @notes")
+    s.send(ctrl_enter)
+    s.wait("HOLD_TWO")
+    s.check("Conversation interrupted" in s.screen.text(),
+            "Ctrl+Enter with draft did not interrupt the active turn")
+    s.check(message_text(f.mock.requests[3]["messages"][-1]) == "LITERAL_AT @notes",
+            "Ctrl+Enter completed @mention instead of sending literal draft: "
+            + repr(f.mock.requests[3]["messages"][-1]))
+
+    s.draft("!echo IMMEDIATE_SHELL")
+    s.wait("! echo IMMEDIATE_SHELL")
+    s.send(ctrl_enter)
+    s.wait("IMMEDIATE_SHELL", absent="esc to interrupt")
+    s.wait("Ready")
+    s.check(len(f.mock.requests) == 4, "Immediate !command issued an extra model request")
+
+    s.draft("START_SLOW_TOOL")
+    s.send("\r")
+    s.wait("sleep 10")
+    s.wait("esc to interrupt")
+    s.draft("M1_FIRST")
+    s.send("\r")
+    s.wait("Messages to be submitted after next tool call")
+    s.wait("M1_FIRST")
+    s.draft("M2_SECOND")
+    s.send("\r")
+    s.wait("M2_SECOND")
+    s.draft("DRAFT_KEEP")
+    s.wait("› DRAFT_KEEP")
+    s.check(len(f.mock.requests) == 5, "Queued steering fired before slow tool ended")
+
+    s.send(ctrl_enter)
+    s.wait("M1_AFTER_TOOL_HOLD")
+    s.wait("Queued follow-up inputs")
+    s.check("M2_SECOND" in s.screen.text(), "M2 was not retained in follow-up queue")
+    s.check("Messages to be submitted after next tool call" not in s.screen.text(),
+            "Remaining steering item was not demoted to follow-up")
+    s.check("› DRAFT_KEEP" in s.screen.text(), "Ctrl+Enter with non-empty queue modified draft")
+    s.check(len(f.mock.requests) == 7, "Expected M1 initial + M1 post-tool requests only")
+    for idx in (5, 6):
+        payload = json.dumps(f.mock.requests[idx])
+        s.check("M1_FIRST" in payload and "M2_SECOND" not in payload and "DRAFT_KEEP" not in payload,
+                "Unexpected messages in M1 request %d: %s" % (idx, payload))
+
+    f.mock.replies[6].release.set()
+    s.wait("M2_COMPLETE", absent="Queued follow-up inputs")
+    s.wait("Ready")
+    s.check("› DRAFT_KEEP" in s.screen.text(), "Draft disappeared after queued turns finished")
+    s.check(message_text(f.mock.requests[7]["messages"][-1]) == "M2_SECOND",
+            "M2 did not run after M1 finished")
+    s.check(all("DRAFT_KEEP" not in json.dumps(r) for r in f.mock.requests),
+            "Unsent composer draft leaked into provider requests")
+
+    s.send("\x03")
+    s.wait("Ready", absent="DRAFT_KEEP")
+    s.exit()
+
+
 def theme(f):
     s = f.start()
     s.wait("alpha")
@@ -1878,6 +1981,16 @@ CASES = {
     "selection-copy": (selection_copy, lambda: [Reply("COPY_ON_RELEASE"), Reply("COPY_ON_RELEASE")]),
     "selection-copy-config": (selection_copy_config, lambda: [Reply("COPY_CONFIG_TEXT"), Reply("COPY_NEW_TEXT")]),
     "selection-scroll": (selection_scroll, lambda: [Reply("\n".join("SCROLL_ROW_%02d_END" % n for n in range(60)))]),
+    "ctrl-enter-send": (ctrl_enter_send, lambda: [
+        Reply("IDLE_MAIN_DONE"),
+        Reply("SIDE_HOLD", hold=True, tail=" IDLE_SIDE_DONE"),
+        Reply("HOLD_ONE\n", hold=True),
+        Reply("HOLD_TWO\n", hold=True),
+        Reply(tools=[("bash", {"command": "sleep 10"})]),
+        Reply(tools=[("read", {"path": "sample.txt"})]),
+        Reply("M1_AFTER_TOOL_HOLD", hold=True, tail=" M1_COMPLETE"),
+        Reply("M2_COMPLETE"),
+    ]),
     "theme": (theme, lambda: [Reply("```rs\nlet value = 42;\n```\n\nTHEME_HISTORY")]),
     "resume": (resume, lambda: [Reply("ALPHA_HISTORY"), Reply("BETA_HISTORY"), Reply("RESUMED_DONE")]),
     "model": (model, lambda: [Reply("BETA_DONE"), Reply("ALPHA_DONE")]),
