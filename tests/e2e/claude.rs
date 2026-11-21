@@ -2447,6 +2447,7 @@ async fn a_message_written_during_a_turn_joins_it_and_does_not_start_another() {
     );
 }
 
+#[cfg(unix)]
 async fn running_turn(fixture: &Fixture) -> (Client, String, TurnId) {
     let mut client = fixture.client();
     let opened = open(&mut client, fixture, None).await;
