@@ -2538,8 +2538,24 @@ fn main_chat_wheel_and_edge_autoscroll_select_across_screens_without_hint_or_com
         last_row,
         KeyModifiers::NONE,
     );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        10,
+        last_row,
+        KeyModifiers::NONE,
+    );
+    assert!(!app.autoscrolling());
     for _ in 0..8 {
-        send_mouse(&mut app, MouseEventKind::ScrollUp, 2, 2, KeyModifiers::NONE);
+        send_mouse(
+            &mut app,
+            MouseEventKind::ScrollUp,
+            10,
+            last_row,
+            KeyModifiers::NONE,
+        );
+        assert!(!app.autoscrolling());
+        assert!(!app.autoscroll_tick());
         assert!(app.take_copy().is_none());
     }
     let mid_frame = text(&app.main_frame().0).join("\n");

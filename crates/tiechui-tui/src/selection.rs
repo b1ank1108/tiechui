@@ -43,6 +43,7 @@ struct DocState {
     pointer: (usize, usize),
     left_top: bool,
     left_bottom: bool,
+    edge_scroll: Option<isize>,
 }
 
 impl DocState {
@@ -63,6 +64,24 @@ impl DocState {
         } else {
             row + 1 >= vp.rows && self.left_bottom
         }
+    }
+
+    fn edge_delta(self, vp: Viewport) -> Option<isize> {
+        if self.at_top_edge(vp) {
+            Some(-2)
+        } else {
+            self.at_bottom_edge(vp).then_some(2)
+        }
+    }
+
+    fn step(self, vp: Viewport, offset: usize, max_offset: usize) -> Option<isize> {
+        let step = self.edge_scroll?;
+        let active = if step < 0 {
+            self.at_top_edge(vp) && offset > 0
+        } else {
+            self.at_bottom_edge(vp) && offset < max_offset
+        };
+        active.then_some(step)
     }
 }
 
@@ -309,11 +328,12 @@ impl Selection {
         self.pressed.is_some() && self.doc_source() == Some(source)
     }
 
-    fn record_pointer(&mut self, col: usize, row: usize, rows: usize) {
+    fn record_pointer(&mut self, col: usize, row: usize, vp: Viewport, dragging: bool) {
         if let Some(Held::Doc { state, .. }) = &mut self.held {
             state.pointer = (col, row);
             state.left_top |= row > 0;
-            state.left_bottom |= row + 1 < rows;
+            state.left_bottom |= row + 1 < vp.rows;
+            state.edge_scroll = dragging.then(|| state.edge_delta(vp)).flatten();
         }
     }
 
@@ -338,6 +358,7 @@ impl Selection {
             pointer: (col, row),
             left_top: row > 0,
             left_bottom: row + 1 < view.viewport.rows,
+            edge_scroll: None,
         };
         let reused = if let Some(Held::Doc { state, .. }) = &mut self.held
             && state.source == view.source
@@ -375,7 +396,7 @@ impl Selection {
         let (viewport, offset) = scroll(delta);
         if self.pressed.is_some() {
             self.dragged = true;
-            self.record_pointer(pointer.0, pointer.1, viewport.rows);
+            self.record_pointer(pointer.0, pointer.1, viewport, false);
             self.end = self.doc_point(pointer.0, pointer.1, viewport, offset);
         }
         MouseAction::Handled
@@ -395,7 +416,7 @@ impl Selection {
             MouseEventKind::Down(button) => self.doc_down(button, event, now, view, snapshot),
             MouseEventKind::Drag(MouseButton::Left) if self.pressed_in(view.source) => {
                 self.dragged = true;
-                self.record_pointer(col, row, view.viewport.rows);
+                self.record_pointer(col, row, view.viewport, true);
                 self.end = self.doc_point(col, row, view.viewport, view.offset);
                 MouseAction::Handled
             }
@@ -415,16 +436,13 @@ impl Selection {
         offset: usize,
         max_offset: usize,
     ) -> Option<isize> {
-        if self.pressed.is_none() || !self.dragged {
+        if self.pressed.is_none() {
             return None;
         }
         let Some(Held::Doc { state, .. }) = &self.held else {
             return None;
         };
-        if state.at_top_edge(viewport) && offset > 0 {
-            return Some(-2);
-        }
-        (state.at_bottom_edge(viewport) && offset < max_offset).then_some(2)
+        state.step(viewport, offset, max_offset)
     }
 
     pub fn apply_autoscroll(&mut self, viewport: Viewport, offset: usize) {

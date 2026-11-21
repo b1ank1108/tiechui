@@ -818,14 +818,18 @@ def selection_scroll(f):
     s.command("long scroll reply", "SCROLL_ROW_59_END")
     s.pump(0.15)
 
-    row58, col58 = find_cell(s, "SCROLL_ROW_58_END")
+    row59, col59 = find_cell(s, "SCROLL_ROW_59_END")
+    end_col59 = col59 + 1 + len("SCROLL_ROW_59_END")
     start = len(s.raw)
-    s.send(f"\x1b[<0;{col58 + 1 + len('SCROLL_ROW_58_END')};{row58 + 1}M")
+    s.send(f"\x1b[<0;{end_col59};{row59 + 1}M")
     s.pump(0.08)
     for _ in range(10):
-        s.send("\x1b[<64;10;10M")
+        s.send(f"\x1b[<64;{end_col59};{row59 + 1}M")
         s.pump(0.04)
     s.wait("esc latest")
+    s.pump(0.25)
+    s.check("SCROLL_ROW_59_END" not in s.screen.text(),
+            "Bottom-row wheel scroll auto-scrolled back to bottom")
     s.check(b"\x1b]52;" not in s.raw[start:], "Wheel drag emitted OSC 52 before release")
     row_top, col_top = next(
         (r, "".join(cells).index("SCROLL_ROW_"))
@@ -837,7 +841,7 @@ def selection_scroll(f):
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after wheel drag, got %d" % len(copies))
-    s.check(top_marker in copies[0] and "SCROLL_ROW_58_END" in copies[0],
+    s.check(top_marker in copies[0] and "SCROLL_ROW_59_END" in copies[0],
             "Wheel drag missed cross-screen bounds: " + repr(copies[0]))
     s.check("esc latest" not in copies[0] and "pgup/pgdn" not in copies[0],
             "Scroll hint leaked into wheel drag copy")

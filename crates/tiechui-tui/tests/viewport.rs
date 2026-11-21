@@ -218,7 +218,7 @@ fn copy_setting_applies_at_startup_and_when_a_session_opens() {
 }
 
 #[test]
-fn resize_focus_loss_session_open_and_footer_scroll_cancel_selection_and_pending_copy() {
+fn resize_focus_loss_session_open_and_panel_scroll_cancel_selection_while_chat_scroll_retains_it() {
     for release in [false, true] {
         for cancel in 0..3 {
             let mut app = app();

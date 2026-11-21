@@ -518,3 +518,54 @@ fn document_down_while_frozen_reuses_snapshot_until_selection_clears() {
     );
     assert_eq!(selection.take_copy().as_deref(), Some("GROWN_24"));
 }
+
+#[test]
+fn bottom_row_wheel_scroll_with_shrinking_viewport_never_triggers_downward_autoscroll() {
+    let lines: Vec<Line<'static>> = (0..20)
+        .map(|n| Line::from(format!("LINE_{n:02}_END")))
+        .collect();
+    let full_vp = Viewport {
+        top: 0,
+        height: 6,
+        rows: 10,
+    };
+    let hinted_vp = Viewport {
+        top: 0,
+        height: 5,
+        rows: 10,
+    };
+    let mut selection = Selection::default();
+    let now = Instant::now();
+    let view = DocView {
+        source: DocSource::Main,
+        viewport: full_vp,
+        offset: 14,
+    };
+    selection.doc_mouse(
+        mouse(DOWN, 11, 5),
+        now,
+        true,
+        view,
+        || lines.clone(),
+        |_| (full_vp, 14),
+    );
+    selection.doc_mouse(
+        mouse(DRAG, 4, 5),
+        now,
+        true,
+        view,
+        || panic!("drag must not snapshot"),
+        |_| (full_vp, 14),
+    );
+    assert_eq!(selection.autoscroll_step(full_vp, 14, 14), None);
+
+    selection.doc_mouse(
+        mouse(MouseEventKind::ScrollUp, 4, 5),
+        now,
+        true,
+        view,
+        || panic!("scroll must not snapshot"),
+        |_| (hinted_vp, 11),
+    );
+    assert_eq!(selection.autoscroll_step(hinted_vp, 11, 15), None);
+}
