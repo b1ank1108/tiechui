@@ -148,8 +148,6 @@ impl DeltaCoalescer {
         self.order.is_empty()
     }
 
-    /// The merged deltas in the order their items first appeared. Call it before emitting
-    /// anything else, so text is never reordered behind the event that followed it.
     pub fn drain(&mut self) -> Vec<(ItemId, String)> {
         let order = std::mem::take(&mut self.order);
         order

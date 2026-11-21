@@ -24,6 +24,30 @@ impl Agent {
     fn running(&self) -> bool {
         matches!(self.state, SubagentState::Running | SubagentState::Waiting)
     }
+
+    fn accepts_message_after_end(&self) -> bool {
+        self.message.is_none()
+    }
+
+    fn takes_message(&self, message: &Option<String>) -> bool {
+        message.is_some()
+            && *message != self.message
+            && (self.running() || self.accepts_message_after_end())
+    }
+
+    fn transition(&mut self, state: SubagentState, message: Option<String>) -> bool {
+        let new_message = self.takes_message(&message);
+        if self.state == state && !new_message {
+            return false;
+        }
+        self.state = state;
+        if state == SubagentState::Running {
+            self.message = None;
+        } else if new_message {
+            self.message = message;
+        }
+        true
+    }
 }
 
 fn snake(camel: &str) -> String {
@@ -117,7 +141,7 @@ impl Translator {
             agent_id: thread.to_owned(),
         };
         self.note_derived();
-        self.emit(BackendEvent::ItemCompleted(BackendItem {
+        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
             item,
             child_of: Some(child_of),
         }))
@@ -357,7 +381,7 @@ impl Translator {
             },
         );
         self.note_derived();
-        self.emit(BackendEvent::Subagent(SubagentUpdate {
+        self.emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
             agent_id: thread.to_owned(),
             parent_call_id,
             name,
@@ -367,8 +391,6 @@ impl Translator {
         .await
     }
 
-    /// Moves a sub-agent to `state`, reporting a change only. A message that arrives after the
-    /// agent ended is reported only when it had none.
     async fn set_state(
         &mut self,
         thread: &str,
@@ -378,17 +400,8 @@ impl Translator {
         let Some(agent) = self.agents.get_mut(thread) else {
             return true;
         };
-        let ended = !agent.running();
-        let new_message =
-            message.is_some() && message != agent.message && (!ended || agent.message.is_none());
-        if agent.state == state && !new_message {
+        if !agent.transition(state, message) {
             return true;
-        }
-        agent.state = state;
-        if state == SubagentState::Running {
-            agent.message = None;
-        } else if new_message {
-            agent.message = message;
         }
         let update = SubagentUpdate {
             agent_id: thread.to_owned(),
@@ -398,7 +411,7 @@ impl Translator {
             message: agent.message.clone(),
         };
         self.note_derived();
-        self.emit(BackendEvent::Subagent(update)).await && self.maybe_idle().await
+        self.emit_after_flush(BackendEvent::Subagent(update)).await && self.maybe_idle().await
     }
 
     pub(super) async fn agent_turn_started(&mut self, thread: &str) -> bool {
@@ -432,7 +445,10 @@ impl Translator {
             ids
         };
         for id in withdrawn {
-            if !self.emit(BackendEvent::ApprovalWithdrawn { id }).await {
+            if !self
+                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                .await
+            {
                 return false;
             }
         }
@@ -467,28 +483,33 @@ impl Translator {
     }
 
     pub(super) fn note_derived(&mut self) {
-        let turn = self.shared.turn.borrow();
-        if turn.active.is_none() && !turn.pending {
-            self.late = true;
+        if self.no_root_turn() {
+            self.outside_turn_output_seen = true;
         }
     }
 
-    /// Tells the session that nothing runs any more, when a derived turn may be open: no root
-    /// turn, no sub-agent running or waiting, no approval pending. Never after a turn that
-    /// merely ended, so a queued turn that starts right after it is not cut short.
+    fn no_root_turn(&self) -> bool {
+        let turn = self.shared.turn.borrow();
+        turn.active.is_none() && !turn.awaiting_turn_started
+    }
+
+    fn no_agent_active(&self) -> bool {
+        !self.agents.values().any(Agent::running)
+    }
+
+    fn no_approval_pending(&self) -> bool {
+        self.shared.approvals().is_empty()
+    }
+
     pub(super) async fn maybe_idle(&mut self) -> bool {
-        let root_busy = {
-            let turn = self.shared.turn.borrow();
-            turn.active.is_some() || turn.pending
-        };
-        if !self.late
-            || root_busy
-            || self.agents.values().any(Agent::running)
-            || !self.shared.approvals().is_empty()
+        if !self.outside_turn_output_seen
+            || !self.no_root_turn()
+            || !self.no_agent_active()
+            || !self.no_approval_pending()
         {
             return true;
         }
-        self.late = false;
-        self.emit(BackendEvent::Idle).await
+        self.outside_turn_output_seen = false;
+        self.emit_after_flush(BackendEvent::Idle).await
     }
 }

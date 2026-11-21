@@ -385,7 +385,9 @@ impl Backend for CodexBackend {
     async fn start_turn(&mut self, input: &[InputContent]) -> Result<(), String> {
         let thread = self.thread_id()?;
         let run = self.running()?;
-        run.shared.turn.send_modify(|state| state.pending = true);
+        run.shared
+            .turn
+            .send_modify(|state| state.awaiting_turn_started = true);
         let result = run
             .rpc
             .call(
@@ -411,18 +413,15 @@ impl Backend for CodexBackend {
             });
         match started {
             Ok(response) => {
-                // The turn/started notification usually got there first; if it did not, this
-                // is the turn id, unless the turn has already ended.
-                run.shared.turn.send_modify(|state| {
-                    if state.pending {
-                        state.active = Some(response.turn.id);
-                        state.pending = false;
-                    }
-                });
+                run.shared
+                    .turn
+                    .send_modify(|state| state.record_turn_id_if_unset(response.turn.id));
                 Ok(())
             }
             Err(error) => {
-                run.shared.turn.send_modify(|state| state.pending = false);
+                run.shared
+                    .turn
+                    .send_modify(|state| state.awaiting_turn_started = false);
                 Err(error)
             }
         }
@@ -455,7 +454,7 @@ impl Backend for CodexBackend {
         // A turn that was just started has no id yet.
         let state: TurnState = tokio::time::timeout(
             TURN_ID_WAIT,
-            turns.wait_for(|state| state.active.is_some() || !state.pending),
+            turns.wait_for(|state| state.active.is_some() || !state.awaiting_turn_started),
         )
         .await
         .map_err(|_| "the turn did not report its id".to_owned())?
@@ -481,8 +480,7 @@ impl Backend for CodexBackend {
         decision: ApprovalDecision,
     ) -> Result<(), String> {
         let run = self.running()?;
-        // The entry is removed first, so a second answer finds nothing and writes nothing.
-        let Some(pending) = run.shared.approvals().remove(approval_id) else {
+        let Some(pending) = run.shared.take_approval(approval_id) else {
             return Ok(());
         };
         run.rpc

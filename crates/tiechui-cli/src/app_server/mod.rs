@@ -985,16 +985,8 @@ impl Server {
 
     async fn open(self: &Arc<Self>, params: Value) -> Result<(Arc<Live>, bool), rpc::Error> {
         let params: SessionOpenParams = parse(params)?;
-        let thinking = params
-            .thinking
-            .map(|level| json!(level).as_str().unwrap_or_default().to_owned());
-        let runtime = params
-            .runtime
-            .as_deref()
-            .filter(|runtime| *runtime != tiechui_protocol::DEFAULT_RUNTIME);
         match (params.path, params.cwd, params.scratch) {
             (Some(path), None, None) => {
-                // The session's own runtime applies, whatever the params say.
                 let live = self
                     .open_existing(
                         PathBuf::from(path),
@@ -1006,45 +998,56 @@ impl Server {
                 Ok((live, false))
             }
             (None, Some(cwd), None) => {
-                let (_, live) = match runtime {
-                    Some(runtime) => {
-                        let params = SessionConfigParams {
-                            model: params.model,
-                            thinking: params.thinking,
-                            mode: params.mode,
-                        };
-                        let open = ExternalOpen::New { cwd: cwd.into() };
-                        self.start_external(runtime, open, params, SessionEpoch(0), None)
-                            .await?
-                    }
-                    None => {
-                        let options = Options {
-                            model: params.model,
-                            thinking,
-                            mode: params.mode,
-                            ..Default::default()
-                        };
-                        self.start(options, Open::New(cwd.into()), SessionEpoch(0), None)
-                            .await?
-                    }
-                };
+                let runtime = requested_runtime(params.runtime.as_deref());
+                let live = self
+                    .open_new(
+                        runtime,
+                        cwd.into(),
+                        params.model,
+                        params.thinking,
+                        params.mode,
+                    )
+                    .await?;
                 Ok((live, false))
             }
-            (None, None, Some(_)) if runtime.is_some() => {
-                Err(invalid("scratch sessions run on the chui runtime"))
-            }
             (None, None, Some(_)) => {
-                let options = Options {
-                    model: params.model,
-                    thinking,
-                    mode: params.mode,
-                    ..Default::default()
-                };
+                if requested_runtime(params.runtime.as_deref()).is_some() {
+                    return Err(invalid("scratch sessions run on the chui runtime"));
+                }
+                let options = chui_options(params.model, params.thinking, params.mode);
                 let live = scratch::open_scratch(self, options).await?;
                 Ok((live, true))
             }
             _ => Err(invalid("give exactly one of path, cwd and scratch")),
         }
+    }
+
+    async fn open_new(
+        self: &Arc<Self>,
+        runtime: Option<&str>,
+        cwd: PathBuf,
+        model: Option<String>,
+        thinking: Option<tiechui_protocol::ThinkingLevel>,
+        mode: Option<String>,
+    ) -> Result<Arc<Live>, rpc::Error> {
+        let (_, live) = match runtime {
+            Some(runtime) => {
+                let config = SessionConfigParams {
+                    model,
+                    thinking,
+                    mode,
+                };
+                let open = ExternalOpen::New { cwd };
+                self.start_external(runtime, open, config, SessionEpoch(0), None)
+                    .await?
+            }
+            None => {
+                let options = chui_options(model, thinking, mode);
+                self.start(options, Open::New(cwd), SessionEpoch(0), None)
+                    .await?
+            }
+        };
+        Ok(live)
     }
 
     async fn open_existing(
@@ -2009,6 +2012,24 @@ fn turn_end(store: &SessionStore, item: &str) -> Result<String, String> {
 /// As replayed threads divide turns.
 fn starts_turn(entry: &Entry) -> bool {
     matches!(&entry.kind, EntryKind::Message { message, .. } if message.role == Role::User)
+}
+
+/// The runtime a new session asks for, or `None` for the default one.
+fn requested_runtime(runtime: Option<&str>) -> Option<&str> {
+    runtime.filter(|runtime| *runtime != tiechui_protocol::DEFAULT_RUNTIME)
+}
+
+fn chui_options(
+    model: Option<String>,
+    thinking: Option<tiechui_protocol::ThinkingLevel>,
+    mode: Option<String>,
+) -> Options {
+    Options {
+        model,
+        thinking: thinking.map(|level| json!(level).as_str().unwrap_or_default().to_owned()),
+        mode,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

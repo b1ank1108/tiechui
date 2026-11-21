@@ -349,7 +349,6 @@ impl Session {
         self.turn.as_ref().is_some_and(|open| !open.derived)
     }
 
-    /// Items go through here so the turn that ends carries all of them.
     fn complete_item(&mut self, item: Item) {
         if let Some(open) = &mut self.turn {
             let turn_id = open.turn.id.clone();
@@ -461,8 +460,6 @@ impl Session {
             turn.status = status;
             turn.ended_at = Some(tiechui_session::now_ms());
             self.last_turn = Some(turn.id.clone());
-            // Before the completion goes out, because clients ask for the turn's changes as soon
-            // as it ends; and before a queued turn starts, so it holds this turn's files only.
             if !open.derived {
                 let _ = self
                     .capture_snapshot(&tiechui_module_rewind::end_anchor(&turn.id.0))
@@ -684,8 +681,6 @@ impl Session {
                 self.complete(status).await;
                 self.drain_queue().await?;
             }
-            // Only a derived turn ends this way: a root turn ends with `TurnCompleted`, and an
-            // `Idle` that was decided before a queued turn started must not cut that one short.
             BackendEvent::Idle => {
                 self.close_derived(TurnStatus::Completed).await;
                 self.drain_queue().await?;
@@ -1166,6 +1161,35 @@ mod tests {
             "{seen:?}"
         );
         assert_eq!(h.calls_len(2).await, ["turn go", "turn again"]);
+    }
+
+    #[tokio::test]
+    async fn an_idle_decided_before_a_queued_turn_starts_does_not_close_it() {
+        let mut h = harness(Steered::Accepted, RuntimeCapabilities::minimal(), WINDOW).await;
+        h.input("go", InputDelivery::FollowUp).await;
+        h.until(started).await;
+        h.backend.send(BackendEvent::Idle).await.unwrap();
+        h.backend
+            .send(BackendEvent::ItemCompleted(BackendItem::root(
+                KnownItem::AssistantMessage {
+                    id: ItemId("reply".into()),
+                    text: "still the same turn".into(),
+                },
+            )))
+            .await
+            .unwrap();
+        h.backend.send(completed()).await.unwrap();
+        let done = h.until(is_turn_completed).await;
+        let EventKind::TurnCompleted { turn } = done.last().unwrap() else {
+            unreachable!()
+        };
+        assert!(
+            turn.items.iter().any(|item| matches!(item,
+                Item::Known(KnownItem::AssistantMessage { id, .. }) if id.0 == "reply")),
+            "{:?}",
+            turn.items
+        );
+        assert!(DerivedTurnMarker::from_item(&turn.items[0]).is_none());
     }
 
     #[tokio::test]

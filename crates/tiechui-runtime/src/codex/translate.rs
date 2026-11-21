@@ -33,8 +33,16 @@ const FLUSH_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnState {
     pub active: Option<String>,
-    /// A `turn/start` was sent and its `turn/started` has not been seen.
-    pub pending: bool,
+    pub awaiting_turn_started: bool,
+}
+
+impl TurnState {
+    pub fn record_turn_id_if_unset(&mut self, id: String) {
+        if self.awaiting_turn_started {
+            self.active = Some(id);
+            self.awaiting_turn_started = false;
+        }
+    }
 }
 
 pub struct Pending {
@@ -89,6 +97,10 @@ impl Shared {
             .clone()
     }
 
+    pub fn take_approval(&self, id: &str) -> Option<Pending> {
+        self.approvals().remove(id)
+    }
+
     pub fn approvals(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
         self.approvals.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -127,8 +139,7 @@ pub struct Translator {
     last_total: Option<Breakdown>,
     context_window: Option<u64>,
     last_completed: Option<String>,
-    /// Something of the root thread arrived with no turn running: a late item or approval.
-    late: bool,
+    outside_turn_output_seen: bool,
     agents: HashMap<String, Agent>,
     child_tools: HashMap<String, Vec<ToolStub>>,
     stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
@@ -153,7 +164,7 @@ impl Translator {
             last_total: None,
             context_window: None,
             last_completed: None,
-            late: false,
+            outside_turn_output_seen: false,
             agents: HashMap::new(),
             child_tools: HashMap::new(),
             stderr,
@@ -228,8 +239,7 @@ impl Translator {
         self.out.send(event).await.is_ok()
     }
 
-    /// Sends an event after the text that came before it.
-    pub(super) async fn emit(&mut self, event: BackendEvent) -> bool {
+    pub(super) async fn emit_after_flush(&mut self, event: BackendEvent) -> bool {
         self.flush().await && self.send_now(event).await
     }
 
@@ -289,7 +299,7 @@ impl Translator {
                 if self.is_root(&note.thread_id) {
                     self.shared.turn.send_modify(|state| {
                         state.active = Some(note.turn.id);
-                        state.pending = false;
+                        state.awaiting_turn_started = false;
                     });
                     return true;
                 }
@@ -355,7 +365,9 @@ impl Translator {
                 };
                 let id = approval_id(&note.request_id);
                 if self.shared.approvals().remove(&id).is_some()
-                    && !self.emit(BackendEvent::ApprovalWithdrawn { id }).await
+                    && !self
+                        .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                        .await
                 {
                     return false;
                 }
@@ -412,21 +424,24 @@ impl Translator {
             ids
         };
         for id in withdrawn {
-            if !self.emit(BackendEvent::ApprovalWithdrawn { id }).await {
+            if !self
+                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                .await
+            {
                 return false;
             }
         }
         self.shared.turn.send_modify(|state| {
             state.active = None;
-            state.pending = false;
+            state.awaiting_turn_started = false;
         });
         self.last_completed = Some(turn.id);
-        self.late = false;
+        self.outside_turn_output_seen = false;
         let error = turn.error.map(|error| match error.additional_details {
             Some(details) if !details.is_empty() => format!("{}: {details}", error.message),
             _ => error.message,
         });
-        self.emit(BackendEvent::TurnCompleted { status, error })
+        self.emit_after_flush(BackendEvent::TurnCompleted { status, error })
             .await
     }
 
@@ -438,7 +453,7 @@ impl Translator {
                     started: true,
                     text,
                 }) => {
-                    let sent = self.emit(text_item(&id, thinking, text)).await;
+                    let sent = self.emit_after_flush(text_item(&id, thinking, text)).await;
                     if !sent {
                         return false;
                     }
@@ -555,7 +570,7 @@ impl Translator {
                 text: String::new(),
             },
         );
-        self.emit(BackendEvent::ItemStarted(BackendItem::root(text_known(
+        self.emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_known(
             id,
             thinking,
             String::new(),
@@ -584,7 +599,10 @@ impl Translator {
         };
         if start {
             let started = BackendItem::root(text_known(id, thinking, String::new()));
-            if !self.emit(BackendEvent::ItemStarted(started)).await {
+            if !self
+                .emit_after_flush(BackendEvent::ItemStarted(started))
+                .await
+            {
                 return false;
             }
         }
@@ -603,7 +621,7 @@ impl Translator {
         }
         if !started
             && !self
-                .emit(BackendEvent::ItemStarted(BackendItem::root(text_known(
+                .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_known(
                     id,
                     thinking,
                     String::new(),
@@ -612,7 +630,7 @@ impl Translator {
         {
             return false;
         }
-        self.emit(text_item(id, thinking, text)).await
+        self.emit_after_flush(text_item(id, thinking, text)).await
     }
 
     async fn start_tools(&mut self, id: &str, calls: Vec<(String, Value, String)>) -> bool {
@@ -623,7 +641,7 @@ impl Translator {
                 name: name.clone(),
                 arguments: arguments.clone(),
             }));
-            if !self.emit(event).await {
+            if !self.emit_after_flush(event).await {
                 return false;
             }
             stubs.push(ToolStub {
@@ -645,7 +663,7 @@ impl Translator {
         is_error: bool,
     ) -> bool {
         let call = ItemId(id.to_owned());
-        self.emit(BackendEvent::ItemCompleted(BackendItem::root(
+        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
             KnownItem::ToolCall {
                 id: call.clone(),
                 name: name.to_owned(),
@@ -682,11 +700,14 @@ impl Translator {
             && self.context_window != Some(window)
         {
             self.context_window = Some(window);
-            if !self.emit(BackendEvent::ContextWindow(window)).await {
+            if !self
+                .emit_after_flush(BackendEvent::ContextWindow(window))
+                .await
+            {
                 return false;
             }
         }
-        self.emit(BackendEvent::Usage(items::usage(&note.token_usage.last)))
+        self.emit_after_flush(BackendEvent::Usage(items::usage(&note.token_usage.last)))
             .await
     }
 
@@ -796,7 +817,7 @@ impl Translator {
         };
         if let Err(error) = answered {
             debug(&error);
-            return self.emit(BackendEvent::Error(error)).await;
+            return self.emit_after_flush(BackendEvent::Error(error)).await;
         }
         true
     }
@@ -869,7 +890,9 @@ impl Translator {
                 thread: thread.to_owned(),
             },
         );
-        self.emit(BackendEvent::Approval { id, request }).await && self.agent_waits(thread).await
+        self.emit_after_flush(BackendEvent::Approval { id, request })
+            .await
+            && self.agent_waits(thread).await
     }
 }
 

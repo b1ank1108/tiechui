@@ -12,6 +12,7 @@ use crate::backend::Backend;
 
 /// How long `<binary> --version` may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_VERSION_OUTPUT: usize = 64 * 1024;
 
 /// What a probe found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -240,8 +241,7 @@ pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> P
     let run = async {
         let mut text = String::new();
         let mut buffer = vec![0; 4096];
-        // A version line is short; stop reading at 64 KiB in case the binary is not one.
-        while text.len() < 64 * 1024 {
+        while text.len() < MAX_VERSION_OUTPUT {
             let read = stdout.read(&mut buffer).await?;
             if read == 0 {
                 break;
