@@ -52,6 +52,8 @@ pub struct Shared {
     pub input_written: AtomicBool,
     /// A turn was started (or joined) and its `result` has not arrived.
     pub turn_active: AtomicBool,
+    /// Claude is running a turn it started by itself (`init` while no turn of the session runs).
+    pub own_turn: AtomicBool,
     /// An `interrupt` request is out, so an aborted `result` is the interrupt's.
     pub interrupting: AtomicBool,
     /// The process has not exited and is not being reaped.
@@ -79,6 +81,7 @@ impl Shared {
             init_id,
             input_written: AtomicBool::new(false),
             turn_active: AtomicBool::new(false),
+            own_turn: AtomicBool::new(false),
             interrupting: AtomicBool::new(false),
             usable: AtomicBool::new(true),
             supervisor,
@@ -94,6 +97,10 @@ impl Shared {
 
     pub fn turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
+    }
+
+    pub fn own_turn(&self) -> bool {
+        self.own_turn.load(Ordering::SeqCst)
     }
 
     pub fn approvals(&self) -> MutexGuard<'_, BTreeMap<String, Pending>> {

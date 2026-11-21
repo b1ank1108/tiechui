@@ -438,7 +438,9 @@ impl Backend for ClaudeBackend {
         let Ok(run) = self.running() else {
             return Ok(());
         };
-        if !run.shared.turn_active() {
+        // A turn Claude started by itself (shown as a derived turn) is interrupted the same way;
+        // its aborted `result` is followed by `Idle`, which ends the derived turn.
+        if !run.shared.turn_active() && !run.shared.own_turn() {
             return Ok(());
         }
         run.shared.interrupting.store(true, Ordering::SeqCst);

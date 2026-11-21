@@ -58,8 +58,6 @@ pub struct Translator {
     child_calls: HashMap<String, ChildCall>,
     /// The next index of a sub-agent's text block, by `<agent id>:<message id>`.
     child_blocks: HashMap<String, u32>,
-    /// Claude is running a turn it started by itself.
-    own_turn: bool,
     outside_turn_output_seen: bool,
 }
 
@@ -89,7 +87,6 @@ impl Translator {
             agents: HashMap::new(),
             child_calls: HashMap::new(),
             child_blocks: HashMap::new(),
-            own_turn: false,
             outside_turn_output_seen: false,
         }
     }
@@ -161,7 +158,7 @@ impl Translator {
             return;
         }
         self.flush().await;
-        self.own_turn = false;
+        self.shared.own_turn.store(false, Ordering::SeqCst);
         if !self.withdraw_approvals_where(|_| true).await
             || !self.settle_turn().await
             || !self.interrupt_agents().await
@@ -236,7 +233,7 @@ impl Translator {
         match incoming.subtype.as_deref() {
             // Every turn begins with `init`; one while no turn of the session runs is Claude's own.
             Some("init") if !self.shared.turn_active() => {
-                self.own_turn = true;
+                self.shared.own_turn.store(true, Ordering::SeqCst);
                 self.outside_turn_output_seen = true;
                 true
             }
@@ -623,7 +620,7 @@ impl Translator {
             .is_some_and(|reason| reason.starts_with("aborted"))
             || self.shared.interrupting.load(Ordering::SeqCst);
         self.shared.interrupting.store(false, Ordering::SeqCst);
-        self.own_turn = false;
+        self.shared.own_turn.store(false, Ordering::SeqCst);
         if !self.shared.turn_active.swap(false, Ordering::SeqCst) {
             // Claude's own turn, or a result outside any turn: no turn of the session ends.
             if failed && !aborted {

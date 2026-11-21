@@ -359,7 +359,7 @@ impl Translator {
 
     pub(super) async fn maybe_idle(&mut self) -> bool {
         let busy = self.shared.turn_active()
-            || self.own_turn
+            || self.shared.own_turn()
             || self.agents.values().any(Agent::live)
             || !self.shared.approvals().is_empty();
         if !self.outside_turn_output_seen || busy {

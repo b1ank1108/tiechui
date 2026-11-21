@@ -2507,6 +2507,90 @@ async fn an_interrupt_is_a_control_request_and_the_aborted_result_ends_the_turn_
     );
 }
 
+#[tokio::test]
+async fn interrupting_a_turn_claude_started_itself_sends_the_interrupt_and_ends_it_promptly() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "sleep 40"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(simple_turn("msg_1", "one", usage_json(1, 1, 0, 0)));
+    // As recorded with 2.1.322: after an interrupted turn Claude acted on the steer in a turn of
+    // its own and ran the command again.
+    steps.extend([
+        json!({"sleep_ms": 200}),
+        system("init", json!({})),
+        message_start("msg_2"),
+    ]);
+    steps.extend(tool_use("msg_2", 0, "toolu_long", "Bash", &input));
+    steps.extend(message_end("msg_2", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.extend([
+        expect(json!({"type": "control_request", "request": {"subtype": "interrupt"}})),
+        emit(json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": "$id", "response": {"still_queued": []}}})),
+        tool_result(
+            "toolu_long",
+            json!("The user doesn't want to proceed with this tool use."),
+            true,
+        ),
+        frame(
+            "result",
+            json!({"subtype": "error_during_execution", "is_error": true, "result": null,
+                "errors": [], "terminal_reason": "aborted_tools"}),
+        ),
+        user_message("after"),
+    ]);
+    steps.extend(simple_turn("msg_3", "after", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    client.until(is_completed).await;
+    let running = client
+        .until(|kind| {
+            matches!(
+                kind,
+                EventKind::ItemCompleted {
+                    item: Item::Known(KnownItem::ToolCall { .. }),
+                    ..
+                }
+            )
+        })
+        .await;
+    assert_eq!(
+        markers(&running)
+            .iter()
+            .map(|marker| marker.reason)
+            .collect::<Vec<_>>(),
+        vec![DerivedReason::Runtime]
+    );
+    let EventKind::ItemCompleted { turn_id, .. } = &running.last().unwrap().event.event else {
+        unreachable!()
+    };
+    let derived = turn_id.clone();
+    let asked = std::time::Instant::now();
+    client
+        .ok("session/submit", interrupt(&thread, &derived))
+        .await;
+    let events = client.until(is_completed).await;
+    // Ended by Claude's aborted `result`, not by the session's 10 s confirmation window.
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let ended = turns_completed(&events);
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].id, derived);
+    submit(&mut client, &thread, "after", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert_eq!(fixture.launches().len(), 1);
+    assert_script_followed(&fixture);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn an_error_result_fails_the_turn_and_the_process_group_is_reaped_within_the_grace() {
