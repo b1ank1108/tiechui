@@ -51,19 +51,16 @@ pub fn command_result(item: &CommandItem) -> (Value, bool) {
     (value, status.is_some())
 }
 
-/// A tool result's output that is only text.
 pub fn tool_output_text(text: &str, is_error: bool) -> Value {
     tool_output(text, is_error, Value::Null)
 }
 
-/// One file of a `fileChange` as a tool call.
 #[derive(Debug, PartialEq)]
 pub struct FileCall {
     pub id: String,
     pub name: &'static str,
     pub arguments: Value,
     pub path: String,
-    /// The result text on success.
     pub summary: String,
 }
 
@@ -115,7 +112,6 @@ pub fn file_calls(item_id: &str, changes: &[FileChange]) -> Vec<FileCall> {
         .collect()
 }
 
-/// The `{oldText, newText}` pairs of a unified diff, one per run of changed lines.
 pub fn edits_from_diff(diff: &str) -> Vec<Value> {
     let mut edits = Vec::new();
     let (mut old, mut new) = (String::new(), String::new());
@@ -130,7 +126,6 @@ pub fn edits_from_diff(diff: &str) -> Vec<Value> {
             flush(&mut old, &mut new);
             in_hunk = true;
         } else if !in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")) {
-            // A file header before the first hunk.
         } else if let Some(removed) = line.strip_prefix('-') {
             old.push_str(removed);
             old.push('\n');
@@ -179,7 +174,6 @@ pub fn mcp_result(item: &McpItem) -> (Value, bool) {
     (value, is_error)
 }
 
-/// A web search, dynamic tool call or image view: `(tool name, arguments, result text, failed)`.
 pub fn other_call(kind: &str, item: &OtherItem) -> Option<(String, Value, String, bool)> {
     match kind {
         "webSearch" => {
@@ -234,14 +228,11 @@ pub fn usage(last: &Breakdown) -> TokenUsage {
     }
 }
 
-/// A tiechui permission mode as Codex policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     pub approval: &'static str,
     pub reviewer: &'static str,
-    /// For `thread/start` and `thread/resume`.
     pub sandbox: &'static str,
-    /// The `type` of the `turn/start` sandbox policy.
     pub sandbox_type: &'static str,
 }
 
@@ -276,7 +267,6 @@ impl Policy {
     }
 }
 
-/// The decision of a command or file change approval.
 pub fn review_decision(decision: &ApprovalDecision) -> &'static str {
     match decision {
         ApprovalDecision::AllowOnce | ApprovalDecision::Accept { .. } => "accept",
@@ -286,7 +276,6 @@ pub fn review_decision(decision: &ApprovalDecision) -> &'static str {
     }
 }
 
-/// The answer to a permissions request: what is granted, and for how long.
 pub fn permissions_response(requested: &Value, decision: &ApprovalDecision) -> Value {
     match decision {
         ApprovalDecision::AllowOnce | ApprovalDecision::Accept { .. } => {
@@ -299,7 +288,6 @@ pub fn permissions_response(requested: &Value, decision: &ApprovalDecision) -> V
     }
 }
 
-/// The answer to an MCP elicitation.
 pub fn elicitation_response(decision: &ApprovalDecision) -> Value {
     match decision {
         ApprovalDecision::Accept { content } => {
@@ -313,7 +301,6 @@ pub fn elicitation_response(decision: &ApprovalDecision) -> Value {
     }
 }
 
-/// The files a permissions request names, for the approval card.
 pub fn requested_paths(permissions: &Value) -> Vec<String> {
     let files = &permissions["fileSystem"];
     let mut paths: Vec<String> = ["read", "write"]

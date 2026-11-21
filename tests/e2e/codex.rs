@@ -1,5 +1,3 @@
-//! The Codex driver against a fake `codex app-server` (`fake_codex.rs`) that replays scripted
-//! frames, driven through a real `chui app-server`.
 #![allow(clippy::unwrap_used)]
 
 mod client;
@@ -19,8 +17,6 @@ use tiechui_protocol::{
 
 const THREAD: &str = "thr-root";
 const TURN: &str = "turn-1";
-
-// ----- script helpers -----
 
 fn expect(frame: Value) -> Value {
     json!({ "expect": frame })
@@ -96,8 +92,6 @@ fn agent_text(id: &str, turn: &str, deltas: &[&str]) -> Vec<Value> {
     steps
 }
 
-// ----- fixture -----
-
 struct Fixture {
     root: TempDir,
     cwd: PathBuf,
@@ -131,7 +125,6 @@ impl Fixture {
         std::fs::write(self.path("script.ndjson"), text.join("\n")).unwrap();
     }
 
-    /// The frames the fake received, in order.
     fn received(&self) -> Vec<Value> {
         std::fs::read_to_string(self.path("fake.log"))
             .unwrap_or_default()
@@ -249,8 +242,6 @@ fn pid_in(path: &Path) -> i32 {
         .unwrap()
 }
 
-// ----- tests -----
-
 #[tokio::test]
 async fn codex_older_than_the_minimum_is_unavailable_and_the_reason_names_both_versions() {
     let fixture = Fixture::new();
@@ -278,7 +269,6 @@ async fn the_turn_ends_only_on_the_root_threads_turn_completed() {
     let mut steps = handshake(("untrusted", "read-only"));
     steps.extend(turn_start("go", TURN));
     steps.extend([
-        // A sub-agent's thread runs and finishes its own turn inside the root turn.
         notify(
             "turn/started",
             json!({"threadId": "thr-child", "turn": {"id": "turn-c", "items": [], "status": "inProgress"}}),
@@ -657,7 +647,6 @@ async fn an_interrupt_codex_never_confirms_ends_as_interrupted_after_the_window(
         started.elapsed() >= Duration::from_secs(9),
         "waited the window"
     );
-    // The hung fake ignores stdin EOF; closing the session must still reap it.
     #[cfg(unix)]
     {
         let fake = pid_in(&fake_pid);
@@ -937,7 +926,6 @@ async fn one_turn_maps_text_reasoning_commands_file_changes_and_usage() {
     // A replay of an earlier turn's usage after the request, as a resume does.
     steps.push(usage(counts(500, 0, 5, 0), counts(500, 0, 5, 0), "turn-0"));
     steps.extend([
-        // The echo of the user's message is skipped.
         notify(
             "item/started",
             with(json!({"item": {"type": "userMessage", "id": "u1",
@@ -1024,7 +1012,6 @@ async fn one_turn_maps_text_reasoning_commands_file_changes_and_usage() {
             "server": "docs", "tool": "search", "arguments": {"q": "x"}, "status": "completed",
             "result": {"content": [{"type": "text", "text": "found it"}]}}})),
         ),
-        // Two model requests, then the same totals again.
         usage(counts(1000, 400, 50, 20), counts(1000, 400, 50, 20), TURN),
         usage(counts(1200, 1000, 30, 0), counts(2200, 1400, 80, 20), TURN),
         usage(counts(1200, 1000, 30, 0), counts(2200, 1400, 80, 20), TURN),
@@ -1075,7 +1062,6 @@ async fn one_turn_maps_text_reasoning_commands_file_changes_and_usage() {
     );
     assert!(items.iter().any(|item| matches!(item,
         KnownItem::Thinking { text, .. } if text == "Checking files")));
-    // Text streams as started, merged deltas, completed.
     let text_events: Vec<_> = events
         .iter()
         .filter(|e| match &e.event.event {
@@ -1172,7 +1158,7 @@ async fn one_turn_maps_text_reasoning_commands_file_changes_and_usage() {
     );
 }
 
-// ----- sub-agents (frames shaped like t3code's codex_transcript fixtures, Codex 0.156.1) -----
+// Sub-agent frames shaped like t3code's codex_transcript fixtures (Codex 0.156.1).
 
 const CHILD: &str = "thr-child";
 const CHILD_TURN: &str = "turn-c";
@@ -1186,7 +1172,6 @@ fn on(thread: &str, turn: &str, extra: Value) -> Value {
     base
 }
 
-/// `subAgentActivity` started, on the root thread: the spawn of a multi-agent v2 sub-agent.
 fn v2_spawn() -> Vec<Value> {
     let item = json!({"type": "subAgentActivity", "id": SPAWN, "kind": "started",
         "agentThreadId": CHILD, "agentPath": "/root/fixture_writer"});
@@ -1302,7 +1287,6 @@ fn custom_items(events: &[tiechui_protocol::Event]) -> (Vec<SubagentItem>, Vec<S
     (children, statuses)
 }
 
-/// Turns as (id, status, item descriptors), folded from an event list the way a client does.
 fn structure(events: &[tiechui_protocol::Event]) -> Vec<(String, String, Vec<String>)> {
     let describe = |item: &Item| match item {
         Item::Known(known) => serde_json::to_value(known).unwrap()["id"].to_string(),
@@ -1405,13 +1389,11 @@ async fn a_subagent_that_finishes_first_folds_under_its_spawn_and_the_parent_tur
     assert_eq!(states, [SubagentState::Running, SubagentState::Completed]);
     assert_eq!(statuses[0].name.as_deref(), Some("fixture_writer"));
     assert_eq!(statuses[1].message.as_deref(), Some("Written."));
-    // The spawn is a normal root tool call.
     let root = known(&events);
     assert!(root.iter().any(|item| matches!(item,
         KnownItem::ToolCall { id, name, .. } if id.0 == SPAWN && name == "spawn_agent")));
     assert!(root.iter().any(|item| matches!(item,
         KnownItem::AssistantMessage { text, .. } if text == "Written.")));
-    // The status item is replaced in place: one per agent in the folded turn.
     let turns = structure(&live);
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert_eq!(
@@ -1431,7 +1413,6 @@ async fn a_subagent_that_finishes_first_folds_under_its_spawn_and_the_parent_tur
     );
 }
 
-/// The root turn ends while the sub-agent still runs; its command needs approval afterwards.
 fn late_subagent_script(fixture: &Fixture) {
     let mut steps = handshake(("untrusted", "read-only"));
     steps.extend(turn_start("go", TURN));
@@ -1483,7 +1464,6 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
     else {
         panic!("not a permission approval");
     };
-    // (e) The approval names the child's tool call, and the actor is the agent.
     assert_eq!(actor.as_deref(), Some(CHILD));
     assert_eq!(call_id, "thr-child:exec-sub");
     assert_eq!(values, ["touch sub.txt"]);
@@ -1494,7 +1474,6 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
                 if id.0 == call_id && arguments["command"] == "touch sub.txt")),
         "the approval's call_id is the id of the child ToolCall with the same command: {children:?}"
     );
-    // The derived turn.
     let derived_start = live
         .iter()
         .find_map(|e| match &e.event {
@@ -1507,7 +1486,6 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
         })
         .expect("a derived turn opened");
     assert_ne!(derived_start.id, root_turn);
-    // (c) mid-flight snapshot equals the live fold.
     let mid = snapshot(
         client
             .ok("session/snapshot", json!({"thread_id": thread}))
@@ -1562,7 +1540,6 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
         fixture.mismatches()
     );
 
-    // Reopening by path rebuilds the same turns.
     client
         .ok("session/close", json!({"thread_id": thread}))
         .await;
@@ -1575,8 +1552,6 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
     ]);
     let mut again = fixture.client();
     let reopened = snapshot(again.ok("session/open", json!({"path": opened.path})).await);
-    // A replayed text or result is named after its stored entry, as for any session; sub-agent
-    // items, statuses, derived turns and tool call ids (what children fold under) are kept.
     let keep = |turns: Vec<(String, String, Vec<String>)>| -> Vec<(String, String, Vec<String>)> {
         turns
             .into_iter()
@@ -1610,7 +1585,6 @@ async fn a_followup_turn_started_right_after_turn_completed_is_not_cut_short_by_
     steps.extend(v2_spawn());
     steps.push(child_turn_started());
     steps.push(turn_done(TURN, "completed"));
-    // The queued follow-up starts at once; the sub-agent finishes during it.
     steps.extend(turn_start("again", "turn-2"));
     steps.extend(child_message("late"));
     steps.push(child_turn_done("late"));
@@ -1775,8 +1749,6 @@ async fn a_subagent_spawned_by_a_subagent_folds_under_the_nested_spawn_call() {
     );
 }
 
-// ----- snapshot undo -----
-
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args([
@@ -1836,8 +1808,6 @@ async fn a_turn_that_edits_files_can_be_undone_from_its_start_of_turn_snapshot()
             json!({"thread_id": thread, "item_id": item}),
         )
         .await;
-    // {"commands": [], "files": [], "mode": "snapshot", "safe": [], "unsafe": [],
-    //  "snapshot_ref": "refs/tiechui/checkpoints/<session>/<turn entry>"}
     assert_eq!(rewind["mode"], "snapshot", "{rewind}");
     assert_eq!(rewind["files"], json!([]));
     assert!(
@@ -1909,9 +1879,6 @@ async fn a_failed_snapshot_is_recorded_as_missing_and_the_turn_still_runs() {
     assert!(message.contains("snapshot"), "{message}");
 }
 
-// ----- undo from start and end snapshots -----
-
-/// A git repository holding `a.txt`, `b.txt` and `c.txt`, each with `<name>0` content.
 fn repo_with_three_files(fixture: &Fixture) {
     git(&fixture.cwd, &["init", "-q"]);
     for name in ["a", "b", "c"] {
@@ -1933,7 +1900,6 @@ fn read_file(fixture: &Fixture, name: &str) -> String {
     std::fs::read_to_string(fixture.cwd.join(name)).unwrap()
 }
 
-/// The script of turns that each write the given files, one `turn/start` per turn.
 fn script_turns(fixture: &Fixture, turns: &[&[(&str, &str)]]) {
     let mut steps = handshake(("never", "danger-full-access"));
     for (index, writes) in turns.iter().enumerate() {
@@ -1949,8 +1915,6 @@ fn script_turns(fixture: &Fixture, turns: &[&[(&str, &str)]]) {
     fixture.script(steps);
 }
 
-/// Runs the next turn and returns its user item id, once its end-of-turn snapshot is recorded
-/// (which happens just after `TurnCompleted`).
 async fn run_turn(client: &mut Client, thread: &str, text: &str) -> String {
     submit(client, thread, text, "follow_up").await;
     let events = client.until(is_completed).await;
@@ -1968,8 +1932,6 @@ async fn run_turn(client: &mut Client, thread: &str, text: &str) -> String {
     item
 }
 
-/// Clients ask for a turn's changes as soon as it ends, so the end-of-turn snapshot must be in
-/// place when `TurnCompleted` arrives.
 async fn end_snapshot_is_ready(client: &mut Client, thread: &str, item: &str) {
     if let Err(error) = client.call("turn/check", at(thread, item)).await {
         panic!("turn/check right after TurnCompleted: {error}");
@@ -2111,7 +2073,6 @@ async fn undo_twice_reapplies_the_turn_and_the_reverted_state_survives_reopening
     let again = client.ok("turn/undo", at(&thread, &item)).await;
     assert_eq!(again["reverted"], false, "{again}");
     assert_eq!(read_file(&fixture, "a.txt"), "a1\n");
-    // A reverted turn whose file was edited meanwhile is not re-applied over the edit.
     client.ok("turn/undo", at(&thread, &item)).await;
     std::fs::write(fixture.cwd.join("a.txt"), "mine\n").unwrap();
     let error = client

@@ -37,10 +37,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// `thread/start` and `thread/resume` load models, MCP servers and history.
 const THREAD_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long an interrupt waits for a turn that was just started to report its id.
 const TURN_ID_WAIT: Duration = Duration::from_secs(5);
 
-/// The environment variable that shortens the handshake and thread timeouts, for tests.
 #[cfg(feature = "fake-runtime")]
 pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CODEX_HANDSHAKE_TIMEOUT_MS";
 
@@ -79,7 +77,6 @@ fn seconds(duration: Duration) -> String {
     }
 }
 
-/// Logs to stderr when `CHUI_CODEX_DEBUG` is set.
 fn debug(message: &str) {
     if std::env::var_os("CHUI_CODEX_DEBUG").is_some() {
         eprintln!("chui codex: {message}");
@@ -99,7 +96,6 @@ fn version_parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Whether `version` is `minimum` or newer, comparing dotted numbers.
 fn at_least(version: &str, minimum: &str) -> bool {
     let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
     let len = version.len().max(minimum.len());
@@ -153,7 +149,6 @@ impl Driver for CodexDriver {
     }
 }
 
-/// A running `codex app-server`.
 struct Run {
     process: Option<Process>,
     rpc: Arc<Rpc>,
@@ -198,7 +193,6 @@ async fn read_frames(stdout: impl AsyncRead + Unpin, frames: mpsc::Sender<Inboun
     }
 }
 
-/// Keeps the last lines Codex logs, to say why it exited.
 async fn read_stderr(stderr: impl AsyncRead + Unpin, tail: StderrTail) {
     let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
     while let Ok(Some(frame)) = reader.next().await {

@@ -27,32 +27,24 @@ use super::wire::{
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::DeltaCoalescer;
 
-/// How long streamed text may wait before it is sent on.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
-/// Buffered text beyond this size is sent at once.
 const FLUSH_BYTES: usize = 64 * 1024;
 
-/// What the root thread's turn is doing, shared with the backend's calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnState {
-    /// The turn Codex runs on the root thread.
     pub active: Option<String>,
     /// A `turn/start` was sent and its `turn/started` has not been seen.
     pub pending: bool,
 }
 
-/// An approval request waiting for the user, by the id the session knows it under.
 pub struct Pending {
     rpc_id: Value,
     kind: Kind,
-    /// The thread that asks: the root or a sub-agent's.
     thread: String,
 }
 
 enum Kind {
-    /// A command or a file change.
     Review,
-    /// What was requested is what an allow grants.
     Permissions(Value),
     Elicitation,
 }
@@ -72,11 +64,9 @@ impl Pending {
 }
 
 pub struct Shared {
-    /// The root thread, once Codex has started or resumed it.
     pub thread: Mutex<Option<String>>,
     pub turn: watch::Sender<TurnState>,
     pub approvals: Mutex<HashMap<String, Pending>>,
-    /// Notified when the first frame arrives.
     pub first_frame: Notify,
 }
 
@@ -104,7 +94,6 @@ impl Shared {
     }
 }
 
-/// What the reader task hands over.
 pub enum Inbound {
     Frame(Vec<u8>),
     Oversize(usize),
@@ -134,17 +123,13 @@ pub struct Translator {
     buffered: usize,
     flush_at: Option<Instant>,
     live: HashMap<String, Live>,
-    /// Item ids in the order they started, for finishing what a turn leaves open.
     open: Vec<String>,
     last_total: Option<Breakdown>,
     context_window: Option<u64>,
     last_completed: Option<String>,
     /// Something of the root thread arrived with no turn running: a late item or approval.
     late: bool,
-    /// Sub-agents by thread id.
     agents: HashMap<String, Agent>,
-    /// Tool calls of sub-agents that were announced and have no result yet, by their scoped
-    /// item id.
     child_tools: HashMap<String, Vec<ToolStub>>,
     stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
@@ -175,7 +160,6 @@ impl Translator {
         }
     }
 
-    /// Runs until Codex closes its output or the session stops listening.
     pub async fn run(mut self, mut inbound: mpsc::Receiver<Inbound>) {
         loop {
             let wake = async {
@@ -226,9 +210,6 @@ impl Translator {
         .await;
     }
 
-    // ----- output -----
-
-    /// Sends the merged text deltas; false when the session is gone.
     async fn flush(&mut self) -> bool {
         self.flush_at = None;
         self.buffered = 0;
@@ -259,8 +240,6 @@ impl Translator {
             self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
         }
     }
-
-    // ----- frames -----
 
     pub(super) fn parse<T: DeserializeOwned>(params: Value, what: &str) -> Option<T> {
         match serde_json::from_value(params) {
@@ -398,8 +377,6 @@ impl Translator {
         }
     }
 
-    // ----- turns -----
-
     async fn turn_completed(&mut self, turn: TurnBody) -> bool {
         let status = match turn.status.as_str() {
             "completed" => TurnStatus::Completed,
@@ -453,7 +430,6 @@ impl Translator {
             .await
     }
 
-    /// Completes what a turn left running, so no client shows a step that never ends.
     async fn finish_open_items(&mut self) -> bool {
         for id in std::mem::take(&mut self.open) {
             match self.live.remove(&id) {
@@ -485,8 +461,6 @@ impl Translator {
         self.live.clear();
         true
     }
-
-    // ----- items -----
 
     async fn item_started(&mut self, item: &Value) -> bool {
         let kind = item["type"].as_str().unwrap_or_default();
@@ -589,7 +563,6 @@ impl Translator {
         .await
     }
 
-    /// Appends streamed text, starting the item first when its start has not been seen.
     async fn text_delta(&mut self, id: &str, thinking: bool, delta: &str) -> bool {
         self.note_derived();
         let start = match self.live.get_mut(id) {
@@ -663,7 +636,6 @@ impl Translator {
         true
     }
 
-    /// A tool call and its result, both complete.
     pub(super) async fn complete_call(
         &mut self,
         id: &str,
@@ -693,8 +665,6 @@ impl Translator {
                 .await
     }
 
-    // ----- usage -----
-
     async fn token_usage(&mut self, note: UsageNotification) -> bool {
         let active = self.shared.turn.borrow().active.clone();
         let current = active.as_deref() == Some(note.turn_id.as_str())
@@ -719,8 +689,6 @@ impl Translator {
         self.emit(BackendEvent::Usage(items::usage(&note.token_usage.last)))
             .await
     }
-
-    // ----- server requests -----
 
     async fn server_request(&mut self, id: Value, method: &str, params: Value) -> bool {
         let answered = match method {
@@ -809,7 +777,6 @@ impl Translator {
                     None => self.rpc.respond(&id, json!({"action": "decline"})).await,
                 }
             }
-            // The user is not asked free-form questions mid-turn: Codex gets no answers.
             "item/tool/requestUserInput" => self.rpc.respond(&id, json!({"answers": {}})).await,
             "item/tool/call" => {
                 self.rpc
@@ -865,8 +832,6 @@ impl Translator {
         }
     }
 
-    /// The tool, arguments and paths a file change approval shows: the first file of the change
-    /// it asks about, when the change was seen.
     fn file_subject(&self, request: &FileApproval) -> (String, Value, Vec<String>) {
         let child = self
             .child_tools
@@ -888,7 +853,6 @@ impl Translator {
         ("edit".into(), json!({"path": request.grant_root}), paths)
     }
 
-    /// Registers the approval and reports it. A sub-agent that asks is waiting meanwhile.
     async fn ask(
         &mut self,
         rpc_id: Value,
@@ -922,7 +886,6 @@ fn text_item(id: &str, thinking: bool, text: String) -> BackendEvent {
     BackendEvent::ItemCompleted(BackendItem::root(text_known(id, thinking, text)))
 }
 
-/// The session's id of an approval: Codex's request id.
 pub fn approval_id(rpc_id: &Value) -> String {
     match rpc_id.as_str() {
         Some(text) => format!("codex-{text}"),
@@ -930,10 +893,8 @@ pub fn approval_id(rpc_id: &Value) -> String {
     }
 }
 
-/// A tool call as an item announces it: the item's id and each call (name, arguments, call id).
 type Starts = (String, Vec<(String, Value, String)>);
 
-/// How a tool item ended.
 pub struct ToolDone {
     pub id: String,
     pub name: String,
@@ -942,8 +903,6 @@ pub struct ToolDone {
     pub is_error: bool,
 }
 
-/// The calls a started tool-like item (command, file change, MCP, collab and the rest) stands
-/// for; `None` for every other kind.
 pub fn tool_starts(kind: &str, item: &Value) -> Option<Starts> {
     match kind {
         "commandExecution" => {
@@ -982,7 +941,6 @@ pub fn tool_starts(kind: &str, item: &Value) -> Option<Starts> {
     }
 }
 
-/// The results of a completed tool-like item, one per call.
 pub fn tool_dones(kind: &str, item: &Value) -> Option<(String, Vec<ToolDone>)> {
     match kind {
         "commandExecution" => {

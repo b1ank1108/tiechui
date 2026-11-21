@@ -1,4 +1,3 @@
-//! A JSON-RPC client of a spawned `chui app-server`, shared by the runtime end-to-end tests.
 #![allow(dead_code, clippy::unwrap_used)]
 
 use std::process::Stdio;
@@ -36,7 +35,6 @@ impl Client {
         }
     }
 
-    /// Closes the app-server's stdin and waits for it to exit.
     pub async fn finish(self) -> std::process::ExitStatus {
         let Self {
             mut child, stdin, ..
@@ -97,7 +95,6 @@ impl Client {
         self.call(method, params).await.unwrap()
     }
 
-    /// Takes the buffered and incoming events up to the first one that matches.
     pub async fn until(&mut self, matches: impl Fn(&EventKind) -> bool) -> Vec<SessionEvent> {
         loop {
             if let Some(index) = self.events.iter().position(|e| matches(&e.event.event)) {

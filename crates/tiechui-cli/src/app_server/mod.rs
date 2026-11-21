@@ -61,7 +61,6 @@ type ClientOut = mpsc::UnboundedSender<String>;
 struct Live {
     path: PathBuf,
     cwd: PathBuf,
-    /// The agent runtime of the session, `chui` or an external one.
     runtime: String,
     capabilities: RuntimeCapabilities,
     submissions: mpsc::Sender<Submission>,
@@ -75,7 +74,6 @@ struct Live {
     stale: AtomicBool,
 }
 
-/// A started session before the server registers it.
 struct Attached {
     handle: tiechui_core::SessionHandle,
     id: String,
@@ -85,7 +83,6 @@ struct Attached {
     capabilities: RuntimeCapabilities,
 }
 
-/// What an external runtime's new session takes from `session/open`.
 struct SessionConfigParams {
     model: Option<String>,
     thinking: Option<tiechui_protocol::ThinkingLevel>,
@@ -455,7 +452,6 @@ fn failure(code: i64, message: impl ToString) -> rpc::Error {
     }
 }
 
-/// The error of an entry the session's runtime does not implement.
 fn unsupported(runtime: &str, feature: &str) -> rpc::Error {
     rpc::Error {
         code: RUNTIME_UNSUPPORTED_CODE,
@@ -836,7 +832,6 @@ impl Server {
         reply
     }
 
-    /// Refuses the entries the session's runtime lacks, before anything runs.
     fn gate(&self, method: &str, params: &Value) -> Result<(), rpc::Error> {
         let gated = matches!(
             method,
@@ -1158,7 +1153,6 @@ impl Server {
         self.attach(session, shutdown, epoch, projection).await
     }
 
-    /// Starts an external runtime's session and waits for its thread to start.
     async fn start_external(
         self: &Arc<Self>,
         runtime: &str,
@@ -1195,7 +1189,6 @@ impl Server {
         self.attach(session, shutdown, epoch, projection).await
     }
 
-    /// Registers a started session and waits for its thread to start.
     async fn attach(
         self: &Arc<Self>,
         session: Attached,
@@ -1872,7 +1865,6 @@ impl Server {
     }
 }
 
-/// The external runtime a session file was created for; none for native sessions.
 async fn stored_external_runtime(path: &Path) -> Result<Option<String>, rpc::Error> {
     let path = path.to_owned();
     let runtime = blocking(move |cancel| {

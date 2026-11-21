@@ -39,7 +39,6 @@ fn snake(camel: &str) -> String {
     out
 }
 
-/// The name and arguments of a collab tool call (`spawnAgent`, `wait`, ...).
 pub fn collab_call(item: &Value) -> Option<(String, Value)> {
     let name = snake(item["tool"].as_str()?);
     let mut arguments = serde_json::Map::new();
@@ -61,7 +60,6 @@ pub fn collab_call(item: &Value) -> Option<(String, Value)> {
     Some((name, Value::Object(arguments)))
 }
 
-/// What a finished collab call says, and whether it failed.
 pub fn collab_result(item: &Value) -> (String, bool) {
     let failed = item["status"] == "failed";
     let mut lines: Vec<String> = item["agentsStates"]
@@ -110,7 +108,6 @@ impl Translator {
         }
     }
 
-    /// Reports an item of the sub-agent that runs `thread`.
     async fn child_event(&mut self, thread: &str, item: KnownItem) -> bool {
         let Some(agent) = self.agents.get(thread) else {
             return true;
@@ -157,7 +154,6 @@ impl Translator {
         .await
     }
 
-    /// Reports a root or sub-agent call that is complete at once.
     async fn complete_call_in(&mut self, thread: &str, stub: ToolStub, text: &str) -> bool {
         let output = items::tool_output_text(text, false);
         if self.is_root(thread) {
@@ -173,8 +169,6 @@ impl Translator {
         }
     }
 
-    /// An item of a thread that is not the root's: a sub-agent's. Only completed items are
-    /// reported, so what streamed is not merged here.
     pub(super) async fn child_item(&mut self, thread: &str, item: &Value, started: bool) -> bool {
         if !self.agents.contains_key(thread) {
             debug(&format!("dropped an item of thread {thread}"));
@@ -228,8 +222,6 @@ impl Translator {
         self.child_event(thread, known).await
     }
 
-    /// The call is complete once announced; its result, and an approval's waiting for it, come
-    /// after.
     async fn child_tool_started(&mut self, thread: &str, kind: &str, item: &Value) -> bool {
         let Some((id, calls)) = tool_starts(kind, item) else {
             return true;
@@ -284,7 +276,6 @@ impl Translator {
         true
     }
 
-    /// `subAgentActivity`: a sub-agent started (the spawn call) or changed state.
     pub(super) async fn sub_agent_activity(&mut self, sender: &str, item: &Value) -> bool {
         let (Some(id), Some(agent)) = (item["id"].as_str(), item["agentThreadId"].as_str()) else {
             return true;
@@ -318,7 +309,6 @@ impl Translator {
         }
     }
 
-    /// What a collab tool call says about the agents it names.
     pub(super) async fn collab_effects(&mut self, thread: &str, item: &Value) -> bool {
         if item["type"] != "collabAgentToolCall" {
             return true;
@@ -345,7 +335,6 @@ impl Translator {
         true
     }
 
-    /// Starts tracking a sub-agent and reports it running.
     async fn register_agent(
         &mut self,
         sender: &str,
@@ -416,7 +405,6 @@ impl Translator {
         self.set_state(thread, SubagentState::Running, None).await
     }
 
-    /// A sub-agent's turn ended: the agent did, not the root turn.
     pub(super) async fn agent_turn_completed(&mut self, thread: &str, turn: TurnBody) -> bool {
         if !self.agents.contains_key(thread) {
             debug(&format!("dropped a turn/completed of thread {thread}"));
@@ -453,7 +441,6 @@ impl Translator {
         self.set_state(thread, state, message).await
     }
 
-    /// A sub-agent asked for approval.
     pub(super) async fn agent_waits(&mut self, thread: &str) -> bool {
         match self.agents.get(thread) {
             Some(agent) if agent.state == SubagentState::Running => {
@@ -463,7 +450,6 @@ impl Translator {
         }
     }
 
-    /// An approval of `thread` was settled: its agent runs on once none is left.
     pub(super) async fn approval_settled(&mut self, thread: &str) -> bool {
         let waiting = self
             .agents
@@ -480,7 +466,6 @@ impl Translator {
         self.maybe_idle().await
     }
 
-    /// Notes that something belongs to no running turn: a derived turn may be open.
     pub(super) fn note_derived(&mut self) {
         let turn = self.shared.turn.borrow();
         if turn.active.is_none() && !turn.pending {

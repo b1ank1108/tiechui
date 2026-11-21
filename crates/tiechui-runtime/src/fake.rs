@@ -281,7 +281,6 @@ impl Player {
         })
     }
 
-    /// Plays one step; false once the turn is over for good (interrupted or the session left).
     #[allow(clippy::too_many_lines)]
     fn step<'a>(
         &'a mut self,

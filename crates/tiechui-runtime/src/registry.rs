@@ -1,6 +1,3 @@
-//! The runtimes a server offers: their identity, static capabilities, availability probe and
-//! the backend factory.
-
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,7 +39,6 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// This process's own `PATH`.
     pub fn from_env() -> Self {
         Self {
             path: std::env::var_os("PATH"),

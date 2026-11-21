@@ -187,13 +187,11 @@ struct Session {
     last_turn: Option<TurnId>,
     submission: Option<SubmissionId>,
     follow_up: VecDeque<(Submission, Vec<InputContent>)>,
-    /// Approvals the backend waits on, in request order.
     approvals: Vec<String>,
     context: Option<TokenUsage>,
     total: TokenUsage,
     interrupt_at: Option<Instant>,
     interrupt_window: Duration,
-    /// Root items already stored, so a re-completed item is not stored twice.
     persisted: HashSet<ItemId>,
     resume: Option<String>,
     home: PathBuf,
@@ -247,14 +245,11 @@ impl Session {
         }
     }
 
-    /// Settles what is open, so no client waits on a session that ended.
     async fn close(&mut self) {
         self.cancel_approvals(ApprovalDecision::Cancel).await;
         self.complete(TurnStatus::Interrupted).await;
         self.backend.shutdown().await;
     }
-
-    // ----- store -----
 
     async fn append(&mut self, kind: EntryKind) -> Result<String, String> {
         let mut store = self.store.take().ok_or("session store unavailable")?;
@@ -275,8 +270,6 @@ impl Session {
             .as_ref()
             .ok_or_else(|| "session store unavailable".into())
     }
-
-    // ----- events -----
 
     fn emit(&self, event: EventKind) {
         let _ = self.events.send(Event {
@@ -348,8 +341,6 @@ impl Session {
         });
     }
 
-    // ----- turns -----
-
     fn turn_id(&self) -> Option<TurnId> {
         self.turn.as_ref().map(|open| open.turn.id.clone())
     }
@@ -409,11 +400,6 @@ impl Session {
         Ok(())
     }
 
-    /// Records the worktree under `anchor`, as the native rewind module does: before a root
-    /// turn runs under its user entry, and after it under `end_anchor` of that entry, so
-    /// `turn/check` and `turn/undo` can work from the turn's own changes. It takes as long as
-    /// native's capture at most (its own timeout) and a failure is recorded as a missing
-    /// snapshot; the turn runs either way. Derived turns have none.
     fn capture_snapshot(&self, anchor: &str) -> tokio::task::JoinHandle<()> {
         let (home, cwd, anchor) = (self.home.clone(), self.cwd.clone(), anchor.to_owned());
         let (session, cancel) = (self.thread.0.clone(), self.cancel.clone());
@@ -436,7 +422,6 @@ impl Session {
         })
     }
 
-    /// Opens the turn that late output belongs to, unless one is open.
     async fn ensure_turn(&mut self, reason: DerivedReason) -> Result<(), String> {
         if self.turn.is_some() {
             return Ok(());
@@ -488,7 +473,6 @@ impl Session {
         self.submission = None;
     }
 
-    /// After a turn ended: the next queued input starts a turn.
     async fn drain_queue(&mut self) -> Result<(), String> {
         if self.turn.is_some() {
             return Ok(());
@@ -499,8 +483,6 @@ impl Session {
         }
         Ok(())
     }
-
-    // ----- submissions -----
 
     async fn handle_op(&mut self, submission: Submission) -> Result<(), String> {
         if let Some(entry) = self.capabilities.unsupported_op(&submission.op) {
@@ -522,7 +504,6 @@ impl Session {
                 self.retract(&submission_ids);
                 Ok(())
             }
-            // Nothing to do: the session has no draft, no composer gate and no modules.
             Op::InputState { .. } | Op::ClearDraft | Op::Reload => Ok(()),
             op => {
                 self.emit(EventKind::Error {
@@ -590,7 +571,6 @@ impl Session {
         Ok(())
     }
 
-    /// The backend never confirmed the interrupt: end the turn so the client is not stuck.
     async fn interrupt_expired(&mut self) -> Result<(), String> {
         self.interrupt_at = None;
         if self.turn.is_some() {
@@ -608,7 +588,6 @@ impl Session {
         Ok(())
     }
 
-    /// Answers the approval to the backend once; a second answer finds it gone.
     async fn answer(
         &mut self,
         approval_id: ApprovalId,
@@ -633,8 +612,6 @@ impl Session {
             });
         }
     }
-
-    // ----- backend events -----
 
     async fn handle_backend(&mut self, event: BackendEvent) -> Result<(), String> {
         match event {
@@ -958,8 +935,6 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
 
-        /// The calls once there are `count`: `TurnStarted` is published before the snapshot is
-        /// taken and the backend is called.
         async fn calls_len(&self, count: usize) -> Vec<String> {
             for _ in 0..100 {
                 if self.calls().len() >= count {

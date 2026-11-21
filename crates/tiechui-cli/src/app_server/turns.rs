@@ -50,7 +50,6 @@ pub(super) struct Located {
     pub(super) session_id: String,
     #[cfg(feature = "workspace")]
     pub(super) cwd: PathBuf,
-    /// An external runtime runs the session: it has no per-file records, only turn snapshots.
     pub(super) external: bool,
     pub(super) branch_target: String,
     pub(super) own: Vec<String>,
@@ -220,7 +219,6 @@ fn resolve_ready_snapshot(at: &Located) -> Result<Result<(String, String), Strin
     ready_snapshot(at, anchor)
 }
 
-/// The reference and tree of the snapshot recorded under `anchor`, or why there is none.
 #[cfg(feature = "workspace")]
 fn ready_snapshot(at: &Located, anchor: &str) -> Result<Result<(String, String), String>, String> {
     match at.store.snapshot(anchor).map_err(|e| e.0)? {
@@ -524,9 +522,6 @@ fn check(at: &Located, turn: &Turn, cancel: &CancellationToken) -> Result<UndoCh
     Ok(check)
 }
 
-/// `turn/changes`, `turn/check` and `turn/undo` of an external session's turn, from the
-/// worktree snapshots taken when the turn started and when it ended. The turn's files are what
-/// differs between the two, and undo writes back only those, as native does from its records.
 #[cfg(feature = "workspace")]
 fn snapshot_turn_op(
     method: &str,
@@ -628,7 +623,6 @@ fn git_toplevel(cwd: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-/// The paths whose content differs between two snapshot trees, sorted, without submodules.
 #[cfg(feature = "workspace")]
 fn changed_between(top: &Path, start: &str, end: &str) -> Result<Vec<String>, String> {
     let output = std::process::Command::new("git")
@@ -651,7 +645,6 @@ fn changed_between(top: &Path, start: &str, end: &str) -> Result<Vec<String>, St
     Ok(files)
 }
 
-/// What a file holds in a snapshot tree, or `None` when it is not there.
 #[cfg(feature = "workspace")]
 fn tree_file(top: &Path, tree: &str, path: &str) -> Option<Vec<u8>> {
     let output = std::process::Command::new("git")
@@ -662,13 +655,11 @@ fn tree_file(top: &Path, tree: &str, path: &str) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
-/// What a file holds in the worktree now, or `None` when it is not there.
 #[cfg(feature = "workspace")]
 fn current_file(top: &Path, path: &str) -> Option<Vec<u8>> {
     std::fs::read(top.join(path)).ok()
 }
 
-/// Puts `content` at `path`, or removes the file when it is `None`.
 #[cfg(feature = "workspace")]
 fn write_file(top: &Path, path: &str, content: Option<Vec<u8>>) -> Result<(), String> {
     let target = top.join(path);

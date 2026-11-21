@@ -1,6 +1,3 @@
-//! The JSON-RPC connection to `codex app-server`: requests with awaited responses, and replies
-//! to the server's own requests.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -14,16 +11,12 @@ use tokio::sync::oneshot;
 
 use super::wire::RpcError;
 
-/// How long a single write to Codex's stdin may block.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Why a call did not return a result.
 #[derive(Debug)]
 pub enum CallError {
-    /// Codex answered with an error.
     Rpc(RpcError),
     Timeout,
-    /// Codex went away or could not be written to.
     Closed(String),
 }
 
@@ -73,7 +66,6 @@ impl Rpc {
         }
     }
 
-    /// Sends a request and returns what resolves with its response.
     pub async fn send(
         &self,
         method: &str,
@@ -115,7 +107,6 @@ impl Rpc {
         self.write(&json!({"method": method})).await
     }
 
-    /// Resolves the call a response belongs to; false when nobody waits for it any more.
     pub fn resolve(&self, id: &Value, outcome: Result<Value, RpcError>) -> bool {
         let Some(id) = id.as_i64() else { return false };
         match self.pending().remove(&id) {
@@ -124,7 +115,6 @@ impl Rpc {
         }
     }
 
-    /// Fails every call still waiting, as Codex is gone.
     pub fn close(&self) {
         self.pending().clear();
     }

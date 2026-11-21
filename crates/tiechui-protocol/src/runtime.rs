@@ -274,7 +274,6 @@ pub struct DerivedTurnMarker {
     pub reason: DerivedReason,
 }
 
-/// Builds the `Item::Custom` of a typed payload.
 fn custom<T: Serialize>(kind: &str, payload: &T) -> crate::Item {
     let mut map = match serde_json::to_value(payload) {
         Ok(Value::Object(map)) => map,

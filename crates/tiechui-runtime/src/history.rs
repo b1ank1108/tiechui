@@ -114,7 +114,6 @@ pub fn tokens_of(usage: &Usage) -> TokenUsage {
     }
 }
 
-/// The entry that stores a root item, if messages can hold it.
 pub fn item_message(item: &KnownItem, model: &tiechui_session::ModelRef) -> Option<EntryKind> {
     let assistant = |content| EntryKind::Message {
         message: Message {
@@ -176,7 +175,6 @@ pub fn item_message(item: &KnownItem, model: &tiechui_session::ModelRef) -> Opti
     }
 }
 
-/// The text of a tool result's `output`, a tool output object or a string.
 fn output_text(output: &Value) -> String {
     match output {
         Value::String(text) => text.clone(),
@@ -195,7 +193,6 @@ fn output_text(output: &Value) -> String {
     }
 }
 
-/// The external thread id of the latest `runtime.thread` entry on the branch.
 pub fn external_id(store: &SessionStore) -> Option<String> {
     on_branch(store)
         .iter()
@@ -210,7 +207,6 @@ pub fn external_id(store: &SessionStore) -> Option<String> {
         })
 }
 
-/// Usage of the branch: the latest request's, and the sum of all.
 pub fn usage(store: &SessionStore) -> (Option<TokenUsage>, TokenUsage) {
     let mut context = None;
     let mut total = TokenUsage::default();
@@ -252,13 +248,10 @@ pub fn marker_id(turn_entry: &str) -> ItemId {
     ItemId(format!("{turn_entry}-derived"))
 }
 
-/// The id of the item that shows a stored user message.
 pub fn user_item_id(entry: &str) -> ItemId {
     ItemId(format!("{entry}-0"))
 }
 
-/// The turns of the branch. A user message opens a turn named by its entry; a derived-turn
-/// entry opens one named by itself; everything else joins the latest turn.
 pub fn turns(store: &SessionStore) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for entry in on_branch(store) {
@@ -340,7 +333,6 @@ fn new_turn(id: &str, at: u64, items: Vec<Item>) -> Turn {
     }
 }
 
-/// Replaces the item with the same id, or appends.
 pub fn upsert(turn: &mut Turn, item: Item) {
     let id = item_id(&item);
     match id.and_then(|id| {

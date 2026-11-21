@@ -29,7 +29,6 @@ impl Fixture {
         let cwd = root.path().join("work");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
-        // A native session opens without a model request.
         std::fs::write(home.join("config.toml"), "model = \"fixture/model\"\n").unwrap();
         std::fs::write(
             home.join("providers.toml"),
@@ -274,7 +273,6 @@ async fn gated_entries_fail_with_runtime_unsupported_on_a_fake_session_but_work_
             json!({"runtime": "fake", "feature": feature})
         );
     }
-    // Entries every runtime has are not gated.
     client
         .ok(
             "session/submit",
@@ -294,7 +292,6 @@ async fn gated_entries_fail_with_runtime_unsupported_on_a_fake_session_but_work_
         .await;
 }
 
-/// Turns as (id, status, item descriptors), folded from an event list the way a client does.
 fn structure(events: &[tiechui_protocol::Event]) -> Vec<(String, String, Vec<String>)> {
     let describe = |item: &Item| match item {
         Item::Known(known) => serde_json::to_value(known).unwrap()["id"].to_string(),
@@ -381,7 +378,6 @@ async fn subagent_items_and_a_turn_after_turn_completed_have_one_structure_live_
             json!({"thread_id": thread, "op": user_input("go")}),
         )
         .await;
-    // The parent turn ends; the sub-agent's output and its approval arrive after.
     live.extend(
         client
             .until(is_completed)
@@ -451,7 +447,6 @@ async fn subagent_items_and_a_turn_after_turn_completed_have_one_structure_live_
     );
     assert_eq!(live_done[1].1, "Completed");
 
-    // The contents.
     let EventKind::ThreadStarted {
         thread: started, ..
     } = &done.events[0].event
@@ -594,7 +589,6 @@ async fn reopening_by_path_restores_history_runtime_and_the_external_thread() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].runtime.as_deref(), Some("fake"));
     assert_eq!(listed[0].thread_id, thread);
-    // The runtime in params is ignored: the session has its own.
     let reopened = snapshot(
         client
             .ok("session/open", json!({"path": path, "runtime": "chui"}))

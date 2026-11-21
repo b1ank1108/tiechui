@@ -28,8 +28,6 @@ pub struct RpcError {
     pub message: String,
 }
 
-// ----- requests the driver sends -----
-
 pub fn initialize_params() -> Value {
     json!({
         "clientInfo": {
@@ -39,7 +37,6 @@ pub fn initialize_params() -> Value {
         },
         "capabilities": {
             "experimentalApi": true,
-            // The turn's aggregate diff is a large payload the driver never uses.
             "optOutNotificationMethods": ["turn/diff/updated"],
         },
     })
@@ -89,9 +86,6 @@ pub fn user_input(content: &[InputContent]) -> Vec<Value> {
         .collect()
 }
 
-// ----- responses -----
-
-/// What `thread/start` and `thread/resume` answer.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadResponse {
@@ -109,8 +103,6 @@ pub struct ThreadId {
 pub struct TurnResponse {
     pub turn: TurnBody,
 }
-
-// ----- notifications -----
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,8 +198,6 @@ pub struct Status {
     #[serde(rename = "type", default)]
     pub kind: String,
 }
-
-// ----- items -----
 
 #[derive(Debug, Deserialize)]
 pub struct AgentMessageItem {
@@ -311,7 +301,6 @@ pub struct McpError {
     pub message: String,
 }
 
-/// An item of a kind without a dedicated mapping: web search, dynamic tool call, image view.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtherItem {
@@ -329,8 +318,6 @@ pub struct OtherItem {
     #[serde(default)]
     pub content_items: Option<Vec<Value>>,
 }
-
-// ----- server requests -----
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

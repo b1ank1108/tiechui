@@ -1,6 +1,3 @@
-//! What drivers need to run an external CLI: a process group that is reaped as a whole, frames
-//! split on `\n` only, and merged text deltas.
-
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;

@@ -1,7 +1,3 @@
-//! What an external agent runtime's driver implements. The driver speaks the runtime's own
-//! protocol and reports normalized events; `ExternalSession` turns them into the session
-//! protocol, persists them and keeps the session's turn structure.
-
 use std::path::PathBuf;
 
 use async_trait::async_trait;
