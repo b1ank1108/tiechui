@@ -125,6 +125,13 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<app::BtwAskParams>();
                 d.visit::<app::BtwModelParams>();
                 d.visit::<app::ApprovalParams>();
+                d.visit::<tiechui_protocol::RuntimeInfo>();
+                d.visit::<tiechui_protocol::RuntimeUnsupported>();
+                d.visit::<tiechui_protocol::SubagentItem>();
+                d.visit::<tiechui_protocol::SubagentState>();
+                d.visit::<tiechui_protocol::SubagentStatus>();
+                d.visit::<tiechui_protocol::DerivedReason>();
+                d.visit::<tiechui_protocol::DerivedTurnMarker>();
                 d.visit::<workspace::RootParams>();
                 d.visit::<workspace::FileParams>();
                 d.visit::<workspace::FileTree>();

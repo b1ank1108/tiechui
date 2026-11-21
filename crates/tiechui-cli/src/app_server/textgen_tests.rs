@@ -563,6 +563,8 @@ async fn verify_server_multi_user_turn_and_unset_tui(
         Arc::new(Live {
             path: app_path.clone(),
             cwd: work.to_owned(),
+            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
             submissions,
             shutdown: CancellationToken::new(),
             projection: projection.clone(),

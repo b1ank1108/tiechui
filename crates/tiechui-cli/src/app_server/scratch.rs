@@ -185,6 +185,10 @@ fn from_persisted_summary(
     live_map: &HashMap<ThreadId, LiveState>,
 ) -> SessionSummary {
     let thread_id = ThreadId(summary.header.id);
+    let runtime = summary
+        .header
+        .runtime
+        .unwrap_or_else(|| tiechui_protocol::DEFAULT_RUNTIME.into());
     SessionSummary {
         live: live_map.get(&thread_id).copied(),
         thread_id,
@@ -200,6 +204,8 @@ fn from_persisted_summary(
             .header
             .parent_session
             .map(|p| p.display().to_string()),
+        capabilities: Some(tiechui_runtime::capabilities_of(&runtime)),
+        runtime: Some(runtime),
     }
 }
 
@@ -226,5 +232,17 @@ fn from_live_only_session(
             .as_ref()
             .map(|p| p.display().to_string()),
         live: Some(open.state),
+        runtime: Some(
+            header
+                .runtime
+                .clone()
+                .unwrap_or_else(|| tiechui_protocol::DEFAULT_RUNTIME.into()),
+        ),
+        capabilities: Some(tiechui_runtime::capabilities_of(
+            header
+                .runtime
+                .as_deref()
+                .unwrap_or(tiechui_protocol::DEFAULT_RUNTIME),
+        )),
     })
 }

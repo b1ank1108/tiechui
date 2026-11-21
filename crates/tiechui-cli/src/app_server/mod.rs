@@ -37,8 +37,10 @@ use tiechui_model::Role;
 use tiechui_protocol::app::*;
 use tiechui_protocol::rpc::{self, Id, JsonRpcMessage};
 use tiechui_protocol::{
-    Event, EventKind, Op, PERMISSION_MODE_EVENT, SessionEpoch, Submission, SubmissionId, ThreadId,
+    Event, EventKind, Op, PERMISSION_MODE_EVENT, RUNTIME_UNSUPPORTED_CODE, RuntimeCapabilities,
+    RuntimeUnsupported, SessionEpoch, Submission, SubmissionId, ThreadId,
 };
+use tiechui_runtime::{Open as ExternalOpen, Registry, SessionConfig};
 use tiechui_session::{Entry, EntryKind, SessionStore};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
@@ -59,6 +61,9 @@ type ClientOut = mpsc::UnboundedSender<String>;
 struct Live {
     path: PathBuf,
     cwd: PathBuf,
+    /// The agent runtime of the session, `chui` or an external one.
+    runtime: String,
+    capabilities: RuntimeCapabilities,
     submissions: mpsc::Sender<Submission>,
     shutdown: CancellationToken,
     projection: Arc<Mutex<Projection>>,
@@ -70,8 +75,26 @@ struct Live {
     stale: AtomicBool,
 }
 
+/// A started session before the server registers it.
+struct Attached {
+    handle: tiechui_core::SessionHandle,
+    id: String,
+    cwd: PathBuf,
+    path: PathBuf,
+    runtime: String,
+    capabilities: RuntimeCapabilities,
+}
+
+/// What an external runtime's new session takes from `session/open`.
+struct SessionConfigParams {
+    model: Option<String>,
+    thinking: Option<tiechui_protocol::ThinkingLevel>,
+    mode: Option<String>,
+}
+
 struct Server {
     home: PathBuf,
+    runtimes: Registry,
     clients: Arc<Mutex<HashMap<u64, ClientOut>>>,
     next_client: AtomicU64,
     sessions: Mutex<HashMap<ThreadId, Arc<Live>>>,
@@ -432,6 +455,19 @@ fn failure(code: i64, message: impl ToString) -> rpc::Error {
     }
 }
 
+/// The error of an entry the session's runtime does not implement.
+fn unsupported(runtime: &str, feature: &str) -> rpc::Error {
+    rpc::Error {
+        code: RUNTIME_UNSUPPORTED_CODE,
+        message: format!("runtime {runtime} does not support {feature}"),
+        data: serde_json::to_value(RuntimeUnsupported {
+            runtime: runtime.to_owned(),
+            feature: feature.to_owned(),
+        })
+        .ok(),
+    }
+}
+
 fn invalid(message: impl ToString) -> rpc::Error {
     failure(-32602, message)
 }
@@ -495,6 +531,7 @@ impl Server {
             )
         };
         let server = Arc::new(Self {
+            runtimes: Registry::builtin(tiechui_runtime::Launch::from_env()),
             home,
             clients,
             next_client: AtomicU64::new(1),
@@ -645,6 +682,10 @@ impl Server {
         method: &str,
         params: Value,
     ) {
+        if let Err(error) = self.gate(method, &params) {
+            respond(out, id, Err(error));
+            return;
+        }
         if matches!(
             method,
             "session/open" | "session/fork" | "session/reload" | "session/snapshot"
@@ -656,6 +697,7 @@ impl Server {
         let reply = match method {
             "initialize" => self.initialize(params),
             "daemon/status" => value(self.daemon_status()),
+            "runtimes/list" => value(self.runtimes.list().await),
             "trust" => self.trust(params).await,
             _ if method.starts_with("session/") || turns::handles(method) => {
                 self.dispatch_session(method, params).await
@@ -794,6 +836,34 @@ impl Server {
         reply
     }
 
+    /// Refuses the entries the session's runtime lacks, before anything runs.
+    fn gate(&self, method: &str, params: &Value) -> Result<(), rpc::Error> {
+        let gated = matches!(
+            method,
+            "session/branch" | "session/fork" | "session/rewind" | "session/submit"
+        ) || method.starts_with("btw/");
+        if !gated {
+            return Ok(());
+        }
+        let Some(thread) = params.get("thread_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let Ok(live) = self.live(&ThreadId(thread.to_owned())) else {
+            return Ok(());
+        };
+        let refused = if method == "session/submit" {
+            serde_json::from_value::<Op>(params["op"].clone())
+                .ok()
+                .and_then(|op| live.capabilities.unsupported_op(&op))
+        } else {
+            live.capabilities.unsupported_method(method)
+        };
+        match refused {
+            Some(feature) => Err(unsupported(&live.runtime, feature)),
+            None => Ok(()),
+        }
+    }
+
     fn initialize(&self, params: Value) -> Reply {
         let params: InitializeParams = parse(params)?;
         if params.protocol_version != APP_PROTOCOL_VERSION {
@@ -857,6 +927,8 @@ impl Server {
                 worktree: self.session_worktree_info(&live.cwd),
                 seq: projection.seq,
                 events: projection.snapshot(),
+                runtime: Some(live.runtime.clone()),
+                capabilities: Some(live.capabilities),
             }),
         );
     }
@@ -889,7 +961,13 @@ impl Server {
             .filter(|(s, _)| params.archived || s.meta.archived_at.is_none())
             .map(|(s, worktree)| {
                 let thread_id = ThreadId(s.header.id);
+                let runtime = s
+                    .header
+                    .runtime
+                    .unwrap_or_else(|| tiechui_protocol::DEFAULT_RUNTIME.into());
                 SessionSummary {
+                    capabilities: Some(tiechui_runtime::capabilities_of(&runtime)),
+                    runtime: Some(runtime),
                     live: sessions
                         .get(&thread_id)
                         .map(|live| lock(&live.projection).state()),
@@ -915,8 +993,13 @@ impl Server {
         let thinking = params
             .thinking
             .map(|level| json!(level).as_str().unwrap_or_default().to_owned());
+        let runtime = params
+            .runtime
+            .as_deref()
+            .filter(|runtime| *runtime != tiechui_protocol::DEFAULT_RUNTIME);
         match (params.path, params.cwd, params.scratch) {
             (Some(path), None, None) => {
+                // The session's own runtime applies, whatever the params say.
                 let live = self
                     .open_existing(
                         PathBuf::from(path),
@@ -928,16 +1011,32 @@ impl Server {
                 Ok((live, false))
             }
             (None, Some(cwd), None) => {
-                let options = Options {
-                    model: params.model,
-                    thinking,
-                    mode: params.mode,
-                    ..Default::default()
+                let (_, live) = match runtime {
+                    Some(runtime) => {
+                        let params = SessionConfigParams {
+                            model: params.model,
+                            thinking: params.thinking,
+                            mode: params.mode,
+                        };
+                        let open = ExternalOpen::New { cwd: cwd.into() };
+                        self.start_external(runtime, open, params, SessionEpoch(0), None)
+                            .await?
+                    }
+                    None => {
+                        let options = Options {
+                            model: params.model,
+                            thinking,
+                            mode: params.mode,
+                            ..Default::default()
+                        };
+                        self.start(options, Open::New(cwd.into()), SessionEpoch(0), None)
+                            .await?
+                    }
                 };
-                let (_, live) = self
-                    .start(options, Open::New(cwd.into()), SessionEpoch(0), None)
-                    .await?;
                 Ok((live, false))
+            }
+            (None, None, Some(_)) if runtime.is_some() => {
+                Err(invalid("scratch sessions run on the chui runtime"))
             }
             (None, None, Some(_)) => {
                 let options = Options {
@@ -1007,6 +1106,24 @@ impl Server {
         epoch: SessionEpoch,
         projection: Option<Arc<Mutex<Projection>>>,
     ) -> Result<(ThreadId, Arc<Live>), rpc::Error> {
+        if let Open::Path(path) = &open
+            && let Some(runtime) = stored_external_runtime(path).await?
+        {
+            let params = SessionConfigParams {
+                model: None,
+                thinking: None,
+                mode: options.mode,
+            };
+            return self
+                .start_external(
+                    &runtime,
+                    ExternalOpen::Path(path.clone()),
+                    params,
+                    epoch,
+                    projection,
+                )
+                .await;
+        }
         options.home.get_or_insert_with(|| self.home.clone());
         let shutdown = CancellationToken::new();
         let mut warnings = Vec::new();
@@ -1030,6 +1147,70 @@ impl Server {
             path,
             ..
         } = prepared.map_err(|(_, message)| internal(message))?;
+        let session = Attached {
+            handle,
+            id,
+            cwd,
+            path,
+            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+            capabilities: RuntimeCapabilities::native(),
+        };
+        self.attach(session, shutdown, epoch, projection).await
+    }
+
+    /// Starts an external runtime's session and waits for its thread to start.
+    async fn start_external(
+        self: &Arc<Self>,
+        runtime: &str,
+        open: ExternalOpen,
+        params: SessionConfigParams,
+        epoch: SessionEpoch,
+        projection: Option<Arc<Mutex<Projection>>>,
+    ) -> Result<(ThreadId, Arc<Live>), rpc::Error> {
+        let driver = self
+            .runtimes
+            .driver(runtime)
+            .ok_or_else(|| invalid(format!("unknown runtime {runtime}")))?
+            .clone();
+        let backend = driver.backend(self.runtimes.launch()).map_err(internal)?;
+        let shutdown = CancellationToken::new();
+        let mut config = SessionConfig::new(self.home.clone(), open);
+        config.epoch = epoch;
+        config.model = params.model;
+        config.thinking = params.thinking;
+        config.mode = params.mode;
+        let capabilities = driver.capabilities();
+        let opened =
+            tiechui_runtime::open_session(runtime, capabilities, backend, config, shutdown.clone())
+                .await
+                .map_err(internal)?;
+        let session = Attached {
+            handle: opened.handle,
+            id: opened.id,
+            cwd: opened.cwd,
+            path: opened.path,
+            runtime: runtime.to_owned(),
+            capabilities,
+        };
+        self.attach(session, shutdown, epoch, projection).await
+    }
+
+    /// Registers a started session and waits for its thread to start.
+    async fn attach(
+        self: &Arc<Self>,
+        session: Attached,
+        shutdown: CancellationToken,
+        epoch: SessionEpoch,
+        projection: Option<Arc<Mutex<Projection>>>,
+    ) -> Result<(ThreadId, Arc<Live>), rpc::Error> {
+        let Attached {
+            handle,
+            id,
+            cwd,
+            path,
+            runtime,
+            capabilities,
+        } = session;
         let thread = ThreadId(id);
         let projection = projection.unwrap_or_default();
         lock(&projection).epoch = epoch;
@@ -1037,6 +1218,8 @@ impl Server {
         let live = Arc::new(Live {
             path,
             cwd,
+            runtime,
+            capabilities,
             submissions: handle.submissions,
             shutdown,
             projection,
@@ -1689,6 +1872,18 @@ impl Server {
     }
 }
 
+/// The external runtime a session file was created for; none for native sessions.
+async fn stored_external_runtime(path: &Path) -> Result<Option<String>, rpc::Error> {
+    let path = path.to_owned();
+    let runtime = blocking(move |cancel| {
+        SessionStore::open_read_only(&path, cancel)
+            .map(|store| store.header().runtime.clone())
+            .map_err(|e| e.to_string())
+    })
+    .await?;
+    Ok(runtime.filter(|runtime| runtime != tiechui_protocol::DEFAULT_RUNTIME))
+}
+
 fn is_settled_event(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -2096,6 +2291,8 @@ pub(super) mod tests {
             Arc::new(Live {
                 path: dir.path().join("session.jsonl"),
                 cwd: dir.path().to_path_buf(),
+                runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+                capabilities: tiechui_protocol::RuntimeCapabilities::native(),
                 submissions,
                 shutdown: CancellationToken::new(),
                 projection: projection.clone(),
@@ -2208,6 +2405,8 @@ pub(super) mod tests {
         let live = Arc::new(Live {
             path: dir.path().join("session.jsonl"),
             cwd: dir.path().to_path_buf(),
+            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
             submissions,
             shutdown: CancellationToken::new(),
             projection: Arc::new(Mutex::new(Projection::default())),
@@ -2460,6 +2659,8 @@ pub(super) mod tests {
         let live = Arc::new(Live {
             path: dir.path().join("session.jsonl"),
             cwd: work.clone(),
+            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
             submissions,
             shutdown: CancellationToken::new(),
             projection: Arc::new(Mutex::new(Projection::default())),

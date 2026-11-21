@@ -3096,6 +3096,7 @@ dependencies = [
  "tiechui-plugin-api",
  "tiechui-protocol",
  "tiechui-providers",
+ "tiechui-runtime",
  "tiechui-session",
  "tiechui-tools",
  "tiechui-tui",
@@ -3476,6 +3477,24 @@ dependencies = [
  "tokio",
  "tokio-util",
  "wiremock",
+]
+
+[[package]]
+name = "tiechui-runtime"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiechui-core",
+ "tiechui-exec",
+ "tiechui-model",
+ "tiechui-protocol",
+ "tiechui-session",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -86,7 +86,23 @@ impl SessionStore {
         cwd: &Path,
         cancel: &CancellationToken,
     ) -> Result<Self, SessionError> {
-        Self::create_in(&session_dir(home, cwd)?, cwd, None, cancel)
+        Self::create_in(&session_dir(home, cwd)?, cwd, None, None, cancel)
+    }
+
+    /// Like `create`, for a session an external agent runtime runs.
+    pub fn create_for_runtime(
+        home: &Path,
+        cwd: &Path,
+        runtime: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self, SessionError> {
+        Self::create_in(
+            &session_dir(home, cwd)?,
+            cwd,
+            None,
+            Some(runtime.to_owned()),
+            cancel,
+        )
     }
 
     /// Acquire the exclusive writer lock before loading. No repair occurs until append.
@@ -296,8 +312,13 @@ impl SessionStore {
             .path
             .parent()
             .ok_or_else(|| SessionError::new(&self.path, "missing session directory"))?;
-        let mut fork =
-            Self::create_in(directory, &self.header.cwd, Some(self.path.clone()), cancel)?;
+        let mut fork = Self::create_in(
+            directory,
+            &self.header.cwd,
+            Some(self.path.clone()),
+            self.header.runtime.clone(),
+            cancel,
+        )?;
         let result = (|| {
             for entry in path {
                 check_cancel(&self.path, cancel)?;

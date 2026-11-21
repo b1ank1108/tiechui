@@ -8,7 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApprovalDecision, ApprovalId, Event, InputContent, Op, SubmissionId, ThinkingLevel, ThreadId,
+    ApprovalDecision, ApprovalId, Event, InputContent, Op, RuntimeCapabilities, SubmissionId,
+    ThinkingLevel, ThreadId,
 };
 
 pub const APP_PROTOCOL_VERSION: u32 = 1;
@@ -102,6 +103,14 @@ pub struct SessionSummary {
     pub parent: Option<String>,
     /// Present while the session is open in this server.
     pub live: Option<LiveState>,
+    /// The agent runtime that runs the session. Servers that predate runtimes omit it: `chui`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub runtime: Option<String>,
+    /// What the runtime implements. Servers that predate runtimes omit it: the native set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub capabilities: Option<RuntimeCapabilities>,
 }
 
 /// Starts `session/open` in the shared `$TIECHUI_HOME/scratch/default` directory.
@@ -124,6 +133,11 @@ pub struct SessionOpenParams {
     pub thinking: Option<ThinkingLevel>,
     /// `rules`, `auto` or `yolo`; otherwise the configured mode.
     pub mode: Option<String>,
+    /// The agent runtime of a new session, one of `runtimes/list`; `chui` when absent. Opening
+    /// by `path` uses the runtime the session was created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub runtime: Option<String>,
 }
 
 /// Events that rebuild the session's current state, as if received from its start.
@@ -138,6 +152,14 @@ pub struct Snapshot {
     pub worktree: Option<SessionWorktree>,
     pub seq: u64,
     pub events: Vec<Event>,
+    /// The agent runtime that runs the session. Servers that predate runtimes omit it: `chui`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub runtime: Option<String>,
+    /// What the runtime implements. Servers that predate runtimes omit it: the native set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub capabilities: Option<RuntimeCapabilities>,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

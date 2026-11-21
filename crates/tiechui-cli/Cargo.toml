@@ -48,6 +48,7 @@ tiechui-module-mcp.workspace = true
 tiechui-protocol.workspace = true
 tiechui-providers.workspace = true
 tiechui-session.workspace = true
+tiechui-runtime.workspace = true
 tiechui-tools.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util.workspace = true
@@ -58,6 +59,8 @@ tiechui-workspace = { workspace = true, optional = true }
 default = ["workspace"]
 # Files, Git and terminals in `chui app-server`.
 workspace = ["dep:tiechui-workspace"]
+# The scripted runtime `fake` of `chui app-server`, for tests.
+fake-runtime = ["tiechui-runtime/fake-runtime"]
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -72,6 +75,11 @@ path = "../../tests/e2e/exec.rs"
 [[test]]
 name = "app_server"
 path = "../../tests/e2e/app_server.rs"
+
+[[test]]
+name = "runtimes"
+path = "../../tests/e2e/runtimes.rs"
+required-features = ["fake-runtime"]
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
