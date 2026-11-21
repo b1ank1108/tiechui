@@ -112,6 +112,8 @@ fn serve() {
                 write["content"].as_str().unwrap(),
             )
             .unwrap();
+        } else if let Some(path) = step.get("remove").and_then(Value::as_str) {
+            std::fs::remove_file(path).unwrap();
         } else if let Some(file) = step.get("grandchild").and_then(Value::as_str) {
             let child = Command::new(std::env::current_exe().unwrap())
                 .arg("--sleeper")

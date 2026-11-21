@@ -614,14 +614,21 @@ impl SnapshotDiff {
         if self.files.is_empty() {
             return Err("the turn changed no files".into());
         }
-        for path in &self.files {
-            let restored = if self.reverted {
-                self.after(path)
-            } else {
-                self.before(path)
-            };
-            write_file(&self.top, path, restored)?;
+        let tree = if self.reverted {
+            &self.end
+        } else {
+            &self.start
+        };
+        let (present, absent): (Vec<String>, Vec<String>) = self
+            .files
+            .iter()
+            .cloned()
+            .partition(|path| tree_file(&self.top, tree, path).is_some());
+        for path in &absent {
+            remove_file(&self.top, path)?;
         }
+        tiechui_workspace::checkout_tree_paths(&self.top, tree, &present)
+            .map_err(|e| format!("could not restore files: {}", e.0))?;
         at.store
             .set_snapshot_reverted(anchor, !self.reverted, cancel)
             .map_err(|e| e.0)?;
@@ -702,21 +709,26 @@ fn tree_file(top: &Path, tree: &str, path: &str) -> Option<Vec<u8>> {
 
 #[cfg(feature = "workspace")]
 fn current_file(top: &Path, path: &str) -> Option<Vec<u8>> {
-    std::fs::read(top.join(path)).ok()
+    let target = top.join(path);
+    // Git keeps a symlink as a blob holding its target.
+    if std::fs::symlink_metadata(&target)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return std::fs::read_link(&target)
+            .ok()
+            .map(|link| link.into_os_string().into_encoded_bytes());
+    }
+    std::fs::read(target).ok()
 }
 
 #[cfg(feature = "workspace")]
-fn write_file(top: &Path, path: &str, content: Option<Vec<u8>>) -> Result<(), String> {
-    let target = top.join(path);
-    let result = match content {
-        Some(bytes) => target
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&target, bytes)),
-        None => match std::fs::remove_file(&target) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        },
-    };
-    result.map_err(|e| format!("could not restore {path}: {e}"))
+fn remove_file(top: &Path, path: &str) -> Result<(), String> {
+    match std::fs::remove_file(top.join(path)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("could not remove {path}: {e}"))
+        }
+        _ => Ok(()),
+    }
 }

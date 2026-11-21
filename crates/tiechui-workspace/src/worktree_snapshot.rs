@@ -141,6 +141,15 @@ pub fn restore_worktree_snapshot_cancellable(
     Ok(())
 }
 
+/// Writes `paths` from `tree` with their Git modes, symlinks included, leaving the index and
+/// every other file alone. Each path must be a file or symlink in `tree`.
+pub fn checkout_tree_paths(worktree_root: &Path, tree: &str, paths: &[String]) -> Result<()> {
+    let runner = BoundedGit::new(DEFAULT_SNAPSHOT_TIMEOUT, None);
+    let env = env_without_index(&BTreeMap::new());
+    let toplevel = resolve_toplevel(&runner, worktree_root, &env)?;
+    checkout_snapshot_files(&runner, &toplevel, tree, paths, &env)
+}
+
 pub fn diff_worktree_snapshot_with_env(
     worktree_root: &Path,
     tree: &str,

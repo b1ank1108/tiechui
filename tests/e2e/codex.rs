@@ -2035,6 +2035,40 @@ async fn undo_never_touches_a_file_the_turn_did_not_change() {
     assert_eq!(read_file(&fixture, "stray.txt"), "stray\n");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn undo_restores_a_removed_executable_with_its_mode_and_a_removed_symlink_as_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    git(&fixture.cwd, &["init", "-q"]);
+    let script = fixture.cwd.join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("run.sh", fixture.cwd.join("link")).unwrap();
+    git(&fixture.cwd, &["add", "."]);
+    git(&fixture.cwd, &["commit", "-q", "-m", "init"]);
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("turn 1", "turn-1"));
+    steps.extend([json!({"remove": "run.sh"}), json!({"remove": "link"})]);
+    steps.push(turn_done("turn-1", "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    let item = run_turn(&mut client, &thread, "turn 1").await;
+
+    client.ok("turn/undo", at(&thread, &item)).await;
+    let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let target = std::fs::read_link(fixture.cwd.join("link")).unwrap();
+    assert_eq!(target, std::path::Path::new("run.sh"));
+    let check = client.ok("turn/check", at(&thread, &item)).await;
+    assert_eq!(check["unsafe"], json!([]), "{check}");
+    client.ok("turn/undo", at(&thread, &item)).await;
+    assert!(!script.exists());
+    assert!(std::fs::symlink_metadata(fixture.cwd.join("link")).is_err());
+}
+
 #[tokio::test]
 async fn undo_twice_reapplies_the_turn_and_the_reverted_state_survives_reopening() {
     let fixture = Fixture::new();
