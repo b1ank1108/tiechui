@@ -471,23 +471,21 @@ impl Session {
 
     async fn complete(&mut self, status: TurnStatus) {
         self.interrupt_at = None;
-        let mut root_anchor = None;
         if let Some(open) = self.turn.take() {
             let mut turn = open.turn;
             turn.status = status;
             turn.ended_at = Some(tiechui_session::now_ms());
             self.last_turn = Some(turn.id.clone());
+            // Before the completion goes out, because clients ask for the turn's changes as soon
+            // as it ends; and before a queued turn starts, so it holds this turn's files only.
             if !open.derived {
-                root_anchor = Some(tiechui_module_rewind::end_anchor(&turn.id.0));
+                let _ = self
+                    .capture_snapshot(&tiechui_module_rewind::end_anchor(&turn.id.0))
+                    .await;
             }
             self.emit(EventKind::TurnCompleted { turn });
         }
         self.submission = None;
-        // After the completion is out, so it is never delayed by the capture; before a queued
-        // turn starts, so the snapshot holds this turn's files only.
-        if let Some(anchor) = root_anchor {
-            let _ = self.capture_snapshot(&anchor).await;
-        }
     }
 
     /// After a turn ended: the next queued input starts a turn.

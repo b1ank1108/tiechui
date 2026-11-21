@@ -1824,7 +1824,7 @@ async fn a_turn_that_edits_files_can_be_undone_from_its_start_of_turn_snapshot()
             _ => None,
         })
         .unwrap();
-    wait_for_end_snapshot(&mut client, &thread, &item).await;
+    end_snapshot_is_ready(&mut client, &thread, &item).await;
     assert_eq!(
         std::fs::read_to_string(fixture.cwd.join("src/hello.ts")).unwrap(),
         "changed by codex\n"
@@ -1964,19 +1964,16 @@ async fn run_turn(client: &mut Client, thread: &str, text: &str) -> String {
             _ => None,
         })
         .unwrap();
-    wait_for_end_snapshot(client, thread, &item).await;
+    end_snapshot_is_ready(client, thread, &item).await;
     item
 }
 
-/// The end-of-turn snapshot is taken just after `TurnCompleted`; `turn/check` works once it is.
-async fn wait_for_end_snapshot(client: &mut Client, thread: &str, item: &str) {
-    for _ in 0..100 {
-        if client.call("turn/check", at(thread, item)).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+/// Clients ask for a turn's changes as soon as it ends, so the end-of-turn snapshot must be in
+/// place when `TurnCompleted` arrives.
+async fn end_snapshot_is_ready(client: &mut Client, thread: &str, item: &str) {
+    if let Err(error) = client.call("turn/check", at(thread, item)).await {
+        panic!("turn/check right after TurnCompleted: {error}");
     }
-    panic!("no end-of-turn snapshot for {item}");
 }
 
 fn at(thread: &str, item: &str) -> Value {
