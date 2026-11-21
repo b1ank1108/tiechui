@@ -37,7 +37,8 @@ pub const MIN_VERSION: &str = "2.1.322";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a process that reported an error `result` may keep running before it is stopped.
-const REAP_GRACE: Duration = Duration::from_secs(10);
+/// Stopping takes another 250 ms (TERM, then KILL), so the group is gone within 10 s.
+const REAP_GRACE: Duration = Duration::from_secs(9);
 
 #[cfg(feature = "fake-runtime")]
 pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CLAUDE_HANDSHAKE_TIMEOUT_MS";
