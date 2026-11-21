@@ -621,6 +621,20 @@ impl Session {
                 self.item_completed(item, child_of).await?;
             }
             BackendEvent::Usage(usage) => self.usage(usage).await?,
+            BackendEvent::ContextWindow(window) => {
+                if self.started.model.context_window != window {
+                    self.started.model.context_window = window;
+                    self.emit(EventKind::SessionUpdated {
+                        model: self.model_info(),
+                        thinking: self.started.thinking,
+                        context: self.context,
+                        total: self.total,
+                    });
+                    self.emit(EventKind::ModelsUpdated {
+                        models: vec![self.model_info()],
+                    });
+                }
+            }
             BackendEvent::Approval { id, request } => self.approval(id, request).await?,
             BackendEvent::ApprovalWithdrawn { id } => {
                 if let Some(index) = self.approvals.iter().position(|pending| *pending == id) {

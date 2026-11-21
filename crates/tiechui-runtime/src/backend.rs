@@ -93,6 +93,8 @@ pub enum BackendEvent {
     ItemCompleted(BackendItem),
     /// Usage of one model request; send it once per request.
     Usage(TokenUsage),
+    /// The model's context window in tokens, when the runtime learns it after `Started`.
+    ContextWindow(u64),
     Approval {
         id: String,
         request: ApprovalRequest,

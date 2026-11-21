@@ -14,6 +14,13 @@ path = "src/bin/tiechui.rs"
 name = "chui"
 path = "src/bin/chui.rs"
 
+# A stand-in for `codex app-server` that replays a script, for the codex runtime tests.
+[[bin]]
+name = "fake-codex"
+path = "../../tests/e2e/fake_codex.rs"
+required-features = ["fake-runtime"]
+test = false
+
 [dependencies]
 tiechui-module-subagents.workspace = true
 tiechui-module-compaction.workspace = true
@@ -79,6 +86,11 @@ path = "../../tests/e2e/app_server.rs"
 [[test]]
 name = "runtimes"
 path = "../../tests/e2e/runtimes.rs"
+required-features = ["fake-runtime"]
+
+[[test]]
+name = "codex"
+path = "../../tests/e2e/codex.rs"
 required-features = ["fake-runtime"]
 
 [target.'cfg(unix)'.dependencies]
