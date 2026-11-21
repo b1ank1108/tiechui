@@ -436,9 +436,7 @@ impl Selection {
         offset: usize,
         max_offset: usize,
     ) -> Option<isize> {
-        if self.pressed.is_none() {
-            return None;
-        }
+        self.pressed?;
         let Some(Held::Doc { state, .. }) = &self.held else {
             return None;
         };
