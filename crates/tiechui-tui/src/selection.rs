@@ -18,6 +18,12 @@ pub enum DocSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Doc(DocSource),
+    Panel(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub top: usize,
     pub height: usize,
@@ -86,7 +92,10 @@ impl DocState {
 }
 
 enum Held {
-    Panel(Vec<Line<'static>>),
+    Panel {
+        id: u64,
+        lines: Vec<Line<'static>>,
+    },
     Doc {
         lines: Vec<Line<'static>>,
         state: DocState,
@@ -160,6 +169,14 @@ impl Selection {
         self.held.is_some()
     }
 
+    pub fn surface(&self) -> Option<Surface> {
+        match &self.held {
+            Some(Held::Panel { id, .. }) => Some(Surface::Panel(*id)),
+            Some(Held::Doc { state, .. }) => Some(Surface::Doc(state.source)),
+            None => None,
+        }
+    }
+
     pub fn doc_source(&self) -> Option<DocSource> {
         match &self.held {
             Some(Held::Doc { state, .. }) => Some(state.source),
@@ -199,7 +216,7 @@ impl Selection {
 
     fn lines(&self) -> &[Line<'static>] {
         match &self.held {
-            Some(Held::Panel(lines) | Held::Doc { lines, .. }) => lines,
+            Some(Held::Panel { lines, .. } | Held::Doc { lines, .. }) => lines,
             None => &self.painted,
         }
     }
@@ -465,23 +482,38 @@ impl Selection {
             .collect()
     }
 
-    fn mouse_down(&mut self, event: MouseEvent, point: Point, now: Instant) -> MouseAction {
+    fn mouse_down(
+        &mut self,
+        id: u64,
+        event: MouseEvent,
+        point: Point,
+        now: Instant,
+    ) -> MouseAction {
         if self.painted.is_empty() {
             return MouseAction::Pass;
         }
-        let extend = matches!(self.held, Some(Held::Panel(_)))
+        let extend = matches!(self.held, Some(Held::Panel { id: held_id, .. }) if held_id == id)
             && event.modifiers.contains(KeyModifiers::SHIFT);
         if !extend {
-            self.held = Some(Held::Panel(self.painted.clone()));
+            self.held = Some(Held::Panel {
+                id,
+                lines: self.painted.clone(),
+            });
         }
         self.begin_press(event, point, now, extend);
         MouseAction::Handled
     }
 
-    pub fn mouse(&mut self, event: MouseEvent, now: Instant, copy_on_select: bool) -> MouseAction {
+    pub fn panel_mouse(
+        &mut self,
+        id: u64,
+        event: MouseEvent,
+        now: Instant,
+        copy_on_select: bool,
+    ) -> MouseAction {
         let point = self.point(usize::from(event.column), usize::from(event.row));
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(event, point, now),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(id, event, point, now),
             MouseEventKind::Drag(MouseButton::Left) if self.pressed.is_some() => {
                 self.dragged = true;
                 self.end = point;
@@ -496,6 +528,10 @@ impl Selection {
             }
             _ => MouseAction::Pass,
         }
+    }
+
+    pub fn mouse(&mut self, event: MouseEvent, now: Instant, copy_on_select: bool) -> MouseAction {
+        self.panel_mouse(0, event, now, copy_on_select)
     }
 
     fn request_copy(&mut self) {
@@ -594,7 +630,7 @@ impl Selection {
     }
 
     pub fn frame(&mut self, frame: Vec<Line<'static>>) -> Vec<Line<'static>> {
-        let Some(Held::Panel(held)) = &self.held else {
+        let Some(Held::Panel { lines: held, .. }) = &self.held else {
             self.painted = frame.clone();
             return frame;
         };

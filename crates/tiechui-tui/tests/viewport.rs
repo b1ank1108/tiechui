@@ -858,3 +858,128 @@ fn fullscreen_control_rows_light_up_and_expand_cells_in_place() {
     let (frame, hide) = row(&mut app, "    − Hide summary");
     assert!(hide.is_some() && text(&frame).contains("SUMMARY_BODY"));
 }
+
+#[test]
+fn event_driven_viewer_close_and_panel_replacement_discard_selection_and_pending_copy() {
+    let mut inline = App::new(
+        Theme::fixture(ColorLevel::TrueColor, false),
+        80,
+        Options {
+            no_alt_screen: true,
+            ..Options::default()
+        },
+    );
+    inline.event(event(EventKind::ThreadStarted {
+        replay: false,
+        thread: Thread {
+            id: ThreadId("t".into()),
+            epoch: SessionEpoch(0),
+            turns: vec![],
+        },
+    }));
+    inline.event(event(EventKind::Extension {
+        name: BTW_EVENT.into(),
+        data: serde_json::to_value(BtwEvent::Update {
+            open: true,
+            view: BtwView {
+                id: "side-1".into(),
+                busy: false,
+                thinking: ThinkingLevel::Off,
+                model: ModelInfo {
+                    provider: "fixture".into(),
+                    id: "side".into(),
+                    context_window: 10000,
+                    reasoning: false,
+                    thinking_levels: vec![ThinkingLevel::Off],
+                },
+                context: None,
+                total: TokenUsage::default(),
+                notice: None,
+                messages: vec![BtwMessage {
+                    text: "SIDE_SELECT_TEXT".into(),
+                    complete: true,
+                    ..Default::default()
+                }],
+            },
+        })
+        .unwrap(),
+    }));
+    let side_page = inline.pager_frame(24).unwrap();
+    let side_row = side_page
+        .iter()
+        .position(|l| text(std::slice::from_ref(l)).contains("SIDE_SELECT_TEXT"))
+        .unwrap() as u16;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 10),
+        (MouseEventKind::Up(MouseButton::Left), 18),
+    ] {
+        inline.mouse(MouseEvent {
+            kind,
+            column,
+            row: side_row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    inline.event(event(EventKind::Extension {
+        name: BTW_EVENT.into(),
+        data: serde_json::to_value(BtwEvent::Closed).unwrap(),
+    }));
+    assert!(inline.take_copy().is_none());
+    inline.paste("after side close");
+    inline.key(key(KeyCode::Enter));
+    assert_eq!(inline.take_submissions().len(), 1);
+
+    let mut panel_app = app();
+    let send_context = |app: &mut App, body: &str| {
+        app.event(event(EventKind::CommandPanel {
+            name: "context".into(),
+            text: String::new(),
+            panel: Box::new(ContextSnapshot {
+                system: vec![ContextItem {
+                    label: "System prompt".into(),
+                    text: body.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            view: ContextView::System,
+        }));
+        app.key(key(KeyCode::Enter));
+    };
+    send_context(&mut panel_app, "OLD_PANEL_BODY");
+    let old_page = panel_app.pager_frame(24).unwrap();
+    let old_row = old_page
+        .iter()
+        .position(|l| text(std::slice::from_ref(l)).contains("OLD_PANEL_BODY"))
+        .unwrap() as u16;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 10),
+        (MouseEventKind::Up(MouseButton::Left), 16),
+    ] {
+        panel_app.mouse(MouseEvent {
+            kind,
+            column,
+            row: old_row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    panel_app.event(event(EventKind::CommandPanel {
+        name: "context".into(),
+        text: String::new(),
+        panel: Box::new(ContextSnapshot {
+            system: vec![ContextItem {
+                label: "Replacement prompt".into(),
+                text: "NEW_PANEL_BODY".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        view: ContextView::System,
+    }));
+    assert!(panel_app.take_copy().is_none());
+    let replaced = text(&panel_app.pager_frame(24).unwrap());
+    assert!(!replaced.contains("OLD_PANEL_BODY"), "{replaced}");
+    assert!(replaced.contains("Replacement prompt"), "{replaced}");
+}

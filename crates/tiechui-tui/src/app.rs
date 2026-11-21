@@ -116,7 +116,9 @@ pub struct App {
     copy_on_select: bool,
     copy_hint: Option<(Span<'static>, Instant)>,
     context_panel: Option<crate::context::ContextPanel>,
+    context_epoch: u64,
     side: Option<crate::btw::Panel>,
+    side_epoch: u64,
     side_visible: bool,
     agents: Option<crate::subagents::Panel>,
     agents_visible: bool,
@@ -317,7 +319,9 @@ impl App {
             copy_on_select: options.copy_on_select,
             copy_hint: None,
             context_panel: None,
+            context_epoch: 0,
             side: None,
+            side_epoch: 0,
             side_visible: false,
             agents: None,
             agents_visible: false,
@@ -997,6 +1001,7 @@ impl App {
             }
             EventKind::CommandPanel { panel, view, .. } => {
                 self.composer.reset_escape();
+                self.context_epoch += 1;
                 self.context_panel = Some(crate::context::ContextPanel::new(*panel, view));
             }
             EventKind::Extension { name, data }
@@ -1092,9 +1097,11 @@ impl App {
                                 if side.view.id == view.id {
                                     side.update(view);
                                 } else if open {
+                                    self.side_epoch += 1;
                                     self.side = Some(crate::btw::Panel::new(view));
                                 }
                             } else {
+                                self.side_epoch += 1;
                                 self.side = Some(crate::btw::Panel::new(view));
                             }
                             if open && !self.context_open() && self.prompt.is_none() {
@@ -1876,29 +1883,44 @@ impl App {
     }
 
     pub fn take_copy(&mut self) -> Option<String> {
+        self.sync_selection_surface();
         self.selection.take_copy()
     }
 
-    fn single_screen_panel_open(&self) -> bool {
-        self.shells_visible
-            || self.agents_visible
-            || self.side_visible
-            || self.context_panel.is_some()
-            || self.resume.is_some()
+    fn panel_surface(&self) -> Option<u64> {
+        if self.shells_visible && self.shells.is_some() {
+            Some(1)
+        } else if self.agents_visible && self.agents.is_some() {
+            Some(2)
+        } else if self.side_visible && self.side.is_some() {
+            Some(3 | (self.side_epoch << 3))
+        } else if self.context_panel.is_some() {
+            Some(4 | (self.context_epoch << 3))
+        } else {
+            self.resume.as_ref().map(|_| 5 | (self.generation << 3))
+        }
+    }
+
+    fn active_surface(&self) -> Option<crate::selection::Surface> {
+        use crate::selection::{DocSource, Surface};
+        if let Some(id) = self.panel_surface() {
+            Some(Surface::Panel(id))
+        } else if self.pager.is_some() {
+            Some(Surface::Doc(DocSource::Pager))
+        } else {
+            self.fullscreen.then_some(Surface::Doc(DocSource::Main))
+        }
     }
 
     fn active_doc_source(&self) -> Option<crate::selection::DocSource> {
-        if self.single_screen_panel_open() {
-            None
-        } else if self.pager.is_some() {
-            Some(crate::selection::DocSource::Pager)
-        } else {
-            self.fullscreen.then_some(crate::selection::DocSource::Main)
+        match self.active_surface() {
+            Some(crate::selection::Surface::Doc(source)) => Some(source),
+            _ => None,
         }
     }
 
     fn sync_selection_surface(&mut self) {
-        if self.selection.active() && self.selection.doc_source() != self.active_doc_source() {
+        if self.selection.active() && self.selection.surface() != self.active_surface() {
             self.selection.clear();
         }
     }
@@ -2059,16 +2081,15 @@ impl App {
     }
 
     pub fn mouse(&mut self, event: crossterm::event::MouseEvent) {
-        if !self.context_open() && !self.fullscreen {
-            return;
-        }
         self.sync_selection_surface();
-        self.pointer = Some((usize::from(event.row), usize::from(event.column)));
-        if let Some(source) = self.active_doc_source() {
-            self.mouse_doc(event, source);
+        let Some(surface) = self.active_surface() else {
             return;
+        };
+        self.pointer = Some((usize::from(event.row), usize::from(event.column)));
+        match surface {
+            crate::selection::Surface::Doc(source) => self.mouse_doc(event, source),
+            crate::selection::Surface::Panel(id) => self.mouse_panel(id, event),
         }
-        self.mouse_panel(event);
     }
 
     fn mouse_main_doc(
@@ -2222,7 +2243,7 @@ impl App {
         }
     }
 
-    fn mouse_panel(&mut self, event: crossterm::event::MouseEvent) {
+    fn mouse_panel(&mut self, id: u64, event: crossterm::event::MouseEvent) {
         use crossterm::event::MouseEventKind;
         if matches!(
             event.kind,
@@ -2239,7 +2260,7 @@ impl App {
         }
         let event = match self
             .selection
-            .mouse(event, Instant::now(), self.copy_on_select)
+            .panel_mouse(id, event, Instant::now(), self.copy_on_select)
         {
             crate::selection::MouseAction::Handled => return,
             crate::selection::MouseAction::Click(clicked) => clicked,
@@ -2522,7 +2543,6 @@ impl App {
         if let Some(pager) = &mut self.pager {
             if !pager.key(key) {
                 self.pager = None;
-                self.selection.clear();
             }
             return Exit::Running;
         }
@@ -2976,9 +2996,6 @@ impl App {
         self.sync_selection_surface();
         let doc_pager = self.active_doc_source() == Some(crate::selection::DocSource::Pager);
         let page = self.page_inner(rows);
-        if page.is_none() && !self.fullscreen {
-            self.selection.clear();
-        }
         page.map(|mut page| {
             if !doc_pager {
                 page = self.selection.frame(page);
