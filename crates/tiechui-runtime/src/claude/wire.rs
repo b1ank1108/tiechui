@@ -35,6 +35,10 @@ pub struct Incoming {
     pub model_usage: std::collections::BTreeMap<String, ModelUsage>,
 }
 
+/// A request Claude sends the host. `can_use_tool` carries the tool, its input, the id of its
+/// `tool_use` block, a short description and the permission updates Claude suggests for
+/// allowing it again (`[{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]`
+/// for a file write).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Request {
@@ -42,6 +46,8 @@ pub struct Request {
     pub tool_name: Option<String>,
     pub input: Value,
     pub tool_use_id: Option<String>,
+    pub description: Option<String>,
+    pub permission_suggestions: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]

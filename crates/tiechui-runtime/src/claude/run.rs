@@ -1,9 +1,9 @@
 //! One running `claude` process: the queue its stdin is written from, the tasks that drain its
 //! stdout and stderr, and the supervisor that owns the process and reaps its group.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::debug;
+use super::items::Pending;
 use crate::process::{Frame, FrameReader, Process};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,6 +57,8 @@ pub struct Shared {
     /// The process has not exited and is not being reaped.
     pub usable: AtomicBool,
     pub supervisor: mpsc::UnboundedSender<Supervise>,
+    /// The permission requests Claude waits on, by approval id.
+    approvals: Mutex<BTreeMap<String, Pending>>,
 }
 
 impl Shared {
@@ -69,6 +72,7 @@ impl Shared {
             interrupting: AtomicBool::new(false),
             usable: AtomicBool::new(true),
             supervisor,
+            approvals: Mutex::default(),
         });
         (shared, commands)
     }
@@ -79,6 +83,15 @@ impl Shared {
 
     pub fn turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
+    }
+
+    pub fn approvals(&self) -> MutexGuard<'_, BTreeMap<String, Pending>> {
+        self.approvals.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Removes the request, so whoever takes it is the only one to answer it.
+    pub fn take_approval(&self, id: &str) -> Option<Pending> {
+        self.approvals().remove(id)
     }
 }
 

@@ -1,7 +1,8 @@
 //! Turns what `claude` writes into `BackendEvent`s: the root conversation's streamed text and
-//! thinking, tool calls and results, usage per model request, and the end of each turn at its
-//! `result` frame. Frames of Claude's own sub-agents (`parent_tool_use_id` set) and the `task_*`
-//! system frames are not mapped yet; they are dropped without touching the main turn.
+//! thinking, tool calls and results, usage per model request, permission requests as approvals,
+//! and the end of each turn at its `result` frame. Frames of Claude's own sub-agents
+//! (`parent_tool_use_id` set) and the `task_*` system frames are not mapped yet; they are dropped
+//! without touching the main turn.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -16,7 +17,7 @@ use tokio::time::Instant;
 use super::debug;
 use super::items;
 use super::run::{Hello, Inbound, Shared, StderrTail, Supervise, Writer};
-use super::wire::{Block, Incoming, Request, StreamEvent, control_error, control_success};
+use super::wire::{Block, Incoming, Request, StreamEvent, control_error};
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::DeltaCoalescer;
 
@@ -45,8 +46,8 @@ pub struct Translator {
     /// The API message being streamed.
     message: String,
     blocks: HashMap<u64, Open>,
-    /// Tool calls shown whose result has not arrived: `(call id, native tool name)`.
-    calls: Vec<(String, String)>,
+    /// Tool calls shown whose result has not arrived: `(call id, native tool name, Claude's input)`.
+    calls: Vec<(String, String, Value)>,
     announced: HashSet<String>,
     context_window: u64,
     stderr: StderrTail,
@@ -138,6 +139,7 @@ impl Translator {
             return;
         }
         self.flush().await;
+        self.withdraw_approvals().await;
         if self.shared.turn_active.swap(false, Ordering::SeqCst) {
             self.settle_turn().await;
             self.send_now(BackendEvent::TurnCompleted {
@@ -186,6 +188,7 @@ impl Translator {
         };
         match incoming.kind.as_str() {
             "control_request" => self.control_request(incoming).await,
+            "control_cancel_request" => self.cancel_request(incoming).await,
             "control_response" => self.control_response(incoming),
             "result" => self.result(incoming).await,
             "stream_event" | "assistant" | "user" if incoming.parent_tool_use_id.is_some() => true,
@@ -216,29 +219,82 @@ impl Translator {
         true
     }
 
+    /// A request Claude sends the host. `can_use_tool` waits for the user; every other request is
+    /// answered with an error at once, so Claude never waits on a request nothing maps.
     async fn control_request(&mut self, incoming: Incoming) -> bool {
         let (Some(id), Some(request)) = (incoming.request_id, incoming.request) else {
             return true;
         };
-        let reply = self.answer_control(&id, &request);
+        if request.subtype == "can_use_tool" {
+            return self.permission_request(&id, &request).await;
+        }
+        let reply = control_error(
+            &id,
+            &format!("unsupported control request: {}", request.subtype),
+        );
         if self.writer.send(&reply).is_err() {
             debug("cannot answer a control request: claude is not taking input");
         }
         true
     }
 
-    /// The answer to a request Claude sends the host. Every request gets one, so Claude never
-    /// waits on a request nothing maps. `can_use_tool` is the one place permission handling plugs
-    /// in; until it does, tools that need a permission are denied.
-    fn answer_control(&self, id: &str, request: &Request) -> Value {
-        match request.subtype.as_str() {
-            "can_use_tool" => control_success(
-                id,
-                json!({"behavior": "deny",
-                    "message": "Tiechui cannot answer permission requests in this session yet."}),
-            ),
-            other => control_error(id, &format!("unsupported control request: {other}")),
+    /// An approval on the step of the call it is about; that step is shown first when its
+    /// `assistant` frame has not arrived yet. Claude waits until `answer_approval` writes the
+    /// answer or it cancels the request.
+    async fn permission_request(&mut self, request_id: &str, request: &Request) -> bool {
+        let mut shown = request.input.clone();
+        let call_id = match &request.tool_use_id {
+            Some(call) => {
+                let tool = request.tool_name.as_deref().unwrap_or_default();
+                if !self.announce(call, tool, &request.input).await {
+                    return false;
+                }
+                // `ExitPlanMode` asks with an empty input: the plan is only in its `tool_use` block.
+                if shown.as_object().is_some_and(serde_json::Map::is_empty)
+                    && let Some((.., input)) = self.calls.iter().find(|(id, ..)| id == call)
+                {
+                    shown = input.clone();
+                }
+                call.clone()
+            }
+            None => request_id.to_owned(),
+        };
+        let (pending, approval) = items::ask(request_id, request, &shown, &call_id);
+        let id = approval_id(request_id);
+        self.shared.approvals().insert(id.clone(), pending);
+        self.emit_after_flush(BackendEvent::Approval {
+            id,
+            request: approval,
+        })
+        .await
+    }
+
+    async fn cancel_request(&mut self, incoming: Incoming) -> bool {
+        let Some(request_id) = incoming.request_id else {
+            return true;
+        };
+        let id = approval_id(&request_id);
+        if self.shared.take_approval(&id).is_none() {
+            return true;
         }
+        self.emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+            .await
+    }
+
+    /// Withdraws every request still waiting: the turn that asked has ended.
+    async fn withdraw_approvals(&mut self) -> bool {
+        let ids: Vec<String> = std::mem::take(&mut *self.shared.approvals())
+            .into_keys()
+            .collect();
+        for id in ids {
+            if !self
+                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                .await
+            {
+                return false;
+            }
+        }
+        true
     }
 
     fn message_id(&self, incoming: &Incoming) -> String {
@@ -365,30 +421,37 @@ impl Translator {
             .await
     }
 
-    /// A tool call, announced once its input is complete.
+    /// The tool calls of an `assistant` frame, which carries their complete input.
     async fn assistant(&mut self, incoming: Incoming) -> bool {
         let Some(message) = incoming.message else {
             return true;
         };
         for block in message.blocks() {
-            if block.kind != "tool_use" || !self.announced.insert(block.id.clone()) {
-                continue;
-            }
-            let (name, arguments) = items::tool_call(&block.name, &block.input);
-            self.calls.push((block.id.clone(), name.clone()));
-            let call = KnownItem::ToolCall {
-                id: ItemId(block.id),
-                name,
-                arguments,
-            };
-            if !self
-                .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(call)))
-                .await
+            if block.kind == "tool_use"
+                && !self.announce(&block.id, &block.name, &block.input).await
             {
                 return false;
             }
         }
         true
+    }
+
+    /// Shows a tool call once, from whichever of its `assistant` frame and its permission request
+    /// arrives first.
+    async fn announce(&mut self, id: &str, tool: &str, input: &Value) -> bool {
+        if !self.announced.insert(id.to_owned()) {
+            return true;
+        }
+        let (name, arguments) = items::tool_call(tool, input);
+        self.calls
+            .push((id.to_owned(), name.clone(), input.clone()));
+        let call = KnownItem::ToolCall {
+            id: ItemId(id.to_owned()),
+            name,
+            arguments,
+        };
+        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(call)))
+            .await
     }
 
     async fn user(&mut self, incoming: Incoming) -> bool {
@@ -407,11 +470,11 @@ impl Translator {
         let Some(position) = self
             .calls
             .iter()
-            .position(|(id, _)| *id == block.tool_use_id)
+            .position(|(id, ..)| *id == block.tool_use_id)
         else {
             return true;
         };
-        let (call, name) = self.calls.remove(position);
+        let (call, name, _) = self.calls.remove(position);
         let output = items::tool_result(&name, &block.content, block.is_error);
         self.emit_result(call, output, block.is_error).await
     }
@@ -436,7 +499,7 @@ impl Translator {
                 return false;
             }
         }
-        for (call, _) in std::mem::take(&mut self.calls) {
+        for (call, ..) in std::mem::take(&mut self.calls) {
             let output = items::tool_result("", &json!("The tool call did not finish."), true);
             if !self.emit_result(call, output, true).await {
                 return false;
@@ -460,7 +523,7 @@ impl Translator {
         if handshaking {
             return true;
         }
-        if !self.settle_turn().await {
+        if !self.withdraw_approvals().await || !self.settle_turn().await {
             return false;
         }
         let window = incoming
@@ -501,6 +564,10 @@ impl Translator {
         }
         sent
     }
+}
+
+fn approval_id(request_id: &str) -> String {
+    format!("claude-{request_id}")
 }
 
 fn text_item(id: &ItemId, thinking: bool, text: String) -> KnownItem {

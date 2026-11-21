@@ -10,7 +10,9 @@ use client::Client;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, Snapshot};
-use tiechui_protocol::{EventKind, Item, KnownItem, TokenUsage, TurnId, TurnStatus};
+use tiechui_protocol::{
+    ApprovalRequest, EventKind, Item, KnownItem, TokenUsage, TurnId, TurnStatus,
+};
 
 const SESSION: &str = "fake-session";
 
@@ -262,6 +264,15 @@ impl Fixture {
     }
 
     fn client_with(&self, env: &[(&str, &str)]) -> Client {
+        let mut command = self.app_server();
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        Client::spawn(command)
+    }
+
+    /// `chui app-server` with the fake `claude` first on its `PATH`.
+    fn app_server(&self) -> tokio::process::Command {
         let bin = self.path("bin");
         let search =
             std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
@@ -275,9 +286,26 @@ impl Fixture {
             .env("FAKE_CLAUDE_LOG", self.path("fake.log"))
             .current_dir(&self.cwd)
             .arg("app-server");
-        for (key, value) in env {
-            command.env(key, value);
-        }
+        command
+    }
+
+    /// A `chui app-server` daemon on `socket`, which several clients can connect to.
+    #[cfg(unix)]
+    fn daemon(&self, socket: &Path) -> tokio::process::Child {
+        let mut command = self.app_server();
+        command
+            .arg("--socket")
+            .arg(socket)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true);
+        command.spawn().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn connect(&self, socket: &Path) -> Client {
+        let mut command = self.app_server();
+        command.arg("--connect").arg(socket);
         Client::spawn(command)
     }
 }
@@ -764,19 +792,11 @@ async fn subagent_frames_and_task_frames_do_not_break_the_main_turn() {
 }
 
 #[tokio::test]
-async fn control_requests_are_answered_so_claude_never_waits() {
+async fn control_requests_without_a_mapping_are_answered_so_claude_never_waits() {
     let fixture = Fixture::new();
     let mut steps = handshake();
     steps.push(user_message("go"));
     steps.extend([
-        emit(
-            json!({"type": "control_request", "request_id": "perm-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "/x"},
-            "tool_use_id": "toolu_w"}}),
-        ),
-        expect(json!({"type": "control_response", "response": {
-            "subtype": "success", "request_id": "perm-1",
-            "response": {"behavior": "deny"}}})),
         emit(
             json!({"type": "control_request", "request_id": "hook-1", "request": {
             "subtype": "hook_callback", "callback_id": "x"}}),
@@ -796,6 +816,742 @@ async fn control_requests_are_answered_so_claude_never_waits() {
         "{:?}",
         fixture.mismatches()
     );
+}
+
+/// A `can_use_tool` request as Claude 2.1.322 sends it (recorded shape).
+fn can_use_tool(request_id: &str, tool: &str, input: &Value, tool_use_id: &str) -> Value {
+    can_use_tool_suggesting(request_id, tool, input, tool_use_id, json!([]))
+}
+
+fn can_use_tool_suggesting(
+    request_id: &str,
+    tool: &str,
+    input: &Value,
+    tool_use_id: &str,
+    suggestions: Value,
+) -> Value {
+    emit(
+        json!({"type": "control_request", "request_id": request_id, "request": {
+        "subtype": "can_use_tool", "tool_name": tool, "display_name": tool, "input": input,
+        "description": tool, "permission_suggestions": suggestions, "tool_use_id": tool_use_id}}),
+    )
+}
+
+/// The fake waits for the answer to one permission request.
+fn permission_answer(request_id: &str, response: Value) -> Value {
+    expect(json!({"type": "control_response", "response": {
+        "subtype": "success", "request_id": request_id, "response": response}}))
+}
+
+/// The alternatives 2.1.322 suggests for a command that writes a file in the workspace.
+fn bash_suggestions(command: &str) -> Value {
+    json!([
+        {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": command}],
+            "behavior": "allow", "destination": "localSettings"},
+        {"type": "addDirectories", "directories": ["/work"], "destination": "session"},
+        {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+    ])
+}
+
+/// Claude's text reply after the tools ran, and the end of the turn.
+fn reply(msg: &str, text: &str) -> Vec<Value> {
+    let mut steps = vec![message_start(msg)];
+    steps.extend(block(msg, 0, "text", &[text]));
+    steps.extend(message_end(msg, usage_json(1, 1, 0, 0), "end_turn"));
+    steps.push(result_ok(text));
+    steps
+}
+
+/// A message whose only block is one tool call.
+fn tool_message(msg: &str, id: &str, name: &str, input: &Value) -> Vec<Value> {
+    let mut steps = vec![message_start(msg)];
+    steps.extend(tool_use(msg, 0, id, name, input));
+    steps
+}
+
+/// Waits for the next approval: the events up to it, its id and its request.
+async fn next_approval(client: &mut Client) -> (Vec<SessionEvent>, String, ApprovalRequest) {
+    let seen = client
+        .until(|kind| matches!(kind, EventKind::ApprovalRequested { .. }))
+        .await;
+    let EventKind::ApprovalRequested {
+        approval_id,
+        request,
+        ..
+    } = &seen.last().unwrap().event.event
+    else {
+        unreachable!()
+    };
+    let (id, request) = (approval_id.0.clone(), request.clone());
+    (seen, id, request)
+}
+
+fn approval_response(thread: &str, approval: &str, decision: Value) -> Value {
+    json!({"thread_id": thread, "op": {"kind": "approval_response",
+        "approval_id": approval, "decision": decision}})
+}
+
+async fn answer(client: &mut Client, thread: &str, approval: &str, decision: Value) {
+    client
+        .ok(
+            "session/submit",
+            approval_response(thread, approval, decision),
+        )
+        .await;
+}
+
+/// The `control_response`s written for one of Claude's requests.
+fn responses_to(fixture: &Fixture, request_id: &str) -> Vec<Value> {
+    fixture
+        .received()
+        .into_iter()
+        .filter(|line| {
+            line["type"] == "control_response" && line["response"]["request_id"] == request_id
+        })
+        .map(|line| line["response"]["response"].clone())
+        .collect()
+}
+
+fn resolved(events: &[SessionEvent], approval: &str) -> Option<usize> {
+    events.iter().position(|e| {
+        matches!(&e.event.event,
+        EventKind::ApprovalResolved { approval_id } if approval_id.0 == approval)
+    })
+}
+
+fn tool_calls_with_id(events: &[SessionEvent], id: &str) -> usize {
+    known(events)
+        .iter()
+        .filter(|item| matches!(item, KnownItem::ToolCall { id: call, .. } if call.0 == id))
+        .count()
+}
+
+fn assert_script_followed(fixture: &Fixture) {
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+}
+
+#[tokio::test]
+async fn a_permission_request_waits_on_its_tool_step_and_allowing_writes_the_input_back() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch approved.txt", "description": "Create approved.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool_suggesting(
+            "perm-1",
+            "Bash",
+            &input,
+            "toolu_touch",
+            bash_suggestions("touch approved.txt"),
+        ),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": input}),
+        ),
+    ]);
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.push(tool_result(
+        "toolu_touch",
+        json!("(Bash completed with no output)"),
+        false,
+    ));
+    steps.extend(reply("msg_2", "created"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let (seen, approval, request) = next_approval(&mut client).await;
+    assert!(approval.starts_with("claude-"), "{approval}");
+    assert_eq!(
+        tool_calls_with_id(&seen, "toolu_touch"),
+        1,
+        "the step the card waits on exists before it"
+    );
+    let ApprovalRequest::Permission {
+        actor,
+        call_id,
+        tool,
+        arguments,
+        values,
+        session_patterns,
+        origin,
+        ..
+    } = request
+    else {
+        panic!("{request:?}");
+    };
+    assert_eq!(actor, None);
+    assert_eq!(call_id, "toolu_touch");
+    assert_eq!(tool, "bash");
+    assert_eq!(arguments, json!({"command": "touch approved.txt"}));
+    assert_eq!(values, ["touch approved.txt"]);
+    assert_eq!(session_patterns, ["Bash(touch approved.txt)"]);
+    assert_eq!(origin, "claude");
+
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert!(resolved(&events, &approval).is_some());
+    assert_script_followed(&fixture);
+    let sent = responses_to(&fixture, "perm-1");
+    assert_eq!(
+        sent,
+        [json!({"behavior": "allow", "updatedInput": input})],
+        "allowing once grants nothing more"
+    );
+}
+
+#[tokio::test]
+async fn denying_writes_the_reason_back_so_claude_sees_it() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch denied.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "deny", "message": "not that file"}),
+        ),
+    ]);
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.push(tool_result("toolu_touch", json!("not that file"), true));
+    let second = json!({"command": "touch other.txt"});
+    steps.extend(tool_message("msg_2", "toolu_other", "Bash", &second));
+    steps.extend([
+        can_use_tool("perm-2", "Bash", &second, "toolu_other"),
+        permission_answer("perm-2", json!({"behavior": "deny"})),
+    ]);
+    steps.push(tool_result("toolu_other", json!("denied"), true));
+    steps.extend(reply("msg_3", "skipped"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "deny", "reason": "not that file"}),
+    )
+    .await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "deny", "reason": null}),
+    )
+    .await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert_script_followed(&fixture);
+    assert_eq!(
+        responses_to(&fixture, "perm-1"),
+        [json!({"behavior": "deny", "message": "not that file"})]
+    );
+    let without_reason = responses_to(&fixture, "perm-2");
+    assert!(
+        without_reason[0]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{without_reason:?}"
+    );
+}
+
+#[tokio::test]
+async fn allowing_for_the_session_grants_claudes_suggestions_for_this_session_only() {
+    let fixture = Fixture::new();
+    let bash = json!({"command": "touch a.txt"});
+    let write = json!({"file_path": "/work/b.txt", "content": "b\n"});
+    let early = json!({"file_path": "/work/c.txt", "content": "c\n"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_bash", "Bash", &bash));
+    steps.extend([
+        can_use_tool_suggesting(
+            "perm-1",
+            "Bash",
+            &bash,
+            "toolu_bash",
+            bash_suggestions("touch a.txt"),
+        ),
+        // Only the narrowest alternative, the rule, scoped to the session.
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": bash, "updatedPermissions": [
+                {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch a.txt"}],
+                    "behavior": "allow", "destination": "session"}]}),
+        ),
+        tool_result("toolu_bash", json!(""), false),
+    ]);
+    steps.extend(tool_message("msg_2", "toolu_write", "Write", &write));
+    steps.extend([
+        // The suggestion 2.1.322 sends for a file write.
+        can_use_tool_suggesting(
+            "perm-2",
+            "Write",
+            &write,
+            "toolu_write",
+            json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
+        ),
+        permission_answer(
+            "perm-2",
+            json!({"behavior": "allow", "updatedInput": write, "updatedPermissions": [
+                {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}),
+        ),
+        tool_result("toolu_write", json!("File created"), false),
+    ]);
+    // A request that arrives before the `assistant` frame of its call, without suggestions.
+    steps.extend([
+        message_start("msg_3"),
+        can_use_tool("perm-3", "Write", &early, "toolu_early"),
+        permission_answer(
+            "perm-3",
+            json!({"behavior": "allow", "updatedInput": early}),
+        ),
+    ]);
+    steps.extend(tool_use("msg_3", 0, "toolu_early", "Write", &early));
+    steps.push(tool_result("toolu_early", json!("File created"), false));
+    steps.extend(reply("msg_4", "done"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let session = json!({"kind": "allow_session", "both_directions": false});
+    let mut seen = Vec::new();
+    let mut patterns = Vec::new();
+    for _ in 0..3 {
+        let (events, approval, request) = next_approval(&mut client).await;
+        seen.extend(events);
+        let ApprovalRequest::Permission {
+            session_patterns,
+            call_id,
+            tool,
+            values,
+            ..
+        } = request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!(tool_calls_with_id(&seen, &call_id), 1, "{call_id}");
+        patterns.push((tool, values, session_patterns));
+        answer(&mut client, &thread, &approval, session.clone()).await;
+    }
+    let events = client.until(is_completed).await;
+    seen.extend(events);
+    assert_eq!(completed_status(&seen), TurnStatus::Completed);
+    assert_script_followed(&fixture);
+    assert_eq!(
+        patterns,
+        [
+            (
+                "bash".to_owned(),
+                vec!["touch a.txt".to_owned()],
+                vec!["Bash(touch a.txt)".to_owned()]
+            ),
+            (
+                "write".to_owned(),
+                vec!["/work/b.txt".to_owned()],
+                vec!["acceptEdits".to_owned()]
+            ),
+            ("write".to_owned(), vec!["/work/c.txt".to_owned()], vec![]),
+        ]
+    );
+    assert_eq!(
+        tool_calls_with_id(&seen, "toolu_early"),
+        1,
+        "the later assistant frame does not repeat the call"
+    );
+    assert_eq!(
+        responses_to(&fixture, "perm-3"),
+        [json!({"behavior": "allow", "updatedInput": early})],
+        "with nothing to grant, allowing for the session allows once"
+    );
+}
+
+#[tokio::test]
+async fn ask_user_question_becomes_question_cards_and_the_answers_go_back_in_the_input() {
+    let fixture = Fixture::new();
+    let input = json!({"questions": [
+        {"question": "Which color?", "header": "Color", "multiSelect": false, "options": [
+            {"label": "Red", "description": "warm"}, {"label": "Blue", "description": "cool"}]},
+        {"question": "Which extras?", "header": "Extras", "multiSelect": true, "options": [
+            {"label": "Tests", "description": "add tests"},
+            {"label": "Docs", "description": "add docs"}]},
+    ]});
+    let mut answered = input.clone();
+    answered["answers"] = json!({"Which color?": "Blue", "Which extras?": "Tests, Docs"});
+    let mut steps = handshake();
+    steps.push(user_message("ask me"));
+    steps.extend(tool_message(
+        "msg_1",
+        "toolu_ask",
+        "AskUserQuestion",
+        &input,
+    ));
+    steps.extend([
+        can_use_tool("perm-1", "AskUserQuestion", &input, "toolu_ask"),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": answered}),
+        ),
+        tool_result(
+            "toolu_ask",
+            json!("User has answered your questions: \"Which color?\"=\"Blue\""),
+            false,
+        ),
+    ]);
+    steps.extend(reply("msg_2", "You picked Blue"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "ask me", "follow_up").await;
+    let (_, approval, request) = next_approval(&mut client).await;
+    let ApprovalRequest::Questions { questions } = request else {
+        panic!("{request:?}");
+    };
+    let shown: Vec<_> = questions
+        .iter()
+        .map(|q| {
+            let labels: Vec<_> = q
+                .options
+                .iter()
+                .flatten()
+                .map(|o| (o.label.as_str(), o.description.as_str()))
+                .collect();
+            (q.header.as_str(), q.question.as_str(), labels)
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "Color",
+                "Which color?",
+                vec![("Red", "warm"), ("Blue", "cool")]
+            ),
+            (
+                "Extras",
+                "Which extras?",
+                vec![("Tests", "add tests"), ("Docs", "add docs")]
+            ),
+        ]
+    );
+    let answers: serde_json::Map<String, Value> = questions
+        .iter()
+        .zip([json!(["Blue"]), json!(["Tests", "Docs"])])
+        .map(|(q, picked)| (q.id.clone(), json!({"answers": picked})))
+        .collect();
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "accept", "content": {"answers": answers}}),
+    )
+    .await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert_script_followed(&fixture);
+    assert_eq!(
+        responses_to(&fixture, "perm-1"),
+        [json!({"behavior": "allow", "updatedInput": answered})]
+    );
+}
+
+#[tokio::test]
+async fn a_plan_is_shown_in_full_and_both_rejecting_and_approving_let_claude_continue() {
+    let fixture = Fixture::new();
+    let enter = json!({});
+    let first = json!({"plan": "# Plan\n\n1. Create a.txt\n2. Run the tests"});
+    let second = json!({"plan": "# Plan\n\n1. Create a.txt\n2. Run the tests\n3. Update docs"});
+    // As 2.1.322 does it: entering plan mode asks nothing, and the request to leave it carries
+    // an empty input, the plan being only in the `tool_use` block before it.
+    let exit_plan = |request_id: &str, tool_use_id: &str| {
+        emit(
+            json!({"type": "control_request", "request_id": request_id, "request": {
+            "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "display_name": "ExitPlanMode",
+            "input": {}, "tool_use_id": tool_use_id, "requires_user_interaction": true}}),
+        )
+    };
+    let mut steps = handshake();
+    steps.push(user_message("plan first"));
+    steps.extend(tool_message(
+        "msg_1",
+        "toolu_enter",
+        "EnterPlanMode",
+        &enter,
+    ));
+    steps.push(tool_result(
+        "toolu_enter",
+        json!("Entered plan mode."),
+        false,
+    ));
+    steps.extend(tool_message("msg_2", "toolu_plan1", "ExitPlanMode", &first));
+    steps.extend([
+        exit_plan("perm-1", "toolu_plan1"),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "deny", "message": "Also update the docs"}),
+        ),
+        tool_result("toolu_plan1", json!("Also update the docs"), true),
+    ]);
+    steps.extend(tool_message(
+        "msg_3",
+        "toolu_plan2",
+        "ExitPlanMode",
+        &second,
+    ));
+    steps.extend([
+        exit_plan("perm-2", "toolu_plan2"),
+        permission_answer("perm-2", json!({"behavior": "allow", "updatedInput": {}})),
+        tool_result(
+            "toolu_plan2",
+            json!("User has approved exiting plan mode. You can now proceed."),
+            false,
+        ),
+    ]);
+    steps.extend(reply("msg_4", "Starting on the plan"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "plan first", "follow_up").await;
+
+    let mut plans = Vec::new();
+    for decision in [
+        json!({"kind": "deny", "reason": "Also update the docs"}),
+        json!({"kind": "allow_once"}),
+    ] {
+        let (_, approval, request) = next_approval(&mut client).await;
+        let ApprovalRequest::Permission {
+            tool,
+            call_id,
+            values,
+            arguments,
+            session_patterns,
+            ..
+        } = request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!(tool, "ExitPlanMode");
+        assert!(call_id.starts_with("toolu_plan"), "{call_id}");
+        assert!(session_patterns.is_empty());
+        // The desktop shows `arguments.command`, or else the values, as the card's text.
+        assert!(arguments.get("command").is_none(), "{arguments}");
+        plans.push(values);
+        answer(&mut client, &thread, &approval, decision).await;
+    }
+    assert_eq!(
+        plans,
+        [
+            vec![first["plan"].as_str().unwrap().to_owned()],
+            vec![second["plan"].as_str().unwrap().to_owned()],
+        ]
+    );
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert_script_followed(&fixture);
+}
+
+#[tokio::test]
+async fn a_cancelled_request_is_withdrawn_and_a_late_answer_writes_nothing() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch x"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        json!({"sleep_ms": 300}),
+        emit(json!({"type": "control_cancel_request", "request_id": "perm-1"})),
+        tool_result("toolu_touch", json!("cancelled"), true),
+        json!({"sleep_ms": 300}),
+    ]);
+    steps.extend(reply("msg_2", "stopped"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let events = client
+        .until(|kind| matches!(kind, EventKind::ApprovalResolved { .. }))
+        .await;
+    assert!(resolved(&events, &approval).is_some());
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(responses_to(&fixture, "perm-1").is_empty());
+}
+
+#[tokio::test]
+async fn an_interrupt_withdraws_the_pending_request_before_the_turn_ends() {
+    // 2.1.322 cancels the request before it answers the interrupt; a Claude that does not still
+    // has it withdrawn when the turn ends.
+    for cancels in [true, false] {
+        let fixture = Fixture::new();
+        let input = json!({"command": "touch x"});
+        let mut steps = handshake();
+        steps.push(user_message("go"));
+        steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+        steps.extend([
+            can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+            expect(json!({"type": "control_request", "request": {"subtype": "interrupt"}})),
+        ]);
+        if cancels {
+            steps.push(emit(
+                json!({"type": "control_cancel_request", "request_id": "perm-1"}),
+            ));
+        }
+        steps.extend([
+            emit(json!({"type": "control_response", "response": {
+                "subtype": "success", "request_id": "$id", "response": {"still_queued": []}}})),
+            tool_result(
+                "toolu_touch",
+                json!("The user doesn't want to proceed with this tool use."),
+                true,
+            ),
+            frame(
+                "result",
+                json!({"subtype": "error_during_execution", "is_error": true, "result": null,
+                    "errors": [], "terminal_reason": "aborted_tools"}),
+            ),
+        ]);
+        fixture.script(steps);
+
+        let mut client = fixture.client();
+        let opened = open(&mut client, &fixture, None).await;
+        let thread = opened.thread_id.0.clone();
+        submit(&mut client, &thread, "go", "follow_up").await;
+        let (seen, approval, _) = next_approval(&mut client).await;
+        let turn = seen
+            .iter()
+            .find_map(|e| match &e.event.event {
+                EventKind::TurnStarted { turn } => Some(turn.id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        client.ok("session/submit", interrupt(&thread, &turn)).await;
+        let events = client.until(is_completed).await;
+        assert_eq!(completed_status(&events), TurnStatus::Interrupted);
+        let withdrawn = resolved(&events, &approval).expect("withdrawn");
+        assert!(withdrawn < events.len() - 1, "cancels: {cancels}");
+        assert_script_followed(&fixture);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(responses_to(&fixture, "perm-1").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_claude_that_exits_with_a_request_pending_withdraws_it() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch x"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        json!({"sleep_ms": 300}),
+        json!({"exit": 1}),
+    ]);
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Failed);
+    assert!(resolved(&events, &approval).is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn two_clients_allowing_the_same_request_at_once_write_one_answer() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch approved.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": input}),
+        ),
+        tool_result("toolu_touch", json!(""), false),
+    ]);
+    steps.extend(reply("msg_2", "created"));
+    fixture.script(steps);
+
+    let socket_dir = tempfile::Builder::new()
+        .prefix("tc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = socket_dir.path().join("app.sock");
+    let _daemon = fixture.daemon(&socket);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while tokio::net::UnixStream::connect(&socket).await.is_err() {
+        assert!(std::time::Instant::now() < deadline, "no daemon socket");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut first = fixture.connect(&socket);
+    let mut second = fixture.connect(&socket);
+    let opened = open(&mut first, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let attached = snapshot(
+        second
+            .ok("session/open", json!({"path": opened.path}))
+            .await,
+    );
+    assert_eq!(attached.thread_id, opened.thread_id);
+    submit(&mut first, &thread, "go", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut first).await;
+    let (_, seen_by_second, _) = next_approval(&mut second).await;
+    assert_eq!(approval, seen_by_second);
+    let allow = json!({"kind": "allow_once"});
+    tokio::join!(
+        answer(&mut first, &thread, &approval, allow.clone()),
+        answer(&mut second, &thread, &approval, allow),
+    );
+    let events = first.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(responses_to(&fixture, "perm-1").len(), 1);
+    assert_script_followed(&fixture);
 }
 
 #[tokio::test]

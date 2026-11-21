@@ -448,11 +448,19 @@ impl Backend for ClaudeBackend {
 
     async fn answer_approval(
         &mut self,
-        _approval_id: &str,
-        _decision: ApprovalDecision,
+        approval_id: &str,
+        decision: ApprovalDecision,
     ) -> Result<(), String> {
-        // Permission requests are denied as they arrive, so none is ever reported.
-        Ok(())
+        let Some(run) = &self.run else {
+            return Ok(());
+        };
+        let Some(pending) = run.shared.take_approval(approval_id) else {
+            return Ok(());
+        };
+        run.writer.send(&wire::control_success(
+            &pending.request_id,
+            pending.response(&decision),
+        ))
     }
 
     async fn shutdown(&mut self) {
