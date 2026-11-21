@@ -220,20 +220,14 @@ fn copy_setting_applies_at_startup_and_when_a_session_opens() {
 #[test]
 fn resize_focus_loss_session_open_and_footer_scroll_cancel_selection_and_pending_copy() {
     for release in [false, true] {
-        for cancel in 0..4 {
+        for cancel in 0..3 {
             let mut app = app();
             complete(&mut app, "first", "SELECT_ME".into());
             select_main_text(&mut app, release);
             match cancel {
                 0 => app.resize(80, 24),
                 1 => app.focus(false),
-                2 => app.opened(app.cwd().to_owned(), Default::default(), true, vec![]),
-                _ => app.mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollDown,
-                    column: 0,
-                    row: 23,
-                    modifiers: KeyModifiers::NONE,
-                }),
+                _ => app.opened(app.cwd().to_owned(), Default::default(), true, vec![]),
             }
             app.mouse(MouseEvent {
                 kind: MouseEventKind::Up(MouseButton::Left),
@@ -244,6 +238,70 @@ fn resize_focus_loss_session_open_and_footer_scroll_cancel_selection_and_pending
             assert!(app.take_copy().is_none());
             assert!(app.main_frame().1.is_some());
         }
+
+        let mut main_app = app();
+        complete(&mut main_app, "first", "SELECT_ME".into());
+        select_main_text(&mut main_app, release);
+        main_app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            main_app.take_copy().as_deref(),
+            release.then_some("SELECT_ME")
+        );
+        assert!(main_app.main_frame().1.is_none());
+
+        let mut panel_app = app();
+        panel_app.event(event(EventKind::CommandPanel {
+            name: "context".into(),
+            text: String::new(),
+            panel: Box::new(ContextSnapshot {
+                system: vec![ContextItem {
+                    label: "System prompt".into(),
+                    text: "PANEL_SELECT_TEXT\nSECOND_LINE".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            view: ContextView::System,
+        }));
+        panel_app.key(key(KeyCode::Enter));
+        let page = panel_app.pager_frame(24).unwrap();
+        let row = page
+            .iter()
+            .position(|l| text(std::slice::from_ref(l)).contains("PANEL_SELECT_TEXT"))
+            .unwrap() as u16;
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Drag(MouseButton::Left), 10),
+            (MouseEventKind::Up(MouseButton::Left), 19),
+        ] {
+            if !release && kind == MouseEventKind::Up(MouseButton::Left) {
+                break;
+            }
+            panel_app.mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        panel_app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        panel_app.mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 19,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(panel_app.take_copy().is_none());
     }
 }
 

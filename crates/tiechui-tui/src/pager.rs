@@ -12,6 +12,7 @@ pub struct Pager {
     following: bool,
     height: usize,
     count: usize,
+    rows: usize,
 }
 
 impl Default for Pager {
@@ -21,6 +22,7 @@ impl Default for Pager {
             following: true,
             height: 1,
             count: 0,
+            rows: 0,
         }
     }
 }
@@ -32,6 +34,60 @@ impl Pager {
             following: false,
             ..Self::default()
         }
+    }
+
+    pub fn body_viewport(rows: usize) -> crate::selection::Viewport {
+        let rows = rows.max(1);
+        let chrome = if rows >= 6 {
+            5
+        } else if rows >= 3 {
+            2
+        } else {
+            0
+        };
+        crate::selection::Viewport {
+            top: usize::from(chrome > 0),
+            height: (rows - chrome).max(1),
+            rows,
+        }
+    }
+
+    pub fn current_viewport(&self, fallback_rows: usize) -> crate::selection::Viewport {
+        Self::body_viewport(if self.rows > 0 {
+            self.rows
+        } else {
+            fallback_rows
+        })
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn set_height(&mut self, height: usize) {
+        self.sync(self.count, height);
+    }
+
+    pub fn sync(&mut self, count: usize, height: usize) {
+        self.height = height.max(1);
+        self.count = count;
+        if self.following {
+            self.offset = self.max();
+        } else {
+            self.offset = self.offset.min(self.max());
+            self.following = self.offset >= self.max();
+        }
+    }
+
+    pub fn freeze(&mut self, count: usize, height: usize) {
+        if self.count == 0 {
+            self.sync(count, height);
+            return;
+        }
+        self.height = height.max(1);
+        self.count = count;
+        self.offset = self.offset.min(self.max());
+        self.following = self.offset >= self.max();
     }
 
     /// Shared viewport for alternate-screen inspectors with their own chrome.
@@ -65,12 +121,7 @@ impl Pager {
         tail: &[Line<'static>],
         height: usize,
     ) -> Vec<Line<'static>> {
-        self.height = height.max(1);
-        self.count = lines.len() + tail.len();
-        if self.following {
-            self.offset = self.max();
-        }
-        self.offset = self.offset.min(self.max());
+        self.sync(lines.len() + tail.len(), height);
         lines
             .iter()
             .chain(tail)
@@ -97,27 +148,75 @@ impl Pager {
         self.following = self.offset >= self.max();
     }
 
+    fn ctrl_scroll_delta(&self, code: KeyCode) -> Option<isize> {
+        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
+        let half = isize::try_from(self.height.div_ceil(2)).unwrap_or(isize::MAX);
+        match code {
+            KeyCode::Char('b') => Some(-page),
+            KeyCode::Char('f') => Some(page),
+            KeyCode::Char('u') => Some(-half),
+            KeyCode::Char('d') => Some(half),
+            _ => None,
+        }
+    }
+
+    fn nav_scroll_delta(&self, key: KeyEvent) -> Option<isize> {
+        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
+        match key.code {
+            KeyCode::PageUp => Some(-page),
+            KeyCode::PageDown => Some(page),
+            KeyCode::Home => Some(isize::MIN),
+            KeyCode::End => Some(isize::MAX),
+            KeyCode::Char(' ') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    -page
+                } else {
+                    page
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        let delta = self
+            .nav_scroll_delta(key)
+            .or_else(|| {
+                key.modifiers
+                    .contains(KeyModifiers::CONTROL)
+                    .then(|| self.ctrl_scroll_delta(key.code))
+                    .flatten()
+            })
+            .or(match key.code {
+                KeyCode::Char('k') if key.modifiers.is_empty() => Some(-1),
+                KeyCode::Char('j') if key.modifiers.is_empty() => Some(1),
+                _ => None,
+            });
+        if let Some(delta) = delta {
+            self.scroll(delta);
+            return true;
+        }
+        false
+    }
+
     /// Returns false when the pager closes.
     pub fn key(&mut self, key: KeyEvent) -> bool {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
-        let half = isize::try_from(self.height.div_ceil(2)).unwrap_or(isize::MAX);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return false,
+            KeyCode::Esc => return false,
+            KeyCode::Char('q') if !control => return false,
             KeyCode::Char('c') if control => return false,
-            KeyCode::Up | KeyCode::Char('k') => self.scroll(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.scroll(1),
-            KeyCode::Char('b') if control => self.scroll(-page),
-            KeyCode::Char('f') if control => self.scroll(page),
-            KeyCode::Char('u') if control => self.scroll(-half),
-            KeyCode::Char('d') if control => self.scroll(half),
-            KeyCode::PageUp => self.scroll(-page),
-            KeyCode::Char(' ') if shift => self.scroll(-page),
-            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll(page),
-            KeyCode::Home => self.scroll(isize::MIN),
-            KeyCode::End => self.scroll(isize::MAX),
-            _ => {}
+            KeyCode::Up => self.scroll(-1),
+            KeyCode::Down => self.scroll(1),
+            _ => {
+                self.scroll_key(key);
+            }
         }
         true
     }
@@ -130,21 +229,20 @@ impl Pager {
         rows: usize,
         theme: &Theme,
     ) -> Vec<Line<'static>> {
-        let rows = rows.max(1);
-        let chrome = if rows >= 6 {
-            5
-        } else if rows >= 3 {
-            2
-        } else {
-            0
-        };
-        self.height = (rows - chrome).max(1);
-        self.count = lines.len();
-        if self.following {
-            self.offset = self.max();
-        }
-        self.offset = self.offset.min(self.max());
-        self.following = self.offset >= self.max();
+        self.render_with(lines, width, rows, theme, |body, _| body)
+    }
+
+    pub fn render_with(
+        &mut self,
+        lines: &[Line<'static>],
+        width: usize,
+        rows: usize,
+        theme: &Theme,
+        transform: impl FnOnce(Vec<Line<'static>>, usize) -> Vec<Line<'static>>,
+    ) -> Vec<Line<'static>> {
+        let vp = Self::body_viewport(rows);
+        self.rows = vp.rows;
+        self.sync(lines.len(), vp.height);
         let mut body: Vec<Line<'static>> = lines
             .iter()
             .skip(self.offset)
@@ -152,7 +250,8 @@ impl Pager {
             .cloned()
             .collect();
         body.resize(self.height, Line::default());
-        if chrome == 0 {
+        let body = transform(body, self.offset);
+        if vp.top == 0 {
             return body;
         }
         let dim = |text: String| wrap::fit(vec![Span::styled(text, theme.dim)], width, false);
@@ -161,7 +260,7 @@ impl Pager {
         let close = dim("q / ctrl+c to quit · esc back".into());
         let mut screen = vec![header];
         screen.extend(body);
-        if chrome == 2 {
+        if vp.rows < 6 {
             screen.push(close);
             return screen;
         }

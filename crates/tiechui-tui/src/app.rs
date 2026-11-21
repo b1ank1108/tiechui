@@ -1797,6 +1797,136 @@ impl App {
         self.selection.take_copy()
     }
 
+    fn single_screen_panel_open(&self) -> bool {
+        self.shells_visible
+            || self.agents_visible
+            || self.side_visible
+            || self.context_panel.is_some()
+            || self.resume.is_some()
+    }
+
+    fn active_doc_source(&self) -> Option<crate::selection::DocSource> {
+        if self.single_screen_panel_open() {
+            None
+        } else if self.pager.is_some() {
+            Some(crate::selection::DocSource::Pager)
+        } else {
+            self.fullscreen.then_some(crate::selection::DocSource::Main)
+        }
+    }
+
+    fn sync_selection_surface(&mut self) {
+        if self.selection.active() && self.selection.doc_source() != self.active_doc_source() {
+            self.selection.clear();
+        }
+    }
+
+    fn main_viewport_for(
+        available: usize,
+        rows: usize,
+        following: bool,
+    ) -> crate::selection::Viewport {
+        let hint = !following && available > 0;
+        crate::selection::Viewport {
+            top: 0,
+            height: available.saturating_sub(usize::from(hint)),
+            rows,
+        }
+    }
+
+    fn main_viewport(&self) -> crate::selection::Viewport {
+        Self::main_viewport_for(
+            self.main_body_height,
+            self.height,
+            self.main_view.following(),
+        )
+    }
+
+    fn doc_metrics(
+        &self,
+        source: crate::selection::DocSource,
+    ) -> (crate::selection::Viewport, usize, usize) {
+        let doc_len = self.selection.doc_len();
+        match source {
+            crate::selection::DocSource::Main => {
+                let vp = self.main_viewport();
+                (
+                    vp,
+                    self.main_view.offset(),
+                    doc_len.saturating_sub(vp.height),
+                )
+            }
+            crate::selection::DocSource::Pager => {
+                let vp = self.pager.as_ref().map_or_else(
+                    || Pager::body_viewport(self.height),
+                    |pager| pager.current_viewport(self.height),
+                );
+                let offset = self.pager.as_ref().map_or(0, Pager::offset);
+                (vp, offset, doc_len.saturating_sub(vp.height))
+            }
+        }
+    }
+
+    fn scroll_doc(
+        &mut self,
+        source: crate::selection::DocSource,
+        delta: isize,
+        doc_len: usize,
+    ) -> (crate::selection::Viewport, usize) {
+        match source {
+            crate::selection::DocSource::Main => {
+                let vp = self.main_viewport();
+                self.main_view.sync(doc_len, vp.height);
+                self.main_view.scroll(delta);
+                let vp = self.main_viewport();
+                self.main_view.sync(doc_len, vp.height);
+                (vp, self.main_view.offset())
+            }
+            crate::selection::DocSource::Pager => {
+                let Some(pager) = &mut self.pager else {
+                    return (Pager::body_viewport(self.height), 0);
+                };
+                let vp = pager.current_viewport(self.height);
+                pager.sync(doc_len, vp.height);
+                pager.scroll(delta);
+                (vp, pager.offset())
+            }
+        }
+    }
+
+    pub fn autoscrolling(&self) -> bool {
+        let Some(source) = self
+            .active_doc_source()
+            .filter(|&s| self.selection.doc_source() == Some(s))
+        else {
+            return false;
+        };
+        let (vp, offset, max_offset) = self.doc_metrics(source);
+        self.selection
+            .autoscroll_step(vp, offset, max_offset)
+            .is_some()
+    }
+
+    pub fn autoscroll_tick(&mut self) -> bool {
+        let Some(source) = self
+            .active_doc_source()
+            .filter(|&s| self.selection.doc_source() == Some(s))
+        else {
+            return false;
+        };
+        let (vp, offset, max_offset) = self.doc_metrics(source);
+        let Some(delta) = self.selection.autoscroll_step(vp, offset, max_offset) else {
+            return false;
+        };
+        let doc_len = self.selection.doc_len();
+        let (new_vp, new_offset) = self.scroll_doc(source, delta, doc_len);
+        if new_offset == offset && new_vp == vp {
+            return false;
+        }
+        self.selection.apply_autoscroll(new_vp, new_offset);
+        true
+    }
+
     pub fn copy_finished(&mut self, chars: usize, sent: bool, now: Instant) {
         let unit = if chars == 1 { "char" } else { "chars" };
         let hint = if sent {
@@ -1837,26 +1967,176 @@ impl App {
     }
 
     pub fn mouse(&mut self, event: crossterm::event::MouseEvent) {
-        use crossterm::event::{MouseButton, MouseEventKind};
         if !self.context_open() && !self.fullscreen {
             return;
         }
+        self.sync_selection_surface();
         self.pointer = Some((usize::from(event.row), usize::from(event.column)));
+        if let Some(source) = self.active_doc_source() {
+            self.mouse_doc(event, source);
+            return;
+        }
+        self.mouse_panel(event);
+    }
+
+    fn mouse_main_doc(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        now: Instant,
+    ) -> crate::selection::MouseAction {
+        use crate::selection::{DocSource, DocView};
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let available = self.main_body_height;
+        let height = self.height;
+        let vp = Self::main_viewport_for(available, height, self.main_view.following());
+        let view = DocView {
+            source: DocSource::Main,
+            viewport: vp,
+            offset: self.main_view.offset(),
+        };
+        let epoch = self.epoch;
+        let copy_on_select = self.copy_on_select;
+        let (transcript, main_view) = (&mut self.transcript, &mut self.main_view);
+        let action = self.selection.doc_mouse(
+            event,
+            now,
+            copy_on_select,
+            view,
+            || {
+                let tail = transcript.retained_live(now - epoch, now);
+                let retained = transcript.retained();
+                let mut doc = Vec::with_capacity(retained.len() + tail.len());
+                doc.extend_from_slice(retained);
+                doc.extend(tail);
+                doc
+            },
+            |delta| {
+                main_view.scroll(delta);
+                let next_vp = Self::main_viewport_for(available, height, main_view.following());
+                main_view.set_height(next_vp.height);
+                (next_vp, main_view.offset())
+            },
+        );
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.selection.doc_source() == Some(DocSource::Main)
+        {
+            self.main_view.freeze(self.selection.doc_len(), vp.height);
+        }
+        action
+    }
+
+    fn mouse_pager_doc(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        now: Instant,
+    ) -> Option<crate::selection::MouseAction> {
+        use crate::selection::{DocSource, DocView};
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut pager = self.pager.take()?;
+        let vp = pager.current_viewport(self.height);
+        let view = DocView {
+            source: DocSource::Pager,
+            viewport: vp,
+            offset: pager.offset(),
+        };
+        let width = self.width;
+        let copy_on_select = self.copy_on_select;
+        self.cache_expanded(width);
+        let (transcript, expanded) = (&self.transcript, &self.expanded.2);
+        let action = self.selection.doc_mouse(
+            event,
+            now,
+            copy_on_select,
+            view,
+            || {
+                let live = transcript.expanded_live(width);
+                let mut doc = Vec::with_capacity(expanded.len() + live.len());
+                doc.extend_from_slice(expanded);
+                doc.extend(live);
+                doc
+            },
+            |delta| {
+                pager.scroll(delta);
+                (vp, pager.offset())
+            },
+        );
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.selection.doc_source() == Some(DocSource::Pager)
+        {
+            pager.freeze(self.selection.doc_len(), vp.height);
+        }
+        self.pager = Some(pager);
+        Some(action)
+    }
+
+    fn mouse_doc_scroll_pass(&mut self, kind: crossterm::event::MouseEventKind) {
+        use crossterm::event::MouseEventKind;
+        let delta = match kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            _ => return,
+        };
+        self.composer.reset_escape();
+        if let Some(pager) = &mut self.pager {
+            pager.scroll(delta);
+        } else {
+            self.main_view.scroll(delta);
+        }
+    }
+
+    fn mouse_doc(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        source: crate::selection::DocSource,
+    ) {
+        use crate::selection::{DocSource, MouseAction};
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let now = Instant::now();
+        let action = match source {
+            DocSource::Main => self.mouse_main_doc(event, now),
+            DocSource::Pager => {
+                let Some(action) = self.mouse_pager_doc(event, now) else {
+                    return;
+                };
+                action
+            }
+        };
+        match action {
+            MouseAction::Handled => self.composer.reset_escape(),
+            MouseAction::Click(pressed) => {
+                self.composer.reset_escape();
+                if source == DocSource::Main
+                    && pressed.kind == MouseEventKind::Down(MouseButton::Left)
+                    && let Some(control) =
+                        self.control_at(usize::from(pressed.row), usize::from(pressed.column))
+                {
+                    self.transcript.unfold(control.cell);
+                    self.main_view.reveal(control.start);
+                }
+            }
+            MouseAction::Pass => self.mouse_doc_scroll_pass(event.kind),
+        }
+    }
+
+    fn panel_wheel_scroll(&mut self, kind: crossterm::event::MouseEventKind) {
+        use crossterm::event::MouseEventKind;
+        let code = match kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return,
+        };
+        for _ in 0..3 {
+            self.key_inner(KeyEvent::new(code, KeyModifiers::NONE), Instant::now());
+        }
+    }
+
+    fn mouse_panel(&mut self, event: crossterm::event::MouseEvent) {
+        use crossterm::event::MouseEventKind;
         if matches!(
             event.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) {
             self.selection.clear();
-        }
-        if !self.context_open() && usize::from(event.row) >= self.main_body_height {
-            if matches!(event.kind, MouseEventKind::Down(_)) {
-                self.selection.clear();
-            }
-            if !self.selection.active()
-                || !matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
-            {
-                return;
-            }
         }
         if let Some(panel) = &mut self.context_panel
             && !panel.text_view()
@@ -1870,52 +2150,22 @@ impl App {
             .mouse(event, Instant::now(), self.copy_on_select)
         {
             crate::selection::MouseAction::Handled => return,
-            crate::selection::MouseAction::Click(event) => event,
+            crate::selection::MouseAction::Click(clicked) => clicked,
             crate::selection::MouseAction::Pass => event,
         };
         self.composer.reset_escape();
+        self.panel_dispatch_mouse(event);
+    }
+
+    fn panel_dispatch_mouse(&mut self, event: crossterm::event::MouseEvent) {
         if self.side_visible
             && let Some(side) = &mut self.side
         {
             side.mouse(event);
-            return;
-        }
-        if let Some(panel) = &mut self.context_panel {
+        } else if let Some(panel) = &mut self.context_panel {
             panel.mouse(event);
-            return;
-        }
-        if event.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.pager.is_none()
-            && let Some(control) =
-                self.control_at(usize::from(event.row), usize::from(event.column))
-        {
-            self.transcript.unfold(control.cell);
-            self.main_view.reveal(control.start);
-            return;
-        }
-        let delta = match event.kind {
-            crossterm::event::MouseEventKind::ScrollUp => -3,
-            crossterm::event::MouseEventKind::ScrollDown => 3,
-            _ => return,
-        };
-        if let Some(pager) = &mut self.pager {
-            pager.scroll(delta);
-        } else if !self.context_open() {
-            self.main_view.scroll(delta);
         } else {
-            for _ in 0..3 {
-                self.key_inner(
-                    KeyEvent::new(
-                        if delta < 0 {
-                            KeyCode::Up
-                        } else {
-                            KeyCode::Down
-                        },
-                        KeyModifiers::NONE,
-                    ),
-                    Instant::now(),
-                );
-            }
+            self.panel_wheel_scroll(event.kind);
         }
     }
 
@@ -1977,7 +2227,10 @@ impl App {
             || self.help
             || self.menu.is_some()
             || self.mention.is_some();
+        self.sync_selection_surface();
+        let selecting = self.selection.active();
         let ready = !modal
+            && !selecting
             && (!self.fullscreen || self.main_view.following())
             && !self.running()
             && self.focused
@@ -1986,6 +2239,7 @@ impl App {
             self.composer.reset_escape();
         }
         if !modal
+            && !selecting
             && self.goal_status.is_some()
             && (key.code == KeyCode::Esc
                 || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -2009,8 +2263,91 @@ impl App {
         }
         exit
     }
+
+    fn main_overlay_open(&self) -> bool {
+        self.prompt.is_some()
+            || self.select.is_some()
+            || self.picker.is_some()
+            || self.theme_picker.is_some()
+            || self.menu.is_some()
+            || self.mention.is_some()
+    }
+
+    fn main_scroll_key(&mut self, key: KeyEvent) -> bool {
+        if self.main_overlay_open() {
+            return false;
+        }
+        let ctrl_jump = matches!(key.code, KeyCode::Home | KeyCode::End)
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && !ctrl_jump {
+            return false;
+        }
+        let doc_len = self.selection.doc_len();
+        let vp = self.main_viewport();
+        self.main_view.sync(doc_len, vp.height);
+        self.main_view.key(key);
+        let vp = self.main_viewport();
+        self.main_view.sync(doc_len, vp.height);
+        true
+    }
+
+    fn pager_selection_scroll_key(&mut self, key: KeyEvent) -> bool {
+        let doc_len = self.selection.doc_len();
+        let height = self.height;
+        let Some(pager) = &mut self.pager else {
+            return false;
+        };
+        let vp = pager.current_viewport(height);
+        pager.sync(doc_len, vp.height);
+        pager.scroll_key(key)
+    }
+
+    fn reveal_selection_end(&mut self) {
+        let (Some(source), Some(end_row)) = (self.selection.doc_source(), self.selection.end_row())
+        else {
+            return;
+        };
+        let (vp, offset, _) = self.doc_metrics(source);
+        if vp.height == 0 {
+            return;
+        }
+        let delta = if end_row < offset {
+            -isize::try_from(offset - end_row).unwrap_or(isize::MAX)
+        } else if end_row >= offset + vp.height {
+            isize::try_from(end_row + 1 - (offset + vp.height)).unwrap_or(isize::MAX)
+        } else {
+            return;
+        };
+        let doc_len = self.selection.doc_len();
+        self.scroll_doc(source, delta, doc_len);
+    }
+
+    fn handle_selection_key(&mut self, key: KeyEvent) -> bool {
+        if !self.selection.active() {
+            return false;
+        }
+        match self.selection.doc_source() {
+            Some(crate::selection::DocSource::Main) if self.main_scroll_key(key) => return true,
+            Some(crate::selection::DocSource::Pager) if self.pager_selection_scroll_key(key) => {
+                return true;
+            }
+            _ => {}
+        }
+        let handled = self.selection.key(key);
+        if handled
+            && matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            )
+        {
+            self.reveal_selection_end();
+        }
+        handled
+    }
+
     fn key_inner(&mut self, key: KeyEvent, now: Instant) -> Exit {
-        if self.selection.key(key) {
+        self.sync_selection_surface();
+        if self.handle_selection_key(key) {
             return Exit::Running;
         }
         if let Some(picker) = &mut self.theme_picker {
@@ -2099,6 +2436,7 @@ impl App {
         if let Some(pager) = &mut self.pager {
             if !pager.key(key) {
                 self.pager = None;
+                self.selection.clear();
             }
             return Exit::Running;
         }
@@ -2551,12 +2889,16 @@ impl App {
             .and_then(|side| side.cursor)
     }
     pub fn pager_frame(&mut self, rows: usize) -> Option<Vec<Line<'static>>> {
+        self.sync_selection_surface();
+        let doc_pager = self.active_doc_source() == Some(crate::selection::DocSource::Pager);
         let page = self.page_inner(rows);
         if page.is_none() && !self.fullscreen {
             self.selection.clear();
         }
-        page.map(|page| {
-            let mut page = self.selection.frame(page);
+        page.map(|mut page| {
+            if !doc_pager {
+                page = self.selection.frame(page);
+            }
             self.paint_copy_hint(&mut page);
             page
         })
@@ -2624,10 +2966,18 @@ impl App {
         }
         self.pager.as_ref()?;
         let width = self.width;
+        let theme = self.theme.clone();
+        if let Some(held) = self.selection.doc_lines(crate::selection::DocSource::Pager) {
+            let selection = &self.selection;
+            return self.pager.as_mut().map(|pager| {
+                pager.render_with(held, width, rows, &theme, |body, offset| {
+                    selection.highlight_slice(body, offset)
+                })
+            });
+        }
         self.cache_expanded(width);
         let committed = self.expanded.2.len();
         self.expanded.2.extend(self.transcript.expanded_live(width));
-        let theme = self.theme.clone();
         let page = self
             .pager
             .as_mut()
@@ -2743,41 +3093,36 @@ impl App {
         self.fullscreen
     }
 
-    /// The transcript scrolls independently of the bottom input and interaction area.
-    pub fn main_frame(&mut self) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
-        self.transcript.discard_history();
-        let now = Instant::now();
-        let (bottom, cursor) = self.bottom(Vec::new(), now);
-        let limit = if self.prompt.is_some()
-            || self.select.is_some()
-            || self.picker.is_some()
-            || self.theme_picker.is_some()
-        {
-            self.height
-        } else {
-            (self.height * 2 / 3).max(8).min(self.height)
-        };
-        let skip = bottom.len().saturating_sub(limit);
-        let bottom = &bottom[skip..];
-        let available = self.height.saturating_sub(bottom.len());
-        self.main_body_height = available;
-        let tail = self.transcript.retained_live(now - self.epoch, now);
-        let hint = !self.main_view.following() && available > 0;
-        let body_height = available.saturating_sub(usize::from(hint));
-        let mut body = if body_height == 0 {
-            Vec::new()
-        } else {
-            self.main_view
-                .viewport_parts(self.transcript.retained(), &tail, body_height)
-        };
-        body.resize(body_height, Line::default());
-        if let Some((row, column)) = self.pointer
-            && self.control_at(row, column).is_some()
-            && let Some(line) = body.get_mut(row)
-        {
-            *line = crate::cells::hovered(line, &self.theme);
-        }
-        if hint {
+    fn main_body(&mut self, available: usize, now: Instant) -> Vec<Line<'static>> {
+        let vp = Self::main_viewport_for(available, self.height, self.main_view.following());
+        let mut body =
+            if let Some(held) = self.selection.doc_lines(crate::selection::DocSource::Main) {
+                let mut slice = if vp.height == 0 {
+                    Vec::new()
+                } else {
+                    self.main_view.viewport(held, vp.height)
+                };
+                let offset = self.main_view.offset();
+                slice.resize(vp.height, Line::default());
+                self.selection.highlight_slice(slice, offset)
+            } else {
+                let tail = self.transcript.retained_live(now - self.epoch, now);
+                let mut slice = if vp.height == 0 {
+                    Vec::new()
+                } else {
+                    self.main_view
+                        .viewport_parts(self.transcript.retained(), &tail, vp.height)
+                };
+                slice.resize(vp.height, Line::default());
+                if let Some((row, column)) = self.pointer
+                    && self.control_at(row, column).is_some()
+                    && let Some(line) = slice.get_mut(row)
+                {
+                    *line = crate::cells::hovered(line, &self.theme);
+                }
+                slice
+            };
+        if !self.main_view.following() && available > 0 {
             body.push(wrap::fit(
                 vec![Span::styled(
                     "  esc latest · pgup/pgdn scroll",
@@ -2787,7 +3132,29 @@ impl App {
                 false,
             ));
         }
-        let mut frame = self.selection.frame(body);
+        body
+    }
+
+    /// The transcript scrolls independently of the bottom input and interaction area.
+    pub fn main_frame(&mut self) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        self.sync_selection_surface();
+        self.transcript.discard_history();
+        let now = Instant::now();
+        let (bottom, cursor) = self.bottom(Vec::new(), now);
+        let modal_bottom = self.prompt.is_some()
+            || self.select.is_some()
+            || self.picker.is_some()
+            || self.theme_picker.is_some();
+        let limit = if modal_bottom {
+            self.height
+        } else {
+            (self.height * 2 / 3).max(8).min(self.height)
+        };
+        let skip = bottom.len().saturating_sub(limit);
+        let bottom = &bottom[skip..];
+        let available = self.height.saturating_sub(bottom.len());
+        self.main_body_height = available;
+        let mut frame = self.main_body(available, now);
         frame.truncate(available);
         frame.resize(available, Line::default());
         frame.extend_from_slice(bottom);

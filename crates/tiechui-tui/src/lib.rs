@@ -301,6 +301,8 @@ async fn session(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut search_tick = tokio::time::interval(Duration::from_millis(16));
     search_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut autoscroll_tick = tokio::time::interval(Duration::from_millis(50));
+    autoscroll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let clipboard_cancel = tokio_util::sync::CancellationToken::new();
     let _clipboard_guard = clipboard_cancel.clone().drop_guard();
     let (pasted, mut pastes) = mpsc::channel(1);
@@ -456,6 +458,7 @@ async fn session(
         }
         tokio::select! {
             _ = search_tick.tick(), if app.searching() => app.search_step(),
+            _ = autoscroll_tick.tick(), if app.autoscrolling() => { app.autoscroll_tick(); },
             key = keys.next() => match key {
                 Some(Ok(TermEvent::Key(key))) => {
                     let (keys, colors) = replies.key(key);

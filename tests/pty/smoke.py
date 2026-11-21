@@ -805,6 +805,158 @@ def selection_copy_config(f):
     s.exit()
 
 
+def find_cell(s, needle):
+    for row, cells in enumerate(s.screen.cells):
+        line = "".join(cells)
+        if needle in line:
+            return row, line.index(needle)
+    s.check(False, "Text not found on screen: %r" % needle)
+
+
+def selection_scroll(f):
+    s = f.start()
+    s.command("long scroll reply", "SCROLL_ROW_59_END")
+    s.pump(0.15)
+
+    row58, col58 = find_cell(s, "SCROLL_ROW_58_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{col58 + 1 + len('SCROLL_ROW_58_END')};{row58 + 1}M")
+    s.pump(0.08)
+    for _ in range(10):
+        s.send("\x1b[<64;10;10M")
+        s.pump(0.04)
+    s.wait("esc latest")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Wheel drag emitted OSC 52 before release")
+    row_top, col_top = next(
+        (r, "".join(cells).index("SCROLL_ROW_"))
+        for r, cells in enumerate(s.screen.cells)
+        if "SCROLL_ROW_" in "".join(cells)
+    )
+    top_marker = "".join(s.screen.cells[row_top])[col_top:col_top + len("SCROLL_ROW_00_END")]
+    s.send(f"\x1b[<0;{col_top + 1};{row_top + 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after wheel drag, got %d" % len(copies))
+    s.check(top_marker in copies[0] and "SCROLL_ROW_58_END" in copies[0],
+            "Wheel drag missed cross-screen bounds: " + repr(copies[0]))
+    s.check("esc latest" not in copies[0] and "pgup/pgdn" not in copies[0],
+            "Scroll hint leaked into wheel drag copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    s.send(ESC)
+    s.wait("SCROLL_ROW_59_END", absent="esc latest")
+
+    row59, col59 = find_cell(s, "SCROLL_ROW_59_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{col59 + 1 + len('SCROLL_ROW_59_END')};{row59 + 1}M")
+    s.pump(0.05)
+    s.send("\x1b[<32;1;1M")
+    s.wait("SCROLL_ROW_00_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Top edge auto-scroll emitted OSC 52 before release")
+    s.send("\x1b[<0;1;1m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after top auto-scroll, got %d" % len(copies))
+    s.check("SCROLL_ROW_00_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
+            "Top auto-scroll missed bounds: " + repr(copies[0]))
+    s.check("esc latest" not in copies[0], "Scroll hint leaked into top auto-scroll copy")
+
+    s.send(ESC)
+    s.wait("SCROLL_ROW_00_END")
+    s.wait("esc latest")
+    row01, col01 = find_cell(s, "SCROLL_ROW_01_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{col01 + 1};{row01 + 1}M")
+    s.pump(0.05)
+    s.send(f"\x1b[<32;5;{s.screen.rows - 1}M")
+    s.wait("SCROLL_ROW_59_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Bottom edge auto-scroll emitted OSC 52 before release")
+    s.send(f"\x1b[<0;5;{s.screen.rows - 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after bottom auto-scroll, got %d" % len(copies))
+    s.check("SCROLL_ROW_01_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
+            "Bottom auto-scroll missed bounds: " + repr(copies[0]))
+    s.check("esc latest" not in copies[0] and "alpha" not in copies[0],
+            "Bottom chrome/hint leaked into bottom auto-scroll copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    row56, col56 = find_cell(s, "SCROLL_ROW_56_END")
+    s.send(f"\x1b[<0;{col56 + 1};{row56 + 1}M")
+    s.send(f"\x1b[<32;{col56 + 8};{row56 + 1}M")
+    s.send(f"\x1b[<0;{col56 + 1 + len('SCROLL_ROW_56_END')};{row56 + 1}m")
+    s.wait("chars to clipboard")
+    after_release = len(s.raw)
+    for seq in ["\x1b[<64;10;10M", "\x1b[<65;10;10M", "\x1b[5~", "\x1b[6~", "\x1b[1;5F", "\x1b[1;5H"]:
+        s.send(seq)
+        s.pump(0.1)
+    s.wait("SCROLL_ROW_00_END")
+    s.check(not copied_texts(s, after_release), "Scrolling after release emitted duplicate OSC 52")
+    row02, col02 = find_cell(s, "SCROLL_ROW_02_END")
+    s.send(f"\x1b[<4;{col02 + 1};{row02 + 1}M")
+    s.pump(0.08)
+    s.check(not copied_texts(s, after_release), "Shift+Click press emitted OSC 52 before release")
+    s.send(f"\x1b[<4;{col02 + 1};{row02 + 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, after_release)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Shift+Click release, got %d" % len(copies))
+    s.check(copies[0].startswith("SCROLL_ROW_02_END") and copies[0].endswith("SCROLL_ROW_56_END"),
+            "Shift+Click extension bounds mismatch: " + repr(copies[0]))
+    s.check("esc latest" not in copies[0], "Scroll hint leaked into Shift+Click copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    s.send(ESC)
+    s.wait("SCROLL_ROW_59_END", absent="esc latest")
+    s.send("\x0f")
+    s.wait("T R A N S C R I P T")
+    s.wait("SCROLL_ROW_59_END")
+
+    p_row58, p_col58 = find_cell(s, "SCROLL_ROW_58_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{p_col58 + 1 + len('SCROLL_ROW_58_END')};{p_row58 + 1}M")
+    s.pump(0.05)
+    s.send("\x1b[<32;10;1M")
+    s.wait("SCROLL_ROW_00_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Ctrl+O top drag emitted OSC 52 before release")
+    s.send("\x1b[<0;10;1m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O top drag, got %d" % len(copies))
+    s.check("SCROLL_ROW_00_END" in copies[0] and "SCROLL_ROW_58_END" in copies[0],
+            "Ctrl+O top drag missed bounds: " + repr(copies[0]))
+    for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
+        s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into copy" % forbidden)
+
+    s.send(ESC)
+    s.pump(0.1)
+    s.check("T R A N S C R I P T" in s.screen.text(), "First Esc closed Ctrl+O before clearing selection")
+    p_row01, p_col01 = find_cell(s, "SCROLL_ROW_01_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{p_col01 + 1};{p_row01 + 1}M")
+    s.pump(0.05)
+    s.send(f"\x1b[<32;10;{s.screen.rows - 2}M")
+    s.wait("SCROLL_ROW_59_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Ctrl+O bottom drag emitted OSC 52 before release")
+    s.send(f"\x1b[<0;10;{s.screen.rows - 2}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O bottom drag, got %d" % len(copies))
+    s.check("SCROLL_ROW_01_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
+            "Ctrl+O bottom drag missed bounds: " + repr(copies[0]))
+    for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
+        s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into bottom drag copy" % forbidden)
+
+    s.send(ESC)
+    s.pump(0.1)
+    s.check("T R A N S C R I P T" in s.screen.text(), "First Esc closed Ctrl+O instead of clearing selection")
+    s.send(ESC)
+    s.wait("alpha", absent="T R A N S C R I P T")
+    s.exit()
+
+
 def theme(f):
     s = f.start()
     s.wait("alpha")
@@ -1725,6 +1877,7 @@ CASES = {
     "viewport-reflow": (viewport_reflow, lambda: [Reply("STREAM_HEAD " + "中文 word " * 12 + "\n", hold=True, tail="STREAM_END")]),
     "selection-copy": (selection_copy, lambda: [Reply("COPY_ON_RELEASE"), Reply("COPY_ON_RELEASE")]),
     "selection-copy-config": (selection_copy_config, lambda: [Reply("COPY_CONFIG_TEXT"), Reply("COPY_NEW_TEXT")]),
+    "selection-scroll": (selection_scroll, lambda: [Reply("\n".join("SCROLL_ROW_%02d_END" % n for n in range(60)))]),
     "theme": (theme, lambda: [Reply("```rs\nlet value = 42;\n```\n\nTHEME_HISTORY")]),
     "resume": (resume, lambda: [Reply("ALPHA_HISTORY"), Reply("BETA_HISTORY"), Reply("RESUMED_DONE")]),
     "model": (model, lambda: [Reply("BETA_DONE"), Reply("ALPHA_DONE")]),
