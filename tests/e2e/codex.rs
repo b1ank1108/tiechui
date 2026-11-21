@@ -1824,6 +1824,7 @@ async fn a_turn_that_edits_files_can_be_undone_from_its_start_of_turn_snapshot()
             _ => None,
         })
         .unwrap();
+    wait_for_end_snapshot(&mut client, &thread, &item).await;
     assert_eq!(
         std::fs::read_to_string(fixture.cwd.join("src/hello.ts")).unwrap(),
         "changed by codex\n"
@@ -1906,4 +1907,220 @@ async fn a_failed_snapshot_is_recorded_as_missing_and_the_turn_still_runs() {
         .unwrap_err();
     let message = error["message"].as_str().unwrap();
     assert!(message.contains("snapshot"), "{message}");
+}
+
+// ----- undo from start and end snapshots -----
+
+/// A git repository holding `a.txt`, `b.txt` and `c.txt`, each with `<name>0` content.
+fn repo_with_three_files(fixture: &Fixture) {
+    git(&fixture.cwd, &["init", "-q"]);
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            fixture.cwd.join(format!("{name}.txt")),
+            format!("{name}0\n"),
+        )
+        .unwrap();
+    }
+    git(&fixture.cwd, &["add", "."]);
+    git(&fixture.cwd, &["commit", "-q", "-m", "init"]);
+}
+
+fn write_step(path: &str, content: &str) -> Value {
+    json!({"write": {"path": path, "content": content}})
+}
+
+fn read_file(fixture: &Fixture, name: &str) -> String {
+    std::fs::read_to_string(fixture.cwd.join(name)).unwrap()
+}
+
+/// The script of turns that each write the given files, one `turn/start` per turn.
+fn script_turns(fixture: &Fixture, turns: &[&[(&str, &str)]]) {
+    let mut steps = handshake(("never", "danger-full-access"));
+    for (index, writes) in turns.iter().enumerate() {
+        let id = format!("turn-{}", index + 1);
+        steps.extend(turn_start(&format!("turn {}", index + 1), &id));
+        steps.extend(
+            writes
+                .iter()
+                .map(|(path, content)| write_step(path, content)),
+        );
+        steps.push(turn_done(&id, "completed"));
+    }
+    fixture.script(steps);
+}
+
+/// Runs the next turn and returns its user item id, once its end-of-turn snapshot is recorded
+/// (which happens just after `TurnCompleted`).
+async fn run_turn(client: &mut Client, thread: &str, text: &str) -> String {
+    submit(client, thread, text, "follow_up").await;
+    let events = client.until(is_completed).await;
+    let item = events
+        .iter()
+        .find_map(|e| match &e.event.event {
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::UserMessage { id, .. }),
+                ..
+            } => Some(id.0.clone()),
+            _ => None,
+        })
+        .unwrap();
+    wait_for_end_snapshot(client, thread, &item).await;
+    item
+}
+
+/// The end-of-turn snapshot is taken just after `TurnCompleted`; `turn/check` works once it is.
+async fn wait_for_end_snapshot(client: &mut Client, thread: &str, item: &str) {
+    for _ in 0..100 {
+        if client.call("turn/check", at(thread, item)).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no end-of-turn snapshot for {item}");
+}
+
+fn at(thread: &str, item: &str) -> Value {
+    json!({"thread_id": thread, "item_id": item})
+}
+
+#[tokio::test]
+async fn a_turns_changes_are_its_own_and_undoing_it_leaves_later_turns_alone() {
+    let fixture = Fixture::new();
+    repo_with_three_files(&fixture);
+    script_turns(
+        &fixture,
+        &[
+            &[("a.txt", "a1\n")],
+            &[("b.txt", "b2\n"), ("new.txt", "n\n")],
+        ],
+    );
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    let first = run_turn(&mut client, &thread, "turn 1").await;
+    let second = run_turn(&mut client, &thread, "turn 2").await;
+
+    let changes = client.ok("turn/changes", at(&thread, &first)).await;
+    assert_eq!(
+        changes,
+        json!({"changes": [{"path": "a.txt", "before": "a0\n", "after": "a1\n"}],
+            "reverted": false})
+    );
+    let later = client.ok("turn/changes", at(&thread, &second)).await;
+    assert_eq!(
+        later,
+        json!({"changes": [
+            {"path": "b.txt", "before": "b0\n", "after": "b2\n"},
+            {"path": "new.txt", "before": null, "after": "n\n"}],
+            "reverted": false})
+    );
+    let check = client.ok("turn/check", at(&thread, &first)).await;
+    assert_eq!(
+        check,
+        json!({"safe": ["a.txt"], "unsafe": [], "ignored": []})
+    );
+
+    let undone = client.ok("turn/undo", at(&thread, &first)).await;
+    assert_eq!(undone["reverted"], true, "{undone}");
+    assert_eq!(read_file(&fixture, "a.txt"), "a0\n");
+    assert_eq!(read_file(&fixture, "b.txt"), "b2\n", "turn 2 is untouched");
+    assert_eq!(read_file(&fixture, "new.txt"), "n\n");
+}
+
+#[tokio::test]
+async fn undo_is_refused_for_a_file_edited_after_the_turn_and_names_it() {
+    let fixture = Fixture::new();
+    repo_with_three_files(&fixture);
+    script_turns(&fixture, &[&[("a.txt", "a1\n"), ("b.txt", "b1\n")]]);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    let item = run_turn(&mut client, &thread, "turn 1").await;
+    std::fs::write(fixture.cwd.join("a.txt"), "edited by hand\n").unwrap();
+
+    let check = client.ok("turn/check", at(&thread, &item)).await;
+    assert_eq!(
+        check,
+        json!({"safe": ["b.txt"], "unsafe": ["a.txt"], "ignored": []})
+    );
+    let error = client
+        .call("turn/undo", at(&thread, &item))
+        .await
+        .unwrap_err();
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("changed since the turn") && message.contains("a.txt"),
+        "{message}"
+    );
+    assert_eq!(read_file(&fixture, "a.txt"), "edited by hand\n");
+    assert_eq!(read_file(&fixture, "b.txt"), "b1\n", "nothing is restored");
+}
+
+#[tokio::test]
+async fn undo_never_touches_a_file_the_turn_did_not_change() {
+    let fixture = Fixture::new();
+    repo_with_three_files(&fixture);
+    script_turns(&fixture, &[&[("a.txt", "a1\n")]]);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    let item = run_turn(&mut client, &thread, "turn 1").await;
+    std::fs::write(fixture.cwd.join("c.txt"), "c edited later\n").unwrap();
+    std::fs::write(fixture.cwd.join("stray.txt"), "stray\n").unwrap();
+
+    let check = client.ok("turn/check", at(&thread, &item)).await;
+    assert_eq!(check["unsafe"], json!([]), "{check}");
+    client.ok("turn/undo", at(&thread, &item)).await;
+    assert_eq!(read_file(&fixture, "a.txt"), "a0\n");
+    assert_eq!(read_file(&fixture, "c.txt"), "c edited later\n");
+    assert_eq!(read_file(&fixture, "stray.txt"), "stray\n");
+}
+
+#[tokio::test]
+async fn undo_twice_reapplies_the_turn_and_the_reverted_state_survives_reopening() {
+    let fixture = Fixture::new();
+    repo_with_three_files(&fixture);
+    script_turns(&fixture, &[&[("a.txt", "a1\n")]]);
+    let (path, thread, item) = {
+        let mut client = fixture.client();
+        let opened = open(&mut client, &fixture, Some("yolo")).await;
+        let thread = opened.thread_id.0.clone();
+        let item = run_turn(&mut client, &thread, "turn 1").await;
+        let undone = client.ok("turn/undo", at(&thread, &item)).await;
+        assert_eq!(undone["reverted"], true, "{undone}");
+        assert_eq!(read_file(&fixture, "a.txt"), "a0\n");
+        let check = client.ok("turn/check", at(&thread, &item)).await;
+        assert_eq!(
+            check,
+            json!({"safe": ["a.txt"], "unsafe": [], "ignored": []})
+        );
+        client
+            .ok("session/close", json!({"thread_id": thread}))
+            .await;
+        (opened.path, thread, item)
+    };
+    fixture.script(vec![
+        expect(json!({"method": "initialize"})),
+        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
+        expect(json!({"method": "initialized"})),
+        expect(json!({"method": "thread/resume", "params": {"threadId": THREAD}})),
+        answer(thread_response()),
+    ]);
+    let mut client = fixture.client();
+    let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
+    assert_eq!(reopened.thread_id.0, thread);
+    let changes = client.ok("turn/changes", at(&thread, &item)).await;
+    assert_eq!(changes["reverted"], true, "{changes}");
+    let again = client.ok("turn/undo", at(&thread, &item)).await;
+    assert_eq!(again["reverted"], false, "{again}");
+    assert_eq!(read_file(&fixture, "a.txt"), "a1\n");
+    // A reverted turn whose file was edited meanwhile is not re-applied over the edit.
+    client.ok("turn/undo", at(&thread, &item)).await;
+    std::fs::write(fixture.cwd.join("a.txt"), "mine\n").unwrap();
+    let error = client
+        .call("turn/undo", at(&thread, &item))
+        .await
+        .unwrap_err();
+    assert!(error["message"].as_str().unwrap().contains("a.txt"));
+    assert_eq!(read_file(&fixture, "a.txt"), "mine\n");
 }

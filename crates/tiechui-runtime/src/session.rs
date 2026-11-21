@@ -409,11 +409,11 @@ impl Session {
         Ok(())
     }
 
-    /// Records the worktree as it is before the turn runs, under the turn's user entry, as the
-    /// native rewind module does, so `turn/check` and `turn/undo` can restore it. It takes as
-    /// long as native's capture at most (its own timeout) and a failure is recorded as a
-    /// missing snapshot; the turn runs either way. Derived turns have no user entry and get
-    /// none.
+    /// Records the worktree under `anchor`, as the native rewind module does: before a root
+    /// turn runs under its user entry, and after it under `end_anchor` of that entry, so
+    /// `turn/check` and `turn/undo` can work from the turn's own changes. It takes as long as
+    /// native's capture at most (its own timeout) and a failure is recorded as a missing
+    /// snapshot; the turn runs either way. Derived turns have none.
     fn capture_snapshot(&self, anchor: &str) -> tokio::task::JoinHandle<()> {
         let (home, cwd, anchor) = (self.home.clone(), self.cwd.clone(), anchor.to_owned());
         let (session, cancel) = (self.thread.0.clone(), self.cancel.clone());
@@ -471,14 +471,23 @@ impl Session {
 
     async fn complete(&mut self, status: TurnStatus) {
         self.interrupt_at = None;
+        let mut root_anchor = None;
         if let Some(open) = self.turn.take() {
             let mut turn = open.turn;
             turn.status = status;
             turn.ended_at = Some(tiechui_session::now_ms());
             self.last_turn = Some(turn.id.clone());
+            if !open.derived {
+                root_anchor = Some(tiechui_module_rewind::end_anchor(&turn.id.0));
+            }
             self.emit(EventKind::TurnCompleted { turn });
         }
         self.submission = None;
+        // After the completion is out, so it is never delayed by the capture; before a queued
+        // turn starts, so the snapshot holds this turn's files only.
+        if let Some(anchor) = root_anchor {
+            let _ = self.capture_snapshot(&anchor).await;
+        }
     }
 
     /// After a turn ended: the next queued input starts a turn.

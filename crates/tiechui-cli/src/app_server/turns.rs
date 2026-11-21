@@ -217,6 +217,12 @@ fn resolve_ready_snapshot(at: &Located) -> Result<Result<(String, String), Strin
     let Some(anchor) = at.own.first() else {
         return Ok(Err("no checkpoint anchor for this turn".into()));
     };
+    ready_snapshot(at, anchor)
+}
+
+/// The reference and tree of the snapshot recorded under `anchor`, or why there is none.
+#[cfg(feature = "workspace")]
+fn ready_snapshot(at: &Located, anchor: &str) -> Result<Result<(String, String), String>, String> {
     match at.store.snapshot(anchor).map_err(|e| e.0)? {
         Some(SnapshotRecord::Ready { reference, tree }) => {
             if tiechui_workspace::has_worktree_snapshot_tree(&at.cwd, &tree, &BTreeMap::new()) {
@@ -519,69 +525,81 @@ fn check(at: &Located, turn: &Turn, cancel: &CancellationToken) -> Result<UndoCh
 }
 
 /// `turn/changes`, `turn/check` and `turn/undo` of an external session's turn, from the
-/// worktree snapshot taken when the turn started. The restore is of the whole worktree, so it
-/// is offered for the latest turn only.
+/// worktree snapshots taken when the turn started and when it ended. The turn's files are what
+/// differs between the two, and undo writes back only those, as native does from its records.
 #[cfg(feature = "workspace")]
 fn snapshot_turn_op(
     method: &str,
     at: &Located,
     cancel: &CancellationToken,
 ) -> Result<Value, String> {
-    let (_, tree) = resolve_ready_snapshot(at)?
+    let anchor = at.own.first().ok_or("no checkpoint anchor for this turn")?;
+    let (_, start) = resolve_ready_snapshot(at)?
         .map_err(|reason| format!("no worktree snapshot for this turn: {reason}"))?;
-    let is_cancelled = || cancel.is_cancelled();
-    let files = tiechui_workspace::diff_worktree_snapshot_with_env(
-        &at.cwd,
-        &tree,
-        tiechui_workspace::DEFAULT_SNAPSHOT_TIMEOUT,
-        &BTreeMap::new(),
-        Some(&is_cancelled),
-    )
-    .map_err(|e| e.0)?;
+    let (_, end) = ready_snapshot(at, &tiechui_module_rewind::end_anchor(anchor))?
+        .map_err(|reason| format!("no end-of-turn snapshot for this turn: {reason}"))?;
+    let reverted = at.store.snapshot_reverted(anchor).map_err(|e| e.0)?;
     let top = git_toplevel(&at.cwd)?;
-    let texts = |files: &[String]| -> Vec<FileChange> {
-        files
+    let files = changed_between(&top, &start, &end)?;
+    let (before, after) = (
+        |path: &str| tree_file(&top, &start, path),
+        |path: &str| tree_file(&top, &end, path),
+    );
+    let text =
+        |file: Option<Vec<u8>>| file.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let changes = |reverted| TurnChanges {
+        changes: files
             .iter()
             .map(|path| FileChange {
                 path: path.clone(),
-                before: git_blob(&top, &tree, path),
-                after: file_text(&top.join(path)),
+                before: text(before(path)),
+                after: text(after(path)),
             })
-            .collect()
+            .collect(),
+        reverted,
     };
+    let mut unsafe_files = vec![];
+    let mut safe = vec![];
+    for path in &files {
+        let expected = if reverted { before(path) } else { after(path) };
+        if expected == current_file(&top, path) {
+            safe.push(path.clone());
+        } else {
+            unsafe_files.push(path.clone());
+        }
+    }
     match method {
-        "turn/changes" => to_json(TurnChanges {
-            changes: texts(&files),
-            reverted: false,
-        }),
+        "turn/changes" => to_json(changes(reverted)),
         "turn/check" => to_json(UndoCheck {
-            safe: files,
-            r#unsafe: vec![],
-            ignored: at.turn_commands.clone(),
+            safe,
+            r#unsafe: unsafe_files,
+            ignored: if reverted {
+                vec![]
+            } else {
+                at.turn_commands.clone()
+            },
         }),
         _ => {
-            if !at.later.is_empty() {
-                return Err(
-                    "later turns exist: a snapshot restores the whole worktree, so only the latest turn can be undone"
-                        .into(),
-                );
+            if !unsafe_files.is_empty() {
+                return Err(format!(
+                    "changed since the turn: {}",
+                    unsafe_files.join(", ")
+                ));
             }
             if files.is_empty() {
-                return Err("The turn changed no files".into());
+                return Err("the turn changed no files".into());
             }
-            let changes = texts(&files);
-            tiechui_workspace::restore_worktree_snapshot_cancellable(
-                &at.cwd,
-                &tree,
-                tiechui_workspace::DEFAULT_SNAPSHOT_TIMEOUT,
-                &BTreeMap::new(),
-                Some(&is_cancelled),
-            )
-            .map_err(|e| e.0)?;
-            to_json(TurnChanges {
-                changes,
-                reverted: true,
-            })
+            for path in &files {
+                write_file(
+                    &top,
+                    path,
+                    if reverted { after(path) } else { before(path) },
+                )?;
+            }
+            at.store
+                .set_snapshot_reverted(anchor, !reverted, cancel)
+                .map_err(|e| e.0)?;
+            to_json(changes(!reverted))
         }
     }
 }
@@ -610,22 +628,59 @@ fn git_toplevel(cwd: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-/// The file's text in the snapshot tree, when it was there and is text.
+/// The paths whose content differs between two snapshot trees, sorted, without submodules.
 #[cfg(feature = "workspace")]
-fn git_blob(top: &Path, tree: &str, path: &str) -> Option<String> {
+fn changed_between(top: &Path, start: &str, end: &str) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["diff-tree", "-r", "-z", "--raw", "--no-renames", start, end])
+        .current_dir(top)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    // `:<mode> <mode> <oid> <oid> <status>` NUL `<path>` NUL, per file.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0').filter(|field| !field.is_empty());
+    let mut files = vec![];
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        if !meta.contains("160000") {
+            files.push(path.to_owned());
+        }
+    }
+    Ok(files)
+}
+
+/// What a file holds in a snapshot tree, or `None` when it is not there.
+#[cfg(feature = "workspace")]
+fn tree_file(top: &Path, tree: &str, path: &str) -> Option<Vec<u8>> {
     let output = std::process::Command::new("git")
         .args(["cat-file", "blob", &format!("{tree}:{path}")])
         .current_dir(top)
         .output()
         .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    output.status.success().then_some(output.stdout)
 }
 
+/// What a file holds in the worktree now, or `None` when it is not there.
 #[cfg(feature = "workspace")]
-fn file_text(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+fn current_file(top: &Path, path: &str) -> Option<Vec<u8>> {
+    std::fs::read(top.join(path)).ok()
+}
+
+/// Puts `content` at `path`, or removes the file when it is `None`.
+#[cfg(feature = "workspace")]
+fn write_file(top: &Path, path: &str, content: Option<Vec<u8>>) -> Result<(), String> {
+    let target = top.join(path);
+    let result = match content {
+        Some(bytes) => target
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&target, bytes)),
+        None => match std::fs::remove_file(&target) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    result.map_err(|e| format!("could not restore {path}: {e}"))
 }

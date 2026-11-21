@@ -102,6 +102,12 @@ fn capture_before_request_sync(
     record_turn_snapshot(&store, options, cwd, session_id, &anchor.id, cancel);
 }
 
+/// The anchor an external turn's end-of-turn snapshot is recorded under, beside the
+/// start-of-turn snapshot of `anchor_id`.
+pub fn end_anchor(anchor_id: &str) -> String {
+    format!("{anchor_id}:end")
+}
+
 /// Captures the worktree and records it under `anchor_id`, unless the turn has a record already.
 /// A failed capture is recorded as missing, with its reason; nothing here fails the caller.
 pub fn record_turn_snapshot(
