@@ -5,6 +5,7 @@
 //! already consumes for native sessions.
 
 mod backend;
+mod claude;
 mod codex;
 #[cfg(feature = "fake-runtime")]
 pub mod fake;
@@ -16,6 +17,7 @@ mod session;
 pub use backend::{
     Backend, BackendEvent, BackendItem, ChildOf, StartParams, Started, Steered, SubagentUpdate,
 };
+pub use claude::ClaudeDriver;
 pub use codex::CodexDriver;
 pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY, item_id};
 pub use process::{DeltaCoalescer, Frame, FrameReader, MAX_FRAME, Process};

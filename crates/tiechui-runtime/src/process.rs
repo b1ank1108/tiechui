@@ -31,7 +31,23 @@ impl Process {
         cwd: &Path,
         path: Option<&OsString>,
     ) -> io::Result<Self> {
+        Self::spawn_filtered(program, args, cwd, path, |_| false)
+    }
+
+    /// Like `spawn`, but the process does not inherit the variables whose names `strip` accepts.
+    pub fn spawn_filtered(
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        path: Option<&OsString>,
+        strip: impl Fn(&str) -> bool,
+    ) -> io::Result<Self> {
         let mut command = Command::new(program);
+        for (name, _) in std::env::vars_os() {
+            if name.to_str().is_some_and(&strip) {
+                command.env_remove(name);
+            }
+        }
         command
             .args(args)
             .current_dir(cwd)

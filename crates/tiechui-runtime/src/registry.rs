@@ -116,7 +116,7 @@ impl Registry {
         Ok(Self { drivers, launch })
     }
 
-    /// The runtimes this build ships: `codex`, and `fake` with the `fake-runtime` feature.
+    /// The runtimes this build ships: `codex`, `claude`, and `fake` with the `fake-runtime` feature.
     pub fn builtin(launch: Launch) -> Self {
         Self::new(builtin_drivers(), launch).expect("built-in runtimes are consistent")
     }
@@ -166,7 +166,10 @@ impl Registry {
 
 fn builtin_drivers() -> Vec<Arc<dyn Driver>> {
     #[allow(unused_mut)]
-    let mut drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(crate::codex::CodexDriver)];
+    let mut drivers: Vec<Arc<dyn Driver>> = vec![
+        Arc::new(crate::codex::CodexDriver),
+        Arc::new(crate::claude::ClaudeDriver),
+    ];
     #[cfg(feature = "fake-runtime")]
     drivers.push(Arc::new(crate::fake::FakeDriver));
     drivers
