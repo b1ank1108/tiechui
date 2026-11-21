@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -41,6 +41,9 @@ struct Manifest {
     undone: BTreeMap<String, Files>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     snapshots: BTreeMap<String, SnapshotRecord>,
+    /// The snapshot turns, by their first anchor, that are currently undone.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    reverted_snapshots: BTreeSet<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
@@ -221,6 +224,7 @@ impl Store {
                 head: BTreeMap::new(),
                 undone: BTreeMap::new(),
                 snapshots: BTreeMap::new(),
+                reverted_snapshots: BTreeSet::new(),
             }),
             Err(error) => Err(error),
         }
@@ -264,6 +268,28 @@ impl Store {
     }
     pub fn snapshot(&self, anchor: &str) -> Result<Option<SnapshotRecord>> {
         Ok(self.load()?.snapshots.get(anchor).cloned())
+    }
+    /// Whether the snapshot turn anchored at `anchor` is currently undone.
+    pub fn snapshot_reverted(&self, anchor: &str) -> Result<bool> {
+        Ok(self.load()?.reverted_snapshots.contains(anchor))
+    }
+    pub fn set_snapshot_reverted(
+        &self,
+        anchor: &str,
+        reverted: bool,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _lock = self.lock(cancel)?;
+        let mut data = self.load()?;
+        let changed = if reverted {
+            data.reverted_snapshots.insert(anchor.into())
+        } else {
+            data.reverted_snapshots.remove(anchor)
+        };
+        if changed {
+            self.atomic("manifest.json", &data)?;
+        }
+        Ok(())
     }
     pub fn snapshots(&self) -> Result<BTreeMap<String, SnapshotRecord>> {
         Ok(self.load()?.snapshots)

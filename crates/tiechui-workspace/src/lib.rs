@@ -47,9 +47,10 @@ pub use worktree_isolation::{
 };
 pub use worktree_snapshot::{
     DEFAULT_SNAPSHOT_TIMEOUT, WorktreeSnapshot, capture_worktree_snapshot,
-    capture_worktree_snapshot_cancellable, capture_worktree_snapshot_with_env, checkpoint_ref_name,
-    diff_worktree_snapshot_with_env, has_worktree_snapshot_tree, restore_worktree_snapshot,
-    restore_worktree_snapshot_cancellable, restore_worktree_snapshot_with_env,
+    capture_worktree_snapshot_cancellable, capture_worktree_snapshot_with_env, checkout_tree_paths,
+    checkpoint_ref_name, diff_worktree_snapshot_with_env, has_worktree_snapshot_tree,
+    restore_worktree_snapshot, restore_worktree_snapshot_cancellable,
+    restore_worktree_snapshot_with_env,
 };
 
 /// Receives a notification's method and params.

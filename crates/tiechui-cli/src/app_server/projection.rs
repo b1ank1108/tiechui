@@ -10,6 +10,8 @@ use tiechui_protocol::{
     KnownItem, SessionEpoch, SubmissionId, TurnId,
 };
 
+use tiechui_runtime::item_id;
+
 use super::textgen::InitialTitleTrigger;
 
 #[derive(Default)]
@@ -301,23 +303,6 @@ pub(super) fn is_btw_settled(kind: &EventKind) -> bool {
                     ..
                 })
         )
-}
-
-fn item_id(item: &Item) -> Option<ItemId> {
-    match item {
-        Item::Known(
-            KnownItem::Compaction { id, .. }
-            | KnownItem::UserMessage { id, .. }
-            | KnownItem::AssistantMessage { id, .. }
-            | KnownItem::Thinking { id, .. }
-            | KnownItem::ToolCall { id, .. }
-            | KnownItem::ToolResult { id, .. },
-        ) => Some(id.clone()),
-        Item::Custom { payload, .. } => payload
-            .get("id")
-            .and_then(|id| id.as_str())
-            .map(|id| ItemId(id.into())),
-    }
 }
 
 #[cfg(test)]

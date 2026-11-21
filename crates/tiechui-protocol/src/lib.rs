@@ -17,8 +17,10 @@ pub use rewind::*;
 pub mod app;
 mod context;
 pub mod rpc;
+mod runtime;
 pub mod workspace;
 pub use context::*;
+pub use runtime::*;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

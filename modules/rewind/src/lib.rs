@@ -3,7 +3,9 @@
 mod snapshot;
 pub mod store;
 
-pub use snapshot::{SnapshotOptions, tiechui_home_from_rewind_dir};
+pub use snapshot::{
+    SnapshotOptions, end_anchor, record_turn_snapshot, tiechui_home_from_rewind_dir,
+};
 
 use std::{
     collections::BTreeMap,

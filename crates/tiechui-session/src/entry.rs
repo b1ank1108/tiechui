@@ -13,6 +13,9 @@ pub struct Header {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<std::path::PathBuf>,
+    /// The agent runtime that runs the session; absent for the native one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

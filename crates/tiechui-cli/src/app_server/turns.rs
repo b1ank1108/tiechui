@@ -50,6 +50,7 @@ pub(super) struct Located {
     pub(super) session_id: String,
     #[cfg(feature = "workspace")]
     pub(super) cwd: PathBuf,
+    pub(super) external: bool,
     pub(super) branch_target: String,
     pub(super) own: Vec<String>,
     pub(super) later: Vec<String>,
@@ -89,6 +90,9 @@ fn dispatch_turn_op(
     at: Located,
     cancel: &CancellationToken,
 ) -> Result<Value, String> {
+    if at.external {
+        return snapshot_turn_op(method, &at, cancel);
+    }
     let turn = at.store.turn(&at.own, &at.later, cancel).map_err(|e| e.0)?;
     match method {
         "turn/changes" => changes(&at.store, &turn).and_then(to_json),
@@ -137,6 +141,21 @@ fn rewind_check(
         return worktree_rewind_check(home, at, &discarded, live_sessions, cancel);
     }
     let _ = live_sessions;
+    #[cfg(feature = "workspace")]
+    if at.external
+        && let Ok(Ok((reference, _))) = resolve_ready_snapshot(&at)
+    {
+        return Ok(RewindCheck {
+            mode: RewindMode::Snapshot,
+            reason: None,
+            snapshot_ref: Some(reference),
+            conflicting_session: None,
+            commands: at.rewind_commands,
+            files: vec![],
+            safe: vec![],
+            r#unsafe: vec![],
+        });
+    }
     build_patch_rewind_check(&at.store, &discarded, None, at.rewind_commands, cancel)
 }
 
@@ -197,6 +216,11 @@ fn resolve_ready_snapshot(at: &Located) -> Result<Result<(String, String), Strin
     let Some(anchor) = at.own.first() else {
         return Ok(Err("no checkpoint anchor for this turn".into()));
     };
+    ready_snapshot(at, anchor)
+}
+
+#[cfg(feature = "workspace")]
+fn ready_snapshot(at: &Located, anchor: &str) -> Result<Result<(String, String), String>, String> {
     match at.store.snapshot(anchor).map_err(|e| e.0)? {
         Some(SnapshotRecord::Ready { reference, tree }) => {
             if tiechui_workspace::has_worktree_snapshot_tree(&at.cwd, &tree, &BTreeMap::new()) {
@@ -411,6 +435,10 @@ fn locate(
     )
     .map_err(|e| e.0)?;
     Ok(Located {
+        external: header
+            .runtime
+            .as_deref()
+            .is_some_and(|runtime| runtime != "chui"),
         store: rewind_store,
         #[cfg(feature = "workspace")]
         session_id: header.id.clone(),
@@ -492,4 +520,215 @@ fn check(at: &Located, turn: &Turn, cancel: &CancellationToken) -> Result<UndoCh
         check.ignored = at.turn_commands.clone();
     }
     Ok(check)
+}
+
+#[cfg(feature = "workspace")]
+struct SnapshotDiff {
+    top: PathBuf,
+    start: String,
+    end: String,
+    files: Vec<String>,
+    reverted: bool,
+}
+
+#[cfg(feature = "workspace")]
+impl SnapshotDiff {
+    fn load(at: &Located, anchor: &str) -> Result<Self, String> {
+        let (_, start) = resolve_ready_snapshot(at)?
+            .map_err(|reason| format!("no worktree snapshot for this turn: {reason}"))?;
+        let (_, end) = ready_snapshot(at, &tiechui_module_rewind::end_anchor(anchor))?
+            .map_err(|reason| format!("no end-of-turn snapshot for this turn: {reason}"))?;
+        let top = git_toplevel(&at.cwd)?;
+        Ok(Self {
+            files: changed_between(&top, &start, &end)?,
+            reverted: at.store.snapshot_reverted(anchor).map_err(|e| e.0)?,
+            top,
+            start,
+            end,
+        })
+    }
+
+    fn before(&self, path: &str) -> Option<Vec<u8>> {
+        tree_file(&self.top, &self.start, path)
+    }
+
+    fn after(&self, path: &str) -> Option<Vec<u8>> {
+        tree_file(&self.top, &self.end, path)
+    }
+
+    fn changes(&self, reverted: bool) -> TurnChanges {
+        let text =
+            |file: Option<Vec<u8>>| file.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        TurnChanges {
+            changes: self
+                .files
+                .iter()
+                .map(|path| FileChange {
+                    path: path.clone(),
+                    before: text(self.before(path)),
+                    after: text(self.after(path)),
+                })
+                .collect(),
+            reverted,
+        }
+    }
+
+    fn check(&self, at: &Located) -> UndoCheck {
+        let (mut safe, mut unsafe_files) = (vec![], vec![]);
+        for path in &self.files {
+            let expected = if self.reverted {
+                self.before(path)
+            } else {
+                self.after(path)
+            };
+            if expected == current_file(&self.top, path) {
+                safe.push(path.clone());
+            } else {
+                unsafe_files.push(path.clone());
+            }
+        }
+        UndoCheck {
+            safe,
+            r#unsafe: unsafe_files,
+            ignored: if self.reverted {
+                vec![]
+            } else {
+                at.turn_commands.clone()
+            },
+        }
+    }
+
+    fn undo(
+        &self,
+        at: &Located,
+        anchor: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Value, String> {
+        let check = self.check(at);
+        if !check.r#unsafe.is_empty() {
+            return Err(format!(
+                "changed since the turn: {}",
+                check.r#unsafe.join(", ")
+            ));
+        }
+        if self.files.is_empty() {
+            return Err("the turn changed no files".into());
+        }
+        let tree = if self.reverted {
+            &self.end
+        } else {
+            &self.start
+        };
+        let (present, absent): (Vec<String>, Vec<String>) = self
+            .files
+            .iter()
+            .cloned()
+            .partition(|path| tree_file(&self.top, tree, path).is_some());
+        for path in &absent {
+            remove_file(&self.top, path)?;
+        }
+        tiechui_workspace::checkout_tree_paths(&self.top, tree, &present)
+            .map_err(|e| format!("could not restore files: {}", e.0))?;
+        at.store
+            .set_snapshot_reverted(anchor, !self.reverted, cancel)
+            .map_err(|e| e.0)?;
+        to_json(self.changes(!self.reverted))
+    }
+}
+
+#[cfg(feature = "workspace")]
+fn snapshot_turn_op(
+    method: &str,
+    at: &Located,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
+    let anchor = at.own.first().ok_or("no checkpoint anchor for this turn")?;
+    let diff = SnapshotDiff::load(at, anchor)?;
+    match method {
+        "turn/changes" => to_json(diff.changes(diff.reverted)),
+        "turn/check" => to_json(diff.check(at)),
+        _ => diff.undo(at, anchor, cancel),
+    }
+}
+
+#[cfg(not(feature = "workspace"))]
+fn snapshot_turn_op(
+    _method: &str,
+    _at: &Located,
+    _cancel: &CancellationToken,
+) -> Result<Value, String> {
+    Err("workspace support is disabled".into())
+}
+
+#[cfg(feature = "workspace")]
+fn git_toplevel(cwd: &Path) -> Result<PathBuf, String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("not a Git worktree".into());
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+#[cfg(feature = "workspace")]
+fn changed_between(top: &Path, start: &str, end: &str) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["diff-tree", "-r", "-z", "--raw", "--no-renames", start, end])
+        .current_dir(top)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    // `:<mode> <mode> <oid> <oid> <status>` NUL `<path>` NUL, per file.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0').filter(|field| !field.is_empty());
+    let mut files = vec![];
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        if !meta.contains("160000") {
+            files.push(path.to_owned());
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(feature = "workspace")]
+fn tree_file(top: &Path, tree: &str, path: &str) -> Option<Vec<u8>> {
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "blob", &format!("{tree}:{path}")])
+        .current_dir(top)
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+#[cfg(feature = "workspace")]
+fn current_file(top: &Path, path: &str) -> Option<Vec<u8>> {
+    let target = top.join(path);
+    // Git keeps a symlink as a blob holding its target.
+    if std::fs::symlink_metadata(&target)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return std::fs::read_link(&target)
+            .ok()
+            .map(|link| link.into_os_string().into_encoded_bytes());
+    }
+    std::fs::read(target).ok()
+}
+
+#[cfg(feature = "workspace")]
+fn remove_file(top: &Path, path: &str) -> Result<(), String> {
+    match std::fs::remove_file(top.join(path)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("could not remove {path}: {e}"))
+        }
+        _ => Ok(()),
+    }
 }

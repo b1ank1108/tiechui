@@ -164,6 +164,10 @@ export type ContextView = "overview" | "system" | "tools" | "injections" | "mess
 
 export type DaemonStatus = { pid: number, server_version: string, protocol_version: number, connected_clients: number, busy_sessions: number, alive_terminals: number, };
 
+export type DerivedReason = "subagent" | "approval" | "runtime";
+
+export type DerivedTurnMarker = { id: ItemId, derived_from: TurnId, reason: DerivedReason, };
+
 export type Error = { code: number, message: string, data?: JsonValue | null, };
 
 export type Event = { submission_id?: SubmissionId | null, thread_id: ThreadId, epoch: SessionEpoch, event: EventKind, };
@@ -588,6 +592,64 @@ export type RewindRow = { session_id: string, entry_id: string, text: string, ti
 
 export type RootParams = { root: string, };
 
+export type RuntimeCapabilities = { steering: SteeringMode, 
+/**
+ * `session/branch` and `Op::Branch`: moving the conversation to an earlier turn.
+ */
+branch: boolean, 
+/**
+ * `session/fork`: copying a conversation through a turn into a new session.
+ */
+fork: boolean, 
+/**
+ * `session/rewind`: conversation rewind. `turn/check` and `turn/undo` are not gated.
+ */
+rewind: boolean, 
+/**
+ * `Op::Retry`: continuing a failed model request.
+ */
+retry: boolean, 
+/**
+ * `Op::Compact`.
+ */
+compact: boolean, 
+/**
+ * `btw/*`: the side conversation.
+ */
+side_chat: boolean, 
+/**
+ * Module commands: `Op::RunCommand` and `Op::CommandInput`.
+ */
+commands: boolean, 
+/**
+ * `Op::SetThinking`.
+ */
+thinking: boolean, 
+/**
+ * `Op::SetModel`, which switches among the native providers' models.
+ */
+model: boolean, 
+/**
+ * `Op::RunShell`: the user's own shell command kept in the model context.
+ */
+shell: boolean, };
+
+export type RuntimeInfo = { id: string, label: string, available: boolean, version?: string, 
+/**
+ * The executable the runtime starts.
+ */
+path?: string, 
+/**
+ * Why the runtime is unavailable.
+ */
+reason?: string, capabilities: RuntimeCapabilities, };
+
+export type RuntimeUnsupported = { runtime: string, 
+/**
+ * The refused method (`session/branch`, `btw/open`) or op (`retry`, `run_command`).
+ */
+feature: string, };
+
 export type ScratchListParams = { 
 /**
  * Include archived scratch sessions.
@@ -640,7 +702,12 @@ model: string | null, thinking: ThinkingLevel | null,
 /**
  * `rules`, `auto` or `yolo`; otherwise the configured mode.
  */
-mode: string | null, };
+mode: string | null, 
+/**
+ * The agent runtime of a new session, one of `runtimes/list`; `chui` when absent. Opening
+ * by `path` uses the runtime the session was created with.
+ */
+runtime?: string, };
 
 export type SessionRewindParams = { thread_id: ThreadId, item_id: string, mode: RewindMode, };
 
@@ -670,7 +737,15 @@ parent: string | null,
 /**
  * Present while the session is open in this server.
  */
-live: LiveState | null, };
+live: LiveState | null, 
+/**
+ * The agent runtime that runs the session. Servers that predate runtimes omit it: `chui`.
+ */
+runtime?: string, 
+/**
+ * What the runtime implements. Servers that predate runtimes omit it: the native set.
+ */
+capabilities?: RuntimeCapabilities, };
 
 export type SessionWorktree = { path: string, name: string, branch: string, base_branch: string, };
 
@@ -744,7 +819,27 @@ export type Snapshot = { thread_id: ThreadId, path: string, cwd: string,
 /**
  * Present when `cwd` is a `chui`-managed session worktree.
  */
-worktree?: SessionWorktree | null, seq: number, events: Array<Event>, };
+worktree?: SessionWorktree | null, seq: number, events: Array<Event>, 
+/**
+ * The agent runtime that runs the session. Servers that predate runtimes omit it: `chui`.
+ */
+runtime?: string, 
+/**
+ * What the runtime implements. Servers that predate runtimes omit it: the native set.
+ */
+capabilities?: RuntimeCapabilities, };
+
+export type SteeringMode = "inject" | "queue";
+
+export type SubagentItem = { id: ItemId, 
+/**
+ * The `ToolCall` item that spawned the sub-agent.
+ */
+parent_call_id: ItemId, agent_id: string, item: KnownItem, };
+
+export type SubagentState = "running" | "waiting" | "completed" | "failed" | "interrupted";
+
+export type SubagentStatus = { id: ItemId, parent_call_id: ItemId, agent_id: string, name?: string, state: SubagentState, message?: string, };
 
 export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };
 

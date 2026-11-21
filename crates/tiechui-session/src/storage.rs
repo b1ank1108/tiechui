@@ -287,6 +287,7 @@ impl SessionStore {
         directory: &Path,
         cwd: &Path,
         parent_session: Option<PathBuf>,
+        runtime: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<Self, SessionError> {
         check_cancel(directory, cancel)?;
@@ -314,6 +315,7 @@ impl SessionStore {
             cwd,
             created_at: now_ms(),
             parent_session,
+            runtime,
         };
         let result = (|| {
             lock_writer(&file).map_err(|error| {
