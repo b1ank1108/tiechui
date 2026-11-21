@@ -1,6 +1,6 @@
 //! Turns what `codex app-server` sends into `BackendEvent`s: the root thread's turns, items and
-//! usage, and the server's requests for approval. Frames of other threads (sub-agents) never
-//! start or end a root turn; approvals from them are surfaced with their thread as the actor.
+//! usage, and the server's requests for approval. Frames of sub-agent threads never start or end
+//! a root turn; `agents` maps them to sub-agent items, status updates and approvals.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -13,8 +13,11 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 
 use super::debug;
-use super::items::{self, FileCall};
+use super::items;
 use super::rpc::Rpc;
+mod agents;
+use agents::Agent;
+
 use super::wire::{
     AgentMessageItem, Breakdown, CommandApproval, CommandItem, DeltaNotification, Elicitation,
     FileApproval, FileChangeItem, Incoming, ItemNotification, McpItem, OtherItem,
@@ -42,6 +45,8 @@ pub struct TurnState {
 pub struct Pending {
     rpc_id: Value,
     kind: Kind,
+    /// The thread that asks: the root or a sub-agent's.
+    thread: String,
 }
 
 enum Kind {
@@ -106,10 +111,10 @@ pub enum Inbound {
     Eof,
 }
 
-struct ToolStub {
-    id: String,
-    name: String,
-    arguments: Value,
+pub(super) struct ToolStub {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
 }
 
 enum Live {
@@ -136,6 +141,11 @@ pub struct Translator {
     last_completed: Option<String>,
     /// Something of the root thread arrived with no turn running: a late item or approval.
     late: bool,
+    /// Sub-agents by thread id.
+    agents: HashMap<String, Agent>,
+    /// Tool calls of sub-agents that were announced and have no result yet, by their scoped
+    /// item id.
+    child_tools: HashMap<String, Vec<ToolStub>>,
     stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
@@ -159,6 +169,8 @@ impl Translator {
             context_window: None,
             last_completed: None,
             late: false,
+            agents: HashMap::new(),
+            child_tools: HashMap::new(),
             stderr,
         }
     }
@@ -236,7 +248,7 @@ impl Translator {
     }
 
     /// Sends an event after the text that came before it.
-    async fn emit(&mut self, event: BackendEvent) -> bool {
+    pub(super) async fn emit(&mut self, event: BackendEvent) -> bool {
         self.flush().await && self.send_now(event).await
     }
 
@@ -250,7 +262,7 @@ impl Translator {
 
     // ----- frames -----
 
-    fn parse<T: DeserializeOwned>(params: Value, what: &str) -> Option<T> {
+    pub(super) fn parse<T: DeserializeOwned>(params: Value, what: &str) -> Option<T> {
         match serde_json::from_value(params) {
             Ok(parsed) => Some(parsed),
             Err(error) => {
@@ -285,50 +297,49 @@ impl Translator {
         }
     }
 
-    fn is_root(&self, thread: &str) -> bool {
+    pub(super) fn is_root(&self, thread: &str) -> bool {
         self.shared.root().as_deref() == Some(thread)
     }
 
     async fn notification(&mut self, method: &str, params: Value) -> bool {
         match method {
             "turn/started" => {
-                if let Some(note) = Self::parse::<TurnNotification>(params, method)
-                    && self.is_root(&note.thread_id)
-                {
+                let Some(note) = Self::parse::<TurnNotification>(params, method) else {
+                    return true;
+                };
+                if self.is_root(&note.thread_id) {
                     self.shared.turn.send_modify(|state| {
                         state.active = Some(note.turn.id);
                         state.pending = false;
                     });
-                } else {
-                    debug("dropped a turn/started of another thread");
+                    return true;
                 }
-                true
+                self.agent_turn_started(&note.thread_id).await
             }
             "turn/completed" => match Self::parse::<TurnNotification>(params, method) {
                 Some(note) if self.is_root(&note.thread_id) => self.turn_completed(note.turn).await,
-                Some(note) => {
-                    debug(&format!(
-                        "dropped a turn/completed of thread {}",
-                        note.thread_id
-                    ));
-                    true
-                }
+                Some(note) => self.agent_turn_completed(&note.thread_id, note.turn).await,
                 None => true,
             },
             "item/started" | "item/completed" => {
                 let Some(note) = Self::parse::<ItemNotification>(params, method) else {
                     return true;
                 };
+                let started = method == "item/started";
                 if !self.is_root(&note.thread_id) {
-                    debug(&format!("dropped an item of thread {}", note.thread_id));
-                    return true;
+                    return self.child_item(&note.thread_id, &note.item, started).await;
                 }
-                self.note_late();
-                if method == "item/started" {
+                self.note_derived();
+                let kind = note.item["type"].as_str().unwrap_or_default();
+                if kind == "subAgentActivity" {
+                    return self.sub_agent_activity(&note.thread_id, &note.item).await;
+                }
+                let ok = if started {
                     self.item_started(&note.item).await
                 } else {
                     self.item_completed(&note.item).await
-                }
+                };
+                ok && self.collab_effects(&note.thread_id, &note.item).await
             }
             "item/agentMessage/delta"
             | "item/reasoning/summaryTextDelta"
@@ -360,33 +371,30 @@ impl Translator {
                 _ => true,
             },
             "serverRequest/resolved" => {
-                if let Some(note) = Self::parse::<ResolvedNotification>(params, method) {
-                    let id = approval_id(&note.request_id);
-                    if self.shared.approvals().remove(&id).is_some() {
-                        return self.emit(BackendEvent::ApprovalWithdrawn { id }).await;
-                    }
+                let Some(note) = Self::parse::<ResolvedNotification>(params, method) else {
+                    return true;
+                };
+                let id = approval_id(&note.request_id);
+                if self.shared.approvals().remove(&id).is_some()
+                    && !self.emit(BackendEvent::ApprovalWithdrawn { id }).await
+                {
+                    return false;
                 }
-                true
+                match note.thread_id {
+                    Some(thread) => self.approval_settled(&thread).await,
+                    None => true,
+                }
             }
             "thread/status/changed" => {
                 if let Some(note) = Self::parse::<StatusNotification>(params, method)
                     && self.is_root(&note.thread_id)
                     && note.status.kind == "idle"
-                    && self.late
                 {
-                    self.late = false;
-                    return self.emit(BackendEvent::Idle).await;
+                    return self.maybe_idle().await;
                 }
                 true
             }
             _ => true,
-        }
-    }
-
-    /// Records that root-thread content arrived while no turn ran.
-    fn note_late(&mut self) {
-        if self.shared.turn.borrow().active.is_none() {
-            self.late = true;
         }
     }
 
@@ -413,7 +421,19 @@ impl Translator {
         if !self.finish_open_items().await {
             return false;
         }
-        let withdrawn: Vec<String> = self.shared.approvals().drain().map(|(id, _)| id).collect();
+        let root = self.shared.root();
+        let withdrawn: Vec<String> = {
+            let mut approvals = self.shared.approvals();
+            let ids: Vec<String> = approvals
+                .iter()
+                .filter(|(_, pending)| Some(&pending.thread) == root.as_ref())
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                approvals.remove(id);
+            }
+            ids
+        };
         for id in withdrawn {
             if !self.emit(BackendEvent::ApprovalWithdrawn { id }).await {
                 return false;
@@ -490,43 +510,8 @@ impl Translator {
                 }
                 true
             }
-            "commandExecution" => {
-                let Some(item) = Self::parse::<CommandItem>(item.clone(), kind) else {
-                    return true;
-                };
-                let arguments =
-                    json!({"command": items::command_text(&item.command, &item.command_actions)});
-                self.start_tools(&item.id, vec![("bash".into(), arguments, item.id.clone())])
-                    .await
-            }
-            "fileChange" => {
-                let Some(item) = Self::parse::<FileChangeItem>(item.clone(), kind) else {
-                    return true;
-                };
-                let calls = items::file_calls(&item.id, &item.changes)
-                    .into_iter()
-                    .map(|call| (call.name.to_owned(), call.arguments, call.id))
-                    .collect();
-                self.start_tools(&item.id, calls).await
-            }
-            "mcpToolCall" => {
-                let Some(item) = Self::parse::<McpItem>(item.clone(), kind) else {
-                    return true;
-                };
-                let call = (
-                    items::mcp_name(&item),
-                    item.arguments.clone(),
-                    item.id.clone(),
-                );
-                self.start_tools(&item.id, vec![call]).await
-            }
-            _ => match Self::parse::<OtherItem>(item.clone(), kind)
-                .and_then(|other| items::other_call(kind, &other).map(|call| (other.id, call)))
-            {
-                Some((id, (name, arguments, _, _))) => {
-                    self.start_tools(&id, vec![(name, arguments, id.clone())])
-                        .await
-                }
+            _ => match tool_starts(kind, item) {
+                Some((id, calls)) => self.start_tools(&id, calls).await,
                 None => {
                     if kind != "userMessage" {
                         debug(&format!("skipped an item of kind {kind}"));
@@ -557,72 +542,26 @@ impl Translator {
                 };
                 self.finish_text(&item.id, true, parts.join("\n\n")).await
             }
-            "commandExecution" => {
-                let Some(item) = Self::parse::<CommandItem>(item.clone(), kind) else {
+            _ => {
+                let Some((id, dones)) = tool_dones(kind, item) else {
                     return true;
                 };
-                self.live.remove(&item.id);
-                let arguments =
-                    json!({"command": items::command_text(&item.command, &item.command_actions)});
-                let (output, is_error) = items::command_result(&item);
-                self.complete_call(&item.id, "bash", arguments, output, is_error)
-                    .await
-            }
-            "fileChange" => {
-                let Some(item) = Self::parse::<FileChangeItem>(item.clone(), kind) else {
-                    return true;
-                };
-                self.live.remove(&item.id);
-                let failed = matches!(item.status.as_str(), "failed" | "declined");
-                for FileCall {
-                    id,
-                    name,
-                    arguments,
-                    summary,
-                    ..
-                } in items::file_calls(&item.id, &item.changes)
-                {
-                    let text = match item.status.as_str() {
-                        "declined" => "The change was declined".to_owned(),
-                        "failed" => "The change failed".to_owned(),
-                        _ => summary,
-                    };
-                    let output = items::tool_output_text(&text, failed);
+                self.live.remove(&id);
+                for done in dones {
                     if !self
-                        .complete_call(&id, name, arguments, output, failed)
+                        .complete_call(
+                            &done.id,
+                            &done.name,
+                            done.arguments,
+                            done.output,
+                            done.is_error,
+                        )
                         .await
                     {
                         return false;
                     }
                 }
                 true
-            }
-            "mcpToolCall" => {
-                let Some(item) = Self::parse::<McpItem>(item.clone(), kind) else {
-                    return true;
-                };
-                self.live.remove(&item.id);
-                let (output, is_error) = items::mcp_result(&item);
-                self.complete_call(
-                    &item.id,
-                    &items::mcp_name(&item),
-                    item.arguments.clone(),
-                    output,
-                    is_error,
-                )
-                .await
-            }
-            _ => {
-                let Some(other) = Self::parse::<OtherItem>(item.clone(), kind) else {
-                    return true;
-                };
-                let Some((name, arguments, text, failed)) = items::other_call(kind, &other) else {
-                    return true;
-                };
-                self.live.remove(&other.id);
-                let output = items::tool_output_text(&text, failed);
-                self.complete_call(&other.id, &name, arguments, output, failed)
-                    .await
             }
         }
     }
@@ -652,7 +591,7 @@ impl Translator {
 
     /// Appends streamed text, starting the item first when its start has not been seen.
     async fn text_delta(&mut self, id: &str, thinking: bool, delta: &str) -> bool {
-        self.note_late();
+        self.note_derived();
         let start = match self.live.get_mut(id) {
             Some(Live::Text { started, text, .. }) => {
                 text.push_str(delta);
@@ -725,7 +664,7 @@ impl Translator {
     }
 
     /// A tool call and its result, both complete.
-    async fn complete_call(
+    pub(super) async fn complete_call(
         &mut self,
         id: &str,
         name: &str,
@@ -802,7 +741,7 @@ impl Translator {
                             vec![command.clone()],
                             vec![command],
                         );
-                        return self.ask(id, Kind::Review, permission).await;
+                        return self.ask(id, &thread, Kind::Review, permission).await;
                     }
                     None => self.rpc.respond(&id, json!({"decision": "decline"})).await,
                 }
@@ -821,7 +760,7 @@ impl Translator {
                             paths.clone(),
                             paths,
                         );
-                        return self.ask(id, Kind::Review, permission).await;
+                        return self.ask(id, &thread, Kind::Review, permission).await;
                     }
                     None => self.rpc.respond(&id, json!({"decision": "decline"})).await,
                 }
@@ -841,7 +780,12 @@ impl Translator {
                             vec![],
                         );
                         return self
-                            .ask(id, Kind::Permissions(request.permissions), permission)
+                            .ask(
+                                id,
+                                &thread,
+                                Kind::Permissions(request.permissions),
+                                permission,
+                            )
                             .await;
                     }
                     None => {
@@ -854,12 +798,13 @@ impl Translator {
             "mcpServer/elicitation/request" => {
                 match Self::parse::<Elicitation>(params.clone(), method) {
                     Some(request) => {
-                        self.note_late_for(&request.thread_id);
+                        self.note_derived();
+                        let thread = request.thread_id.clone();
                         let request = ApprovalRequest::Elicitation {
                             server: request.server_name,
                             request: params,
                         };
-                        return self.ask(id, Kind::Elicitation, request).await;
+                        return self.ask(id, &thread, Kind::Elicitation, request).await;
                     }
                     None => self.rpc.respond(&id, json!({"action": "decline"})).await,
                 }
@@ -889,12 +834,6 @@ impl Translator {
         true
     }
 
-    fn note_late_for(&mut self, thread: &str) {
-        if self.is_root(thread) {
-            self.note_late();
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn permission(
         &mut self,
@@ -906,10 +845,15 @@ impl Translator {
         values: Vec<String>,
         session_patterns: Vec<String>,
     ) -> ApprovalRequest {
-        self.note_late_for(thread);
+        self.note_derived();
+        let child = !self.is_root(thread);
         ApprovalRequest::Permission {
-            actor: (!self.is_root(thread)).then(|| thread.into()),
-            call_id: item_id.to_owned(),
+            actor: child.then(|| thread.into()),
+            call_id: if child {
+                agents::scoped(thread, item_id)
+            } else {
+                item_id.to_owned()
+            },
             tool: tool.to_owned(),
             arguments,
             surface: surface.to_owned(),
@@ -924,7 +868,14 @@ impl Translator {
     /// The tool, arguments and paths a file change approval shows: the first file of the change
     /// it asks about, when the change was seen.
     fn file_subject(&self, request: &FileApproval) -> (String, Value, Vec<String>) {
-        if let Some(Live::Tool(stubs)) = self.live.get(&request.item_id) {
+        let child = self
+            .child_tools
+            .get(&agents::scoped(&request.thread_id, &request.item_id));
+        let stubs = match self.live.get(&request.item_id) {
+            Some(Live::Tool(stubs)) => Some(stubs),
+            _ => child,
+        };
+        if let Some(stubs) = stubs {
             let paths = stubs
                 .iter()
                 .filter_map(|stub| stub.arguments["path"].as_str().map(str::to_owned))
@@ -937,13 +888,24 @@ impl Translator {
         ("edit".into(), json!({"path": request.grant_root}), paths)
     }
 
-    /// Registers the approval and reports it.
-    async fn ask(&mut self, rpc_id: Value, kind: Kind, request: ApprovalRequest) -> bool {
+    /// Registers the approval and reports it. A sub-agent that asks is waiting meanwhile.
+    async fn ask(
+        &mut self,
+        rpc_id: Value,
+        thread: &str,
+        kind: Kind,
+        request: ApprovalRequest,
+    ) -> bool {
         let id = approval_id(&rpc_id);
-        self.shared
-            .approvals()
-            .insert(id.clone(), Pending { rpc_id, kind });
-        self.emit(BackendEvent::Approval { id, request }).await
+        self.shared.approvals().insert(
+            id.clone(),
+            Pending {
+                rpc_id,
+                kind,
+                thread: thread.to_owned(),
+            },
+        );
+        self.emit(BackendEvent::Approval { id, request }).await && self.agent_waits(thread).await
     }
 }
 
@@ -965,5 +927,136 @@ pub fn approval_id(rpc_id: &Value) -> String {
     match rpc_id.as_str() {
         Some(text) => format!("codex-{text}"),
         None => format!("codex-{rpc_id}"),
+    }
+}
+
+/// A tool call as an item announces it: the item's id and each call (name, arguments, call id).
+type Starts = (String, Vec<(String, Value, String)>);
+
+/// How a tool item ended.
+pub struct ToolDone {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+    pub output: Value,
+    pub is_error: bool,
+}
+
+/// The calls a started tool-like item (command, file change, MCP, collab and the rest) stands
+/// for; `None` for every other kind.
+pub fn tool_starts(kind: &str, item: &Value) -> Option<Starts> {
+    match kind {
+        "commandExecution" => {
+            let item = Translator::parse::<CommandItem>(item.clone(), kind)?;
+            let arguments =
+                json!({"command": items::command_text(&item.command, &item.command_actions)});
+            Some((item.id.clone(), vec![("bash".into(), arguments, item.id)]))
+        }
+        "fileChange" => {
+            let item = Translator::parse::<FileChangeItem>(item.clone(), kind)?;
+            let calls = items::file_calls(&item.id, &item.changes)
+                .into_iter()
+                .map(|call| (call.name.to_owned(), call.arguments, call.id))
+                .collect();
+            Some((item.id, calls))
+        }
+        "mcpToolCall" => {
+            let item = Translator::parse::<McpItem>(item.clone(), kind)?;
+            let call = (
+                items::mcp_name(&item),
+                item.arguments.clone(),
+                item.id.clone(),
+            );
+            Some((item.id, vec![call]))
+        }
+        "collabAgentToolCall" => {
+            let (name, arguments) = agents::collab_call(item)?;
+            let id = item["id"].as_str()?.to_owned();
+            Some((id.clone(), vec![(name, arguments, id)]))
+        }
+        _ => {
+            let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
+            let (name, arguments, _, _) = items::other_call(kind, &other)?;
+            Some((other.id.clone(), vec![(name, arguments, other.id)]))
+        }
+    }
+}
+
+/// The results of a completed tool-like item, one per call.
+pub fn tool_dones(kind: &str, item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    match kind {
+        "commandExecution" => {
+            let item = Translator::parse::<CommandItem>(item.clone(), kind)?;
+            let arguments =
+                json!({"command": items::command_text(&item.command, &item.command_actions)});
+            let (output, is_error) = items::command_result(&item);
+            let done = ToolDone {
+                id: item.id.clone(),
+                name: "bash".into(),
+                arguments,
+                output,
+                is_error,
+            };
+            Some((item.id, vec![done]))
+        }
+        "fileChange" => {
+            let item = Translator::parse::<FileChangeItem>(item.clone(), kind)?;
+            let failed = matches!(item.status.as_str(), "failed" | "declined");
+            let dones = items::file_calls(&item.id, &item.changes)
+                .into_iter()
+                .map(|call| {
+                    let text = match item.status.as_str() {
+                        "declined" => "The change was declined".to_owned(),
+                        "failed" => "The change failed".to_owned(),
+                        _ => call.summary,
+                    };
+                    ToolDone {
+                        id: call.id,
+                        name: call.name.to_owned(),
+                        arguments: call.arguments,
+                        output: items::tool_output_text(&text, failed),
+                        is_error: failed,
+                    }
+                })
+                .collect();
+            Some((item.id, dones))
+        }
+        "mcpToolCall" => {
+            let item = Translator::parse::<McpItem>(item.clone(), kind)?;
+            let (output, is_error) = items::mcp_result(&item);
+            let done = ToolDone {
+                id: item.id.clone(),
+                name: items::mcp_name(&item),
+                arguments: item.arguments.clone(),
+                output,
+                is_error,
+            };
+            Some((item.id, vec![done]))
+        }
+        "collabAgentToolCall" => {
+            let (name, arguments) = agents::collab_call(item)?;
+            let id = item["id"].as_str()?.to_owned();
+            let (text, is_error) = agents::collab_result(item);
+            let done = ToolDone {
+                id: id.clone(),
+                name,
+                arguments,
+                output: items::tool_output_text(&text, is_error),
+                is_error,
+            };
+            Some((id, vec![done]))
+        }
+        _ => {
+            let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
+            let (name, arguments, text, failed) = items::other_call(kind, &other)?;
+            let done = ToolDone {
+                id: other.id.clone(),
+                name,
+                arguments,
+                output: items::tool_output_text(&text, failed),
+                is_error: failed,
+            };
+            Some((other.id, vec![done]))
+        }
     }
 }

@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, Snapshot};
 use tiechui_protocol::{
-    ApprovalRequest, EventKind, Item, KnownItem, TokenUsage, TurnId, TurnStatus,
+    ApprovalRequest, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem, SubagentItem,
+    SubagentState, SubagentStatus, TokenUsage, TurnId, TurnStatus,
 };
 
 const THREAD: &str = "thr-root";
@@ -639,6 +640,8 @@ async fn an_interrupt_codex_never_confirms_ends_as_interrupted_after_the_window(
     let fixture = Fixture::new();
     let mut steps = handshake(("untrusted", "read-only"));
     steps.extend(turn_start("go", TURN));
+    let fake_pid = fixture.path("fake.pid");
+    steps.insert(0, json!({"self_pid": fake_pid}));
     steps.extend([
         expect(json!({"method": "turn/interrupt"})),
         answer(json!({})),
@@ -654,6 +657,16 @@ async fn an_interrupt_codex_never_confirms_ends_as_interrupted_after_the_window(
         started.elapsed() >= Duration::from_secs(9),
         "waited the window"
     );
+    // The hung fake ignores stdin EOF; closing the session must still reap it.
+    #[cfg(unix)]
+    {
+        let fake = pid_in(&fake_pid);
+        client
+            .ok("session/close", json!({"thread_id": thread}))
+            .await;
+        assert!(gone(fake).await, "the hung codex outlived the session");
+    }
+    client.finish().await;
 }
 
 #[cfg(unix)]
@@ -1157,4 +1170,740 @@ async fn one_turn_maps_text_reasoning_commands_file_changes_and_usage() {
         "{:?}",
         fixture.mismatches()
     );
+}
+
+// ----- sub-agents (frames shaped like t3code's codex_transcript fixtures, Codex 0.156.1) -----
+
+const CHILD: &str = "thr-child";
+const CHILD_TURN: &str = "turn-c";
+const SPAWN: &str = "call-spawn";
+
+fn on(thread: &str, turn: &str, extra: Value) -> Value {
+    let mut base = json!({"threadId": thread, "turnId": turn});
+    base.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    base
+}
+
+/// `subAgentActivity` started, on the root thread: the spawn of a multi-agent v2 sub-agent.
+fn v2_spawn() -> Vec<Value> {
+    let item = json!({"type": "subAgentActivity", "id": SPAWN, "kind": "started",
+        "agentThreadId": CHILD, "agentPath": "/root/fixture_writer"});
+    vec![
+        notify("item/started", on(THREAD, TURN, json!({"item": item}))),
+        notify("item/completed", on(THREAD, TURN, json!({"item": item}))),
+    ]
+}
+
+fn v2_finished() -> Vec<Value> {
+    let item = json!({"type": "subAgentActivity", "id": "subagent-completed-turn-c",
+        "kind": "completed", "agentThreadId": CHILD, "agentPath": "/root/fixture_writer"});
+    vec![
+        notify("item/started", on(THREAD, TURN, json!({"item": item}))),
+        notify("item/completed", on(THREAD, TURN, json!({"item": item}))),
+    ]
+}
+
+fn child_turn_started() -> Value {
+    notify(
+        "turn/started",
+        json!({"threadId": CHILD, "turn": {"id": CHILD_TURN, "items": [], "status": "inProgress"}}),
+    )
+}
+
+const CHILD_COMMAND: &str = "/bin/bash -lc \"touch sub.txt\"";
+
+fn child_command(status: &str) -> Value {
+    json!({"type": "commandExecution", "id": "exec-sub", "command": CHILD_COMMAND,
+        "commandActions": [{"type": "unknown", "command": "touch sub.txt"}],
+        "cwd": "/x", "status": status, "aggregatedOutput": if status == "completed" { json!("") } else { Value::Null },
+        "exitCode": if status == "completed" { json!(0) } else { Value::Null }})
+}
+
+fn child_command_started() -> Value {
+    notify(
+        "item/started",
+        on(
+            CHILD,
+            CHILD_TURN,
+            json!({"item": child_command("inProgress")}),
+        ),
+    )
+}
+
+fn child_command_completed() -> Value {
+    notify(
+        "item/completed",
+        on(
+            CHILD,
+            CHILD_TURN,
+            json!({"item": child_command("completed")}),
+        ),
+    )
+}
+
+fn child_approval(id: u64) -> Value {
+    emit(
+        json!({"id": id, "method": "item/commandExecution/requestApproval", "params": {
+        "kind": "command", "threadId": CHILD, "turnId": CHILD_TURN, "itemId": "exec-sub",
+        "startedAtMs": 1, "command": CHILD_COMMAND,
+        "commandActions": [{"type": "unknown", "command": "touch sub.txt"}], "cwd": "/x"}}),
+    )
+}
+
+fn child_message(text: &str) -> Vec<Value> {
+    let item = json!({"type": "agentMessage", "id": "msg-sub", "text": text});
+    vec![
+        notify(
+            "item/started",
+            on(
+                CHILD,
+                CHILD_TURN,
+                json!({"item": {"type": "agentMessage", "id": "msg-sub", "text": ""}}),
+            ),
+        ),
+        notify(
+            "item/agentMessage/delta",
+            on(
+                CHILD,
+                CHILD_TURN,
+                json!({"itemId": "msg-sub", "delta": text}),
+            ),
+        ),
+        notify(
+            "item/completed",
+            on(CHILD, CHILD_TURN, json!({"item": item})),
+        ),
+    ]
+}
+
+fn child_turn_done(text: &str) -> Value {
+    notify(
+        "turn/completed",
+        json!({"threadId": CHILD, "turn": {"id": CHILD_TURN, "status": "completed",
+            "items": [{"type": "agentMessage", "id": "msg-sub", "text": text}]}}),
+    )
+}
+
+fn custom_items(events: &[tiechui_protocol::Event]) -> (Vec<SubagentItem>, Vec<SubagentStatus>) {
+    let mut children = vec![];
+    let mut statuses = vec![];
+    for event in events {
+        if let EventKind::ItemCompleted { item, .. } = &event.event {
+            if let Some(child) = SubagentItem::from_item(item) {
+                children.push(child);
+            }
+            if let Some(status) = SubagentStatus::from_item(item) {
+                statuses.push(status);
+            }
+        }
+    }
+    (children, statuses)
+}
+
+/// Turns as (id, status, item descriptors), folded from an event list the way a client does.
+fn structure(events: &[tiechui_protocol::Event]) -> Vec<(String, String, Vec<String>)> {
+    let describe = |item: &Item| match item {
+        Item::Known(known) => serde_json::to_value(known).unwrap()["id"].to_string(),
+        Item::Custom { kind, payload } => format!("{kind}:{}", payload["id"]),
+    };
+    let mut turns: Vec<(String, String, Vec<String>)> = vec![];
+    for event in events {
+        match &event.event {
+            EventKind::ThreadStarted { thread, .. } => {
+                turns = thread
+                    .turns
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.id.0.clone(),
+                            format!("{:?}", t.status),
+                            t.items.iter().map(describe).collect(),
+                        )
+                    })
+                    .collect();
+            }
+            EventKind::TurnStarted { turn } => {
+                turns.push((turn.id.0.clone(), "InProgress".into(), vec![]));
+            }
+            EventKind::ItemCompleted { turn_id, item } => {
+                let turn = turns
+                    .iter_mut()
+                    .find(|t| t.0 == turn_id.0)
+                    .expect("item outside a turn");
+                let described = describe(item);
+                match turn.2.iter().position(|d| *d == described) {
+                    Some(index) => turn.2[index] = described,
+                    None => turn.2.push(described),
+                }
+            }
+            EventKind::TurnCompleted { turn } => {
+                let slot = turns
+                    .iter_mut()
+                    .find(|t| t.0 == turn.id.0)
+                    .expect("unknown turn");
+                slot.1 = format!("{:?}", turn.status);
+                slot.2 = turn.items.iter().map(describe).collect();
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
+#[tokio::test]
+async fn a_subagent_that_finishes_first_folds_under_its_spawn_and_the_parent_turn_runs_on() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("go", TURN));
+    steps.extend(v2_spawn());
+    steps.extend([
+        child_turn_started(),
+        child_command_started(),
+        child_command_completed(),
+    ]);
+    steps.extend(child_message("Written."));
+    steps.push(child_turn_done("Written."));
+    steps.extend(v2_finished());
+    steps.push(json!({"sleep_ms": 300}));
+    steps.extend(agent_text("msg-root", TURN, &["Written."]));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    let live: Vec<_> = events.iter().map(|e| e.event.clone()).collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| is_completed(&e.event.event))
+            .count(),
+        1,
+        "only the root thread's turn/completed ends a turn"
+    );
+    let (children, statuses) = custom_items(&live);
+    assert!(
+        children
+            .iter()
+            .all(|c| c.parent_call_id.0 == SPAWN && c.agent_id == CHILD),
+        "{children:?}"
+    );
+    let ids: Vec<_> = children.iter().map(|c| c.id.0.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "thr-child:exec-sub",
+            "thr-child:exec-sub:result",
+            "thr-child:msg-sub"
+        ],
+        "completed items only, call before result"
+    );
+    let states: Vec<_> = statuses.iter().map(|s| s.state).collect();
+    assert_eq!(states, [SubagentState::Running, SubagentState::Completed]);
+    assert_eq!(statuses[0].name.as_deref(), Some("fixture_writer"));
+    assert_eq!(statuses[1].message.as_deref(), Some("Written."));
+    // The spawn is a normal root tool call.
+    let root = known(&events);
+    assert!(root.iter().any(|item| matches!(item,
+        KnownItem::ToolCall { id, name, .. } if id.0 == SPAWN && name == "spawn_agent")));
+    assert!(root.iter().any(|item| matches!(item,
+        KnownItem::AssistantMessage { text, .. } if text == "Written.")));
+    // The status item is replaced in place: one per agent in the folded turn.
+    let turns = structure(&live);
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(
+        turns[0]
+            .2
+            .iter()
+            .filter(|d| d.contains("subagent-status"))
+            .count(),
+        1,
+        "{turns:?}"
+    );
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+}
+
+/// The root turn ends while the sub-agent still runs; its command needs approval afterwards.
+fn late_subagent_script(fixture: &Fixture) {
+    let mut steps = handshake(("untrusted", "read-only"));
+    steps.extend(turn_start("go", TURN));
+    steps.extend(v2_spawn());
+    steps.push(child_turn_started());
+    steps.extend(agent_text("msg-root", TURN, &["spawned"]));
+    steps.push(turn_done(TURN, "completed"));
+    steps.push(json!({"sleep_ms": 200}));
+    steps.push(child_command_started());
+    steps.push(child_approval(9));
+    steps.push(expect(json!({"id": 9, "result": {"decision": "accept"}})));
+    steps.push(child_command_completed());
+    steps.extend(child_message("Written."));
+    steps.push(child_turn_done("Written."));
+    steps.extend(v2_finished());
+    fixture.script(steps);
+}
+
+#[tokio::test]
+async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_derived_turn() {
+    let fixture = Fixture::new();
+    late_subagent_script(&fixture);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let mut live = opened.events.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let first = client.until(is_completed).await;
+    let root_turn = match &first.last().unwrap().event.event {
+        EventKind::TurnCompleted { turn } => turn.id.clone(),
+        _ => unreachable!(),
+    };
+    live.extend(first.iter().map(|e| e.event.clone()));
+    let seen = client
+        .until(|kind| matches!(kind, EventKind::ApprovalRequested { .. }))
+        .await;
+    live.extend(seen.iter().map(|e| e.event.clone()));
+    let EventKind::ApprovalRequested {
+        turn_id: Some(approval_turn),
+        approval_id,
+        request:
+            ApprovalRequest::Permission {
+                actor,
+                call_id,
+                values,
+                ..
+            },
+    } = seen.last().unwrap().event.event.clone()
+    else {
+        panic!("not a permission approval");
+    };
+    // (e) The approval names the child's tool call, and the actor is the agent.
+    assert_eq!(actor.as_deref(), Some(CHILD));
+    assert_eq!(call_id, "thr-child:exec-sub");
+    assert_eq!(values, ["touch sub.txt"]);
+    let (children, _) = custom_items(&live);
+    assert!(
+        children.iter().any(|c| matches!(&c.item,
+            KnownItem::ToolCall { id, arguments, .. }
+                if id.0 == call_id && arguments["command"] == "touch sub.txt")),
+        "the approval's call_id is the id of the child ToolCall with the same command: {children:?}"
+    );
+    // The derived turn.
+    let derived_start = live
+        .iter()
+        .find_map(|e| match &e.event {
+            EventKind::TurnStarted { turn }
+                if turn.id != root_turn && turn.id.0 == approval_turn.0 =>
+            {
+                Some(turn.clone())
+            }
+            _ => None,
+        })
+        .expect("a derived turn opened");
+    assert_ne!(derived_start.id, root_turn);
+    // (c) mid-flight snapshot equals the live fold.
+    let mid = snapshot(
+        client
+            .ok("session/snapshot", json!({"thread_id": thread}))
+            .await,
+    );
+    assert_eq!(structure(&mid.events), structure(&live));
+    assert_eq!(structure(&live)[1].1, "InProgress");
+
+    client
+        .ok(
+            "session/submit",
+            approval_response(&thread, &approval_id.0, json!({"kind": "allow_once"})),
+        )
+        .await;
+    let done = client.until(is_completed).await;
+    live.extend(done.iter().map(|e| e.event.clone()));
+    assert_eq!(completed_status(&done), TurnStatus::Completed);
+    assert_eq!(
+        responses(&fixture, 9).len(),
+        1,
+        "one answer, on the child's request id"
+    );
+
+    let turns = structure(&live);
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert_eq!(turns[1].1, "Completed");
+    let after = snapshot(
+        client
+            .ok("session/snapshot", json!({"thread_id": thread}))
+            .await,
+    );
+    assert_eq!(structure(&after.events), turns, "snapshot vs live");
+    let EventKind::ThreadStarted {
+        thread: started, ..
+    } = &after.events[0].event
+    else {
+        panic!()
+    };
+    let marker = DerivedTurnMarker::from_item(&started.turns[1].items[0]).expect("marker");
+    assert_eq!(marker.derived_from, root_turn);
+    assert_eq!(marker.reason, DerivedReason::Subagent);
+    let (_, statuses) = custom_items(&live);
+    let last = statuses.last().unwrap();
+    assert_eq!(last.state, SubagentState::Completed);
+    assert!(
+        statuses.iter().any(|s| s.state == SubagentState::Waiting),
+        "the agent waits while its approval is open: {statuses:?}"
+    );
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+
+    // Reopening by path rebuilds the same turns.
+    client
+        .ok("session/close", json!({"thread_id": thread}))
+        .await;
+    fixture.script(vec![
+        expect(json!({"method": "initialize"})),
+        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
+        expect(json!({"method": "initialized"})),
+        expect(json!({"method": "thread/resume", "params": {"threadId": THREAD}})),
+        answer(thread_response()),
+    ]);
+    let mut again = fixture.client();
+    let reopened = snapshot(again.ok("session/open", json!({"path": opened.path})).await);
+    // A replayed text or result is named after its stored entry, as for any session; sub-agent
+    // items, statuses, derived turns and tool call ids (what children fold under) are kept.
+    let keep = |turns: Vec<(String, String, Vec<String>)>| -> Vec<(String, String, Vec<String>)> {
+        turns
+            .into_iter()
+            .map(|(id, status, items)| {
+                let items = items
+                    .into_iter()
+                    .map(|item| {
+                        if item.starts_with("runtime.") || item == "\"call-spawn\"" {
+                            item
+                        } else {
+                            "known".into()
+                        }
+                    })
+                    .collect();
+                (id, status, items)
+            })
+            .collect()
+    };
+    assert_eq!(
+        keep(structure(&reopened.events)),
+        keep(turns),
+        "reopened vs live"
+    );
+}
+
+#[tokio::test]
+async fn a_followup_turn_started_right_after_turn_completed_is_not_cut_short_by_a_subagent() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("untrusted", "read-only"));
+    steps.extend(turn_start("go", TURN));
+    steps.extend(v2_spawn());
+    steps.push(child_turn_started());
+    steps.push(turn_done(TURN, "completed"));
+    // The queued follow-up starts at once; the sub-agent finishes during it.
+    steps.extend(turn_start("again", "turn-2"));
+    steps.extend(child_message("late"));
+    steps.push(child_turn_done("late"));
+    steps.push(json!({"sleep_ms": 300}));
+    steps.extend(agent_text("msg-2", "turn-2", &["second"]));
+    steps.push(turn_done("turn-2", "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    submit(&mut client, &opened.thread_id.0, "again", "follow_up").await;
+    let first = client.until(is_completed).await;
+    assert_eq!(completed_status(&first), TurnStatus::Completed);
+    let second = client.until(is_completed).await;
+    assert_eq!(completed_status(&second), TurnStatus::Completed);
+    assert!(
+        known(&second).iter().any(|item| matches!(item,
+        KnownItem::AssistantMessage { text, .. } if text == "second")),
+        "the second turn ran to its own end"
+    );
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+}
+
+#[tokio::test]
+async fn collab_tool_calls_spawn_and_wait_map_to_tool_calls_and_agent_states() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("go", TURN));
+    let spawn = |status: &str, receivers: Value, states: Value| {
+        json!({"type": "collabAgentToolCall", "id": "exec-spawn", "tool": "spawnAgent",
+            "status": status, "senderThreadId": THREAD, "receiverThreadIds": receivers,
+            "prompt": "Read package.json", "model": "gpt-x", "reasoningEffort": "medium",
+            "agentsStates": states})
+    };
+    steps.push(notify(
+        "item/started",
+        on(
+            THREAD,
+            TURN,
+            json!({"item": spawn("inProgress", json!([]), json!({}))}),
+        ),
+    ));
+    steps.push(notify(
+        "item/completed",
+        on(
+            THREAD,
+            TURN,
+            json!({"item": spawn("completed", json!([CHILD]),
+            json!({CHILD: {"status": "pendingInit", "message": null}}))}),
+        ),
+    ));
+    steps.push(child_turn_started());
+    steps.extend(child_message("summary"));
+    steps.push(child_turn_done("summary"));
+    let wait = |status: &str, states: Value| {
+        json!({"type": "collabAgentToolCall", "id": "exec-wait", "tool": "wait",
+            "status": status, "senderThreadId": THREAD, "receiverThreadIds": [CHILD],
+            "prompt": null, "model": null, "reasoningEffort": null, "agentsStates": states})
+    };
+    steps.push(notify(
+        "item/started",
+        on(THREAD, TURN, json!({"item": wait("inProgress", json!({}))})),
+    ));
+    steps.push(notify(
+        "item/completed",
+        on(
+            THREAD,
+            TURN,
+            json!({"item": wait("completed",
+            json!({CHILD: {"status": "completed", "message": "summary"}}))}),
+        ),
+    ));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    let live: Vec<_> = events.iter().map(|e| e.event.clone()).collect();
+    let calls: Vec<_> = known(&events)
+        .into_iter()
+        .filter_map(|item| match item {
+            KnownItem::ToolCall { id, name, .. } => Some((id.0, name)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.contains(&("exec-spawn".into(), "spawn_agent".into())),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&("exec-wait".into(), "wait".into())),
+        "{calls:?}"
+    );
+    let (children, statuses) = custom_items(&live);
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].parent_call_id.0, "exec-spawn");
+    assert_eq!(
+        statuses.iter().map(|s| s.state).collect::<Vec<_>>(),
+        [SubagentState::Running, SubagentState::Completed]
+    );
+    assert_eq!(structure(&live).len(), 1);
+}
+
+#[tokio::test]
+async fn a_subagent_spawned_by_a_subagent_folds_under_the_nested_spawn_call() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("go", TURN));
+    steps.extend(v2_spawn());
+    steps.push(child_turn_started());
+    let nested = json!({"type": "subAgentActivity", "id": "call-nested", "kind": "started",
+        "agentThreadId": "thr-grand", "agentPath": "/root/fixture_writer/grand"});
+    steps.push(notify(
+        "item/started",
+        on(CHILD, CHILD_TURN, json!({"item": nested})),
+    ));
+    steps.push(notify(
+        "turn/started",
+        json!({"threadId": "thr-grand", "turn": {"id": "turn-g", "items": [], "status": "inProgress"}}),
+    ));
+    steps.push(notify(
+        "item/completed",
+        on(
+            "thr-grand",
+            "turn-g",
+            json!({"item": {"type": "agentMessage", "id": "msg-g", "text": "hi"}}),
+        ),
+    ));
+    steps.push(notify(
+        "turn/completed",
+        json!({"threadId": "thr-grand", "turn": {"id": "turn-g", "status": "completed", "items": []}}),
+    ));
+    steps.push(child_turn_done("done"));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    let live: Vec<_> = events.iter().map(|e| e.event.clone()).collect();
+    let (children, statuses) = custom_items(&live);
+    let nested_call = children
+        .iter()
+        .find(|c| c.id.0 == "thr-child:call-nested")
+        .expect("the nested spawn is a child tool call");
+    assert_eq!(nested_call.parent_call_id.0, SPAWN);
+    let grand = children
+        .iter()
+        .find(|c| c.id.0 == "thr-grand:msg-g")
+        .expect("the nested agent's text");
+    assert_eq!(grand.parent_call_id.0, "thr-child:call-nested");
+    assert_eq!(grand.agent_id, "thr-grand");
+    assert!(
+        statuses
+            .iter()
+            .any(|s| s.agent_id == "thr-grand" && s.parent_call_id.0 == "thr-child:call-nested")
+    );
+}
+
+// ----- snapshot undo -----
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[tokio::test]
+async fn a_turn_that_edits_files_can_be_undone_from_its_start_of_turn_snapshot() {
+    let fixture = Fixture::new();
+    git(&fixture.cwd, &["init", "-q"]);
+    std::fs::create_dir_all(fixture.cwd.join("src")).unwrap();
+    std::fs::write(fixture.cwd.join("src/hello.ts"), "original\n").unwrap();
+    git(&fixture.cwd, &["add", "."]);
+    git(&fixture.cwd, &["commit", "-q", "-m", "init"]);
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("edit", TURN));
+    steps.push(json!({"write": {"path": "src/hello.ts", "content": "changed by codex\n"}}));
+    steps.push(json!({"write": {"path": "new.txt", "content": "new\n"}}));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "edit", "follow_up").await;
+    let events = client.until(is_completed).await;
+    let item = events
+        .iter()
+        .find_map(|e| match &e.event.event {
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::UserMessage { id, .. }),
+                ..
+            } => Some(id.0.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.cwd.join("src/hello.ts")).unwrap(),
+        "changed by codex\n"
+    );
+
+    let rewind = client
+        .ok(
+            "turn/rewind_check",
+            json!({"thread_id": thread, "item_id": item}),
+        )
+        .await;
+    // {"commands": [], "files": [], "mode": "snapshot", "safe": [], "unsafe": [],
+    //  "snapshot_ref": "refs/tiechui/checkpoints/<session>/<turn entry>"}
+    assert_eq!(rewind["mode"], "snapshot", "{rewind}");
+    assert_eq!(rewind["files"], json!([]));
+    assert!(
+        rewind["snapshot_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("refs/tiechui/checkpoints/"),
+        "{rewind}"
+    );
+    let check = client
+        .ok("turn/check", json!({"thread_id": thread, "item_id": item}))
+        .await;
+    assert_eq!(
+        check,
+        json!({"safe": ["new.txt", "src/hello.ts"], "unsafe": [], "ignored": []})
+    );
+    let undone = client
+        .ok("turn/undo", json!({"thread_id": thread, "item_id": item}))
+        .await;
+    assert_eq!(
+        undone,
+        json!({"changes": [
+            {"path": "new.txt", "before": null, "after": "new\n"},
+            {"path": "src/hello.ts", "before": "original\n", "after": "changed by codex\n"}],
+            "reverted": true})
+    );
+    assert_eq!(undone["reverted"], true, "{undone}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.cwd.join("src/hello.ts")).unwrap(),
+        "original\n"
+    );
+    assert!(!fixture.cwd.join("new.txt").exists());
+    assert_eq!(
+        git(&fixture.cwd, &["status", "--porcelain"]),
+        "",
+        "no stray changes"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_snapshot_is_recorded_as_missing_and_the_turn_still_runs() {
+    let fixture = Fixture::new(); // not a git repository
+    let mut steps = handshake(("never", "danger-full-access"));
+    steps.extend(turn_start("go", TURN));
+    steps.extend(agent_text("msg-1", TURN, &["ok"]));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("yolo")).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    let item = events
+        .iter()
+        .find_map(|e| match &e.event.event {
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::UserMessage { id, .. }),
+                ..
+            } => Some(id.0.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let error = client
+        .call("turn/undo", json!({"thread_id": thread, "item_id": item}))
+        .await
+        .unwrap_err();
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("snapshot"), "{message}");
 }

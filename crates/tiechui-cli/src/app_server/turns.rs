@@ -50,6 +50,8 @@ pub(super) struct Located {
     pub(super) session_id: String,
     #[cfg(feature = "workspace")]
     pub(super) cwd: PathBuf,
+    /// An external runtime runs the session: it has no per-file records, only turn snapshots.
+    pub(super) external: bool,
     pub(super) branch_target: String,
     pub(super) own: Vec<String>,
     pub(super) later: Vec<String>,
@@ -89,6 +91,9 @@ fn dispatch_turn_op(
     at: Located,
     cancel: &CancellationToken,
 ) -> Result<Value, String> {
+    if at.external {
+        return snapshot_turn_op(method, &at, cancel);
+    }
     let turn = at.store.turn(&at.own, &at.later, cancel).map_err(|e| e.0)?;
     match method {
         "turn/changes" => changes(&at.store, &turn).and_then(to_json),
@@ -137,6 +142,21 @@ fn rewind_check(
         return worktree_rewind_check(home, at, &discarded, live_sessions, cancel);
     }
     let _ = live_sessions;
+    #[cfg(feature = "workspace")]
+    if at.external
+        && let Ok(Ok((reference, _))) = resolve_ready_snapshot(&at)
+    {
+        return Ok(RewindCheck {
+            mode: RewindMode::Snapshot,
+            reason: None,
+            snapshot_ref: Some(reference),
+            conflicting_session: None,
+            commands: at.rewind_commands,
+            files: vec![],
+            safe: vec![],
+            r#unsafe: vec![],
+        });
+    }
     build_patch_rewind_check(&at.store, &discarded, None, at.rewind_commands, cancel)
 }
 
@@ -411,6 +431,10 @@ fn locate(
     )
     .map_err(|e| e.0)?;
     Ok(Located {
+        external: header
+            .runtime
+            .as_deref()
+            .is_some_and(|runtime| runtime != "chui"),
         store: rewind_store,
         #[cfg(feature = "workspace")]
         session_id: header.id.clone(),
@@ -492,4 +516,116 @@ fn check(at: &Located, turn: &Turn, cancel: &CancellationToken) -> Result<UndoCh
         check.ignored = at.turn_commands.clone();
     }
     Ok(check)
+}
+
+/// `turn/changes`, `turn/check` and `turn/undo` of an external session's turn, from the
+/// worktree snapshot taken when the turn started. The restore is of the whole worktree, so it
+/// is offered for the latest turn only.
+#[cfg(feature = "workspace")]
+fn snapshot_turn_op(
+    method: &str,
+    at: &Located,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
+    let (_, tree) = resolve_ready_snapshot(at)?
+        .map_err(|reason| format!("no worktree snapshot for this turn: {reason}"))?;
+    let is_cancelled = || cancel.is_cancelled();
+    let files = tiechui_workspace::diff_worktree_snapshot_with_env(
+        &at.cwd,
+        &tree,
+        tiechui_workspace::DEFAULT_SNAPSHOT_TIMEOUT,
+        &BTreeMap::new(),
+        Some(&is_cancelled),
+    )
+    .map_err(|e| e.0)?;
+    let top = git_toplevel(&at.cwd)?;
+    let texts = |files: &[String]| -> Vec<FileChange> {
+        files
+            .iter()
+            .map(|path| FileChange {
+                path: path.clone(),
+                before: git_blob(&top, &tree, path),
+                after: file_text(&top.join(path)),
+            })
+            .collect()
+    };
+    match method {
+        "turn/changes" => to_json(TurnChanges {
+            changes: texts(&files),
+            reverted: false,
+        }),
+        "turn/check" => to_json(UndoCheck {
+            safe: files,
+            r#unsafe: vec![],
+            ignored: at.turn_commands.clone(),
+        }),
+        _ => {
+            if !at.later.is_empty() {
+                return Err(
+                    "later turns exist: a snapshot restores the whole worktree, so only the latest turn can be undone"
+                        .into(),
+                );
+            }
+            if files.is_empty() {
+                return Err("The turn changed no files".into());
+            }
+            let changes = texts(&files);
+            tiechui_workspace::restore_worktree_snapshot_cancellable(
+                &at.cwd,
+                &tree,
+                tiechui_workspace::DEFAULT_SNAPSHOT_TIMEOUT,
+                &BTreeMap::new(),
+                Some(&is_cancelled),
+            )
+            .map_err(|e| e.0)?;
+            to_json(TurnChanges {
+                changes,
+                reverted: true,
+            })
+        }
+    }
+}
+
+#[cfg(not(feature = "workspace"))]
+fn snapshot_turn_op(
+    _method: &str,
+    _at: &Located,
+    _cancel: &CancellationToken,
+) -> Result<Value, String> {
+    Err("workspace support is disabled".into())
+}
+
+#[cfg(feature = "workspace")]
+fn git_toplevel(cwd: &Path) -> Result<PathBuf, String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("not a Git worktree".into());
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+/// The file's text in the snapshot tree, when it was there and is text.
+#[cfg(feature = "workspace")]
+fn git_blob(top: &Path, tree: &str, path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "blob", &format!("{tree}:{path}")])
+        .current_dir(top)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(feature = "workspace")]
+fn file_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }

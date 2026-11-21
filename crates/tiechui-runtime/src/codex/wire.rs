@@ -122,6 +122,9 @@ pub struct TurnNotification {
 #[derive(Debug, Deserialize)]
 pub struct TurnBody {
     pub id: String,
+    /// The items Codex lists for a finished turn (summary view).
+    #[serde(default)]
+    pub items: Vec<Value>,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -187,6 +190,8 @@ pub struct Breakdown {
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedNotification {
     pub request_id: Value,
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

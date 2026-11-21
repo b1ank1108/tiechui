@@ -150,6 +150,9 @@ pub async fn open_session(
         interrupt_window: config.interrupt_window,
         persisted: HashSet::new(),
         resume,
+        home: config.home.clone(),
+        cwd: cwd.clone(),
+        cancel: shutdown.clone(),
     };
     let task = tokio::spawn(session.run(ops, backend_events, shutdown));
     Ok(Opened {
@@ -193,6 +196,9 @@ struct Session {
     /// Root items already stored, so a re-completed item is not stored twice.
     persisted: HashSet<ItemId>,
     resume: Option<String>,
+    home: PathBuf,
+    cwd: PathBuf,
+    cancel: CancellationToken,
 }
 
 impl Session {
@@ -395,11 +401,39 @@ impl Session {
             id: history::user_item_id(&entry),
             content: content.clone(),
         }));
+        let _ = self.capture_snapshot(&entry).await;
         if let Err(error) = self.backend.start_turn(&content).await {
             self.emit(EventKind::Error { message: error });
             self.complete(TurnStatus::Failed).await;
         }
         Ok(())
+    }
+
+    /// Records the worktree as it is before the turn runs, under the turn's user entry, as the
+    /// native rewind module does, so `turn/check` and `turn/undo` can restore it. It takes as
+    /// long as native's capture at most (its own timeout) and a failure is recorded as a
+    /// missing snapshot; the turn runs either way. Derived turns have no user entry and get
+    /// none.
+    fn capture_snapshot(&self, anchor: &str) -> tokio::task::JoinHandle<()> {
+        let (home, cwd, anchor) = (self.home.clone(), self.cwd.clone(), anchor.to_owned());
+        let (session, cancel) = (self.thread.0.clone(), self.cancel.clone());
+        tokio::task::spawn_blocking(move || {
+            let Ok(store) = tiechui_module_rewind::store::Store::new(
+                &home.join("state/rewind"),
+                &cwd,
+                &session,
+            ) else {
+                return;
+            };
+            tiechui_module_rewind::record_turn_snapshot(
+                &store,
+                &tiechui_module_rewind::SnapshotOptions::default(),
+                &cwd,
+                &session,
+                &anchor,
+                &cancel,
+            );
+        })
     }
 
     /// Opens the turn that late output belongs to, unless one is open.
@@ -666,8 +700,10 @@ impl Session {
                 self.complete(status).await;
                 self.drain_queue().await?;
             }
+            // Only a derived turn ends this way: a root turn ends with `TurnCompleted`, and an
+            // `Idle` that was decided before a queued turn started must not cut that one short.
             BackendEvent::Idle => {
-                self.complete(TurnStatus::Completed).await;
+                self.close_derived(TurnStatus::Completed).await;
                 self.drain_queue().await?;
             }
             BackendEvent::Error(message) => self.emit(EventKind::Error { message }),
@@ -914,6 +950,18 @@ mod tests {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
+
+        /// The calls once there are `count`: `TurnStarted` is published before the snapshot is
+        /// taken and the backend is called.
+        async fn calls_len(&self, count: usize) -> Vec<String> {
+            for _ in 0..100 {
+                if self.calls().len() >= count {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            self.calls()
+        }
     }
 
     fn completed() -> BackendEvent {
@@ -954,7 +1002,10 @@ mod tests {
         h.backend.send(completed()).await.unwrap();
         h.until(is_turn_completed).await;
         h.until(started).await;
-        assert_eq!(h.calls(), ["turn first", "steer second", "turn second"]);
+        assert_eq!(
+            h.calls_len(3).await,
+            ["turn first", "steer second", "turn second"]
+        );
     }
 
     #[tokio::test]
@@ -1132,7 +1183,7 @@ mod tests {
             matches!(&seen[0], EventKind::TurnCompleted { .. }),
             "{seen:?}"
         );
-        assert_eq!(h.calls(), ["turn go", "turn again"]);
+        assert_eq!(h.calls_len(2).await, ["turn go", "turn again"]);
     }
 
     #[tokio::test]

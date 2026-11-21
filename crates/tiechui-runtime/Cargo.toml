@@ -13,6 +13,7 @@ serde_json.workspace = true
 tiechui-core.workspace = true
 tiechui-exec.workspace = true
 tiechui-model.workspace = true
+tiechui-module-rewind.workspace = true
 tiechui-protocol.workspace = true
 tiechui-session.workspace = true
 tokio.workspace = true

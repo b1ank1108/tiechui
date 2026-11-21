@@ -102,7 +102,9 @@ fn capture_before_request_sync(
     record_turn_snapshot(&store, options, cwd, session_id, &anchor.id, cancel);
 }
 
-fn record_turn_snapshot(
+/// Captures the worktree and records it under `anchor_id`, unless the turn has a record already.
+/// A failed capture is recorded as missing, with its reason; nothing here fails the caller.
+pub fn record_turn_snapshot(
     store: &store::Store,
     options: &SnapshotOptions,
     cwd: &Path,

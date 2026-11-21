@@ -9,6 +9,8 @@
 //!   inbound request.
 //! - `{"sleep_ms": n}`, `{"hang": true}`, `{"exit": code}`.
 //! - `{"self_pid": "<file>"}`: write this process's pid to the file.
+//! - `{"write": {"path": "<file>", "content": ".."}}`: write the file, relative to the working
+//!   directory (a stand-in for Codex editing the workspace).
 //! - `{"grandchild": "<file>"}`: start a long-lived child in this process group and write its
 //!   pid to the file.
 //!
@@ -104,6 +106,12 @@ fn serve() {
             std::process::exit(code as i32);
         } else if let Some(file) = step.get("self_pid").and_then(Value::as_str) {
             std::fs::write(file, std::process::id().to_string()).unwrap();
+        } else if let Some(write) = step.get("write") {
+            std::fs::write(
+                write["path"].as_str().unwrap(),
+                write["content"].as_str().unwrap(),
+            )
+            .unwrap();
         } else if let Some(file) = step.get("grandchild").and_then(Value::as_str) {
             let child = Command::new(std::env::current_exe().unwrap())
                 .arg("--sleeper")

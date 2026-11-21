@@ -3491,6 +3491,7 @@ dependencies = [
  "tiechui-core",
  "tiechui-exec",
  "tiechui-model",
+ "tiechui-module-rewind",
  "tiechui-protocol",
  "tiechui-session",
  "tokio",
