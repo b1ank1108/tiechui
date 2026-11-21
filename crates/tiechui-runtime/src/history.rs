@@ -302,7 +302,7 @@ fn push_message(turns: &mut Vec<Turn>, entry: &Entry, message: &Message, details
         turns.push(new_turn(&entry.id, entry.timestamp, vec![]));
         items.push(Item::Known(KnownItem::UserMessage {
             id: user_item_id(&entry.id),
-            content: tiechui_core::input_content(&message.content),
+            content: input_content(&message.content),
         }));
     } else {
         for (index, content) in message.content.iter().enumerate() {
@@ -317,6 +317,20 @@ fn push_message(turns: &mut Vec<Turn>, entry: &Entry, message: &Message, details
         turn.items.extend(items);
         turn.ended_at = Some(entry.timestamp);
     }
+}
+
+fn input_content(parts: &[Content]) -> Vec<InputContent> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            Content::Text { text, .. } => Some(InputContent::Text { text: text.clone() }),
+            Content::Image { mime_type, data } => Some(InputContent::Image {
+                mime_type: mime_type.clone(),
+                data: data.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn new_turn(id: &str, at: u64, items: Vec<Item>) -> Turn {

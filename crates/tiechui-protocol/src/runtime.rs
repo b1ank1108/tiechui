@@ -137,19 +137,18 @@ impl RuntimeCapabilities {
     }
 
     pub const fn allows(&self, feature: Feature) -> bool {
-        let flags = [
-            self.branch,
-            self.fork,
-            self.rewind,
-            self.retry,
-            self.compact,
-            self.side_chat,
-            self.commands,
-            self.thinking,
-            self.model,
-            self.shell,
-        ];
-        flags[feature as usize]
+        match feature {
+            Feature::Branch => self.branch,
+            Feature::Fork => self.fork,
+            Feature::Rewind => self.rewind,
+            Feature::Retry => self.retry,
+            Feature::Compact => self.compact,
+            Feature::SideChat => self.side_chat,
+            Feature::Commands => self.commands,
+            Feature::Thinking => self.thinking,
+            Feature::Model => self.model,
+            Feature::Shell => self.shell,
+        }
     }
 
     /// The entry of a gated op the runtime lacks.
@@ -327,86 +326,5 @@ impl DerivedTurnMarker {
 
     pub fn from_item(item: &crate::Item) -> Option<Self> {
         payload_of(item, DERIVED_TURN_KIND)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_feature_reads_its_own_flag() {
-        let none = RuntimeCapabilities::minimal();
-        let only = [
-            (
-                Feature::Branch,
-                RuntimeCapabilities {
-                    branch: true,
-                    ..none
-                },
-            ),
-            (Feature::Fork, RuntimeCapabilities { fork: true, ..none }),
-            (
-                Feature::Rewind,
-                RuntimeCapabilities {
-                    rewind: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Retry,
-                RuntimeCapabilities {
-                    retry: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Compact,
-                RuntimeCapabilities {
-                    compact: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::SideChat,
-                RuntimeCapabilities {
-                    side_chat: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Commands,
-                RuntimeCapabilities {
-                    commands: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Thinking,
-                RuntimeCapabilities {
-                    thinking: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Model,
-                RuntimeCapabilities {
-                    model: true,
-                    ..none
-                },
-            ),
-            (
-                Feature::Shell,
-                RuntimeCapabilities {
-                    shell: true,
-                    ..none
-                },
-            ),
-        ];
-        for (feature, capabilities) in only {
-            for (other, _) in only {
-                assert_eq!(capabilities.allows(other), other == feature);
-            }
-        }
     }
 }

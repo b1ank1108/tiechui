@@ -654,7 +654,12 @@ impl Session {
                 self.emit(EventKind::Error { message });
                 Ok(())
             }
-            _ => Ok(()),
+            BackendEvent::ItemStarted(_)
+            | BackendEvent::ItemDelta { .. }
+            | BackendEvent::ItemCompleted(_)
+            | BackendEvent::Usage(_)
+            | BackendEvent::ContextWindow(_)
+            | BackendEvent::Subagent(_) => Ok(()),
         }
     }
 

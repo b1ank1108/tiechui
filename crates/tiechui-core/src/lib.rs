@@ -14,7 +14,6 @@ mod stream;
 pub mod textgen;
 mod validation;
 
-pub use commands::input_content;
 pub use interactions::{Inbox, Interactions};
 pub use retry::{BoundedRetry, RetryPolicy};
 

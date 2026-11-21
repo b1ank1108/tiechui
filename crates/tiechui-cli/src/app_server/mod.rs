@@ -2049,7 +2049,6 @@ fn starts_turn(entry: &Entry) -> bool {
     matches!(&entry.kind, EntryKind::Message { message, .. } if message.role == Role::User)
 }
 
-/// The runtime a new session asks for, or `None` for the default one.
 fn requested_runtime(runtime: Option<&str>) -> Option<&str> {
     runtime.filter(|runtime| *runtime != tiechui_protocol::DEFAULT_RUNTIME)
 }
