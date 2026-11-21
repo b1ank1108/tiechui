@@ -805,6 +805,274 @@ def selection_copy_config(f):
     s.exit()
 
 
+def find_cell(s, needle):
+    for row, cells in enumerate(s.screen.cells):
+        line = "".join(cells)
+        if needle in line:
+            return row, line.index(needle)
+    s.check(False, "Text not found on screen: %r" % needle)
+
+
+def assert_scroll_rows(s, text, lo, hi):
+    pos = -1
+    for n in range(lo, hi + 1):
+        marker = "SCROLL_ROW_%02d_END" % n
+        nxt = text.find(marker, pos + 1)
+        s.check(nxt > pos, "Missing or out-of-order %s in %d..%d copy: %r" % (marker, lo, hi, text))
+        pos = nxt
+
+
+def selection_scroll(f):
+    s = f.start()
+    s.command("long scroll reply", "SCROLL_ROW_59_END")
+    s.pump(0.15)
+
+    row59, col59 = find_cell(s, "SCROLL_ROW_59_END")
+    end_col59 = col59 + 1 + len("SCROLL_ROW_59_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{end_col59};{row59 + 1}M")
+    s.pump(0.08)
+    for _ in range(10):
+        s.send(f"\x1b[<64;{end_col59};{row59 + 1}M")
+        s.pump(0.04)
+    s.wait("esc latest")
+    s.pump(0.25)
+    s.check("SCROLL_ROW_59_END" not in s.screen.text(),
+            "Bottom-row wheel scroll auto-scrolled back to bottom")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Wheel drag emitted OSC 52 before release")
+    row_top, col_top = next(
+        (r, "".join(cells).index("SCROLL_ROW_"))
+        for r, cells in enumerate(s.screen.cells)
+        if "SCROLL_ROW_" in "".join(cells)
+    )
+    top_marker = "".join(s.screen.cells[row_top])[col_top:col_top + len("SCROLL_ROW_00_END")]
+    top_idx = int(top_marker.split("_")[2])
+    s.send(f"\x1b[<0;{col_top + 1};{row_top + 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after wheel drag, got %d" % len(copies))
+    assert_scroll_rows(s, copies[0], top_idx, 59)
+    s.check("esc latest" not in copies[0] and "pgup/pgdn" not in copies[0],
+            "Scroll hint leaked into wheel drag copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    s.send(ESC)
+    s.wait("SCROLL_ROW_59_END", absent="esc latest")
+
+    row59, col59 = find_cell(s, "SCROLL_ROW_59_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{col59 + 1 + len('SCROLL_ROW_59_END')};{row59 + 1}M")
+    s.pump(0.05)
+    s.send("\x1b[<32;1;1M")
+    s.wait("SCROLL_ROW_00_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Top edge auto-scroll emitted OSC 52 before release")
+    s.send("\x1b[<0;1;1m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after top auto-scroll, got %d" % len(copies))
+    assert_scroll_rows(s, copies[0], 0, 59)
+    s.check("esc latest" not in copies[0], "Scroll hint leaked into top auto-scroll copy")
+
+    s.send(ESC)
+    s.wait("SCROLL_ROW_00_END")
+    s.wait("esc latest")
+    row01, col01 = find_cell(s, "SCROLL_ROW_01_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{col01 + 1};{row01 + 1}M")
+    s.pump(0.05)
+    s.send(f"\x1b[<32;5;{s.screen.rows - 1}M")
+    s.wait("SCROLL_ROW_59_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Bottom edge auto-scroll emitted OSC 52 before release")
+    s.send(f"\x1b[<0;5;{s.screen.rows - 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after bottom auto-scroll, got %d" % len(copies))
+    assert_scroll_rows(s, copies[0], 1, 59)
+    s.check("esc latest" not in copies[0] and "alpha" not in copies[0],
+            "Bottom chrome/hint leaked into bottom auto-scroll copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    row56, col56 = find_cell(s, "SCROLL_ROW_56_END")
+    s.send(f"\x1b[<0;{col56 + 1};{row56 + 1}M")
+    s.send(f"\x1b[<32;{col56 + 8};{row56 + 1}M")
+    s.send(f"\x1b[<0;{col56 + 1 + len('SCROLL_ROW_56_END')};{row56 + 1}m")
+    s.wait("chars to clipboard")
+    after_release = len(s.raw)
+    for seq in ["\x1b[<64;10;10M", "\x1b[<65;10;10M", "\x1b[5~", "\x1b[6~", "\x1b[1;5F", "\x1b[1;5H"]:
+        s.send(seq)
+        s.pump(0.1)
+    s.wait("SCROLL_ROW_00_END")
+    s.check(not copied_texts(s, after_release), "Scrolling after release emitted duplicate OSC 52")
+    row02, col02 = find_cell(s, "SCROLL_ROW_02_END")
+    s.send(f"\x1b[<4;{col02 + 1};{row02 + 1}M")
+    s.pump(0.08)
+    s.check(not copied_texts(s, after_release), "Shift+Click press emitted OSC 52 before release")
+    s.send(f"\x1b[<4;{col02 + 1};{row02 + 1}m")
+    s.pump(0.15)
+    copies = copied_texts(s, after_release)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Shift+Click release, got %d" % len(copies))
+    s.check(copies[0].startswith("SCROLL_ROW_02_END") and copies[0].endswith("SCROLL_ROW_56_END"),
+            "Shift+Click extension bounds mismatch: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 2, 56)
+    s.check("esc latest" not in copies[0], "Scroll hint leaked into Shift+Click copy")
+
+    s.send(ESC)
+    s.pump(0.05)
+    s.send(ESC)
+    s.wait("SCROLL_ROW_59_END", absent="esc latest")
+    s.send("\x0f")
+    s.wait("T R A N S C R I P T")
+    s.wait("SCROLL_ROW_59_END")
+
+    p_row58, p_col58 = find_cell(s, "SCROLL_ROW_58_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{p_col58 + 1 + len('SCROLL_ROW_58_END')};{p_row58 + 1}M")
+    s.pump(0.05)
+    s.send("\x1b[<32;10;1M")
+    s.wait("SCROLL_ROW_00_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Ctrl+O top drag emitted OSC 52 before release")
+    s.send("\x1b[<0;10;1m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O top drag, got %d" % len(copies))
+    assert_scroll_rows(s, copies[0], 0, 58)
+    for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
+        s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into copy" % forbidden)
+
+    s.send(ESC)
+    s.pump(0.1)
+    s.check("T R A N S C R I P T" in s.screen.text(), "First Esc closed Ctrl+O before clearing selection")
+    p_row01, p_col01 = find_cell(s, "SCROLL_ROW_01_END")
+    start = len(s.raw)
+    s.send(f"\x1b[<0;{p_col01 + 1};{p_row01 + 1}M")
+    s.pump(0.05)
+    s.send(f"\x1b[<32;10;{s.screen.rows - 2}M")
+    s.wait("SCROLL_ROW_59_END")
+    s.check(b"\x1b]52;" not in s.raw[start:], "Ctrl+O bottom drag emitted OSC 52 before release")
+    s.send(f"\x1b[<0;10;{s.screen.rows - 2}m")
+    s.pump(0.15)
+    copies = copied_texts(s, start)
+    s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O bottom drag, got %d" % len(copies))
+    assert_scroll_rows(s, copies[0], 1, 59)
+    for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
+        s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into bottom drag copy" % forbidden)
+
+    s.send(ESC)
+    s.pump(0.1)
+    s.check("T R A N S C R I P T" in s.screen.text(), "First Esc closed Ctrl+O instead of clearing selection")
+    s.send(ESC)
+    s.wait("alpha", absent="T R A N S C R I P T")
+    s.exit()
+
+
+def ctrl_enter_send(f):
+    ctrl_enter = ESC + "[13;5u"
+    (f.cwd / "notes target.txt").write_text("NOTES_FILE\n")
+    (f.cwd / "sample.txt").write_text("SAMPLE_BODY\n")
+    f.config.write_text(
+        f.config.read_text()
+        + '\n[tui.status_line]\nitems = ["model", "run-state"]\n'
+        + '[[permissions.rules]]\nsurface = "*"\npattern = "*"\naction = "allow"\n'
+    )
+    s = f.start()
+    s.wait("Ready")
+
+    s.draft("IDLE_MAIN_PROMPT")
+    s.wait("› IDLE_MAIN_PROMPT")
+    s.send(ctrl_enter)
+    s.wait("IDLE_MAIN_DONE")
+    s.wait("Ready")
+    s.check(message_text(f.mock.requests[0]["messages"][-1]) == "IDLE_MAIN_PROMPT",
+            "Idle Ctrl+Enter did not send main prompt")
+
+    s.command("/btw", "Ask a follow-up question")
+    s.draft("IDLE_SIDE_PROMPT")
+    s.wait("› IDLE_SIDE_PROMPT")
+    s.send(ctrl_enter)
+    s.wait("SIDE_HOLD")
+    s.draft("SIDE_BUSY_KEEP")
+    s.wait("SIDE_BUSY_KEEP")
+    s.send(ctrl_enter)
+    s.wait("Side reply is still running")
+    s.check("SIDE_BUSY_KEEP" in s.screen.text(), "Busy /btw Ctrl+Enter lost draft")
+    s.check(len(f.mock.requests) == 2, "Busy /btw Ctrl+Enter issued another request")
+    s.send("\x03")
+    f.mock.replies[1].release.set()
+    s.wait("IDLE_SIDE_DONE")
+    s.send("\x1f")
+    s.wait("ctrl+/ for side", absent="── Side ──")
+
+    s.command("SLOW_ONE", "HOLD_ONE")
+    s.send(ctrl_enter)
+    s.pump(0.2)
+    s.check("Conversation interrupted" not in s.screen.text() and len(f.mock.requests) == 3,
+            "Empty composer + empty queue Ctrl+Enter interrupted the running turn")
+
+    s.draft("LITERAL_AT @notes")
+    s.wait("notes target.txt")
+    s.wait("› LITERAL_AT @notes")
+    copy_start = mouse_copy(s, "HOLD_ONE")
+    s.send(ctrl_enter)
+    s.wait("HOLD_TWO")
+    s.check(copied_texts(s, copy_start) == ["HOLD_ONE"],
+            "Ctrl+Enter re-copied active selection instead of clearing and sending")
+    s.check("Conversation interrupted" in s.screen.text(),
+            "Ctrl+Enter with draft did not interrupt the active turn")
+    s.check(message_text(f.mock.requests[3]["messages"][-1]) == "LITERAL_AT @notes",
+            "Ctrl+Enter completed @mention instead of sending literal draft: "
+            + repr(f.mock.requests[3]["messages"][-1]))
+
+    s.draft("!echo IMMEDIATE_SHELL")
+    s.wait("! echo IMMEDIATE_SHELL")
+    s.send(ctrl_enter)
+    s.wait("IMMEDIATE_SHELL", absent="esc to interrupt")
+    s.wait("Ready")
+    s.check(len(f.mock.requests) == 4, "Immediate !command issued an extra model request")
+
+    s.draft("START_SLOW_TOOL")
+    s.send("\r")
+    s.wait("sleep 10")
+    s.wait("esc to interrupt")
+    s.draft("M1_FIRST")
+    s.send("\r")
+    s.wait("Messages to be submitted after next tool call")
+    s.wait("M1_FIRST")
+    s.draft("M2_SECOND")
+    s.send("\r")
+    s.wait("M2_SECOND")
+    s.draft("DRAFT_KEEP")
+    s.wait("› DRAFT_KEEP")
+    s.check(len(f.mock.requests) == 5, "Queued steering fired before slow tool ended")
+
+    s.send(ctrl_enter)
+    s.wait("M1_AFTER_TOOL_HOLD")
+    s.wait("Queued follow-up inputs")
+    s.check("M2_SECOND" in s.screen.text(), "M2 was not retained in follow-up queue")
+    s.check("Messages to be submitted after next tool call" not in s.screen.text(),
+            "Remaining steering item was not demoted to follow-up")
+    s.check("› DRAFT_KEEP" in s.screen.text(), "Ctrl+Enter with non-empty queue modified draft")
+    s.check(len(f.mock.requests) == 7, "Expected M1 initial + M1 post-tool requests only")
+    for idx in (5, 6):
+        payload = json.dumps(f.mock.requests[idx])
+        s.check("M1_FIRST" in payload and "M2_SECOND" not in payload and "DRAFT_KEEP" not in payload,
+                "Unexpected messages in M1 request %d: %s" % (idx, payload))
+
+    f.mock.replies[6].release.set()
+    s.wait("M2_COMPLETE", absent="Queued follow-up inputs")
+    s.wait("Ready")
+    s.check("› DRAFT_KEEP" in s.screen.text(), "Draft disappeared after queued turns finished")
+    s.check(message_text(f.mock.requests[7]["messages"][-1]) == "M2_SECOND",
+            "M2 did not run after M1 finished")
+    s.check(all("DRAFT_KEEP" not in json.dumps(r) for r in f.mock.requests),
+            "Unsent composer draft leaked into provider requests")
+
+    s.send("\x03")
+    s.wait("Ready", absent="DRAFT_KEEP")
+    s.exit()
+
+
 def theme(f):
     s = f.start()
     s.wait("alpha")
@@ -1725,6 +1993,17 @@ CASES = {
     "viewport-reflow": (viewport_reflow, lambda: [Reply("STREAM_HEAD " + "中文 word " * 12 + "\n", hold=True, tail="STREAM_END")]),
     "selection-copy": (selection_copy, lambda: [Reply("COPY_ON_RELEASE"), Reply("COPY_ON_RELEASE")]),
     "selection-copy-config": (selection_copy_config, lambda: [Reply("COPY_CONFIG_TEXT"), Reply("COPY_NEW_TEXT")]),
+    "selection-scroll": (selection_scroll, lambda: [Reply("\n".join("SCROLL_ROW_%02d_END" % n for n in range(60)))]),
+    "ctrl-enter-send": (ctrl_enter_send, lambda: [
+        Reply("IDLE_MAIN_DONE"),
+        Reply("SIDE_HOLD", hold=True, tail=" IDLE_SIDE_DONE"),
+        Reply("HOLD_ONE\n", hold=True),
+        Reply("HOLD_TWO\n", hold=True),
+        Reply(tools=[("bash", {"command": "sleep 10"})]),
+        Reply(tools=[("read", {"path": "sample.txt"})]),
+        Reply("M1_AFTER_TOOL_HOLD", hold=True, tail=" M1_COMPLETE"),
+        Reply("M2_COMPLETE"),
+    ]),
     "theme": (theme, lambda: [Reply("```rs\nlet value = 42;\n```\n\nTHEME_HISTORY")]),
     "resume": (resume, lambda: [Reply("ALPHA_HISTORY"), Reply("BETA_HISTORY"), Reply("RESUMED_DONE")]),
     "model": (model, lambda: [Reply("BETA_DONE"), Reply("ALPHA_DONE")]),

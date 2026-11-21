@@ -121,6 +121,48 @@ fn modal_keys_draft_busy_and_close_are_isolated() {
     ));
 }
 #[test]
+fn ctrl_enter_sends_when_idle_and_refuses_when_busy_preserving_draft() {
+    let mut panel = Panel::new(view());
+    assert!(matches!(
+        key(&mut panel, KeyCode::Char('?'), KeyModifiers::NONE),
+        Outcome::Open
+    ));
+    assert!(plain(&render(&mut panel, 80, 24, false)).contains("ctrl+enter"));
+    key(&mut panel, KeyCode::Esc, KeyModifiers::NONE);
+
+    panel.paste("first line");
+    assert!(matches!(
+        key(
+            &mut panel,
+            KeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ),
+        Outcome::Open
+    ));
+    panel.paste("second line");
+    match key(&mut panel, KeyCode::Enter, KeyModifiers::CONTROL) {
+        Outcome::Action(BtwAction::Send { content }) => {
+            assert_eq!(
+                content,
+                vec![InputContent::Text {
+                    text: "first line\nsecond line".into()
+                }]
+            );
+        }
+        _ => panic!("expected BtwAction::Send on idle Ctrl+Enter"),
+    }
+    assert!(panel.view.busy);
+
+    panel.paste("keep busy draft");
+    assert!(matches!(
+        key(&mut panel, KeyCode::Enter, KeyModifiers::CONTROL),
+        Outcome::Open
+    ));
+    let busy_screen = plain(&render(&mut panel, 80, 24, false));
+    assert!(busy_screen.contains("Side reply is still running."));
+    assert!(busy_screen.contains("keep busy draft"));
+}
+#[test]
 fn short_multiline_panel_keeps_cursor_and_footer_and_error_once() {
     let mut panel = Panel::new(view());
     panel.view.messages[1].text.clear();

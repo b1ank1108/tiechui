@@ -413,7 +413,7 @@ impl Panel {
         let mut footer = Vec::new();
         if self.help {
             for text in [
-                "enter send · shift+enter newline",
+                "enter / ctrl+enter send · shift+enter newline",
                 "ctrl+t thinking · ctrl+o transcript · ctrl+s share",
                 "/statusline configure footer · alt+s stash draft · esc close shortcuts",
             ] {

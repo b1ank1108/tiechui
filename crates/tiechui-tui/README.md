@@ -6,7 +6,11 @@ scrolls with the mouse wheel or PageUp / PageDown. Ctrl+Home / Ctrl+End jump to
 the beginning / latest output. Scrolling up
 pauses following; Esc returns to the latest output. Drag, double-click and
 triple-click select transcript text and copy on mouse release through OSC 52.
-Selection freezes the painted transcript while the composer remains live.
+In fullscreen chat and Ctrl+O, selection freezes the scrollable transcript
+document lines while the composer and footer remain live, excluding the scroll
+hint row, composer/status rows and Ctrl+O header/footer chrome. Holding the left
+button while scrolling the wheel or dragging to the top/bottom viewport edge
+scrolls across screens and copies once on mouse release.
 Closing a viewer retains the fullscreen chat; exit and suspension restore the
 shell screen. Finished cells are cached and resize rewraps their source.
 
@@ -20,11 +24,14 @@ Ctrl+O opens the expanded transcript on the alternate screen, including full
 tool output and thinking. Viewers support wheel scrolling, drag selection,
 double-click words, triple-click lines and arrow-key selection adjustment.
 Non-blank selections copy once on mouse release and keep their highlight.
-Arrow-key adjustments do not copy automatically; Enter, Ctrl+C or Super+C
-copies explicitly. A plain click keeps its normal action, and Ctrl+C without a
-selection keeps its interrupt behavior. Esc clears selection before closing the
-viewer. Scrolling, focus loss, resize, closing a viewer and switching sessions
-clear selection and discard any pending copy.
+In fullscreen chat and Ctrl+O, wheel and page scrolling preserve an active
+selection without re-copying, and Shift+Click extends the selection across
+screens; other single-screen panels clear selection and discard any pending copy
+on scroll. Arrow-key adjustments do not copy automatically; Enter, Ctrl+C or
+Super+C copies explicitly. A plain click keeps its normal action, and Ctrl+C
+without a selection keeps its interrupt behavior. Esc clears selection before
+returning to the latest output or closing Ctrl+O. Focus loss, resize, closing a
+viewer and switching sessions clear selection and discard any pending copy.
 
 `tui.copy_on_select` defaults to `true`. Set it to `false` in `[tui]` to keep only
 explicit copy shortcuts; `/reload` applies changes. It covers fullscreen chat and
@@ -75,6 +82,18 @@ side draft or stream. Esc stops only the side reply; empty Ctrl+C/D discards it.
 Ctrl+/ uses the kitty protocol or legacy `0x1f` (Ctrl+7). BTW does not enable
 xterm modifyOtherKeys: crossterm cannot decode its CSI 27 form, which tmux may
 send even when CSI-u format is requested. Support is left to terminal input work.
+
+Ctrl+Enter requires the kitty keyboard protocol (`CSI u`) or Windows ConPTY;
+xterm modifyOtherKeys is not enabled. When idle, it submits immediately in the
+main composer and in BTW, skipping `/`, `@` and `$` menu completion (while BTW
+is busy, concurrent sends are still refused). While a main turn is running,
+Enter steers after the next tool call and Tab or Alt+Enter queues a follow-up.
+Ctrl+Enter interrupts the active turn instead. When queued messages exist, the
+draft stays in the composer, the first queued message starts the next turn, and
+any remaining steering items move to the follow-up queue. When the queue is
+empty, a non-blank draft or `!command` clears the composer and runs once the
+interrupted turn settles; if both the queue and the draft are empty, Ctrl+Enter
+does nothing.
 
 Escape priority, from the currently focused surface to the idle composer:
 

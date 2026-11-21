@@ -232,6 +232,7 @@ chui exec "Continue" --resume SESSION_ID --json --approval allow-listed
 | --- | --- |
 | Enter | 发送。回合运行中时，排队一条引导，在下一次工具调用后送达 |
 | Tab | 排队一条后续消息；补全菜单项 |
+| Ctrl+Enter | 跳过菜单补全直接发送。回合运行中时，中断当前回合并发送队首消息（保留草稿）或当前草稿 |
 | Shift+Enter、Ctrl+J | 换行 |
 | Up / Down | 输入历史 |
 | Alt+S | 暂存或恢复草稿 |

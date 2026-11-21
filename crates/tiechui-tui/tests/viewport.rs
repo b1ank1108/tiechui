@@ -218,22 +218,16 @@ fn copy_setting_applies_at_startup_and_when_a_session_opens() {
 }
 
 #[test]
-fn resize_focus_loss_session_open_and_footer_scroll_cancel_selection_and_pending_copy() {
+fn resize_focus_loss_session_open_and_panel_scroll_cancel_selection_while_chat_scroll_retains_it() {
     for release in [false, true] {
-        for cancel in 0..4 {
+        for cancel in 0..3 {
             let mut app = app();
             complete(&mut app, "first", "SELECT_ME".into());
             select_main_text(&mut app, release);
             match cancel {
                 0 => app.resize(80, 24),
                 1 => app.focus(false),
-                2 => app.opened(app.cwd().to_owned(), Default::default(), true, vec![]),
-                _ => app.mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollDown,
-                    column: 0,
-                    row: 23,
-                    modifiers: KeyModifiers::NONE,
-                }),
+                _ => app.opened(app.cwd().to_owned(), Default::default(), true, vec![]),
             }
             app.mouse(MouseEvent {
                 kind: MouseEventKind::Up(MouseButton::Left),
@@ -244,6 +238,70 @@ fn resize_focus_loss_session_open_and_footer_scroll_cancel_selection_and_pending
             assert!(app.take_copy().is_none());
             assert!(app.main_frame().1.is_some());
         }
+
+        let mut main_app = app();
+        complete(&mut main_app, "first", "SELECT_ME".into());
+        select_main_text(&mut main_app, release);
+        main_app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            main_app.take_copy().as_deref(),
+            release.then_some("SELECT_ME")
+        );
+        assert!(main_app.main_frame().1.is_none());
+
+        let mut panel_app = app();
+        panel_app.event(event(EventKind::CommandPanel {
+            name: "context".into(),
+            text: String::new(),
+            panel: Box::new(ContextSnapshot {
+                system: vec![ContextItem {
+                    label: "System prompt".into(),
+                    text: "PANEL_SELECT_TEXT\nSECOND_LINE".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            view: ContextView::System,
+        }));
+        panel_app.key(key(KeyCode::Enter));
+        let page = panel_app.pager_frame(24).unwrap();
+        let row = page
+            .iter()
+            .position(|l| text(std::slice::from_ref(l)).contains("PANEL_SELECT_TEXT"))
+            .unwrap() as u16;
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Drag(MouseButton::Left), 10),
+            (MouseEventKind::Up(MouseButton::Left), 19),
+        ] {
+            if !release && kind == MouseEventKind::Up(MouseButton::Left) {
+                break;
+            }
+            panel_app.mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        panel_app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        panel_app.mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 19,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(panel_app.take_copy().is_none());
     }
 }
 
@@ -799,4 +857,129 @@ fn fullscreen_control_rows_light_up_and_expand_cells_in_place() {
     click(&mut app, 18, summary);
     let (frame, hide) = row(&mut app, "    − Hide summary");
     assert!(hide.is_some() && text(&frame).contains("SUMMARY_BODY"));
+}
+
+#[test]
+fn event_driven_viewer_close_and_panel_replacement_discard_selection_and_pending_copy() {
+    let mut inline = App::new(
+        Theme::fixture(ColorLevel::TrueColor, false),
+        80,
+        Options {
+            no_alt_screen: true,
+            ..Options::default()
+        },
+    );
+    inline.event(event(EventKind::ThreadStarted {
+        replay: false,
+        thread: Thread {
+            id: ThreadId("t".into()),
+            epoch: SessionEpoch(0),
+            turns: vec![],
+        },
+    }));
+    inline.event(event(EventKind::Extension {
+        name: BTW_EVENT.into(),
+        data: serde_json::to_value(BtwEvent::Update {
+            open: true,
+            view: BtwView {
+                id: "side-1".into(),
+                busy: false,
+                thinking: ThinkingLevel::Off,
+                model: ModelInfo {
+                    provider: "fixture".into(),
+                    id: "side".into(),
+                    context_window: 10000,
+                    reasoning: false,
+                    thinking_levels: vec![ThinkingLevel::Off],
+                },
+                context: None,
+                total: TokenUsage::default(),
+                notice: None,
+                messages: vec![BtwMessage {
+                    text: "SIDE_SELECT_TEXT".into(),
+                    complete: true,
+                    ..Default::default()
+                }],
+            },
+        })
+        .unwrap(),
+    }));
+    let side_page = inline.pager_frame(24).unwrap();
+    let side_row = side_page
+        .iter()
+        .position(|l| text(std::slice::from_ref(l)).contains("SIDE_SELECT_TEXT"))
+        .unwrap() as u16;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 10),
+        (MouseEventKind::Up(MouseButton::Left), 18),
+    ] {
+        inline.mouse(MouseEvent {
+            kind,
+            column,
+            row: side_row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    inline.event(event(EventKind::Extension {
+        name: BTW_EVENT.into(),
+        data: serde_json::to_value(BtwEvent::Closed).unwrap(),
+    }));
+    assert!(inline.take_copy().is_none());
+    inline.paste("after side close");
+    inline.key(key(KeyCode::Enter));
+    assert_eq!(inline.take_submissions().len(), 1);
+
+    let mut panel_app = app();
+    let send_context = |app: &mut App, body: &str| {
+        app.event(event(EventKind::CommandPanel {
+            name: "context".into(),
+            text: String::new(),
+            panel: Box::new(ContextSnapshot {
+                system: vec![ContextItem {
+                    label: "System prompt".into(),
+                    text: body.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            view: ContextView::System,
+        }));
+        app.key(key(KeyCode::Enter));
+    };
+    send_context(&mut panel_app, "OLD_PANEL_BODY");
+    let old_page = panel_app.pager_frame(24).unwrap();
+    let old_row = old_page
+        .iter()
+        .position(|l| text(std::slice::from_ref(l)).contains("OLD_PANEL_BODY"))
+        .unwrap() as u16;
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 10),
+        (MouseEventKind::Up(MouseButton::Left), 16),
+    ] {
+        panel_app.mouse(MouseEvent {
+            kind,
+            column,
+            row: old_row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    panel_app.event(event(EventKind::CommandPanel {
+        name: "context".into(),
+        text: String::new(),
+        panel: Box::new(ContextSnapshot {
+            system: vec![ContextItem {
+                label: "Replacement prompt".into(),
+                text: "NEW_PANEL_BODY".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        view: ContextView::System,
+    }));
+    assert!(panel_app.take_copy().is_none());
+    let replaced = text(&panel_app.pager_frame(24).unwrap());
+    assert!(!replaced.contains("OLD_PANEL_BODY"), "{replaced}");
+    assert!(replaced.contains("Replacement prompt"), "{replaced}");
 }

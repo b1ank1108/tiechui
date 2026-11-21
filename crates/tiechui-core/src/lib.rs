@@ -125,6 +125,7 @@ pub struct SessionActor {
     retry_wake: Option<CancellationToken>,
     compacting: bool,
     pending_compaction: Option<Submission>,
+    pending_shell: Option<Submission>,
     breaker: compaction::Breaker,
 }
 
@@ -196,6 +197,7 @@ impl SessionActor {
             retry_wake: None,
             compacting: false,
             pending_compaction: None,
+            pending_shell: None,
             breaker: compaction::Breaker::default(),
         };
         let task = tokio::spawn(actor.run());
@@ -658,15 +660,8 @@ impl SessionActor {
         }
         let mut resources_tick = tokio::time::interval(std::time::Duration::from_secs(1));
         while !self.closing && !self.shutdown.is_cancelled() {
-            let submission = if let Some(compaction) = self.pending_compaction.take() {
-                Some(compaction)
-            } else if let Some(queued) = self
-                .steering
-                .pop_front()
-                .or_else(|| self.follow_up.pop_front())
-            {
-                self.publish_queue();
-                Some(queued)
+            let submission = if let Some(pending) = self.next_pending() {
+                Some(pending)
             } else {
                 // Prompts first: a withdrawal sent before an answer is applied before it.
                 tokio::select! {
@@ -933,12 +928,41 @@ impl SessionActor {
             .ok_or("session epoch exhausted")?;
         self.steering.clear();
         self.follow_up.clear();
+        self.pending_shell = None;
         self.restore()?;
         self.ensure_settings().await?;
         self.publish_thread(replay);
         self.runtime(tiechui_plugin_api::RuntimeEvent::Restore { navigation: replay })
             .await?;
         Ok(())
+    }
+
+    fn next_pending(&mut self) -> Option<Submission> {
+        if let Some(compaction) = self.pending_compaction.take() {
+            return Some(compaction);
+        }
+        if let Some(shell) = self.pending_shell.take() {
+            return Some(shell);
+        }
+        let next = self
+            .steering
+            .pop_front()
+            .or_else(|| self.follow_up.pop_front())?;
+        while let Some(remaining) = self.steering.pop_back() {
+            self.follow_up.push_front(remaining);
+        }
+        self.publish_queue();
+        Some(next)
+    }
+
+    fn accepts_interrupt_shell(&self) -> bool {
+        self.turn.is_some()
+            && self.cancel.is_cancelled()
+            && self.pending_compaction.is_none()
+            && self.pending_shell.is_none()
+            && self.navigation.is_none()
+            && self.steering.is_empty()
+            && self.follow_up.is_empty()
     }
 
     async fn busy(&mut self, submission: Submission) -> Result<(), String> {
@@ -973,6 +997,9 @@ impl SessionActor {
             } => {
                 self.follow_up.push_back(submission);
                 self.publish_queue();
+            }
+            Op::RunShell { .. } if self.accepts_interrupt_shell() => {
+                self.pending_shell = Some(submission);
             }
             Op::Interrupt { turn_id } => {
                 if self.turn.as_ref().is_some_and(|turn| &turn.id == turn_id) {
