@@ -1003,8 +1003,11 @@ def ctrl_enter_send(f):
     s.draft("LITERAL_AT @notes")
     s.wait("notes target.txt")
     s.wait("› LITERAL_AT @notes")
+    copy_start = mouse_copy(s, "HOLD_ONE")
     s.send(ctrl_enter)
     s.wait("HOLD_TWO")
+    s.check(copied_texts(s, copy_start) == ["HOLD_ONE"],
+            "Ctrl+Enter re-copied active selection instead of clearing and sending")
     s.check("Conversation interrupted" in s.screen.text(),
             "Ctrl+Enter with draft did not interrupt the active turn")
     s.check(message_text(f.mock.requests[3]["messages"][-1]) == "LITERAL_AT @notes",

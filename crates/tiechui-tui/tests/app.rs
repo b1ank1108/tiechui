@@ -2837,3 +2837,334 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
     app.key(key(KeyCode::Esc));
     assert!(app.pager_frame(14).is_none());
 }
+
+#[test]
+fn active_selection_passes_modified_enter_and_arrow_shortcuts_through() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = running(60);
+    app.resize(60, 16);
+    for ev in answer("seed", "SELECTABLE_LINE_ONE\nSELECTABLE_LINE_TWO") {
+        app.event(ev);
+    }
+    let select_row0 = |app: &mut App| {
+        let (frame, _) = app.main_frame();
+        let row = frame
+            .iter()
+            .position(|l| text(std::slice::from_ref(l))[0].contains("SELECTABLE_LINE_ONE"))
+            .unwrap() as u16;
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Drag(MouseButton::Left), 12),
+            (MouseEventKind::Up(MouseButton::Left), 21),
+        ] {
+            app.mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert_eq!(app.take_copy().as_deref(), Some("SELECTABLE_LINE_ONE"));
+        assert!(app.main_frame().1.is_none());
+    };
+
+    typed(&mut app, "urgent draft");
+    select_row0(&mut app);
+    app.key(with(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert_eq!(
+        ops(&mut app),
+        [interrupt(), user("urgent draft", InputDelivery::FollowUp),]
+    );
+    assert!(app.take_copy().is_none());
+    assert!(app.main_frame().1.is_some());
+
+    let mut app = running(60);
+    app.resize(60, 16);
+    for ev in answer("seed", "SELECTABLE_LINE_ONE\nSELECTABLE_LINE_TWO") {
+        app.event(ev);
+    }
+    typed(&mut app, "first line");
+    select_row0(&mut app);
+    app.key(with(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert!(ops(&mut app).is_empty());
+    assert!(app.take_copy().is_none());
+    assert_eq!(draft(&mut app), ["› first line", ""]);
+
+    typed(&mut app, "second line");
+    select_row0(&mut app);
+    app.key(with(KeyCode::Enter, KeyModifiers::ALT));
+    let sent = ids(&mut app);
+    assert_eq!(
+        sent,
+        [(
+            sent[0].0.clone(),
+            user("first line\nsecond line", InputDelivery::FollowUp),
+        )]
+    );
+
+    typed(&mut app, "second queued");
+    app.key(key(KeyCode::Tab));
+    let second_id = ids(&mut app).remove(0).0;
+    app.event(queue(
+        &[],
+        &[
+            (&sent[0].0, "first line\nsecond line"),
+            (&second_id, "second queued"),
+        ],
+    ));
+
+    select_row0(&mut app);
+    app.key(with(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(ops(&mut app), [retract(&[&second_id])]);
+    app.event(retracted(&[(&second_id, "second queued")]));
+    app.event(queue(&[], &[(&sent[0].0, "first line\nsecond line")]));
+
+    select_row0(&mut app);
+    app.key(with(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(ops(&mut app), [retract(&[&sent[0].0])]);
+    app.event(retracted(&[(&sent[0].0, "first line\nsecond line")]));
+    app.event(queue(&[], &[]));
+
+    select_row0(&mut app);
+    app.key(with(KeyCode::Left, KeyModifiers::CONTROL));
+    typed(&mut app, "X");
+    assert_eq!(draft(&mut app), ["› first line", "  second Xline"]);
+}
+
+#[test]
+fn single_click_and_new_drag_after_stream_growth_while_frozen_keep_follow_and_controls() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = ready(60);
+    app.resize(60, 16);
+    let initial_body: String = (0..20).map(|n| format!("INIT_ROW_{n:02}_END\n")).collect();
+    for ev in answer("init", &initial_body) {
+        app.event(ev);
+    }
+    let send_mouse = |app: &mut App, kind, column, row, modifiers| {
+        app.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers,
+        });
+    };
+    let find_row = |lines: &[Line<'_>], needle: &str| -> u16 {
+        lines
+            .iter()
+            .position(|l| text(std::slice::from_ref(l))[0].contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle} in:\n{}", text(lines).join("\n")))
+            as u16
+    };
+
+    let (frame, _) = app.main_frame();
+    let row18 = find_row(&frame, "INIT_ROW_18_END");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        row18,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        17,
+        row18,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(app.take_copy().as_deref(), Some("INIT_ROW_18_END"));
+
+    let grown_body: String = (0..30).map(|n| format!("GROWN_MAIN_{n:02}\n")).collect();
+    for ev in answer("grown", &grown_body) {
+        app.event(ev);
+    }
+    let (frozen, frozen_cursor) = app.main_frame();
+    let frozen_text = text(&frozen).join("\n");
+    assert!(frozen_cursor.is_none());
+    assert!(frozen_text.contains("INIT_ROW_19_END"));
+    assert!(!frozen_text.contains("GROWN_MAIN_29"));
+    assert!(!frozen_text.contains("esc latest"));
+
+    let row17 = find_row(&frozen, "INIT_ROW_17_END");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        row17,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        10,
+        row17,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        17,
+        row17,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(app.take_copy().as_deref(), Some("INIT_ROW_17_END"));
+    assert!(!text(&app.main_frame().0).join("\n").contains("esc latest"));
+
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        4,
+        1,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        4,
+        1,
+        KeyModifiers::NONE,
+    );
+    assert!(app.take_copy().is_none());
+    let (resumed, resumed_cursor) = app.main_frame();
+    let resumed_text = text(&resumed).join("\n");
+    assert!(resumed_cursor.is_some());
+    assert!(!resumed_text.contains("esc latest"), "{resumed_text}");
+    assert!(resumed_text.contains("GROWN_MAIN_29"), "{resumed_text}");
+
+    app.event(event(completed(call(
+        "c1",
+        "bash",
+        json!({"command": "echo tool"}),
+    ))));
+    app.event(event(completed(result(
+        "c1",
+        "TOOL_1\nTOOL_2\nTOOL_3\nTOOL_4\nTOOL_5\nTOOL_6",
+        false,
+    ))));
+    for ev in answer("after_tool", "SELECT_NEAR_CONTROL") {
+        app.event(ev);
+    }
+    let (with_ctrl, _) = app.main_frame();
+    assert!(!text(&with_ctrl).join("\n").contains("TOOL_3"));
+    let sel_row = find_row(&with_ctrl, "SELECT_NEAR_CONTROL");
+    let ctrl_row = find_row(&with_ctrl, "+ 3 lines");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        sel_row,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        21,
+        sel_row,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(app.take_copy().as_deref(), Some("SELECT_NEAR_CONTROL"));
+
+    for ev in answer("while_ctrl_frozen", "STREAMED_AFTER_TOOL") {
+        app.event(ev);
+    }
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        6,
+        ctrl_row,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        6,
+        ctrl_row,
+        KeyModifiers::NONE,
+    );
+    let (unfolded, unfolded_cursor) = app.main_frame();
+    let unfolded_text = text(&unfolded).join("\n");
+    assert!(unfolded_cursor.is_some());
+    assert!(!unfolded_text.contains("esc latest"), "{unfolded_text}");
+    assert!(unfolded_text.contains("TOOL_3"), "{unfolded_text}");
+    assert!(unfolded_text.contains("− Show less"), "{unfolded_text}");
+    assert!(
+        unfolded_text.contains("STREAMED_AFTER_TOOL"),
+        "{unfolded_text}"
+    );
+
+    app.key(with(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let page = app.pager_frame(14).unwrap();
+    let p_sel_row = find_row(&page, "STREAMED_AFTER_TOOL");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        p_sel_row,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        21,
+        p_sel_row,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(app.take_copy().as_deref(), Some("STREAMED_AFTER_TOOL"));
+
+    let pager_grown: String = (0..30).map(|n| format!("PAGER_LATE_{n:02}\n")).collect();
+    for ev in answer("pager_grown", &pager_grown) {
+        app.event(ev);
+    }
+    let frozen_page = app.pager_frame(14).unwrap();
+    let frozen_page_text = text(&frozen_page).join("\n");
+    assert!(!frozen_page_text.contains("PAGER_LATE_29"));
+    assert!(frozen_page_text.contains(" 100% "), "{frozen_page_text}");
+
+    let p_drag_row = find_row(&frozen_page, "SELECT_NEAR_CONTROL");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        p_drag_row,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        10,
+        p_drag_row,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        21,
+        p_drag_row,
+        KeyModifiers::NONE,
+    );
+    assert_eq!(app.take_copy().as_deref(), Some("SELECT_NEAR_CONTROL"));
+    assert!(
+        text(&app.pager_frame(14).unwrap())
+            .join("\n")
+            .contains(" 100% ")
+    );
+
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        4,
+        2,
+        KeyModifiers::NONE,
+    );
+    send_mouse(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        4,
+        2,
+        KeyModifiers::NONE,
+    );
+    assert!(app.take_copy().is_none());
+    let resumed_page = text(&app.pager_frame(14).unwrap()).join("\n");
+    assert!(resumed_page.contains("PAGER_LATE_29"), "{resumed_page}");
+    assert!(resumed_page.contains(" 100% "), "{resumed_page}");
+}

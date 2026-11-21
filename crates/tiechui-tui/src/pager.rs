@@ -64,10 +64,6 @@ impl Pager {
         self.offset
     }
 
-    pub fn set_height(&mut self, height: usize) {
-        self.sync(self.count, height);
-    }
-
     pub fn sync(&mut self, count: usize, height: usize) {
         self.height = height.max(1);
         self.count = count;

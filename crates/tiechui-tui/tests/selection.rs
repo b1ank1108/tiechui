@@ -374,3 +374,147 @@ fn document_selection_ignores_outside_presses_and_reports_edge_autoscroll() {
     );
     assert_eq!(selection.autoscroll_step(main_vp, 4, 11), Some(-2));
 }
+
+#[test]
+fn modified_enter_and_arrow_keys_clear_selection_and_pass_through() {
+    let now = Instant::now();
+    let select_copy = || {
+        let mut sel = selection("copy this text");
+        sel.mouse(mouse(DOWN, 0, 0), now, false);
+        sel.mouse(mouse(DRAG, 4, 0), now, false);
+        sel.mouse(mouse(UP, 4, 0), now, false);
+        sel
+    };
+
+    for copy_key in [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SUPER),
+        KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+    ] {
+        let mut sel = select_copy();
+        assert!(sel.key(copy_key), "{copy_key:?} should copy");
+        assert!(sel.active());
+        assert_eq!(sel.take_copy().as_deref(), Some("copy"));
+    }
+
+    for pass_key in [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Up, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+        KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ),
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT),
+    ] {
+        let mut sel = selection("copy this text");
+        sel.mouse(mouse(DOWN, 0, 0), now, true);
+        sel.mouse(mouse(DRAG, 4, 0), now, true);
+        sel.mouse(mouse(UP, 4, 0), now, true);
+        assert!(!sel.key(pass_key), "{pass_key:?} must pass through");
+        assert!(!sel.active(), "{pass_key:?} must clear selection");
+        assert!(
+            sel.take_copy().is_none(),
+            "{pass_key:?} must discard pending copy"
+        );
+    }
+}
+
+#[test]
+fn document_down_while_frozen_reuses_snapshot_until_selection_clears() {
+    let initial: Vec<Line<'static>> = (0..10)
+        .map(|n| Line::from(format!("FROZEN_{n:02}")))
+        .collect();
+    let grown: Vec<Line<'static>> = (0..25)
+        .map(|n| Line::from(format!("GROWN_{n:02}")))
+        .collect();
+    let viewport = Viewport {
+        top: 0,
+        height: 5,
+        rows: 8,
+    };
+    let view = DocView {
+        source: DocSource::Main,
+        viewport,
+        offset: 5,
+    };
+    let now = Instant::now();
+    let mut selection = Selection::default();
+
+    selection.doc_mouse(
+        mouse(DOWN, 0, 1),
+        now,
+        true,
+        view,
+        || initial.clone(),
+        |_| (viewport, 5),
+    );
+    selection.doc_mouse(
+        mouse(UP, 9, 1),
+        now,
+        true,
+        view,
+        || panic!("release must not snapshot"),
+        |_| (viewport, 5),
+    );
+    assert_eq!(selection.take_copy().as_deref(), Some("FROZEN_06"));
+
+    let click_at = now + Duration::from_secs(1);
+    selection.doc_mouse(
+        mouse(DOWN, 2, 2),
+        click_at,
+        true,
+        view,
+        || panic!("press while selection is active must keep frozen snapshot"),
+        |_| (viewport, 5),
+    );
+    assert_eq!(selection.doc_len(), 10);
+    let action = selection.doc_mouse(
+        mouse(UP, 2, 2),
+        click_at,
+        true,
+        view,
+        || panic!("stationary release must not snapshot"),
+        |_| (viewport, 5),
+    );
+    assert!(matches!(action, MouseAction::Click(_)));
+    assert!(!selection.active());
+
+    let next_view = DocView {
+        source: DocSource::Main,
+        viewport,
+        offset: 20,
+    };
+    selection.doc_mouse(
+        mouse(DOWN, 0, 4),
+        click_at + Duration::from_secs(1),
+        true,
+        next_view,
+        || grown.clone(),
+        |_| (viewport, 20),
+    );
+    selection.doc_mouse(
+        mouse(UP, 8, 4),
+        click_at + Duration::from_secs(1),
+        true,
+        next_view,
+        || panic!("release must not snapshot"),
+        |_| (viewport, 20),
+    );
+    assert_eq!(selection.take_copy().as_deref(), Some("GROWN_24"));
+}

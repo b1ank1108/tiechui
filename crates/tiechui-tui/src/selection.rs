@@ -66,11 +66,18 @@ impl DocState {
     }
 }
 
+enum Held {
+    Panel(Vec<Line<'static>>),
+    Doc {
+        lines: Vec<Line<'static>>,
+        state: DocState,
+    },
+}
+
 #[derive(Default)]
 pub struct Selection {
     painted: Vec<Line<'static>>,
-    held: Option<Vec<Line<'static>>>,
-    doc: Option<DocState>,
+    held: Option<Held>,
     anchor: Point,
     end: Point,
     pressed: Option<MouseEvent>,
@@ -135,17 +142,24 @@ impl Selection {
     }
 
     pub fn doc_source(&self) -> Option<DocSource> {
-        self.doc.map(|d| d.source).filter(|_| self.held.is_some())
+        match &self.held {
+            Some(Held::Doc { state, .. }) => Some(state.source),
+            _ => None,
+        }
     }
 
     pub fn doc_lines(&self, source: DocSource) -> Option<&[Line<'static>]> {
-        self.held
-            .as_deref()
-            .filter(|_| self.doc.is_some_and(|d| d.source == source))
+        match &self.held {
+            Some(Held::Doc { lines, state }) if state.source == source => Some(lines),
+            _ => None,
+        }
     }
 
     pub fn doc_len(&self) -> usize {
-        self.held.as_ref().map_or(0, Vec::len)
+        match &self.held {
+            Some(Held::Doc { lines, .. }) => lines.len(),
+            _ => 0,
+        }
     }
 
     pub fn end_row(&self) -> Option<usize> {
@@ -154,7 +168,6 @@ impl Selection {
 
     pub fn clear(&mut self) {
         self.held = None;
-        self.doc = None;
         self.pressed = None;
         self.dragged = false;
         self.last_click = None;
@@ -165,14 +178,19 @@ impl Selection {
         self.copy.take()
     }
 
+    fn lines(&self) -> &[Line<'static>] {
+        match &self.held {
+            Some(Held::Panel(lines) | Held::Doc { lines, .. }) => lines,
+            None => &self.painted,
+        }
+    }
+
     fn line_count(&self) -> usize {
-        self.held.as_ref().map_or(self.painted.len(), Vec::len)
+        self.lines().len()
     }
 
     fn text(&self, row: usize) -> String {
-        self.held
-            .as_ref()
-            .unwrap_or(&self.painted)
+        self.lines()
             .get(row)
             .map(|line| {
                 line.spans
@@ -279,7 +297,6 @@ impl Selection {
         }
         if !self.dragged && self.anchor == self.end {
             self.held = None;
-            self.doc = None;
             return MouseAction::Click(pressed);
         }
         if copy_on_select {
@@ -289,14 +306,14 @@ impl Selection {
     }
 
     fn pressed_in(&self, source: DocSource) -> bool {
-        self.pressed.is_some() && self.doc.is_some_and(|d| d.source == source)
+        self.pressed.is_some() && self.doc_source() == Some(source)
     }
 
     fn record_pointer(&mut self, col: usize, row: usize, rows: usize) {
-        if let Some(doc) = &mut self.doc {
-            doc.pointer = (col, row);
-            doc.left_top |= row > 0;
-            doc.left_bottom |= row + 1 < rows;
+        if let Some(Held::Doc { state, .. }) = &mut self.held {
+            state.pointer = (col, row);
+            state.left_top |= row > 0;
+            state.left_bottom |= row + 1 < rows;
         }
     }
 
@@ -316,22 +333,30 @@ impl Selection {
         if button != MouseButton::Left {
             return MouseAction::Pass;
         }
-        let extend =
-            self.doc_lines(view.source).is_some() && event.modifiers.contains(KeyModifiers::SHIFT);
-        if !extend {
+        let next_state = DocState {
+            source: view.source,
+            pointer: (col, row),
+            left_top: row > 0,
+            left_bottom: row + 1 < view.viewport.rows,
+        };
+        let reused = if let Some(Held::Doc { state, .. }) = &mut self.held
+            && state.source == view.source
+        {
+            *state = next_state;
+            true
+        } else {
             let lines = snapshot();
             if lines.is_empty() {
                 self.clear();
                 return MouseAction::Pass;
             }
-            self.held = Some(lines);
-        }
-        self.doc = Some(DocState {
-            source: view.source,
-            pointer: (col, row),
-            left_top: row > 0,
-            left_bottom: row + 1 < view.viewport.rows,
-        });
+            self.held = Some(Held::Doc {
+                lines,
+                state: next_state,
+            });
+            false
+        };
+        let extend = reused && event.modifiers.contains(KeyModifiers::SHIFT);
         let point = self.doc_point(col, row, view.viewport, view.offset);
         self.begin_press(event, point, now, extend);
         MouseAction::Handled
@@ -393,16 +418,21 @@ impl Selection {
         if self.pressed.is_none() || !self.dragged {
             return None;
         }
-        let doc = self.doc?;
-        if doc.at_top_edge(viewport) && offset > 0 {
+        let Some(Held::Doc { state, .. }) = &self.held else {
+            return None;
+        };
+        if state.at_top_edge(viewport) && offset > 0 {
             return Some(-2);
         }
-        (doc.at_bottom_edge(viewport) && offset < max_offset).then_some(2)
+        (state.at_bottom_edge(viewport) && offset < max_offset).then_some(2)
     }
 
     pub fn apply_autoscroll(&mut self, viewport: Viewport, offset: usize) {
-        if let Some(doc) = self.doc.filter(|_| self.pressed.is_some()) {
-            let (col, row) = doc.pointer;
+        if self.pressed.is_none() {
+            return;
+        }
+        if let Some(Held::Doc { state, .. }) = &self.held {
+            let (col, row) = state.pointer;
             self.end = self.doc_point(col, row, viewport, offset);
         }
     }
@@ -423,12 +453,10 @@ impl Selection {
         if self.painted.is_empty() {
             return MouseAction::Pass;
         }
-        let extend = self.held.is_some()
-            && self.doc.is_none()
+        let extend = matches!(self.held, Some(Held::Panel(_)))
             && event.modifiers.contains(KeyModifiers::SHIFT);
         if !extend {
-            self.held = Some(self.painted.clone());
-            self.doc = None;
+            self.held = Some(Held::Panel(self.painted.clone()));
         }
         self.begin_press(event, point, now, extend);
         MouseAction::Handled
@@ -522,16 +550,25 @@ impl Selection {
     }
 
     pub fn key(&mut self, key: KeyEvent) -> bool {
-        if self.held.is_none() {
+        if !self.active() {
             return false;
         }
-        let copy_shortcut = matches!(key.code, KeyCode::Char('c' | 'C'))
-            && key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        if !key.modifiers.is_empty() {
+            if matches!(key.code, KeyCode::Char('c' | 'C'))
+                && key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                self.request_copy();
+                return true;
+            }
+            self.clear();
+            return false;
+        }
         if key.code == KeyCode::Esc {
             self.clear();
-        } else if key.code == KeyCode::Enter || copy_shortcut {
+        } else if key.code == KeyCode::Enter {
             self.request_copy();
         } else if !self.step_end(key.code) {
             self.clear();
@@ -541,7 +578,7 @@ impl Selection {
     }
 
     pub fn frame(&mut self, frame: Vec<Line<'static>>) -> Vec<Line<'static>> {
-        let Some(held) = self.held.as_ref().filter(|_| self.doc.is_none()) else {
+        let Some(Held::Panel(held)) = &self.held else {
             self.painted = frame.clone();
             return frame;
         };

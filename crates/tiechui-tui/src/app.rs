@@ -1916,14 +1916,6 @@ impl App {
         }
     }
 
-    fn main_viewport(&self) -> crate::selection::Viewport {
-        Self::main_viewport_for(
-            self.main_body_height,
-            self.height,
-            self.main_view.following(),
-        )
-    }
-
     fn doc_metrics(
         &self,
         source: crate::selection::DocSource,
@@ -1931,7 +1923,11 @@ impl App {
         let doc_len = self.selection.doc_len();
         match source {
             crate::selection::DocSource::Main => {
-                let vp = self.main_viewport();
+                let vp = Self::main_viewport_for(
+                    self.main_body_height,
+                    self.height,
+                    self.main_view.following(),
+                );
                 (
                     vp,
                     self.main_view.offset(),
@@ -1949,6 +1945,21 @@ impl App {
         }
     }
 
+    fn sync_main_scroll(
+        main_view: &mut Pager,
+        available: usize,
+        rows: usize,
+        doc_len: usize,
+        step: impl FnOnce(&mut Pager),
+    ) -> (crate::selection::Viewport, usize) {
+        let vp = Self::main_viewport_for(available, rows, main_view.following());
+        main_view.sync(doc_len, vp.height);
+        step(main_view);
+        let vp = Self::main_viewport_for(available, rows, main_view.following());
+        main_view.sync(doc_len, vp.height);
+        (vp, main_view.offset())
+    }
+
     fn scroll_doc(
         &mut self,
         source: crate::selection::DocSource,
@@ -1956,14 +1967,13 @@ impl App {
         doc_len: usize,
     ) -> (crate::selection::Viewport, usize) {
         match source {
-            crate::selection::DocSource::Main => {
-                let vp = self.main_viewport();
-                self.main_view.sync(doc_len, vp.height);
-                self.main_view.scroll(delta);
-                let vp = self.main_viewport();
-                self.main_view.sync(doc_len, vp.height);
-                (vp, self.main_view.offset())
-            }
+            crate::selection::DocSource::Main => Self::sync_main_scroll(
+                &mut self.main_view,
+                self.main_body_height,
+                self.height,
+                doc_len,
+                |view| view.scroll(delta),
+            ),
             crate::selection::DocSource::Pager => {
                 let Some(pager) = &mut self.pager else {
                     return (Pager::body_viewport(self.height), 0);
@@ -2070,6 +2080,7 @@ impl App {
         use crossterm::event::{MouseButton, MouseEventKind};
         let available = self.main_body_height;
         let height = self.height;
+        let doc_len = self.selection.doc_len();
         let vp = Self::main_viewport_for(available, height, self.main_view.following());
         let view = DocView {
             source: DocSource::Main,
@@ -2093,10 +2104,9 @@ impl App {
                 doc
             },
             |delta| {
-                main_view.scroll(delta);
-                let next_vp = Self::main_viewport_for(available, height, main_view.following());
-                main_view.set_height(next_vp.height);
-                (next_vp, main_view.offset())
+                Self::sync_main_scroll(main_view, available, height, doc_len, |view| {
+                    view.scroll(delta);
+                })
             },
         );
         if event.kind == MouseEventKind::Down(MouseButton::Left)
@@ -2365,11 +2375,15 @@ impl App {
             return false;
         }
         let doc_len = self.selection.doc_len();
-        let vp = self.main_viewport();
-        self.main_view.sync(doc_len, vp.height);
-        self.main_view.key(key);
-        let vp = self.main_viewport();
-        self.main_view.sync(doc_len, vp.height);
+        Self::sync_main_scroll(
+            &mut self.main_view,
+            self.main_body_height,
+            self.height,
+            doc_len,
+            |view| {
+                view.key(key);
+            },
+        );
         true
     }
 
