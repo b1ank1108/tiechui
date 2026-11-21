@@ -3184,3 +3184,74 @@ fn single_click_and_new_drag_after_stream_growth_while_frozen_keep_follow_and_co
     assert!(resumed_page.contains("PAGER_LATE_29"), "{resumed_page}");
     assert!(resumed_page.contains(" 100% "), "{resumed_page}");
 }
+
+#[test]
+fn main_selection_scrolls_on_page_keys_with_menu_open_and_clears_on_modified_page_keys() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = ready(60);
+    app.resize(60, 14);
+    app.event(event(EventKind::CommandsUpdated {
+        commands: vec![CommandInfo {
+            name: "status".into(),
+            description: "Show status".into(),
+            argument_hint: None,
+        }],
+    }));
+    let body: String = (0..30).map(|n| format!("OVERLAY_ROW_{n:02}\n")).collect();
+    for ev in answer("overlay_scroll", &body) {
+        app.event(ev);
+    }
+    typed(&mut app, "/st");
+    let (frame, _) = app.main_frame();
+    let row = frame
+        .iter()
+        .position(|l| text(std::slice::from_ref(l))[0].contains("OVERLAY_ROW_29"))
+        .unwrap() as u16;
+
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 2),
+        (MouseEventKind::Drag(MouseButton::Left), 10),
+        (MouseEventKind::Up(MouseButton::Left), 16),
+    ] {
+        app.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    assert_eq!(app.take_copy().as_deref(), Some("OVERLAY_ROW_29"));
+
+    app.key(key(KeyCode::PageUp));
+    let scrolled = text(&app.main_frame().0).join("\n");
+    assert!(scrolled.contains("esc latest"), "{scrolled}");
+    app.key(key(KeyCode::Enter));
+    assert_eq!(app.take_copy().as_deref(), Some("OVERLAY_ROW_29"));
+
+    for bad_key in [
+        with(KeyCode::PageUp, KeyModifiers::ALT),
+        with(KeyCode::PageDown, KeyModifiers::SHIFT),
+        with(KeyCode::Home, KeyModifiers::CONTROL | KeyModifiers::ALT),
+    ] {
+        let (current, _) = app.main_frame();
+        let target_row = current
+            .iter()
+            .position(|l| text(std::slice::from_ref(l))[0].contains("OVERLAY_ROW_"))
+            .unwrap() as u16;
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Drag(MouseButton::Left), 10),
+            (MouseEventKind::Up(MouseButton::Left), 16),
+        ] {
+            app.mouse(MouseEvent {
+                kind,
+                column,
+                row: target_row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        app.key(bad_key);
+        assert!(app.take_copy().is_none());
+        assert!(app.main_frame().1.is_some());
+    }
+}

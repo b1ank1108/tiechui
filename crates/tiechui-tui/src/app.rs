@@ -2356,22 +2356,12 @@ impl App {
         exit
     }
 
-    fn main_overlay_open(&self) -> bool {
-        self.prompt.is_some()
-            || self.select.is_some()
-            || self.picker.is_some()
-            || self.theme_picker.is_some()
-            || self.menu.is_some()
-            || self.mention.is_some()
-    }
-
     fn main_scroll_key(&mut self, key: KeyEvent) -> bool {
-        if self.main_overlay_open() {
-            return false;
-        }
+        let plain_page =
+            matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && key.modifiers.is_empty();
         let ctrl_jump = matches!(key.code, KeyCode::Home | KeyCode::End)
-            && key.modifiers.contains(KeyModifiers::CONTROL);
-        if !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && !ctrl_jump {
+            && key.modifiers == KeyModifiers::CONTROL;
+        if !plain_page && !ctrl_jump {
             return false;
         }
         let doc_len = self.selection.doc_len();
