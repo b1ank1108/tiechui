@@ -257,70 +257,66 @@ pub fn turns(store: &SessionStore) -> Vec<Turn> {
     for entry in on_branch(store) {
         match &entry.kind {
             EntryKind::Custom { kind, data } if kind == DERIVED_ENTRY => {
-                let Ok(derived) = serde_json::from_value::<DerivedData>(data.clone()) else {
-                    continue;
-                };
-                turns.push(new_turn(
-                    &entry.id,
-                    entry.timestamp,
-                    vec![marker_item(
-                        &entry.id,
-                        &derived.derived_from,
-                        derived.reason,
-                    )],
-                ));
+                push_derived(&mut turns, entry, data);
             }
             EntryKind::Custom { kind, data } if kind == ITEM_ENTRY => {
-                if let (Some(turn), Ok(item)) = (
-                    turns.last_mut(),
-                    serde_json::from_value::<Item>(data.clone()),
-                ) {
-                    upsert(turn, item);
-                    turn.ended_at = Some(entry.timestamp);
-                }
+                push_runtime_item(&mut turns, entry, data);
             }
             EntryKind::Message {
                 message, details, ..
-            } => {
-                let mut items = Vec::new();
-                if message.role == Role::User {
-                    let content: Vec<InputContent> = message
-                        .content
-                        .iter()
-                        .filter_map(|part| match part {
-                            Content::Text { text, .. } => {
-                                Some(InputContent::Text { text: text.clone() })
-                            }
-                            Content::Image { mime_type, data } => Some(InputContent::Image {
-                                mime_type: mime_type.clone(),
-                                data: data.clone(),
-                            }),
-                            _ => None,
-                        })
-                        .collect();
-                    turns.push(new_turn(&entry.id, entry.timestamp, vec![]));
-                    items.push(Item::Known(KnownItem::UserMessage {
-                        id: user_item_id(&entry.id),
-                        content,
-                    }));
-                } else {
-                    for (index, content) in message.content.iter().enumerate() {
-                        let id = ItemId(format!("{}-{index}", entry.id));
-                        items.extend(content_item(message.role, content, id, details.as_ref()));
-                    }
-                }
-                if turns.is_empty() {
-                    turns.push(new_turn(&entry.id, entry.timestamp, vec![]));
-                }
-                if let Some(turn) = turns.last_mut() {
-                    turn.items.extend(items);
-                    turn.ended_at = Some(entry.timestamp);
-                }
-            }
+            } => push_message(&mut turns, entry, message, details.as_ref()),
             _ => {}
         }
     }
     turns
+}
+
+fn push_derived(turns: &mut Vec<Turn>, entry: &Entry, data: &Value) {
+    let Ok(derived) = serde_json::from_value::<DerivedData>(data.clone()) else {
+        return;
+    };
+    turns.push(new_turn(
+        &entry.id,
+        entry.timestamp,
+        vec![marker_item(
+            &entry.id,
+            &derived.derived_from,
+            derived.reason,
+        )],
+    ));
+}
+
+fn push_runtime_item(turns: &mut [Turn], entry: &Entry, data: &Value) {
+    if let (Some(turn), Ok(item)) = (
+        turns.last_mut(),
+        serde_json::from_value::<Item>(data.clone()),
+    ) {
+        upsert(turn, item);
+        turn.ended_at = Some(entry.timestamp);
+    }
+}
+
+fn push_message(turns: &mut Vec<Turn>, entry: &Entry, message: &Message, details: Option<&Value>) {
+    let mut items = Vec::new();
+    if message.role == Role::User {
+        turns.push(new_turn(&entry.id, entry.timestamp, vec![]));
+        items.push(Item::Known(KnownItem::UserMessage {
+            id: user_item_id(&entry.id),
+            content: tiechui_core::input_content(&message.content),
+        }));
+    } else {
+        for (index, content) in message.content.iter().enumerate() {
+            let id = ItemId(format!("{}-{index}", entry.id));
+            items.extend(content_item(message.role, content, id, details));
+        }
+    }
+    if turns.is_empty() {
+        turns.push(new_turn(&entry.id, entry.timestamp, vec![]));
+    }
+    if let Some(turn) = turns.last_mut() {
+        turn.items.extend(items);
+        turn.ended_at = Some(entry.timestamp);
+    }
 }
 
 fn new_turn(id: &str, at: u64, items: Vec<Item>) -> Turn {

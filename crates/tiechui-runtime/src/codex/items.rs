@@ -112,32 +112,53 @@ pub fn file_calls(item_id: &str, changes: &[FileChange]) -> Vec<FileCall> {
         .collect()
 }
 
-pub fn edits_from_diff(diff: &str) -> Vec<Value> {
-    let mut edits = Vec::new();
-    let (mut old, mut new) = (String::new(), String::new());
-    let mut in_hunk = false;
-    let mut flush = |old: &mut String, new: &mut String| {
-        if !old.is_empty() || !new.is_empty() {
-            edits.push(json!({"oldText": std::mem::take(old), "newText": std::mem::take(new)}));
-        }
-    };
-    for line in diff.lines() {
-        if line.starts_with("@@") {
-            flush(&mut old, &mut new);
-            in_hunk = true;
-        } else if !in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")) {
-        } else if let Some(removed) = line.strip_prefix('-') {
-            old.push_str(removed);
-            old.push('\n');
-        } else if let Some(added) = line.strip_prefix('+') {
-            new.push_str(added);
-            new.push('\n');
-        } else if !line.starts_with('\\') {
-            // Context, or Codex's header lines: they end a run of changes.
-            flush(&mut old, &mut new);
+#[derive(Default)]
+struct DiffEdits {
+    edits: Vec<Value>,
+    old: String,
+    new: String,
+    in_hunk: bool,
+}
+
+impl DiffEdits {
+    fn flush(&mut self) {
+        if !self.old.is_empty() || !self.new.is_empty() {
+            self.edits.push(json!({
+                "oldText": std::mem::take(&mut self.old),
+                "newText": std::mem::take(&mut self.new),
+            }));
         }
     }
-    flush(&mut old, &mut new);
+
+    fn is_file_header(&self, line: &str) -> bool {
+        !self.in_hunk && (line.starts_with("--- ") || line.starts_with("+++ "))
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if line.starts_with("@@") {
+            self.flush();
+            self.in_hunk = true;
+        } else if self.is_file_header(line) {
+        } else if let Some(removed) = line.strip_prefix('-') {
+            self.old.push_str(removed);
+            self.old.push('\n');
+        } else if let Some(added) = line.strip_prefix('+') {
+            self.new.push_str(added);
+            self.new.push('\n');
+        } else if !line.starts_with('\\') {
+            // Context, or Codex's header lines: they end a run of changes.
+            self.flush();
+        }
+    }
+}
+
+pub fn edits_from_diff(diff: &str) -> Vec<Value> {
+    let mut parsed = DiffEdits::default();
+    for line in diff.lines() {
+        parsed.push_line(line);
+    }
+    parsed.flush();
+    let mut edits = parsed.edits;
     if edits.is_empty() && !diff.is_empty() {
         edits.push(json!({"oldText": "", "newText": diff}));
     }

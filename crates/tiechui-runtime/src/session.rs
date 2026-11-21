@@ -613,80 +613,118 @@ impl Session {
     async fn handle_backend(&mut self, event: BackendEvent) -> Result<(), String> {
         match event {
             BackendEvent::ItemStarted(BackendItem { item, child_of }) => {
-                if child_of.is_none() {
-                    self.ensure_turn(DerivedReason::Runtime).await?;
-                    if let Some(turn_id) = self.turn_id() {
-                        self.emit(EventKind::ItemStarted {
-                            turn_id,
-                            item: Item::Known(item),
-                        });
-                    }
-                }
+                self.item_started(item, child_of).await
             }
             BackendEvent::ItemDelta { item_id, delta } => {
-                if let Some(turn_id) = self.turn_id() {
-                    self.emit(EventKind::ItemDelta {
-                        turn_id,
-                        item_id,
-                        delta,
-                    });
-                }
+                self.item_delta(item_id, delta);
+                Ok(())
             }
             BackendEvent::ItemCompleted(BackendItem { item, child_of }) => {
-                self.item_completed(item, child_of).await?;
+                self.item_completed(item, child_of).await
             }
-            BackendEvent::Usage(usage) => self.usage(usage).await?,
+            BackendEvent::Usage(usage) => self.usage(usage).await,
             BackendEvent::ContextWindow(window) => {
-                if self.started.model.context_window != window {
-                    self.started.model.context_window = window;
-                    self.emit(EventKind::SessionUpdated {
-                        model: self.model_info(),
-                        thinking: self.started.thinking,
-                        context: self.context,
-                        total: self.total,
-                    });
-                    self.emit(EventKind::ModelsUpdated {
-                        models: vec![self.model_info()],
-                    });
-                }
+                self.context_window(window);
+                Ok(())
             }
-            BackendEvent::Approval { id, request } => self.approval(id, request).await?,
+            BackendEvent::Subagent(update) => self.subagent(update).await,
+            other => self.handle_flow(other).await,
+        }
+    }
+
+    async fn handle_flow(&mut self, event: BackendEvent) -> Result<(), String> {
+        match event {
+            BackendEvent::Approval { id, request } => self.approval(id, request).await,
             BackendEvent::ApprovalWithdrawn { id } => {
-                if let Some(index) = self.approvals.iter().position(|pending| *pending == id) {
-                    self.approvals.remove(index);
-                    self.emit(EventKind::ApprovalResolved {
-                        approval_id: ApprovalId(id),
-                    });
-                }
-            }
-            BackendEvent::Subagent(update) => {
-                self.ensure_turn(DerivedReason::Subagent).await?;
-                let status = SubagentStatus {
-                    id: SubagentStatus::item_id(&update.agent_id),
-                    parent_call_id: update.parent_call_id,
-                    agent_id: update.agent_id,
-                    name: update.name,
-                    state: update.state,
-                    message: update.message,
-                }
-                .into_item();
-                let kind = history::item_entry(&status);
-                self.append(kind).await?;
-                self.complete_item(status);
+                self.withdraw_approval(id);
+                Ok(())
             }
             BackendEvent::TurnCompleted { status, error } => {
                 if let Some(message) = error {
                     self.emit(EventKind::Error { message });
                 }
                 self.complete(status).await;
-                self.drain_queue().await?;
+                self.drain_queue().await
             }
             BackendEvent::Idle => {
                 self.close_derived(TurnStatus::Completed).await;
-                self.drain_queue().await?;
+                self.drain_queue().await
             }
-            BackendEvent::Error(message) => self.emit(EventKind::Error { message }),
+            BackendEvent::Error(message) => {
+                self.emit(EventKind::Error { message });
+                Ok(())
+            }
+            _ => Ok(()),
         }
+    }
+
+    fn item_delta(&mut self, item_id: ItemId, delta: String) {
+        if let Some(turn_id) = self.turn_id() {
+            self.emit(EventKind::ItemDelta {
+                turn_id,
+                item_id,
+                delta,
+            });
+        }
+    }
+
+    async fn item_started(
+        &mut self,
+        item: KnownItem,
+        child_of: Option<crate::backend::ChildOf>,
+    ) -> Result<(), String> {
+        if child_of.is_some() {
+            return Ok(());
+        }
+        self.ensure_turn(DerivedReason::Runtime).await?;
+        if let Some(turn_id) = self.turn_id() {
+            self.emit(EventKind::ItemStarted {
+                turn_id,
+                item: Item::Known(item),
+            });
+        }
+        Ok(())
+    }
+
+    fn context_window(&mut self, window: u64) {
+        if self.started.model.context_window == window {
+            return;
+        }
+        self.started.model.context_window = window;
+        self.emit(EventKind::SessionUpdated {
+            model: self.model_info(),
+            thinking: self.started.thinking,
+            context: self.context,
+            total: self.total,
+        });
+        self.emit(EventKind::ModelsUpdated {
+            models: vec![self.model_info()],
+        });
+    }
+
+    fn withdraw_approval(&mut self, id: String) {
+        if let Some(index) = self.approvals.iter().position(|pending| *pending == id) {
+            self.approvals.remove(index);
+            self.emit(EventKind::ApprovalResolved {
+                approval_id: ApprovalId(id),
+            });
+        }
+    }
+
+    async fn subagent(&mut self, update: crate::backend::SubagentUpdate) -> Result<(), String> {
+        self.ensure_turn(DerivedReason::Subagent).await?;
+        let status = SubagentStatus {
+            id: SubagentStatus::item_id(&update.agent_id),
+            parent_call_id: update.parent_call_id,
+            agent_id: update.agent_id,
+            name: update.name,
+            state: update.state,
+            message: update.message,
+        }
+        .into_item();
+        let kind = history::item_entry(&status);
+        self.append(kind).await?;
+        self.complete_item(status);
         Ok(())
     }
 

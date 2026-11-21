@@ -6,6 +6,21 @@ use tiechui_plugin_api::{
 };
 use tokio::sync::oneshot;
 
+/// The user-visible parts of a user message: its text and images.
+pub fn input_content(parts: &[Content]) -> Vec<InputContent> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            Content::Text { text, .. } => Some(InputContent::Text { text: text.clone() }),
+            Content::Image { mime_type, data } => Some(InputContent::Image {
+                mime_type: mime_type.clone(),
+                data: data.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) enum Request {
     Scoped(SessionEpoch, Box<Request>),
     Finished(String, Result<String, ToolError>),
@@ -220,22 +235,9 @@ impl SessionActor {
                 parent_id: entry.parent_id.clone(),
                 timestamp: entry.timestamp,
                 content: match &entry.kind {
-                    EntryKind::Message { message, .. } if message.role == Role::User => Some(
-                        message
-                            .content
-                            .iter()
-                            .filter_map(|part| match part {
-                                Content::Text { text, .. } => {
-                                    Some(InputContent::Text { text: text.clone() })
-                                }
-                                Content::Image { mime_type, data } => Some(InputContent::Image {
-                                    mime_type: mime_type.clone(),
-                                    data: data.clone(),
-                                }),
-                                _ => None,
-                            })
-                            .collect(),
-                    ),
+                    EntryKind::Message { message, .. } if message.role == Role::User => {
+                        Some(input_content(&message.content))
+                    }
                     _ => None,
                 },
                 custom: match &entry.kind {

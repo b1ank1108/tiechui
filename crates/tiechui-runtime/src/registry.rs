@@ -30,6 +30,14 @@ impl Probe {
             ..Self::default()
         }
     }
+
+    fn found_at(path: PathBuf, reason: String) -> Self {
+        Self {
+            path: Some(path),
+            reason: Some(reason),
+            ..Self::default()
+        }
+    }
 }
 
 /// The environment drivers probe and spawn with.
@@ -227,51 +235,36 @@ pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> P
     }
     let (mut child, tree) = match tiechui_exec::Tree::spawn(&mut command) {
         Ok(spawned) => spawned,
-        Err(error) => {
-            return Probe {
-                path: Some(path),
-                reason: Some(format!("cannot run {binary}: {error}")),
-                ..Probe::default()
-            };
-        }
+        Err(error) => return Probe::found_at(path, format!("cannot run {binary}: {error}")),
     };
-    let Some(mut stdout) = child.stdout.take() else {
+    let Some(stdout) = child.stdout.take() else {
         return Probe::unavailable(format!("cannot read {binary} output"));
     };
-    let run = async {
-        let mut text = String::new();
-        let mut buffer = vec![0; 4096];
-        while text.len() < MAX_VERSION_OUTPUT {
-            let read = stdout.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            text.push_str(&String::from_utf8_lossy(&buffer[..read]));
-        }
-        let status = child.wait().await?;
-        Ok::<_, std::io::Error>((status, text))
-    };
-    let outcome = tokio::time::timeout(PROBE_TIMEOUT, run).await;
+    let outcome =
+        tokio::time::timeout(PROBE_TIMEOUT, read_version_output(stdout, &mut child)).await;
     drop(tree);
+    probe_result(outcome, path, &format!("{binary} {version_arg}"))
+}
+
+type VersionOutput = std::io::Result<(std::process::ExitStatus, String)>;
+
+fn probe_result(
+    outcome: Result<VersionOutput, tokio::time::error::Elapsed>,
+    path: PathBuf,
+    command_line: &str,
+) -> Probe {
     match outcome {
-        Err(_) => Probe {
-            path: Some(path),
-            reason: Some(format!(
-                "{binary} {version_arg} did not finish in {} s",
+        Err(_) => Probe::found_at(
+            path,
+            format!(
+                "{command_line} did not finish in {} s",
                 PROBE_TIMEOUT.as_secs()
-            )),
-            ..Probe::default()
-        },
-        Ok(Err(error)) => Probe {
-            path: Some(path),
-            reason: Some(format!("{binary} {version_arg}: {error}")),
-            ..Probe::default()
-        },
-        Ok(Ok((status, _))) if !status.success() => Probe {
-            path: Some(path),
-            reason: Some(format!("{binary} {version_arg} exited with {status}")),
-            ..Probe::default()
-        },
+            ),
+        ),
+        Ok(Err(error)) => Probe::found_at(path, format!("{command_line}: {error}")),
+        Ok(Ok((status, _))) if !status.success() => {
+            Probe::found_at(path, format!("{command_line} exited with {status}"))
+        }
         Ok(Ok((_, text))) => match parse_version(&text) {
             Some(version) => Probe {
                 available: true,
@@ -279,13 +272,25 @@ pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> P
                 path: Some(path),
                 reason: None,
             },
-            None => Probe {
-                path: Some(path),
-                reason: Some(format!("{binary} {version_arg} printed no version")),
-                ..Probe::default()
-            },
+            None => Probe::found_at(path, format!("{command_line} printed no version")),
         },
     }
+}
+
+async fn read_version_output(
+    mut stdout: tokio::process::ChildStdout,
+    child: &mut tokio::process::Child,
+) -> VersionOutput {
+    let mut text = String::new();
+    let mut buffer = vec![0; 4096];
+    while text.len() < MAX_VERSION_OUTPUT {
+        let read = stdout.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+    Ok((child.wait().await?, text))
 }
 
 #[cfg(test)]

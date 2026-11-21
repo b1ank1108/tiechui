@@ -94,16 +94,10 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
         loop {
             let buffer = self.reader.fill_buf().await?;
             if buffer.is_empty() {
-                return Ok(match (line.is_empty(), skipped) {
-                    (true, 0) => None,
-                    (_, 0) => Some(Frame::Line(line)),
-                    (_, skipped) => Some(Frame::Oversize(skipped)),
-                });
+                return Ok(end_of_stream_frame(line, skipped));
             }
-            let (chunk, found) = match buffer.iter().position(|&byte| byte == b'\n') {
-                Some(index) => (index, true),
-                None => (buffer.len(), false),
-            };
+            let found = buffer.iter().position(|&byte| byte == b'\n');
+            let chunk = found.unwrap_or(buffer.len());
             if skipped > 0 || line.len() + chunk > self.limit {
                 skipped += line.len() + chunk;
                 line.clear();
@@ -111,15 +105,27 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
             } else {
                 line.extend_from_slice(&buffer[..chunk]);
             }
-            self.reader.consume(chunk + usize::from(found));
-            if found {
-                return Ok(Some(if skipped > 0 {
-                    Frame::Oversize(skipped)
-                } else {
-                    Frame::Line(line)
-                }));
+            self.reader.consume(chunk + usize::from(found.is_some()));
+            if found.is_some() {
+                return Ok(Some(line_frame(line, skipped)));
             }
         }
+    }
+}
+
+fn line_frame(line: Vec<u8>, skipped: usize) -> Frame {
+    if skipped > 0 {
+        Frame::Oversize(skipped)
+    } else {
+        Frame::Line(line)
+    }
+}
+
+fn end_of_stream_frame(line: Vec<u8>, skipped: usize) -> Option<Frame> {
+    if line.is_empty() && skipped == 0 {
+        None
+    } else {
+        Some(line_frame(line, skipped))
     }
 }
 
@@ -223,8 +229,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn closing_a_process_reaps_its_grandchildren() {
+    async fn spawn_with_grandchild() -> (tempfile::TempDir, Process, i32) {
         use tokio::io::AsyncBufReadExt;
         let dir = tempfile::tempdir().unwrap();
         let mut process = Process::spawn(
@@ -236,42 +241,40 @@ mod tests {
         .unwrap();
         let mut lines = tokio::io::BufReader::new(process.stdout.take().unwrap()).lines();
         let grandchild: i32 = lines.next_line().await.unwrap().unwrap().parse().unwrap();
+        (dir, process, grandchild)
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 only checks that the process exists.
-        let alive = |pid| unsafe { libc::kill(pid, 0) == 0 };
-        assert!(alive(grandchild));
-        process.close().await;
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    async fn assert_gone(pid: i32, what: &str) {
         for _ in 0..50 {
-            if !alive(grandchild) {
+            if !alive(pid) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("the grandchild outlived the process group");
+        panic!("the grandchild outlived {what}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_a_process_reaps_its_grandchildren() {
+        let (_dir, process, grandchild) = spawn_with_grandchild().await;
+        assert!(alive(grandchild));
+        process.close().await;
+        assert_gone(grandchild, "the process group").await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_a_process_kills_the_group() {
-        use tokio::io::AsyncBufReadExt;
-        let dir = tempfile::tempdir().unwrap();
-        let mut process = Process::spawn(
-            Path::new("/bin/sh"),
-            &["-c", "sleep 300 & echo $!; wait"],
-            dir.path(),
-            None,
-        )
-        .unwrap();
-        let mut lines = tokio::io::BufReader::new(process.stdout.take().unwrap()).lines();
-        let grandchild: i32 = lines.next_line().await.unwrap().unwrap().parse().unwrap();
+        let (_dir, process, grandchild) = spawn_with_grandchild().await;
         drop(process);
-        // SAFETY: signal 0 only checks that the process exists.
-        let alive = |pid| unsafe { libc::kill(pid, 0) == 0 };
-        for _ in 0..50 {
-            if !alive(grandchild) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        panic!("the grandchild outlived the dropped process");
+        assert_gone(grandchild, "the dropped process").await;
     }
 }

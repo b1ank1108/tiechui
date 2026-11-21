@@ -523,79 +523,124 @@ fn check(at: &Located, turn: &Turn, cancel: &CancellationToken) -> Result<UndoCh
 }
 
 #[cfg(feature = "workspace")]
+struct SnapshotDiff {
+    top: PathBuf,
+    start: String,
+    end: String,
+    files: Vec<String>,
+    reverted: bool,
+}
+
+#[cfg(feature = "workspace")]
+impl SnapshotDiff {
+    fn load(at: &Located, anchor: &str) -> Result<Self, String> {
+        let (_, start) = resolve_ready_snapshot(at)?
+            .map_err(|reason| format!("no worktree snapshot for this turn: {reason}"))?;
+        let (_, end) = ready_snapshot(at, &tiechui_module_rewind::end_anchor(anchor))?
+            .map_err(|reason| format!("no end-of-turn snapshot for this turn: {reason}"))?;
+        let top = git_toplevel(&at.cwd)?;
+        Ok(Self {
+            files: changed_between(&top, &start, &end)?,
+            reverted: at.store.snapshot_reverted(anchor).map_err(|e| e.0)?,
+            top,
+            start,
+            end,
+        })
+    }
+
+    fn before(&self, path: &str) -> Option<Vec<u8>> {
+        tree_file(&self.top, &self.start, path)
+    }
+
+    fn after(&self, path: &str) -> Option<Vec<u8>> {
+        tree_file(&self.top, &self.end, path)
+    }
+
+    fn changes(&self, reverted: bool) -> TurnChanges {
+        let text =
+            |file: Option<Vec<u8>>| file.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        TurnChanges {
+            changes: self
+                .files
+                .iter()
+                .map(|path| FileChange {
+                    path: path.clone(),
+                    before: text(self.before(path)),
+                    after: text(self.after(path)),
+                })
+                .collect(),
+            reverted,
+        }
+    }
+
+    fn check(&self, at: &Located) -> UndoCheck {
+        let (mut safe, mut unsafe_files) = (vec![], vec![]);
+        for path in &self.files {
+            let expected = if self.reverted {
+                self.before(path)
+            } else {
+                self.after(path)
+            };
+            if expected == current_file(&self.top, path) {
+                safe.push(path.clone());
+            } else {
+                unsafe_files.push(path.clone());
+            }
+        }
+        UndoCheck {
+            safe,
+            r#unsafe: unsafe_files,
+            ignored: if self.reverted {
+                vec![]
+            } else {
+                at.turn_commands.clone()
+            },
+        }
+    }
+
+    fn undo(
+        &self,
+        at: &Located,
+        anchor: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Value, String> {
+        let check = self.check(at);
+        if !check.r#unsafe.is_empty() {
+            return Err(format!(
+                "changed since the turn: {}",
+                check.r#unsafe.join(", ")
+            ));
+        }
+        if self.files.is_empty() {
+            return Err("the turn changed no files".into());
+        }
+        for path in &self.files {
+            let restored = if self.reverted {
+                self.after(path)
+            } else {
+                self.before(path)
+            };
+            write_file(&self.top, path, restored)?;
+        }
+        at.store
+            .set_snapshot_reverted(anchor, !self.reverted, cancel)
+            .map_err(|e| e.0)?;
+        to_json(self.changes(!self.reverted))
+    }
+}
+
+#[cfg(feature = "workspace")]
 fn snapshot_turn_op(
     method: &str,
     at: &Located,
     cancel: &CancellationToken,
 ) -> Result<Value, String> {
     let anchor = at.own.first().ok_or("no checkpoint anchor for this turn")?;
-    let (_, start) = resolve_ready_snapshot(at)?
-        .map_err(|reason| format!("no worktree snapshot for this turn: {reason}"))?;
-    let (_, end) = ready_snapshot(at, &tiechui_module_rewind::end_anchor(anchor))?
-        .map_err(|reason| format!("no end-of-turn snapshot for this turn: {reason}"))?;
-    let reverted = at.store.snapshot_reverted(anchor).map_err(|e| e.0)?;
-    let top = git_toplevel(&at.cwd)?;
-    let files = changed_between(&top, &start, &end)?;
-    let (before, after) = (
-        |path: &str| tree_file(&top, &start, path),
-        |path: &str| tree_file(&top, &end, path),
-    );
-    let text =
-        |file: Option<Vec<u8>>| file.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    let changes = |reverted| TurnChanges {
-        changes: files
-            .iter()
-            .map(|path| FileChange {
-                path: path.clone(),
-                before: text(before(path)),
-                after: text(after(path)),
-            })
-            .collect(),
-        reverted,
-    };
-    let mut unsafe_files = vec![];
-    let mut safe = vec![];
-    for path in &files {
-        let expected = if reverted { before(path) } else { after(path) };
-        if expected == current_file(&top, path) {
-            safe.push(path.clone());
-        } else {
-            unsafe_files.push(path.clone());
-        }
-    }
+    let diff = SnapshotDiff::load(at, anchor)?;
     match method {
-        "turn/changes" => to_json(changes(reverted)),
-        "turn/check" => to_json(UndoCheck {
-            safe,
-            r#unsafe: unsafe_files,
-            ignored: if reverted {
-                vec![]
-            } else {
-                at.turn_commands.clone()
-            },
-        }),
-        _ => {
-            if !unsafe_files.is_empty() {
-                return Err(format!(
-                    "changed since the turn: {}",
-                    unsafe_files.join(", ")
-                ));
-            }
-            if files.is_empty() {
-                return Err("the turn changed no files".into());
-            }
-            for path in &files {
-                write_file(
-                    &top,
-                    path,
-                    if reverted { after(path) } else { before(path) },
-                )?;
-            }
-            at.store
-                .set_snapshot_reverted(anchor, !reverted, cancel)
-                .map_err(|e| e.0)?;
-            to_json(changes(!reverted))
-        }
+        "turn/changes" => to_json(diff.changes(diff.reverted)),
+        "turn/check" => to_json(diff.check(at)),
+        _ => diff.undo(at, anchor, cancel),
     }
 }
 

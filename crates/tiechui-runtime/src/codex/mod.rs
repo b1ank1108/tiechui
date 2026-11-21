@@ -236,6 +236,31 @@ impl CodexBackend {
     async fn handshake(&self, resume: Option<&str>) -> Result<Started, String> {
         let run = self.running()?;
         let (rpc, shared) = (&run.rpc, &run.shared);
+        self.initialize(rpc, shared).await?;
+        let (value, resumed) = self.open_thread(rpc, resume).await?;
+        let thread: wire::ThreadResponse = serde_json::from_value(value)
+            .map_err(|error| format!("codex thread response: {error}"))?;
+        *shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread.thread.id.clone());
+        let model = if thread.model.is_empty() {
+            self.model.clone().unwrap_or_else(|| "codex".into())
+        } else {
+            thread.model
+        };
+        Ok(Started {
+            external_id: thread.thread.id,
+            resumed,
+            model: ModelInfo {
+                provider: "codex".into(),
+                id: model,
+                context_window: 0,
+                reasoning: false,
+                thinking_levels: vec![ThinkingLevel::Off],
+            },
+            thinking: ThinkingLevel::Off,
+        })
+    }
+
+    async fn initialize(&self, rpc: &Rpc, shared: &Shared) -> Result<(), String> {
         let timeouts = self.timeouts;
         let (_, initialized) = rpc
             .send("initialize", wire::initialize_params())
@@ -267,10 +292,15 @@ impl CodexBackend {
                 "codex {version} is older than the minimum supported version {MIN_VERSION}"
             ));
         }
-        rpc.notify("initialized").await?;
+        rpc.notify("initialized").await
+    }
 
-        let mut resumed = false;
-        let mut thread = None;
+    async fn open_thread(
+        &self,
+        rpc: &Rpc,
+        resume: Option<&str>,
+    ) -> Result<(serde_json::Value, bool), String> {
+        let timeouts = self.timeouts;
         if let Some(id) = resume {
             match rpc
                 .call(
@@ -280,10 +310,7 @@ impl CodexBackend {
                 )
                 .await
             {
-                Ok(value) => {
-                    resumed = true;
-                    thread = Some(value);
-                }
+                Ok(value) => return Ok((value, true)),
                 // Codex no longer has the thread: the session continues on a new one.
                 Err(CallError::Rpc(error)) => {
                     debug(&format!("thread/resume failed: {}", error.message));
@@ -291,33 +318,11 @@ impl CodexBackend {
                 Err(error) => return Err(error.describe("thread/resume")),
             }
         }
-        let value = match thread {
-            Some(value) => value,
-            None => rpc
-                .call("thread/start", self.thread_params(None), timeouts.thread)
-                .await
-                .map_err(|error| error.describe("thread/start"))?,
-        };
-        let thread: wire::ThreadResponse = serde_json::from_value(value)
-            .map_err(|error| format!("codex thread response: {error}"))?;
-        *shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread.thread.id.clone());
-        let model = if thread.model.is_empty() {
-            self.model.clone().unwrap_or_else(|| "codex".into())
-        } else {
-            thread.model
-        };
-        Ok(Started {
-            external_id: thread.thread.id,
-            resumed,
-            model: ModelInfo {
-                provider: "codex".into(),
-                id: model,
-                context_window: 0,
-                reasoning: false,
-                thinking_levels: vec![ThinkingLevel::Off],
-            },
-            thinking: ThinkingLevel::Off,
-        })
+        let value = rpc
+            .call("thread/start", self.thread_params(None), timeouts.thread)
+            .await
+            .map_err(|error| error.describe("thread/start"))?;
+        Ok((value, false))
     }
 
     fn thread_id(&self) -> Result<String, String> {

@@ -22,7 +22,7 @@ use super::wire::{
     AgentMessageItem, Breakdown, CommandApproval, CommandItem, DeltaNotification, Elicitation,
     FileApproval, FileChangeItem, Incoming, ItemNotification, McpItem, OtherItem,
     PermissionsApproval, ReasoningItem, ResolvedNotification, StatusNotification, TurnBody,
-    TurnNotification, UsageNotification,
+    TurnError, TurnNotification, UsageNotification,
 };
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::DeltaCoalescer;
@@ -292,130 +292,170 @@ impl Translator {
 
     async fn notification(&mut self, method: &str, params: Value) -> bool {
         match method {
-            "turn/started" => {
-                let Some(note) = Self::parse::<TurnNotification>(params, method) else {
-                    return true;
-                };
-                if self.is_root(&note.thread_id) {
-                    self.shared.turn.send_modify(|state| {
-                        state.active = Some(note.turn.id);
-                        state.awaiting_turn_started = false;
-                    });
-                    return true;
-                }
-                self.agent_turn_started(&note.thread_id).await
-            }
-            "turn/completed" => match Self::parse::<TurnNotification>(params, method) {
-                Some(note) if self.is_root(&note.thread_id) => self.turn_completed(note.turn).await,
-                Some(note) => self.agent_turn_completed(&note.thread_id, note.turn).await,
-                None => true,
-            },
-            "item/started" | "item/completed" => {
-                let Some(note) = Self::parse::<ItemNotification>(params, method) else {
-                    return true;
-                };
-                let started = method == "item/started";
-                if !self.is_root(&note.thread_id) {
-                    return self.child_item(&note.thread_id, &note.item, started).await;
-                }
-                self.note_derived();
-                let kind = note.item["type"].as_str().unwrap_or_default();
-                if kind == "subAgentActivity" {
-                    return self.sub_agent_activity(&note.thread_id, &note.item).await;
-                }
-                let ok = if started {
-                    self.item_started(&note.item).await
-                } else {
-                    self.item_completed(&note.item).await
-                };
-                ok && self.collab_effects(&note.thread_id, &note.item).await
-            }
+            "turn/started" => self.on_turn_started(params).await,
+            "turn/completed" => self.on_turn_completed(params).await,
+            "item/started" | "item/completed" => self.on_item(method, params).await,
             "item/agentMessage/delta"
             | "item/reasoning/summaryTextDelta"
-            | "item/reasoning/textDelta" => {
-                let Some(note) = Self::parse::<DeltaNotification>(params, method) else {
-                    return true;
-                };
-                if !self.is_root(&note.thread_id) {
-                    return true;
-                }
-                self.text_delta(
-                    &note.item_id,
-                    method != "item/agentMessage/delta",
-                    &note.delta,
-                )
-                .await
-            }
-            "item/reasoning/summaryPartAdded" => {
-                if let Some(note) = Self::parse::<DeltaNotification>(params, method)
-                    && self.is_root(&note.thread_id)
-                    && note.summary_index.unwrap_or(0) > 0
-                {
-                    return self.text_delta(&note.item_id, true, "\n\n").await;
-                }
-                true
-            }
-            "thread/tokenUsage/updated" => match Self::parse::<UsageNotification>(params, method) {
-                Some(note) if self.is_root(&note.thread_id) => self.token_usage(note).await,
-                _ => true,
-            },
-            "serverRequest/resolved" => {
-                let Some(note) = Self::parse::<ResolvedNotification>(params, method) else {
-                    return true;
-                };
-                let id = approval_id(&note.request_id);
-                if self.shared.approvals().remove(&id).is_some()
-                    && !self
-                        .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
-                        .await
-                {
-                    return false;
-                }
-                match note.thread_id {
-                    Some(thread) => self.approval_settled(&thread).await,
-                    None => true,
-                }
-            }
-            "thread/status/changed" => {
-                if let Some(note) = Self::parse::<StatusNotification>(params, method)
-                    && self.is_root(&note.thread_id)
-                    && note.status.kind == "idle"
-                {
-                    return self.maybe_idle().await;
-                }
-                true
-            }
+            | "item/reasoning/textDelta" => self.on_delta(method, params).await,
+            "item/reasoning/summaryPartAdded" => self.on_summary_part(params).await,
+            "thread/tokenUsage/updated" => self.on_token_usage(params).await,
+            "serverRequest/resolved" => self.on_request_resolved(params).await,
+            "thread/status/changed" => self.on_status_changed(params).await,
             _ => true,
         }
     }
 
-    async fn turn_completed(&mut self, turn: TurnBody) -> bool {
-        let status = match turn.status.as_str() {
-            "completed" => TurnStatus::Completed,
-            "interrupted" => TurnStatus::Interrupted,
-            "failed" => TurnStatus::Failed,
-            _ => return true,
+    async fn on_turn_started(&mut self, params: Value) -> bool {
+        let Some(note) = Self::parse::<TurnNotification>(params, "turn/started") else {
+            return true;
         };
-        if self.last_completed.as_deref() == Some(turn.id.as_str()) {
+        if self.is_root(&note.thread_id) {
+            self.shared.turn.send_modify(|state| {
+                state.active = Some(note.turn.id);
+                state.awaiting_turn_started = false;
+            });
             return true;
         }
-        let active = self.shared.turn.borrow().active.clone();
-        if active.is_some_and(|active| active != turn.id) {
-            debug(&format!(
-                "dropped the end of turn {}, not the active one",
-                turn.id
-            ));
+        self.agent_turn_started(&note.thread_id).await
+    }
+
+    async fn on_turn_completed(&mut self, params: Value) -> bool {
+        match Self::parse::<TurnNotification>(params, "turn/completed") {
+            Some(note) if self.is_root(&note.thread_id) => self.turn_completed(note.turn).await,
+            Some(note) => self.agent_turn_completed(&note.thread_id, note.turn).await,
+            None => true,
+        }
+    }
+
+    async fn on_item(&mut self, method: &str, params: Value) -> bool {
+        let Some(note) = Self::parse::<ItemNotification>(params, method) else {
+            return true;
+        };
+        let started = method == "item/started";
+        if !self.is_root(&note.thread_id) {
+            return self.child_item(&note.thread_id, &note.item, started).await;
+        }
+        self.note_derived();
+        let kind = note.item["type"].as_str().unwrap_or_default();
+        if kind == "subAgentActivity" {
+            return self.sub_agent_activity(&note.thread_id, &note.item).await;
+        }
+        let ok = if started {
+            self.item_started(&note.item).await
+        } else {
+            self.item_completed(&note.item).await
+        };
+        ok && self.collab_effects(&note.thread_id, &note.item).await
+    }
+
+    async fn on_delta(&mut self, method: &str, params: Value) -> bool {
+        let Some(note) = Self::parse::<DeltaNotification>(params, method) else {
+            return true;
+        };
+        if !self.is_root(&note.thread_id) {
+            return true;
+        }
+        self.text_delta(
+            &note.item_id,
+            method != "item/agentMessage/delta",
+            &note.delta,
+        )
+        .await
+    }
+
+    async fn on_summary_part(&mut self, params: Value) -> bool {
+        if let Some(note) =
+            Self::parse::<DeltaNotification>(params, "item/reasoning/summaryPartAdded")
+            && self.is_root(&note.thread_id)
+            && note.summary_index.unwrap_or(0) > 0
+        {
+            return self.text_delta(&note.item_id, true, "\n\n").await;
+        }
+        true
+    }
+
+    async fn on_token_usage(&mut self, params: Value) -> bool {
+        match Self::parse::<UsageNotification>(params, "thread/tokenUsage/updated") {
+            Some(note) if self.is_root(&note.thread_id) => self.token_usage(note).await,
+            _ => true,
+        }
+    }
+
+    async fn on_request_resolved(&mut self, params: Value) -> bool {
+        let Some(note) = Self::parse::<ResolvedNotification>(params, "serverRequest/resolved")
+        else {
+            return true;
+        };
+        let id = approval_id(&note.request_id);
+        if self.shared.take_approval(&id).is_some()
+            && !self
+                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                .await
+        {
+            return false;
+        }
+        match note.thread_id {
+            Some(thread) => self.approval_settled(&thread).await,
+            None => true,
+        }
+    }
+
+    async fn on_status_changed(&mut self, params: Value) -> bool {
+        if let Some(note) = Self::parse::<StatusNotification>(params, "thread/status/changed")
+            && self.is_root(&note.thread_id)
+            && note.status.kind == "idle"
+        {
+            return self.maybe_idle().await;
+        }
+        true
+    }
+
+    async fn turn_completed(&mut self, turn: TurnBody) -> bool {
+        let Some(status) = turn_status(&turn.status) else {
+            return true;
+        };
+        if self.is_stale_turn_end(&turn.id) {
             return true;
         }
         if !self.finish_open_items().await {
             return false;
         }
         let root = self.shared.root();
+        if !self.withdraw_approvals_of(root.as_deref()).await {
+            return false;
+        }
+        self.shared.turn.send_modify(|state| {
+            state.active = None;
+            state.awaiting_turn_started = false;
+        });
+        self.last_completed = Some(turn.id);
+        self.outside_turn_output_seen = false;
+        let error = turn.error.map(turn_error_text);
+        self.emit_after_flush(BackendEvent::TurnCompleted { status, error })
+            .await
+    }
+
+    fn is_stale_turn_end(&self, turn_id: &str) -> bool {
+        if self.last_completed.as_deref() == Some(turn_id) {
+            return true;
+        }
+        let active = self.shared.turn.borrow().active.clone();
+        if active.is_some_and(|active| active != turn_id) {
+            debug(&format!(
+                "dropped the end of turn {turn_id}, not the active one"
+            ));
+            return true;
+        }
+        false
+    }
+
+    pub(super) async fn withdraw_approvals_of(&mut self, thread: Option<&str>) -> bool {
         let withdrawn: Vec<String> = {
             let mut approvals = self.shared.approvals();
             let ids: Vec<String> = approvals
                 .iter()
-                .filter(|(_, pending)| Some(&pending.thread) == root.as_ref())
+                .filter(|(_, pending)| Some(pending.thread.as_str()) == thread)
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &ids {
@@ -431,18 +471,7 @@ impl Translator {
                 return false;
             }
         }
-        self.shared.turn.send_modify(|state| {
-            state.active = None;
-            state.awaiting_turn_started = false;
-        });
-        self.last_completed = Some(turn.id);
-        self.outside_turn_output_seen = false;
-        let error = turn.error.map(|error| match error.additional_details {
-            Some(details) if !details.is_empty() => format!("{}: {details}", error.message),
-            _ => error.message,
-        });
-        self.emit_after_flush(BackendEvent::TurnCompleted { status, error })
-            .await
+        true
     }
 
     async fn finish_open_items(&mut self) -> bool {
@@ -480,12 +509,10 @@ impl Translator {
     async fn item_started(&mut self, item: &Value) -> bool {
         let kind = item["type"].as_str().unwrap_or_default();
         match kind {
-            "agentMessage" => {
-                let Some(item) = Self::parse::<AgentMessageItem>(item.clone(), kind) else {
-                    return true;
-                };
-                self.start_text(&item.id, false).await
-            }
+            "agentMessage" => match Self::parse::<AgentMessageItem>(item.clone(), kind) {
+                Some(item) => self.start_text(&item.id, false).await,
+                None => true,
+            },
             "reasoning" => {
                 if let Some(item) = Self::parse::<ReasoningItem>(item.clone(), kind) {
                     self.track(
@@ -714,90 +741,13 @@ impl Translator {
     async fn server_request(&mut self, id: Value, method: &str, params: Value) -> bool {
         let answered = match method {
             "item/commandExecution/requestApproval" => {
-                match Self::parse::<CommandApproval>(params, method) {
-                    Some(request) => {
-                        let command = items::command_text(
-                            request.command.as_deref().unwrap_or_default(),
-                            &request.command_actions,
-                        );
-                        let thread = request.thread_id.clone();
-                        let permission = self.permission(
-                            &thread,
-                            &request.item_id,
-                            "bash",
-                            json!({"command": command}),
-                            "command",
-                            vec![command.clone()],
-                            vec![command],
-                        );
-                        return self.ask(id, &thread, Kind::Review, permission).await;
-                    }
-                    None => self.rpc.respond(&id, json!({"decision": "decline"})).await,
-                }
+                return self.command_approval(id, params).await;
             }
-            "item/fileChange/requestApproval" => {
-                match Self::parse::<FileApproval>(params, method) {
-                    Some(request) => {
-                        let (tool, arguments, paths) = self.file_subject(&request);
-                        let thread = request.thread_id.clone();
-                        let permission = self.permission(
-                            &thread,
-                            &request.item_id,
-                            &tool,
-                            arguments,
-                            "path",
-                            paths.clone(),
-                            paths,
-                        );
-                        return self.ask(id, &thread, Kind::Review, permission).await;
-                    }
-                    None => self.rpc.respond(&id, json!({"decision": "decline"})).await,
-                }
-            }
+            "item/fileChange/requestApproval" => return self.file_approval(id, params).await,
             "item/permissions/requestApproval" => {
-                match Self::parse::<PermissionsApproval>(params, method) {
-                    Some(request) => {
-                        let paths = items::requested_paths(&request.permissions);
-                        let thread = request.thread_id.clone();
-                        let permission = self.permission(
-                            &thread,
-                            &request.item_id,
-                            "request_permissions",
-                            json!({"permissions": request.permissions, "reason": request.reason}),
-                            "permissions",
-                            paths,
-                            vec![],
-                        );
-                        return self
-                            .ask(
-                                id,
-                                &thread,
-                                Kind::Permissions(request.permissions),
-                                permission,
-                            )
-                            .await;
-                    }
-                    None => {
-                        self.rpc
-                            .respond(&id, json!({"permissions": {}, "scope": "turn"}))
-                            .await
-                    }
-                }
+                return self.permissions_approval(id, params).await;
             }
-            "mcpServer/elicitation/request" => {
-                match Self::parse::<Elicitation>(params.clone(), method) {
-                    Some(request) => {
-                        self.note_derived();
-                        let thread = request.thread_id.clone();
-                        let request = ApprovalRequest::Elicitation {
-                            server: request.server_name,
-                            request: params,
-                        };
-                        return self.ask(id, &thread, Kind::Elicitation, request).await;
-                    }
-                    None => self.rpc.respond(&id, json!({"action": "decline"})).await,
-                }
-            }
+            "mcpServer/elicitation/request" => return self.elicitation(id, params).await,
             "item/tool/requestUserInput" => self.rpc.respond(&id, json!({"answers": {}})).await,
             "item/tool/call" => {
                 self.rpc
@@ -815,11 +765,103 @@ impl Translator {
                     .await
             }
         };
+        self.after_answer(answered).await
+    }
+
+    async fn answer(&mut self, id: &Value, result: Value) -> bool {
+        let answered = self.rpc.respond(id, result).await;
+        self.after_answer(answered).await
+    }
+
+    async fn after_answer(&mut self, answered: Result<(), String>) -> bool {
         if let Err(error) = answered {
             debug(&error);
             return self.emit_after_flush(BackendEvent::Error(error)).await;
         }
         true
+    }
+
+    async fn command_approval(&mut self, id: Value, params: Value) -> bool {
+        let method = "item/commandExecution/requestApproval";
+        let Some(request) = Self::parse::<CommandApproval>(params, method) else {
+            return self.answer(&id, json!({"decision": "decline"})).await;
+        };
+        let command = items::command_text(
+            request.command.as_deref().unwrap_or_default(),
+            &request.command_actions,
+        );
+        let thread = request.thread_id.clone();
+        let permission = self.permission(
+            &thread,
+            &request.item_id,
+            "bash",
+            json!({"command": command}),
+            "command",
+            vec![command.clone()],
+            vec![command],
+        );
+        self.ask(id, &thread, Kind::Review, permission).await
+    }
+
+    async fn file_approval(&mut self, id: Value, params: Value) -> bool {
+        let Some(request) = Self::parse::<FileApproval>(params, "item/fileChange/requestApproval")
+        else {
+            return self.answer(&id, json!({"decision": "decline"})).await;
+        };
+        let (tool, arguments, paths) = self.file_subject(&request);
+        let thread = request.thread_id.clone();
+        let permission = self.permission(
+            &thread,
+            &request.item_id,
+            &tool,
+            arguments,
+            "path",
+            paths.clone(),
+            paths,
+        );
+        self.ask(id, &thread, Kind::Review, permission).await
+    }
+
+    async fn permissions_approval(&mut self, id: Value, params: Value) -> bool {
+        let method = "item/permissions/requestApproval";
+        let Some(request) = Self::parse::<PermissionsApproval>(params, method) else {
+            return self
+                .answer(&id, json!({"permissions": {}, "scope": "turn"}))
+                .await;
+        };
+        let paths = items::requested_paths(&request.permissions);
+        let thread = request.thread_id.clone();
+        let permission = self.permission(
+            &thread,
+            &request.item_id,
+            "request_permissions",
+            json!({"permissions": request.permissions, "reason": request.reason}),
+            "permissions",
+            paths,
+            vec![],
+        );
+        self.ask(
+            id,
+            &thread,
+            Kind::Permissions(request.permissions),
+            permission,
+        )
+        .await
+    }
+
+    async fn elicitation(&mut self, id: Value, params: Value) -> bool {
+        let Some(request) =
+            Self::parse::<Elicitation>(params.clone(), "mcpServer/elicitation/request")
+        else {
+            return self.answer(&id, json!({"action": "decline"})).await;
+        };
+        self.note_derived();
+        let thread = request.thread_id.clone();
+        let request = ApprovalRequest::Elicitation {
+            server: request.server_name,
+            request: params,
+        };
+        self.ask(id, &thread, Kind::Elicitation, request).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -896,6 +938,22 @@ impl Translator {
     }
 }
 
+fn turn_status(status: &str) -> Option<TurnStatus> {
+    match status {
+        "completed" => Some(TurnStatus::Completed),
+        "interrupted" => Some(TurnStatus::Interrupted),
+        "failed" => Some(TurnStatus::Failed),
+        _ => None,
+    }
+}
+
+fn turn_error_text(error: TurnError) -> String {
+    match error.additional_details {
+        Some(details) if !details.is_empty() => format!("{}: {details}", error.message),
+        _ => error.message,
+    }
+}
+
 fn text_known(id: &str, thinking: bool, text: String) -> KnownItem {
     let id = ItemId(id.to_owned());
     if thinking {
@@ -928,116 +986,134 @@ pub struct ToolDone {
 
 pub fn tool_starts(kind: &str, item: &Value) -> Option<Starts> {
     match kind {
-        "commandExecution" => {
-            let item = Translator::parse::<CommandItem>(item.clone(), kind)?;
-            let arguments =
-                json!({"command": items::command_text(&item.command, &item.command_actions)});
-            Some((item.id.clone(), vec![("bash".into(), arguments, item.id)]))
-        }
-        "fileChange" => {
-            let item = Translator::parse::<FileChangeItem>(item.clone(), kind)?;
-            let calls = items::file_calls(&item.id, &item.changes)
-                .into_iter()
-                .map(|call| (call.name.to_owned(), call.arguments, call.id))
-                .collect();
-            Some((item.id, calls))
-        }
-        "mcpToolCall" => {
-            let item = Translator::parse::<McpItem>(item.clone(), kind)?;
-            let call = (
-                items::mcp_name(&item),
-                item.arguments.clone(),
-                item.id.clone(),
-            );
-            Some((item.id, vec![call]))
-        }
-        "collabAgentToolCall" => {
-            let (name, arguments) = agents::collab_call(item)?;
-            let id = item["id"].as_str()?.to_owned();
-            Some((id.clone(), vec![(name, arguments, id)]))
-        }
-        _ => {
-            let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
-            let (name, arguments, _, _) = items::other_call(kind, &other)?;
-            Some((other.id.clone(), vec![(name, arguments, other.id)]))
-        }
+        "commandExecution" => command_starts(item),
+        "fileChange" => file_starts(item),
+        "mcpToolCall" => mcp_starts(item),
+        "collabAgentToolCall" => collab_starts(item),
+        _ => other_starts(kind, item),
     }
+}
+
+fn command_starts(item: &Value) -> Option<Starts> {
+    let item = Translator::parse::<CommandItem>(item.clone(), "commandExecution")?;
+    let arguments = json!({"command": items::command_text(&item.command, &item.command_actions)});
+    Some((item.id.clone(), vec![("bash".into(), arguments, item.id)]))
+}
+
+fn file_starts(item: &Value) -> Option<Starts> {
+    let item = Translator::parse::<FileChangeItem>(item.clone(), "fileChange")?;
+    let calls = items::file_calls(&item.id, &item.changes)
+        .into_iter()
+        .map(|call| (call.name.to_owned(), call.arguments, call.id))
+        .collect();
+    Some((item.id, calls))
+}
+
+fn mcp_starts(item: &Value) -> Option<Starts> {
+    let item = Translator::parse::<McpItem>(item.clone(), "mcpToolCall")?;
+    let call = (
+        items::mcp_name(&item),
+        item.arguments.clone(),
+        item.id.clone(),
+    );
+    Some((item.id, vec![call]))
+}
+
+fn collab_starts(item: &Value) -> Option<Starts> {
+    let (name, arguments) = agents::collab_call(item)?;
+    let id = item["id"].as_str()?.to_owned();
+    Some((id.clone(), vec![(name, arguments, id)]))
+}
+
+fn other_starts(kind: &str, item: &Value) -> Option<Starts> {
+    let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
+    let (name, arguments, _, _) = items::other_call(kind, &other)?;
+    Some((other.id.clone(), vec![(name, arguments, other.id)]))
 }
 
 pub fn tool_dones(kind: &str, item: &Value) -> Option<(String, Vec<ToolDone>)> {
     match kind {
-        "commandExecution" => {
-            let item = Translator::parse::<CommandItem>(item.clone(), kind)?;
-            let arguments =
-                json!({"command": items::command_text(&item.command, &item.command_actions)});
-            let (output, is_error) = items::command_result(&item);
-            let done = ToolDone {
-                id: item.id.clone(),
-                name: "bash".into(),
-                arguments,
-                output,
-                is_error,
+        "commandExecution" => command_dones(item),
+        "fileChange" => file_dones(item),
+        "mcpToolCall" => mcp_dones(item),
+        "collabAgentToolCall" => collab_dones(item),
+        _ => other_dones(kind, item),
+    }
+}
+
+fn command_dones(item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    let item = Translator::parse::<CommandItem>(item.clone(), "commandExecution")?;
+    let arguments = json!({"command": items::command_text(&item.command, &item.command_actions)});
+    let (output, is_error) = items::command_result(&item);
+    let done = ToolDone {
+        id: item.id.clone(),
+        name: "bash".into(),
+        arguments,
+        output,
+        is_error,
+    };
+    Some((item.id, vec![done]))
+}
+
+fn file_dones(item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    let item = Translator::parse::<FileChangeItem>(item.clone(), "fileChange")?;
+    let failed = matches!(item.status.as_str(), "failed" | "declined");
+    let dones = items::file_calls(&item.id, &item.changes)
+        .into_iter()
+        .map(|call| {
+            let text = match item.status.as_str() {
+                "declined" => "The change was declined".to_owned(),
+                "failed" => "The change failed".to_owned(),
+                _ => call.summary,
             };
-            Some((item.id, vec![done]))
-        }
-        "fileChange" => {
-            let item = Translator::parse::<FileChangeItem>(item.clone(), kind)?;
-            let failed = matches!(item.status.as_str(), "failed" | "declined");
-            let dones = items::file_calls(&item.id, &item.changes)
-                .into_iter()
-                .map(|call| {
-                    let text = match item.status.as_str() {
-                        "declined" => "The change was declined".to_owned(),
-                        "failed" => "The change failed".to_owned(),
-                        _ => call.summary,
-                    };
-                    ToolDone {
-                        id: call.id,
-                        name: call.name.to_owned(),
-                        arguments: call.arguments,
-                        output: items::tool_output_text(&text, failed),
-                        is_error: failed,
-                    }
-                })
-                .collect();
-            Some((item.id, dones))
-        }
-        "mcpToolCall" => {
-            let item = Translator::parse::<McpItem>(item.clone(), kind)?;
-            let (output, is_error) = items::mcp_result(&item);
-            let done = ToolDone {
-                id: item.id.clone(),
-                name: items::mcp_name(&item),
-                arguments: item.arguments.clone(),
-                output,
-                is_error,
-            };
-            Some((item.id, vec![done]))
-        }
-        "collabAgentToolCall" => {
-            let (name, arguments) = agents::collab_call(item)?;
-            let id = item["id"].as_str()?.to_owned();
-            let (text, is_error) = agents::collab_result(item);
-            let done = ToolDone {
-                id: id.clone(),
-                name,
-                arguments,
-                output: items::tool_output_text(&text, is_error),
-                is_error,
-            };
-            Some((id, vec![done]))
-        }
-        _ => {
-            let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
-            let (name, arguments, text, failed) = items::other_call(kind, &other)?;
-            let done = ToolDone {
-                id: other.id.clone(),
-                name,
-                arguments,
+            ToolDone {
+                id: call.id,
+                name: call.name.to_owned(),
+                arguments: call.arguments,
                 output: items::tool_output_text(&text, failed),
                 is_error: failed,
-            };
-            Some((other.id, vec![done]))
-        }
-    }
+            }
+        })
+        .collect();
+    Some((item.id, dones))
+}
+
+fn mcp_dones(item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    let item = Translator::parse::<McpItem>(item.clone(), "mcpToolCall")?;
+    let (output, is_error) = items::mcp_result(&item);
+    let done = ToolDone {
+        id: item.id.clone(),
+        name: items::mcp_name(&item),
+        arguments: item.arguments.clone(),
+        output,
+        is_error,
+    };
+    Some((item.id, vec![done]))
+}
+
+fn collab_dones(item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    let (name, arguments) = agents::collab_call(item)?;
+    let id = item["id"].as_str()?.to_owned();
+    let (text, is_error) = agents::collab_result(item);
+    let done = ToolDone {
+        id: id.clone(),
+        name,
+        arguments,
+        output: items::tool_output_text(&text, is_error),
+        is_error,
+    };
+    Some((id, vec![done]))
+}
+
+fn other_dones(kind: &str, item: &Value) -> Option<(String, Vec<ToolDone>)> {
+    let other = Translator::parse::<OtherItem>(item.clone(), kind)?;
+    let (name, arguments, text, failed) = items::other_call(kind, &other)?;
+    let done = ToolDone {
+        id: other.id.clone(),
+        name,
+        arguments,
+        output: items::tool_output_text(&text, failed),
+        is_error: failed,
+    };
+    Some((other.id, vec![done]))
 }

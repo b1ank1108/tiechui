@@ -17,7 +17,7 @@ pub use backend::{
     Backend, BackendEvent, BackendItem, ChildOf, StartParams, Started, Steered, SubagentUpdate,
 };
 pub use codex::CodexDriver;
-pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY};
+pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY, item_id};
 pub use process::{DeltaCoalescer, Frame, FrameReader, MAX_FRAME, Process};
 pub use registry::{
     Driver, Launch, PROBE_TIMEOUT, Probe, Registry, capabilities_of, parse_version, probe_binary,

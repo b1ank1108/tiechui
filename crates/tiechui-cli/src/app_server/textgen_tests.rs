@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -560,19 +559,13 @@ async fn verify_server_multi_user_turn_and_unset_tui(
     let thread = ThreadId("app-t1".into());
     lock(&server.sessions).insert(
         thread.clone(),
-        Arc::new(Live {
-            path: app_path.clone(),
-            cwd: work.to_owned(),
-            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
-            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
+        Live::native_for_test(
+            app_path.clone(),
+            work.to_owned(),
             submissions,
-            shutdown: CancellationToken::new(),
-            projection: projection.clone(),
-            applied: Arc::new(Notify::new()),
+            projection.clone(),
             started,
-            pump: Mutex::new(None),
-            stale: AtomicBool::new(false),
-        }),
+        ),
     );
 
     server.forward_event(

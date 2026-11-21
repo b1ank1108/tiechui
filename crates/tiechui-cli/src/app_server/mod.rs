@@ -74,6 +74,31 @@ struct Live {
     stale: AtomicBool,
 }
 
+#[cfg(test)]
+impl Live {
+    fn native_for_test(
+        path: PathBuf,
+        cwd: PathBuf,
+        submissions: mpsc::Sender<Submission>,
+        projection: Arc<Mutex<Projection>>,
+        started: watch::Receiver<Option<SessionEpoch>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            cwd,
+            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
+            capabilities: RuntimeCapabilities::native(),
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection,
+            applied: Arc::new(Notify::new()),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        })
+    }
+}
+
 struct Attached {
     handle: tiechui_core::SessionHandle,
     id: String,
@@ -690,7 +715,18 @@ impl Server {
             self.respond_opened_snapshot(out, id, opened);
             return;
         }
-        let reply = match method {
+        let reply = self.dispatch_routed(client_id, &id, method, params).await;
+        respond(out, id, reply);
+    }
+
+    async fn dispatch_routed(
+        self: &Arc<Self>,
+        client_id: u64,
+        id: &Id,
+        method: &str,
+        params: Value,
+    ) -> Reply {
+        match method {
             "initialize" => self.initialize(params),
             "daemon/status" => value(self.daemon_status()),
             "runtimes/list" => value(self.runtimes.list().await),
@@ -698,9 +734,8 @@ impl Server {
             _ if method.starts_with("session/") || turns::handles(method) => {
                 self.dispatch_session(method, params).await
             }
-            _ => self.dispatch_module(client_id, &id, method, params).await,
-        };
-        respond(out, id, reply);
+            _ => self.dispatch_module(client_id, id, method, params).await,
+        }
     }
 
     fn respond_opened_snapshot(
@@ -2301,19 +2336,13 @@ pub(super) mod tests {
         let thread = ThreadId("t-unit".into());
         lock(&server.sessions).insert(
             thread.clone(),
-            Arc::new(Live {
-                path: dir.path().join("session.jsonl"),
-                cwd: dir.path().to_path_buf(),
-                runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
-                capabilities: tiechui_protocol::RuntimeCapabilities::native(),
+            Live::native_for_test(
+                dir.path().join("session.jsonl"),
+                dir.path().to_path_buf(),
                 submissions,
-                shutdown: CancellationToken::new(),
-                projection: projection.clone(),
-                applied: Arc::new(Notify::new()),
+                projection.clone(),
                 started,
-                pump: Mutex::new(None),
-                stale: AtomicBool::new(false),
-            }),
+            ),
         );
         assert_eq!(
             client
@@ -2415,19 +2444,13 @@ pub(super) mod tests {
 
         let (submissions, _rx) = mpsc::channel(1);
         let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
-        let live = Arc::new(Live {
-            path: dir.path().join("session.jsonl"),
-            cwd: dir.path().to_path_buf(),
-            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
-            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
+        let live = Live::native_for_test(
+            dir.path().join("session.jsonl"),
+            dir.path().to_path_buf(),
             submissions,
-            shutdown: CancellationToken::new(),
-            projection: Arc::new(Mutex::new(Projection::default())),
-            applied: Arc::new(Notify::new()),
+            Arc::new(Mutex::new(Projection::default())),
             started,
-            pump: Mutex::new(None),
-            stale: AtomicBool::new(false),
-        });
+        );
         lock(&server.sessions).insert(ThreadId("t-presets".into()), live.clone());
 
         let matched: Vec<ModelEntry> = client
@@ -2669,19 +2692,13 @@ pub(super) mod tests {
 
         let (submissions, _rx) = mpsc::channel(1);
         let (_ready_tx, started) = watch::channel(Some(SessionEpoch(1)));
-        let live = Arc::new(Live {
-            path: dir.path().join("session.jsonl"),
-            cwd: work.clone(),
-            runtime: tiechui_protocol::DEFAULT_RUNTIME.into(),
-            capabilities: tiechui_protocol::RuntimeCapabilities::native(),
+        let live = Live::native_for_test(
+            dir.path().join("session.jsonl"),
+            work.clone(),
             submissions,
-            shutdown: CancellationToken::new(),
-            projection: Arc::new(Mutex::new(Projection::default())),
-            applied: Arc::new(Notify::new()),
+            Arc::new(Mutex::new(Projection::default())),
             started,
-            pump: Mutex::new(None),
-            stale: AtomicBool::new(false),
-        });
+        );
         lock(&server.sessions).insert(ThreadId("t-open".into()), live.clone());
 
         let discovered: TerminalShellsResult = client.call_ok("terminal/shells", json!({})).await;

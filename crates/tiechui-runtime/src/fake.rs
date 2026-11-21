@@ -281,7 +281,6 @@ impl Player {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     fn step<'a>(
         &'a mut self,
         step: &'a Value,
@@ -289,234 +288,255 @@ impl Player {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             match step["op"].as_str().unwrap_or_default() {
-                op @ ("text" | "thinking") => {
-                    let text = step["text"].as_str().unwrap_or_default().to_owned();
-                    let id = self.item_id(op, parent);
-                    let known = |text: String| match op {
-                        "text" => KnownItem::AssistantMessage {
-                            id: id.clone(),
-                            text,
-                        },
-                        _ => KnownItem::Thinking {
-                            id: id.clone(),
-                            text,
-                        },
-                    };
-                    if parent.is_none() {
-                        let chunks = step["chunks"].as_u64().unwrap_or(1).max(1) as usize;
-                        let chars: Vec<char> = text.chars().collect();
-                        if !self
-                            .send(BackendEvent::ItemStarted(BackendItem::root(known(
-                                String::new(),
-                            ))))
-                            .await
-                        {
-                            return false;
-                        }
-                        for part in chars.chunks(chars.len().div_ceil(chunks).max(1)) {
-                            let delta = part.iter().collect();
-                            if !self
-                                .send(BackendEvent::ItemDelta {
-                                    item_id: id.clone(),
-                                    delta,
-                                })
-                                .await
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                    self.send(BackendEvent::ItemCompleted(BackendItem {
-                        item: known(text),
-                        child_of: Self::child(parent),
-                    }))
-                    .await
-                }
-                "command" => {
-                    let command = step["command"].as_str().unwrap_or_default();
-                    let call = self.item_id("call", parent);
-                    let result = self.item_id("result", parent);
-                    let is_error = step["is_error"].as_bool().unwrap_or(false);
-                    self.send(BackendEvent::ItemCompleted(BackendItem {
-                        item: KnownItem::ToolCall {
-                            id: call.clone(),
-                            name: "bash".into(),
-                            arguments: json!({ "command": command }),
-                        },
-                        child_of: Self::child(parent),
-                    }))
-                    .await
-                        && self
-                            .send(BackendEvent::ItemCompleted(BackendItem {
-                                item: KnownItem::ToolResult {
-                                    id: result,
-                                    call_id: call,
-                                    output: tool_output(
-                                        step["output"].as_str().unwrap_or_default(),
-                                        is_error,
-                                        Value::Null,
-                                    ),
-                                    is_error,
-                                },
-                                child_of: Self::child(parent),
-                            }))
-                            .await
-                }
-                "usage" => {
-                    let usage = TokenUsage {
-                        input: step["input"].as_u64().unwrap_or(0),
-                        output: step["output"].as_u64().unwrap_or(0),
-                        ..TokenUsage::default()
-                    };
-                    self.send(BackendEvent::Usage(usage)).await
-                }
-                "approval" => {
-                    let id = self.id("approval");
-                    let (tx, rx) = oneshot::channel();
-                    self.shared
-                        .answers
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(id.clone(), tx);
-                    let request = ApprovalRequest::Permission {
-                        actor: step["agent"].as_str().map(Into::into),
-                        call_id: self.id("call"),
-                        tool: step["tool"].as_str().unwrap_or("bash").into(),
-                        arguments: step.get("arguments").cloned().unwrap_or(Value::Null),
-                        surface: "command".into(),
-                        values: step["values"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
-                            .collect(),
-                        matched_pattern: None,
-                        origin: "fake".into(),
-                        session_patterns: vec![],
-                        preview: None,
-                    };
-                    if !self
-                        .send(BackendEvent::Approval {
-                            id: id.clone(),
-                            request,
-                        })
-                        .await
-                    {
-                        return false;
-                    }
-                    let decision = tokio::select! {
-                        decision = rx => decision.ok(),
-                        () = self.shared.interrupted.notified() => {
-                            self.send(BackendEvent::TurnCompleted {
-                                status: TurnStatus::Interrupted,
-                                error: None,
-                            }).await;
-                            self.ended = true;
-                            return false;
-                        }
-                    };
-                    let kind = decision
-                        .and_then(|decision| serde_json::to_value(decision).ok())
-                        .and_then(|value| value["kind"].as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "cancelled".into());
-                    let text = json!({ "op": "text", "text": format!("approval: {kind}") });
-                    self.step(&text, parent).await
-                }
-                "subagent" => {
-                    let agent = step["id"].as_str().unwrap_or("agent").to_owned();
-                    let name = step["name"].as_str().map(str::to_owned);
-                    let call = ItemId(format!("spawn-{agent}"));
-                    let update = |state, message: Option<String>| {
-                        BackendEvent::Subagent(SubagentUpdate {
-                            agent_id: agent.clone(),
-                            parent_call_id: call.clone(),
-                            name: name.clone(),
-                            state,
-                            message,
-                        })
-                    };
-                    let phase = step["phase"].as_str().unwrap_or("full");
-                    let spawned = phase == "output"
-                        || self
-                            .send(BackendEvent::ItemCompleted(BackendItem::root(
-                                KnownItem::ToolCall {
-                                    id: call.clone(),
-                                    name: "spawn_agent".into(),
-                                    arguments: json!({ "agent": agent, "name": name }),
-                                },
-                            )))
-                            .await
-                            && self
-                                .send(BackendEvent::ItemCompleted(BackendItem::root(
-                                    KnownItem::ToolResult {
-                                        id: ItemId(format!("spawn-{agent}-result")),
-                                        call_id: call.clone(),
-                                        output: tool_output("spawned", false, Value::Null),
-                                        is_error: false,
-                                    },
-                                )))
-                                .await
-                            && self.send(update(SubagentState::Running, None)).await;
-                    if !spawned {
-                        return false;
-                    }
-                    if phase == "spawn" {
-                        return true;
-                    }
-                    for child in step["steps"].as_array().into_iter().flatten() {
-                        if !self
-                            .step(child, Some((call.0.as_str(), agent.as_str())))
-                            .await
-                        {
-                            return false;
-                        }
-                    }
-                    let state = match step["final"].as_str() {
-                        Some("failed") => SubagentState::Failed,
-                        Some("interrupted") => SubagentState::Interrupted,
-                        Some("waiting") => SubagentState::Waiting,
-                        Some("running") => SubagentState::Running,
-                        _ => SubagentState::Completed,
-                    };
-                    self.send(update(state, None)).await
-                }
-                "sleep" => {
-                    tokio::time::sleep(Duration::from_millis(step["ms"].as_u64().unwrap_or(0)))
-                        .await;
-                    true
-                }
-                "hang" => {
-                    self.shared.interrupted.notified().await;
-                    self.ended = true;
-                    self.send(BackendEvent::TurnCompleted {
-                        status: TurnStatus::Interrupted,
-                        error: None,
-                    })
-                    .await;
-                    false
-                }
-                "turn_end" => {
-                    self.ended = true;
-                    let status = match step["status"].as_str() {
-                        Some("failed") => TurnStatus::Failed,
-                        Some("interrupted") => TurnStatus::Interrupted,
-                        _ => TurnStatus::Completed,
-                    };
-                    self.send(BackendEvent::TurnCompleted {
-                        status,
-                        error: None,
-                    })
-                    .await
-                }
-                "idle" => {
-                    self.idled = true;
-                    self.send(BackendEvent::Idle).await
-                }
-                other => {
-                    self.send(BackendEvent::Error(format!("unknown fake step {other:?}")))
-                        .await
-                }
+                op @ ("text" | "thinking") => self.play_text(op, step, parent).await,
+                "command" => self.play_command(step, parent).await,
+                "usage" => self.play_usage(step).await,
+                "approval" => self.play_approval(step, parent).await,
+                "subagent" => self.play_subagent(step).await,
+                op => self.play_control(op, step).await,
             }
         })
+    }
+
+    async fn play_usage(&self, step: &Value) -> bool {
+        let usage = TokenUsage {
+            input: step["input"].as_u64().unwrap_or(0),
+            output: step["output"].as_u64().unwrap_or(0),
+            ..TokenUsage::default()
+        };
+        self.send(BackendEvent::Usage(usage)).await
+    }
+
+    async fn play_control(&mut self, op: &str, step: &Value) -> bool {
+        match op {
+            "sleep" => {
+                tokio::time::sleep(Duration::from_millis(step["ms"].as_u64().unwrap_or(0))).await;
+                true
+            }
+            "hang" => {
+                self.shared.interrupted.notified().await;
+                self.ended = true;
+                self.send(BackendEvent::TurnCompleted {
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                })
+                .await;
+                false
+            }
+            "turn_end" => {
+                self.ended = true;
+                let status = match step["status"].as_str() {
+                    Some("failed") => TurnStatus::Failed,
+                    Some("interrupted") => TurnStatus::Interrupted,
+                    _ => TurnStatus::Completed,
+                };
+                self.send(BackendEvent::TurnCompleted {
+                    status,
+                    error: None,
+                })
+                .await
+            }
+            "idle" => {
+                self.idled = true;
+                self.send(BackendEvent::Idle).await
+            }
+            other => {
+                self.send(BackendEvent::Error(format!("unknown fake step {other:?}")))
+                    .await
+            }
+        }
+    }
+
+    async fn play_text(&mut self, op: &str, step: &Value, parent: Parent<'_>) -> bool {
+        let text = step["text"].as_str().unwrap_or_default().to_owned();
+        let id = self.item_id(op, parent);
+        let known = |text: String| match op {
+            "text" => KnownItem::AssistantMessage {
+                id: id.clone(),
+                text,
+            },
+            _ => KnownItem::Thinking {
+                id: id.clone(),
+                text,
+            },
+        };
+        if parent.is_none() {
+            let chunks = step["chunks"].as_u64().unwrap_or(1).max(1) as usize;
+            let chars: Vec<char> = text.chars().collect();
+            if !self
+                .send(BackendEvent::ItemStarted(BackendItem::root(known(
+                    String::new(),
+                ))))
+                .await
+            {
+                return false;
+            }
+            for part in chars.chunks(chars.len().div_ceil(chunks).max(1)) {
+                let delta = part.iter().collect();
+                if !self
+                    .send(BackendEvent::ItemDelta {
+                        item_id: id.clone(),
+                        delta,
+                    })
+                    .await
+                {
+                    return false;
+                }
+            }
+        }
+        self.send(BackendEvent::ItemCompleted(BackendItem {
+            item: known(text),
+            child_of: Self::child(parent),
+        }))
+        .await
+    }
+
+    async fn play_command(&mut self, step: &Value, parent: Parent<'_>) -> bool {
+        let command = step["command"].as_str().unwrap_or_default();
+        let call = self.item_id("call", parent);
+        let result = self.item_id("result", parent);
+        let is_error = step["is_error"].as_bool().unwrap_or(false);
+        self.send(BackendEvent::ItemCompleted(BackendItem {
+            item: KnownItem::ToolCall {
+                id: call.clone(),
+                name: "bash".into(),
+                arguments: json!({ "command": command }),
+            },
+            child_of: Self::child(parent),
+        }))
+        .await
+            && self
+                .send(BackendEvent::ItemCompleted(BackendItem {
+                    item: KnownItem::ToolResult {
+                        id: result,
+                        call_id: call,
+                        output: tool_output(
+                            step["output"].as_str().unwrap_or_default(),
+                            is_error,
+                            Value::Null,
+                        ),
+                        is_error,
+                    },
+                    child_of: Self::child(parent),
+                }))
+                .await
+    }
+
+    async fn play_approval(&mut self, step: &Value, parent: Parent<'_>) -> bool {
+        let id = self.id("approval");
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .answers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), tx);
+        let request = ApprovalRequest::Permission {
+            actor: step["agent"].as_str().map(Into::into),
+            call_id: self.id("call"),
+            tool: step["tool"].as_str().unwrap_or("bash").into(),
+            arguments: step.get("arguments").cloned().unwrap_or(Value::Null),
+            surface: "command".into(),
+            values: step["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+            matched_pattern: None,
+            origin: "fake".into(),
+            session_patterns: vec![],
+            preview: None,
+        };
+        if !self
+            .send(BackendEvent::Approval {
+                id: id.clone(),
+                request,
+            })
+            .await
+        {
+            return false;
+        }
+        let decision = tokio::select! {
+            decision = rx => decision.ok(),
+            () = self.shared.interrupted.notified() => {
+                self.send(BackendEvent::TurnCompleted {
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                }).await;
+                self.ended = true;
+                return false;
+            }
+        };
+        let kind = decision
+            .and_then(|decision| serde_json::to_value(decision).ok())
+            .and_then(|value| value["kind"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "cancelled".into());
+        let text = json!({ "op": "text", "text": format!("approval: {kind}") });
+        self.step(&text, parent).await
+    }
+
+    async fn play_subagent(&mut self, step: &Value) -> bool {
+        let agent = step["id"].as_str().unwrap_or("agent").to_owned();
+        let name = step["name"].as_str().map(str::to_owned);
+        let call = ItemId(format!("spawn-{agent}"));
+        let update = |state, message: Option<String>| {
+            BackendEvent::Subagent(SubagentUpdate {
+                agent_id: agent.clone(),
+                parent_call_id: call.clone(),
+                name: name.clone(),
+                state,
+                message,
+            })
+        };
+        let phase = step["phase"].as_str().unwrap_or("full");
+        let spawned = phase == "output"
+            || self.send_spawn(&agent, name.as_deref(), &call).await
+                && self.send(update(SubagentState::Running, None)).await;
+        if !spawned {
+            return false;
+        }
+        if phase == "spawn" {
+            return true;
+        }
+        for child in step["steps"].as_array().into_iter().flatten() {
+            if !self
+                .step(child, Some((call.0.as_str(), agent.as_str())))
+                .await
+            {
+                return false;
+            }
+        }
+        self.send(update(final_state(step), None)).await
+    }
+
+    async fn send_spawn(&self, agent: &str, name: Option<&str>, call: &ItemId) -> bool {
+        self.send(BackendEvent::ItemCompleted(BackendItem::root(
+            KnownItem::ToolCall {
+                id: call.clone(),
+                name: "spawn_agent".into(),
+                arguments: json!({ "agent": agent, "name": name }),
+            },
+        )))
+        .await
+            && self
+                .send(BackendEvent::ItemCompleted(BackendItem::root(
+                    KnownItem::ToolResult {
+                        id: ItemId(format!("spawn-{agent}-result")),
+                        call_id: call.clone(),
+                        output: tool_output("spawned", false, Value::Null),
+                        is_error: false,
+                    },
+                )))
+                .await
+    }
+}
+
+fn final_state(step: &Value) -> SubagentState {
+    match step["final"].as_str() {
+        Some("failed") => SubagentState::Failed,
+        Some("interrupted") => SubagentState::Interrupted,
+        Some("waiting") => SubagentState::Waiting,
+        Some("running") => SubagentState::Running,
+        _ => SubagentState::Completed,
     }
 }

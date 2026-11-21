@@ -432,25 +432,8 @@ impl Translator {
             .and_then(|item| item["text"].as_str())
             .filter(|text| !text.is_empty())
             .map(str::to_owned);
-        let withdrawn: Vec<String> = {
-            let mut approvals = self.shared.approvals();
-            let ids: Vec<String> = approvals
-                .iter()
-                .filter(|(_, pending)| pending.thread == thread)
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in &ids {
-                approvals.remove(id);
-            }
-            ids
-        };
-        for id in withdrawn {
-            if !self
-                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
-                .await
-            {
-                return false;
-            }
+        if !self.withdraw_approvals_of(Some(thread)).await {
+            return false;
         }
         let prefix = scoped(thread, "");
         self.child_tools.retain(|id, _| !id.starts_with(&prefix));
