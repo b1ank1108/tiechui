@@ -324,8 +324,13 @@ fn edit(input: &Value) -> Value {
     })
 }
 
+/// The result of a call that ended without one.
+pub fn unfinished_result() -> Value {
+    tool_output("The tool call did not finish.", true, Value::Null)
+}
+
 /// The text of a `tool_result` block's content: a string, or text blocks joined.
-pub fn result_text(content: &Value) -> String {
+fn result_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks

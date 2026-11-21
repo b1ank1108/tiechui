@@ -4,12 +4,11 @@
 //! `task_notification`) as `Subagent` updates. A background sub-agent outlives the root turn: the
 //! session goes idle only once no turn runs, no sub-agent runs and no request is open.
 
-use serde_json::json;
 use tiechui_protocol::{ItemId, KnownItem, SubagentState};
 
 use super::super::items::{self, Pending};
 use super::super::wire::{Block, Incoming, Message};
-use super::{Translator, text_item};
+use super::{Translator, result_item, text_item};
 use crate::backend::{BackendEvent, BackendItem, ChildOf, SubagentUpdate};
 
 /// A sub-agent's item id: Claude's ids are its own, the agent id keeps them apart from the root's.
@@ -276,13 +275,7 @@ impl Translator {
         output: serde_json::Value,
         is_error: bool,
     ) -> bool {
-        let call = scoped(agent, call);
-        let result = KnownItem::ToolResult {
-            id: ItemId(format!("{call}:result")),
-            call_id: ItemId(call),
-            output,
-            is_error,
-        };
+        let result = result_item(scoped(agent, call), output, is_error);
         self.child_event(agent, result).await
     }
 
@@ -296,8 +289,10 @@ impl Translator {
             .collect();
         open.sort();
         for call in open {
-            let output = items::tool_result("", &json!("The tool call did not finish."), true);
-            if !self.child_result(agent, &call, output, true).await {
+            if !self
+                .child_result(agent, &call, items::unfinished_result(), true)
+                .await
+            {
                 return false;
             }
         }

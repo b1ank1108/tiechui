@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tiechui_protocol::{ItemId, KnownItem, TurnStatus};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -147,14 +147,10 @@ impl Translator {
     async fn exited(&mut self) {
         self.shared.usable.store(false, Ordering::SeqCst);
         let detail = self.stderr_detail();
-        let pending = self.shared.hello.send_if_modified(|hello| {
-            let waiting = *hello == Hello::Pending;
-            if waiting {
-                *hello = Hello::Failed(format!("claude exited{detail}"));
-            }
-            waiting
-        });
-        if pending {
+        if self
+            .shared
+            .settle_hello(Hello::Failed(format!("claude exited{detail}")))
+        {
             return;
         }
         self.flush().await;
@@ -195,13 +191,6 @@ impl Translator {
 
     async fn emit_after_flush(&mut self, event: BackendEvent) -> bool {
         self.flush().await && self.send_now(event).await
-    }
-
-    fn push_delta(&mut self, item: &ItemId, delta: &str) {
-        self.coalescer.push(item, delta);
-        if self.flush_at.is_none() && !delta.is_empty() {
-            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
-        }
     }
 
     async fn frame(&mut self, frame: &[u8]) -> bool {
@@ -247,16 +236,10 @@ impl Translator {
             return true;
         };
         if response.request_id.as_deref() == Some(self.shared.init_id.as_str()) {
-            self.shared.hello.send_if_modified(|hello| {
-                let waiting = *hello == Hello::Pending;
-                if waiting {
-                    *hello = if response.subtype == "success" {
-                        Hello::Ready
-                    } else {
-                        Hello::Failed(response.error.unwrap_or_else(|| "initialize failed".into()))
-                    };
-                }
-                waiting
+            self.shared.settle_hello(if response.subtype == "success" {
+                Hello::Ready
+            } else {
+                Hello::Failed(response.error.unwrap_or_else(|| "initialize failed".into()))
             });
         }
         true
@@ -451,7 +434,10 @@ impl Translator {
         {
             return false;
         }
-        self.push_delta(&id, text);
+        self.coalescer.push(&id, text);
+        if self.flush_at.is_none() {
+            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
+        }
         true
     }
 
@@ -552,12 +538,7 @@ impl Translator {
     }
 
     async fn emit_result(&mut self, call: String, output: Value, is_error: bool) -> bool {
-        let result = KnownItem::ToolResult {
-            id: ItemId(format!("{call}:result")),
-            call_id: ItemId(call),
-            output,
-            is_error,
-        };
+        let result = result_item(call, output, is_error);
         self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(result)))
             .await
     }
@@ -572,8 +553,10 @@ impl Translator {
             }
         }
         for (call, ..) in std::mem::take(&mut self.calls) {
-            let output = items::tool_result("", &json!("The tool call did not finish."), true);
-            if !self.emit_result(call, output, true).await {
+            if !self
+                .emit_result(call, items::unfinished_result(), true)
+                .await
+            {
                 return false;
             }
         }
@@ -585,14 +568,7 @@ impl Translator {
         let subtype = incoming.subtype.clone().unwrap_or_default();
         let failed = incoming.is_error || (!subtype.is_empty() && subtype != "success");
         let message = failure_text(&incoming, &subtype);
-        let handshaking = self.shared.hello.send_if_modified(|hello| {
-            let waiting = *hello == Hello::Pending;
-            if waiting && failed {
-                *hello = Hello::Failed(message.clone());
-            }
-            waiting && failed
-        });
-        if handshaking {
+        if failed && self.shared.settle_hello(Hello::Failed(message.clone())) {
             return true;
         }
         if !self
@@ -667,6 +643,15 @@ fn text_item(id: &ItemId, thinking: bool, text: String) -> KnownItem {
         KnownItem::Thinking { id, text }
     } else {
         KnownItem::AssistantMessage { id, text }
+    }
+}
+
+fn result_item(call: String, output: Value, is_error: bool) -> KnownItem {
+    KnownItem::ToolResult {
+        id: ItemId(format!("{call}:result")),
+        call_id: ItemId(call),
+        output,
+        is_error,
     }
 }
 

@@ -134,7 +134,7 @@ pub struct Block {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -145,13 +145,13 @@ pub struct Usage {
     pub output_tokens_details: OutputDetails,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CacheCreation {
     pub ephemeral_1h_input_tokens: u64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct OutputDetails {
     pub thinking_tokens: u64,

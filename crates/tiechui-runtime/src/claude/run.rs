@@ -91,6 +91,17 @@ impl Shared {
         (shared, commands, answered)
     }
 
+    /// Ends the handshake with `outcome` unless it has ended already; true when this call ended it.
+    pub fn settle_hello(&self, outcome: Hello) -> bool {
+        self.hello.send_if_modified(|hello| {
+            let waiting = *hello == Hello::Pending;
+            if waiting {
+                *hello = outcome;
+            }
+            waiting
+        })
+    }
+
     pub fn is_usable(&self) -> bool {
         self.usable.load(Ordering::SeqCst)
     }

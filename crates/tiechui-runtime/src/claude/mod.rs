@@ -378,22 +378,12 @@ impl Backend for ClaudeBackend {
         &mut self,
         params: StartParams,
     ) -> Result<(Started, mpsc::Receiver<BackendEvent>), String> {
-        if self.run.is_some() {
-            return Err("claude is already running".into());
-        }
         let (events, received) = mpsc::channel(1024);
         self.events = Some(events);
         self.params = Some(params.clone());
-        match self.open(params.resume.as_deref()).await {
-            Ok((run, resumed)) => {
-                self.run = Some(run);
-                Ok((self.started(&params, resumed), received))
-            }
-            Err(error) => {
-                self.events = None;
-                Err(error)
-            }
-        }
+        let (run, resumed) = self.open(params.resume.as_deref()).await?;
+        self.run = Some(run);
+        Ok((self.started(&params, resumed), received))
     }
 
     async fn start_turn(&mut self, input: &[InputContent]) -> Result<(), String> {
