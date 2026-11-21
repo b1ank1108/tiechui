@@ -219,8 +219,10 @@ fn document_selection_scroll_drag_extends_across_offsets_and_copies_once_on_rele
         |_| (viewport, offset),
     );
     let copied = selection.take_copy().expect("copied cross-screen slice");
-    assert!(copied.starts_with("中e\u{301}👩‍💻 row\nL02 "));
-    assert!(copied.ends_with("\nL12 中e\u{301}👩‍💻"));
+    let mut expected_lines = vec!["中e\u{301}👩‍💻 row".to_owned()];
+    expected_lines.extend((2..=11).map(|n| format!("L{n:02} 中e\u{301}👩‍💻 row")));
+    expected_lines.push("L12 中e\u{301}👩‍💻".to_owned());
+    assert_eq!(copied, expected_lines.join("\n"));
     assert!(selection.take_copy().is_none());
 
     selection.doc_mouse(
@@ -262,8 +264,9 @@ fn document_selection_scroll_drag_extends_across_offsets_and_copies_once_on_rele
         |_| (viewport, offset),
     );
     let extended = selection.take_copy().expect("copied extended slice");
-    assert!(extended.starts_with("中e\u{301}👩‍💻 row\nL02 "));
-    assert!(extended.ends_with("\nL16 中e\u{301}👩‍💻 row"));
+    let mut expected_ext = vec!["中e\u{301}👩‍💻 row".to_owned()];
+    expected_ext.extend((2..=16).map(|n| format!("L{n:02} 中e\u{301}👩‍💻 row")));
+    assert_eq!(extended, expected_ext.join("\n"));
 }
 
 #[test]
@@ -325,8 +328,9 @@ fn document_selection_ignores_outside_presses_and_reports_edge_autoscroll() {
         |_| (pager_vp, 0),
     );
     let copied = selection.take_copy().expect("copied upward to top");
-    assert!(copied.starts_with("ROW_00_END\n"));
-    assert!(copied.ends_with("\nROW_06"));
+    let mut expected_up: Vec<String> = (0..=5).map(|n| format!("ROW_{n:02}_END")).collect();
+    expected_up.push("ROW_06".to_owned());
+    assert_eq!(copied, expected_up.join("\n"));
 
     let main_vp = Viewport {
         top: 0,
@@ -568,4 +572,103 @@ fn bottom_row_wheel_scroll_with_shrinking_viewport_never_triggers_downward_autos
         |_| (hinted_vp, 11),
     );
     assert_eq!(selection.autoscroll_step(hinted_vp, 11, 15), None);
+}
+
+#[test]
+fn zero_length_drags_leave_selection_inactive_without_breaking_multi_click() {
+    let now = Instant::now();
+    let mut panel = selection("short line");
+    for (kind, col) in [(DOWN, 25), (DRAG, 35), (UP, 35)] {
+        let action = panel.mouse(mouse(kind, col, 0), now, true);
+        assert!(matches!(action, MouseAction::Handled));
+    }
+    assert!(!panel.active());
+    assert!(panel.take_copy().is_none());
+    assert!(!panel.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    for (kind, col) in [(DOWN, 2), (DRAG, 7), (DRAG, 2), (UP, 2)] {
+        let action = panel.mouse(mouse(kind, col, 0), now + Duration::from_secs(1), true);
+        assert!(matches!(action, MouseAction::Handled));
+    }
+    assert!(!panel.active());
+    assert!(panel.take_copy().is_none());
+
+    let doc = vec![Line::from("FIRST"), Line::from("SECOND")];
+    let vp = Viewport {
+        top: 0,
+        height: 6,
+        rows: 9,
+    };
+    let view = DocView {
+        source: DocSource::Main,
+        viewport: vp,
+        offset: 0,
+    };
+    let mut doc_sel = Selection::default();
+    for (kind, col, row) in [(DOWN, 3, 4), (DRAG, 12, 5), (UP, 12, 5)] {
+        let action = doc_sel.doc_mouse(
+            mouse(kind, col, row),
+            now,
+            true,
+            view,
+            || doc.clone(),
+            |_| (vp, 0),
+        );
+        assert!(matches!(action, MouseAction::Handled));
+    }
+    assert!(!doc_sel.active());
+    assert!(doc_sel.doc_lines(DocSource::Main).is_none());
+    assert!(doc_sel.take_copy().is_none());
+
+    for (kind, col) in [(DOWN, 1), (DRAG, 4), (DRAG, 1), (UP, 1)] {
+        let action = doc_sel.doc_mouse(
+            mouse(kind, col, 0),
+            now + Duration::from_secs(1),
+            true,
+            view,
+            || doc.clone(),
+            |_| (vp, 0),
+        );
+        assert!(matches!(action, MouseAction::Handled));
+    }
+    assert!(!doc_sel.active());
+
+    let click_at = now + Duration::from_secs(2);
+    doc_sel.doc_mouse(
+        mouse(DOWN, 1, 0),
+        click_at,
+        true,
+        view,
+        || doc.clone(),
+        |_| (vp, 0),
+    );
+    let click_release = doc_sel.doc_mouse(
+        mouse(UP, 1, 0),
+        click_at,
+        true,
+        view,
+        || doc.clone(),
+        |_| (vp, 0),
+    );
+    assert!(matches!(click_release, MouseAction::Click(_)));
+    assert!(!doc_sel.active());
+
+    let dbl_at = click_at + Duration::from_millis(100);
+    doc_sel.doc_mouse(
+        mouse(DOWN, 1, 0),
+        dbl_at,
+        true,
+        view,
+        || doc.clone(),
+        |_| (vp, 0),
+    );
+    doc_sel.doc_mouse(
+        mouse(UP, 1, 0),
+        dbl_at,
+        true,
+        view,
+        || doc.clone(),
+        |_| (vp, 0),
+    );
+    assert_eq!(doc_sel.take_copy().as_deref(), Some("FIRST"));
 }

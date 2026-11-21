@@ -813,6 +813,15 @@ def find_cell(s, needle):
     s.check(False, "Text not found on screen: %r" % needle)
 
 
+def assert_scroll_rows(s, text, lo, hi):
+    pos = -1
+    for n in range(lo, hi + 1):
+        marker = "SCROLL_ROW_%02d_END" % n
+        nxt = text.find(marker, pos + 1)
+        s.check(nxt > pos, "Missing or out-of-order %s in %d..%d copy: %r" % (marker, lo, hi, text))
+        pos = nxt
+
+
 def selection_scroll(f):
     s = f.start()
     s.command("long scroll reply", "SCROLL_ROW_59_END")
@@ -837,12 +846,12 @@ def selection_scroll(f):
         if "SCROLL_ROW_" in "".join(cells)
     )
     top_marker = "".join(s.screen.cells[row_top])[col_top:col_top + len("SCROLL_ROW_00_END")]
+    top_idx = int(top_marker.split("_")[2])
     s.send(f"\x1b[<0;{col_top + 1};{row_top + 1}m")
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after wheel drag, got %d" % len(copies))
-    s.check(top_marker in copies[0] and "SCROLL_ROW_59_END" in copies[0],
-            "Wheel drag missed cross-screen bounds: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], top_idx, 59)
     s.check("esc latest" not in copies[0] and "pgup/pgdn" not in copies[0],
             "Scroll hint leaked into wheel drag copy")
 
@@ -862,8 +871,7 @@ def selection_scroll(f):
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after top auto-scroll, got %d" % len(copies))
-    s.check("SCROLL_ROW_00_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
-            "Top auto-scroll missed bounds: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 0, 59)
     s.check("esc latest" not in copies[0], "Scroll hint leaked into top auto-scroll copy")
 
     s.send(ESC)
@@ -880,8 +888,7 @@ def selection_scroll(f):
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after bottom auto-scroll, got %d" % len(copies))
-    s.check("SCROLL_ROW_01_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
-            "Bottom auto-scroll missed bounds: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 1, 59)
     s.check("esc latest" not in copies[0] and "alpha" not in copies[0],
             "Bottom chrome/hint leaked into bottom auto-scroll copy")
 
@@ -908,6 +915,7 @@ def selection_scroll(f):
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Shift+Click release, got %d" % len(copies))
     s.check(copies[0].startswith("SCROLL_ROW_02_END") and copies[0].endswith("SCROLL_ROW_56_END"),
             "Shift+Click extension bounds mismatch: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 2, 56)
     s.check("esc latest" not in copies[0], "Scroll hint leaked into Shift+Click copy")
 
     s.send(ESC)
@@ -929,8 +937,7 @@ def selection_scroll(f):
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O top drag, got %d" % len(copies))
-    s.check("SCROLL_ROW_00_END" in copies[0] and "SCROLL_ROW_58_END" in copies[0],
-            "Ctrl+O top drag missed bounds: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 0, 58)
     for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
         s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into copy" % forbidden)
 
@@ -948,8 +955,7 @@ def selection_scroll(f):
     s.pump(0.15)
     copies = copied_texts(s, start)
     s.check(len(copies) == 1, "Expected 1 OSC 52 copy after Ctrl+O bottom drag, got %d" % len(copies))
-    s.check("SCROLL_ROW_01_END" in copies[0] and "SCROLL_ROW_59_END" in copies[0],
-            "Ctrl+O bottom drag missed bounds: " + repr(copies[0]))
+    assert_scroll_rows(s, copies[0], 1, 59)
     for forbidden in ("T R A N S C R I P T", "%", "to scroll", "to quit"):
         s.check(forbidden not in copies[0], "Ctrl+O chrome %r leaked into bottom drag copy" % forbidden)
 

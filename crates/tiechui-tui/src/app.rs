@@ -2377,36 +2377,41 @@ impl App {
         exit
     }
 
-    fn main_scroll_key(&mut self, key: KeyEvent) -> bool {
-        let plain_page =
-            matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && key.modifiers.is_empty();
-        let ctrl_jump = matches!(key.code, KeyCode::Home | KeyCode::End)
-            && key.modifiers == KeyModifiers::CONTROL;
-        if !plain_page && !ctrl_jump {
+    fn is_selection_scroll_key(key: KeyEvent) -> bool {
+        (matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && key.modifiers.is_empty())
+            || (matches!(key.code, KeyCode::Home | KeyCode::End)
+                && key.modifiers == KeyModifiers::CONTROL)
+    }
+
+    fn doc_scroll_key(&mut self, source: crate::selection::DocSource, key: KeyEvent) -> bool {
+        if !Self::is_selection_scroll_key(key) {
             return false;
         }
         let doc_len = self.selection.doc_len();
-        Self::sync_main_scroll(
-            &mut self.main_view,
-            self.main_body_height,
-            self.height,
-            doc_len,
-            |view| {
-                view.key(key);
-            },
-        );
-        true
-    }
-
-    fn pager_selection_scroll_key(&mut self, key: KeyEvent) -> bool {
-        let doc_len = self.selection.doc_len();
-        let height = self.height;
-        let Some(pager) = &mut self.pager else {
-            return false;
-        };
-        let vp = pager.current_viewport(height);
-        pager.sync(doc_len, vp.height);
-        pager.scroll_key(key)
+        match source {
+            crate::selection::DocSource::Main => {
+                Self::sync_main_scroll(
+                    &mut self.main_view,
+                    self.main_body_height,
+                    self.height,
+                    doc_len,
+                    |view| {
+                        view.key(key);
+                    },
+                );
+                true
+            }
+            crate::selection::DocSource::Pager => {
+                let height = self.height;
+                let Some(pager) = &mut self.pager else {
+                    return false;
+                };
+                let vp = pager.current_viewport(height);
+                pager.sync(doc_len, vp.height);
+                pager.key(key);
+                true
+            }
+        }
     }
 
     fn reveal_selection_end(&mut self) {
@@ -2433,12 +2438,10 @@ impl App {
         if !self.selection.active() {
             return false;
         }
-        match self.selection.doc_source() {
-            Some(crate::selection::DocSource::Main) if self.main_scroll_key(key) => return true,
-            Some(crate::selection::DocSource::Pager) if self.pager_selection_scroll_key(key) => {
-                return true;
-            }
-            _ => {}
+        if let Some(source) = self.selection.doc_source()
+            && self.doc_scroll_key(source, key)
+        {
+            return true;
         }
         let handled = self.selection.key(key);
         if handled

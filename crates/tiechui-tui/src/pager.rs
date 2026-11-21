@@ -144,8 +144,7 @@ impl Pager {
         self.following = self.offset >= self.max();
     }
 
-    fn ctrl_scroll_delta(&self, code: KeyCode) -> Option<isize> {
-        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
+    fn ctrl_delta(&self, code: KeyCode, page: isize) -> Option<isize> {
         let half = isize::try_from(self.height.div_ceil(2)).unwrap_or(isize::MAX);
         match code {
             KeyCode::Char('b') => Some(-page),
@@ -156,49 +155,33 @@ impl Pager {
         }
     }
 
-    fn nav_scroll_delta(&self, key: KeyEvent) -> Option<isize> {
-        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
-        match key.code {
+    fn nav_delta(code: KeyCode, page: isize) -> Option<isize> {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => Some(-1),
+            KeyCode::Down | KeyCode::Char('j') => Some(1),
             KeyCode::PageUp => Some(-page),
             KeyCode::PageDown => Some(page),
             KeyCode::Home => Some(isize::MIN),
             KeyCode::End => Some(isize::MAX),
-            KeyCode::Char(' ') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    -page
-                } else {
-                    page
-                })
-            }
             _ => None,
         }
     }
 
-    pub fn scroll_key(&mut self, key: KeyEvent) -> bool {
-        if key
-            .modifiers
-            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+    fn key_delta(&self, key: KeyEvent) -> Option<isize> {
+        let page = isize::try_from(self.height).unwrap_or(isize::MAX);
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(delta) = self.ctrl_delta(key.code, page)
         {
-            return false;
+            return Some(delta);
         }
-        let delta = self
-            .nav_scroll_delta(key)
-            .or_else(|| {
-                key.modifiers
-                    .contains(KeyModifiers::CONTROL)
-                    .then(|| self.ctrl_scroll_delta(key.code))
-                    .flatten()
-            })
-            .or(match key.code {
-                KeyCode::Char('k') if key.modifiers.is_empty() => Some(-1),
-                KeyCode::Char('j') if key.modifiers.is_empty() => Some(1),
-                _ => None,
+        if key.code == KeyCode::Char(' ') {
+            return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                -page
+            } else {
+                page
             });
-        if let Some(delta) = delta {
-            self.scroll(delta);
-            return true;
         }
-        false
+        Self::nav_delta(key.code, page)
     }
 
     /// Returns false when the pager closes.
@@ -208,11 +191,10 @@ impl Pager {
             KeyCode::Esc => return false,
             KeyCode::Char('q') if !control => return false,
             KeyCode::Char('c') if control => return false,
-            KeyCode::Up => self.scroll(-1),
-            KeyCode::Down => self.scroll(1),
-            _ => {
-                self.scroll_key(key);
-            }
+            _ => {}
+        }
+        if let Some(delta) = self.key_delta(key) {
+            self.scroll(delta);
         }
         true
     }

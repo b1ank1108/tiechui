@@ -328,11 +328,17 @@ impl Selection {
         let Some(pressed) = self.pressed.take() else {
             return MouseAction::Pass;
         };
-        if self.dragged || (event.column, event.row) != (pressed.column, pressed.row) {
+        let moved = std::mem::take(&mut self.dragged)
+            || (event.column, event.row) != (pressed.column, pressed.row);
+        if moved {
             self.end = point;
         }
-        if !self.dragged && self.anchor == self.end {
+        if self.anchor == self.end {
             self.held = None;
+            if moved {
+                self.last_click = None;
+                return MouseAction::Handled;
+            }
             return MouseAction::Click(pressed);
         }
         if copy_on_select {

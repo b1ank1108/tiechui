@@ -2568,8 +2568,14 @@ fn main_chat_wheel_and_edge_autoscroll_select_across_screens_without_hint_or_com
         KeyModifiers::NONE,
     );
     let wheel_copy = app.take_copy().expect("wheel drag copied on release");
-    assert!(wheel_copy.contains("MAIN_LINE_44_END"));
-    assert!(wheel_copy.contains("MAIN_LINE_25_END"));
+    let mut prev = 0;
+    for n in 25..=44 {
+        let marker = format!("MAIN_LINE_{n:02}_END");
+        let pos = wheel_copy[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in wheel_copy:\n{wheel_copy}"));
+        prev += pos + marker.len();
+    }
     assert!(!wheel_copy.contains("esc latest"));
     assert!(!wheel_copy.contains("composer draft"));
 
@@ -2624,8 +2630,14 @@ fn main_chat_wheel_and_edge_autoscroll_select_across_screens_without_hint_or_com
         KeyModifiers::NONE,
     );
     let top_copy = app.take_copy().expect("top autoscroll copied on release");
-    assert!(top_copy.contains("MAIN_LINE_00_END"));
-    assert!(top_copy.contains("MAIN_LINE_44_END"));
+    let mut prev = 0;
+    for n in 0..=44 {
+        let marker = format!("MAIN_LINE_{n:02}_END");
+        let pos = top_copy[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in top_copy:\n{top_copy}"));
+        prev += pos + marker.len();
+    }
     assert!(!top_copy.contains("esc latest"));
     assert!(!top_copy.contains("composer draft"));
 
@@ -2664,9 +2676,15 @@ fn main_chat_wheel_and_edge_autoscroll_select_across_screens_without_hint_or_com
     let bottom_copy = app
         .take_copy()
         .expect("bottom autoscroll copied on release");
-    assert!(bottom_copy.contains("MAIN_LINE_01_END"));
-    assert!(bottom_copy.contains("MAIN_LINE_44_END"));
-    assert!(bottom_copy.contains("STREAMED_AFTER_SELECT"));
+    let mut prev = 0;
+    for n in 1..=44 {
+        let marker = format!("MAIN_LINE_{n:02}_END");
+        let pos = bottom_copy[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in bottom_copy:\n{bottom_copy}"));
+        prev += pos + marker.len();
+    }
+    assert!(bottom_copy[prev..].contains("STREAMED_AFTER_SELECT"));
     assert!(!bottom_copy.contains("esc latest"));
     assert!(!bottom_copy.contains("composer draft"));
 }
@@ -2749,6 +2767,14 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
     let extended = app.take_copy().expect("Shift+Click extended copy");
     assert!(extended.starts_with("DOC_ROW_02_END\n"));
     assert!(extended.ends_with("DOC_ROW_38_END"));
+    let mut prev = 0;
+    for n in 2..=38 {
+        let marker = format!("DOC_ROW_{n:02}_END");
+        let pos = extended[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in extended:\n{extended}"));
+        prev += pos + marker.len();
+    }
 
     send_mouse(
         &mut app,
@@ -2774,6 +2800,14 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
     let arrow_copy = app.take_copy().expect("explicit Enter copy");
     assert!(arrow_copy.starts_with("DOC_ROW_00_END\n"));
     assert!(arrow_copy.ends_with("DOC_ROW_38_END"));
+    let mut prev = 0;
+    for n in 0..=38 {
+        let marker = format!("DOC_ROW_{n:02}_END");
+        let pos = arrow_copy[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in arrow_copy:\n{arrow_copy}"));
+        prev += pos + marker.len();
+    }
 
     app.key(key(KeyCode::Esc));
     app.key(with(KeyCode::Char('o'), KeyModifiers::CONTROL));
@@ -2819,8 +2853,14 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
         KeyModifiers::NONE,
     );
     let pager_copy = app.take_copy().expect("Ctrl+O cross-screen copy");
-    assert!(pager_copy.contains("DOC_ROW_00_END"));
-    assert!(pager_copy.contains("DOC_ROW_39_END"));
+    let mut prev = 0;
+    for n in 0..=39 {
+        let marker = format!("DOC_ROW_{n:02}_END");
+        let pos = pager_copy[prev..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {marker} in pager_copy:\n{pager_copy}"));
+        prev += pos + marker.len();
+    }
     assert!(!pager_copy.contains("T R A N S C R I P T"));
     assert!(!pager_copy.contains('%'));
     assert!(!pager_copy.contains("to scroll"));
@@ -2829,16 +2869,8 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
     for k in [
         key(KeyCode::PageDown),
         key(KeyCode::PageUp),
-        key(KeyCode::End),
-        key(KeyCode::Home),
-        key(KeyCode::Char(' ')),
-        with(KeyCode::Char(' '), KeyModifiers::SHIFT),
-        with(KeyCode::Char('d'), KeyModifiers::CONTROL),
-        with(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        with(KeyCode::Char('f'), KeyModifiers::CONTROL),
-        with(KeyCode::Char('b'), KeyModifiers::CONTROL),
-        key(KeyCode::Char('j')),
-        key(KeyCode::Char('k')),
+        with(KeyCode::End, KeyModifiers::CONTROL),
+        with(KeyCode::Home, KeyModifiers::CONTROL),
     ] {
         app.key(k);
         assert!(app.pager_frame(14).is_some());
@@ -2848,8 +2880,13 @@ fn post_release_scroll_shift_click_and_ctrl_o_chrome_isolation() {
     assert!(app.take_copy().is_some());
     assert!(app.pager_frame(14).is_some());
 
-    app.key(key(KeyCode::Esc));
+    app.key(key(KeyCode::Enter));
+    app.key(key(KeyCode::Char('j')));
+    assert!(app.take_copy().is_none());
     assert!(app.pager_frame(14).is_some());
+    app.key(key(KeyCode::Enter));
+    assert!(app.take_copy().is_none());
+
     app.key(key(KeyCode::Esc));
     assert!(app.pager_frame(14).is_none());
 }
@@ -3254,4 +3291,76 @@ fn main_selection_scrolls_on_page_keys_with_menu_open_and_clears_on_modified_pag
         assert!(app.take_copy().is_none());
         assert!(app.main_frame().1.is_some());
     }
+}
+
+#[test]
+fn zero_length_drag_in_short_chat_keeps_cursor_live_stream_and_enter_submit() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = ready(60);
+    app.resize(60, 16);
+    app.event(event(completed(call(
+        "c1",
+        "bash",
+        json!({"command": "echo short"}),
+    ))));
+    app.event(event(completed(result(
+        "c1",
+        "T1\nT2\nT3\nT4\nT5\nT6",
+        false,
+    ))));
+    let (frame, cursor) = app.main_frame();
+    assert!(cursor.is_some());
+    let ctrl_row = frame
+        .iter()
+        .position(|l| text(std::slice::from_ref(l))[0].contains("+ 3 lines"))
+        .unwrap() as u16;
+    let empty_row = ctrl_row + 2;
+
+    for (kind, column, row) in [
+        (MouseEventKind::Down(MouseButton::Left), 4, empty_row),
+        (MouseEventKind::Drag(MouseButton::Left), 18, empty_row + 1),
+        (MouseEventKind::Up(MouseButton::Left), 18, empty_row + 1),
+    ] {
+        app.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    for ev in answer("streamed", "LIVE_AFTER_EMPTY_DRAG") {
+        app.event(ev);
+    }
+    let (after_empty, after_cursor) = app.main_frame();
+    assert!(after_cursor.is_some());
+    assert!(
+        text(&after_empty)
+            .join("\n")
+            .contains("LIVE_AFTER_EMPTY_DRAG")
+    );
+
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 6),
+        (MouseEventKind::Drag(MouseButton::Left), 12),
+        (MouseEventKind::Drag(MouseButton::Left), 6),
+        (MouseEventKind::Up(MouseButton::Left), 6),
+    ] {
+        app.mouse(MouseEvent {
+            kind,
+            column,
+            row: ctrl_row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    let (after_return, return_cursor) = app.main_frame();
+    assert!(return_cursor.is_some());
+    assert!(!text(&after_return).join("\n").contains("T3"));
+
+    ops(&mut app);
+    typed(&mut app, "send on enter");
+    app.key(key(KeyCode::Enter));
+    assert_eq!(
+        ops(&mut app),
+        [user("send on enter", InputDelivery::FollowUp)]
+    );
 }
