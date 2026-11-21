@@ -19,6 +19,8 @@ const UNANSWERED: &str = "The user did not answer the questions.";
 /// A `can_use_tool` request Claude waits on, kept until it is answered or withdrawn.
 pub struct Pending {
     pub request_id: String,
+    /// The sub-agent that asked; `None` for the root conversation.
+    pub agent: Option<String>,
     input: Value,
     asked: Asked,
 }
@@ -72,7 +74,8 @@ impl Pending {
 /// kept to answer it. `shown` is the call's input as the card shows it, the request's own input
 /// unless that is empty. `AskUserQuestion` becomes question cards; every other tool,
 /// `ExitPlanMode` included, a permission card whose text is the command, the file or the full
-/// plan. The answer always carries the request's own input back.
+/// plan. A sub-agent's request names the sub-agent as its actor. The answer always carries the
+/// request's own input back.
 pub fn ask(
     request_id: &str,
     request: &Request,
@@ -91,7 +94,7 @@ pub fn ask(
         let (name, arguments) = tool_call(tool, shown);
         let (surface, value) = subject(&name, &arguments, request.description.as_deref());
         let approval = ApprovalRequest::Permission {
-            actor: None,
+            actor: request.agent_id.as_deref().map(Box::from),
             call_id: call_id.to_owned(),
             tool: name,
             arguments,
@@ -106,6 +109,7 @@ pub fn ask(
     };
     let pending = Pending {
         request_id: request_id.to_owned(),
+        agent: request.agent_id.clone(),
         input: request.input.clone(),
         asked,
     };
@@ -501,6 +505,7 @@ mod tests {
             tool_use_id: Some("toolu_1".into()),
             description: None,
             permission_suggestions: suggestions,
+            agent_id: None,
         }
     }
 

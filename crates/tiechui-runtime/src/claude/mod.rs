@@ -267,7 +267,7 @@ impl ClaudeBackend {
             return Err(Failure::Other("claude started without its stdio".into()));
         };
         let (writer, write_task) = Writer::spawn(stdin);
-        let (shared, commands) = Shared::new("tiechui-init".into());
+        let (shared, commands, answered) = Shared::new("tiechui-init".into());
         let tail = StderrTail::default();
         let (frames, inbound) = mpsc::channel(256);
         let translator = Translator::new(
@@ -282,7 +282,7 @@ impl ClaudeBackend {
             write_task,
             tokio::spawn(run::read_frames(stdout, frames)),
             tokio::spawn(run::read_stderr(stderr, tail)),
-            tokio::spawn(translator.run(inbound)),
+            tokio::spawn(translator.run(inbound, answered)),
             tokio::spawn(run::supervise(process, commands, shared.clone())),
         ];
         let run = Run {
@@ -454,7 +454,7 @@ impl Backend for ClaudeBackend {
         let Some(run) = &self.run else {
             return Ok(());
         };
-        let Some(pending) = run.shared.take_approval(approval_id) else {
+        let Some(pending) = run.shared.answer_approval(approval_id) else {
             return Ok(());
         };
         run.writer.send(&wire::control_success(

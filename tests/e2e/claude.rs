@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, Snapshot};
 use tiechui_protocol::{
-    ApprovalRequest, EventKind, Item, KnownItem, TokenUsage, TurnId, TurnStatus,
+    ApprovalRequest, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem, SubagentItem,
+    SubagentState, SubagentStatus, TokenUsage, TurnId, TurnStatus,
 };
 
 const SESSION: &str = "fake-session";
@@ -731,64 +732,6 @@ async fn a_recorded_turn_maps_like_the_synthetic_ones() {
         used.iter()
             .all(|usage| usage.output > 0 && usage.cache_read > 0)
     );
-}
-
-#[tokio::test]
-async fn subagent_frames_and_task_frames_do_not_break_the_main_turn() {
-    let fixture = Fixture::new();
-    let mut steps = handshake();
-    steps.push(user_message("go"));
-    steps.push(message_start("msg_1"));
-    steps.extend(tool_use(
-        "msg_1",
-        0,
-        "toolu_agent",
-        "Agent",
-        &json!({"description": "sub", "prompt": "do"}),
-    ));
-    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
-    steps.push(system(
-        "task_started",
-        json!({"task_id": "t1", "tool_use_id": "toolu_agent", "description": "sub"}),
-    ));
-    let mut child = frame(
-        "assistant",
-        json!({"message": {"id": "msg_child", "content": [{"type": "text", "text": "child words"}]}}),
-    );
-    child["emit"]["parent_tool_use_id"] = json!("toolu_agent");
-    steps.push(child);
-    let mut child_stream = stream(
-        "msg_child",
-        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "child delta"}}),
-    );
-    child_stream["emit"]["parent_tool_use_id"] = json!("toolu_agent");
-    steps.push(child_stream);
-    let mut child_result = tool_result("toolu_inner", json!("inner"), false);
-    child_result["emit"]["parent_tool_use_id"] = json!("toolu_agent");
-    steps.push(child_result);
-    steps.push(system(
-        "task_notification",
-        json!({"task_id": "t1", "status": "completed"}),
-    ));
-    steps.push(tool_result("toolu_agent", json!("sub done"), false));
-    steps.push(message_start("msg_2"));
-    steps.extend(block("msg_2", 0, "text", &["parent words"]));
-    steps.extend(message_end("msg_2", usage_json(1, 2, 0, 0), "end_turn"));
-    steps.push(result_ok("parent words"));
-    fixture.script(steps);
-
-    let mut client = fixture.client();
-    let opened = open(&mut client, &fixture, None).await;
-    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
-    let events = client.until(is_completed).await;
-    assert_eq!(completed_status(&events), TurnStatus::Completed);
-    let text = serde_json::to_string(&known(&events)).unwrap();
-    assert!(
-        text.contains("parent words") && !text.contains("child"),
-        "{text}"
-    );
-    assert!(!text.contains("inner"), "{text}");
-    assert_eq!(usages(&events).len(), 2);
 }
 
 #[tokio::test]
@@ -1552,6 +1495,699 @@ async fn two_clients_allowing_the_same_request_at_once_write_one_answer() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(responses_to(&fixture, "perm-1").len(), 1);
     assert_script_followed(&fixture);
+}
+
+/// A frame one of Claude's sub-agents produced: it names the call that spawned the agent and the
+/// agent's id.
+fn child(agent: &str, call: &str, step: Value) -> Value {
+    let mut step = step;
+    step["emit"]["parent_tool_use_id"] = json!(call);
+    step["emit"]["agent_id"] = json!(agent);
+    step
+}
+
+fn child_message(agent: &str, call: &str, msg: &str, block: Value) -> Value {
+    child(
+        agent,
+        call,
+        frame(
+            "assistant",
+            json!({"message": {"id": msg, "role": "assistant", "content": [block]}}),
+        ),
+    )
+}
+
+fn child_tool_use(
+    agent: &str,
+    call: &str,
+    msg: &str,
+    id: &str,
+    name: &str,
+    input: &Value,
+) -> Value {
+    child_message(
+        agent,
+        call,
+        msg,
+        json!({"type": "tool_use", "id": id, "name": name, "input": input}),
+    )
+}
+
+fn child_text(agent: &str, call: &str, msg: &str, text: &str) -> Value {
+    child_message(agent, call, msg, json!({"type": "text", "text": text}))
+}
+
+fn child_tool_result(agent: &str, call: &str, id: &str, content: &str) -> Value {
+    child(agent, call, tool_result(id, json!(content), false))
+}
+
+fn task_started(agent: &str, call: &str, background: bool) -> Value {
+    system(
+        "task_started",
+        json!({"task_id": agent, "tool_use_id": call, "description": "Touch a file",
+            "subagent_type": "general-purpose", "is_backgrounded": background,
+            "task_type": "local_agent"}),
+    )
+}
+
+/// The end of a sub-agent as 2.1.322 reports it: the task's new status, then its summary.
+fn task_ended(agent: &str, call: &str, status: &str, summary: &str) -> Vec<Value> {
+    vec![
+        system(
+            "task_updated",
+            json!({"task_id": agent, "patch": {"status": status}}),
+        ),
+        system(
+            "task_notification",
+            json!({"task_id": agent, "tool_use_id": call, "status": status, "summary": summary}),
+        ),
+    ]
+}
+
+fn child_can_use_tool(request_id: &str, agent: &str, input: &Value, tool_use_id: &str) -> Value {
+    let mut step = can_use_tool(request_id, "Bash", input, tool_use_id);
+    step["emit"]["request"]["agent_id"] = json!(agent);
+    step
+}
+
+/// A root turn that spawns a background sub-agent and ends at once.
+fn background_spawn(agent: &str, call: &str) -> Vec<Value> {
+    let mut steps = vec![system("init", json!({}))];
+    steps.extend(tool_message(
+        "msg_1",
+        call,
+        "Agent",
+        &json!({"description": "Touch a file", "subagent_type": "general-purpose",
+            "prompt": "touch bg.txt", "run_in_background": true}),
+    ));
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.push(task_started(agent, call, true));
+    steps.push(tool_result(
+        call,
+        json!("Async agent launched successfully."),
+        false,
+    ));
+    steps.extend(reply("msg_2", "spawned"));
+    steps
+}
+
+fn subagent_items(events: &[SessionEvent]) -> Vec<SubagentItem> {
+    custom_items(events, SubagentItem::from_item)
+}
+
+fn subagent_states(events: &[SessionEvent]) -> Vec<SubagentStatus> {
+    custom_items(events, SubagentStatus::from_item)
+}
+
+fn custom_items<T>(events: &[SessionEvent], parse: impl Fn(&Item) -> Option<T>) -> Vec<T> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event.event {
+            EventKind::ItemCompleted { item, .. } => parse(item),
+            _ => None,
+        })
+        .collect()
+}
+
+fn states_of(statuses: &[SubagentStatus], agent: &str) -> Vec<(SubagentState, Option<String>)> {
+    statuses
+        .iter()
+        .filter(|status| status.agent_id == agent)
+        .map(|status| (status.state, status.message.clone()))
+        .collect()
+}
+
+fn markers(events: &[SessionEvent]) -> Vec<DerivedTurnMarker> {
+    custom_items(events, DerivedTurnMarker::from_item)
+}
+
+fn turns_completed(events: &[SessionEvent]) -> Vec<tiechui_protocol::Turn> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event.event {
+            EventKind::TurnCompleted { turn } => Some(turn.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each turn of a session as `(derived reason, status, ids of its sub-agent items, statuses and
+/// marker)`, from its live events or its snapshot: what reopening must rebuild.
+fn structure<'a>(
+    events: impl Iterator<Item = &'a tiechui_protocol::Event>,
+) -> Vec<(Option<DerivedReason>, TurnStatus, Vec<String>)> {
+    let mut turns: Vec<(TurnId, TurnStatus, Vec<Item>)> = vec![];
+    for event in events {
+        match &event.event {
+            EventKind::ThreadStarted { thread, .. } => {
+                turns = thread
+                    .turns
+                    .iter()
+                    .map(|t| (t.id.clone(), t.status, t.items.clone()))
+                    .collect();
+            }
+            EventKind::TurnStarted { turn } => {
+                turns.push((turn.id.clone(), TurnStatus::InProgress, vec![]));
+            }
+            EventKind::ItemCompleted { turn_id, item } => {
+                let turn = turns.iter_mut().find(|t| t.0 == *turn_id).unwrap();
+                turn.2.push(item.clone());
+            }
+            EventKind::TurnCompleted { turn } => {
+                let slot = turns.iter_mut().find(|t| t.0 == turn.id).unwrap();
+                *slot = (turn.id.clone(), turn.status, turn.items.clone());
+            }
+            _ => {}
+        }
+    }
+    turns
+        .into_iter()
+        .map(|(_, status, items)| {
+            let mut ids: Vec<String> = vec![];
+            for item in &items {
+                if let Item::Custom { kind, payload } = item {
+                    let id = format!("{kind}:{}", payload["id"]);
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            let reason = items
+                .first()
+                .and_then(DerivedTurnMarker::from_item)
+                .map(|marker| marker.reason);
+            (reason, status, ids)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_recorded_foreground_subagent_folds_under_its_agent_call() {
+    const AGENT: &str = "a0d05e7f5294d18a0";
+    const SPAWN: &str = "toolu_017Umw5jiSeU16kfK4MGLL91";
+    const BASH: &str = "toolu_01MZ1aHnrFuDiJiuQtFV6chq";
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    let recorded = include_str!("fixtures/claude-subagent-foreground.ndjson");
+    steps.extend(
+        recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap()),
+    );
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("manual")).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let (before, approval, request) = next_approval(&mut client).await;
+    let child_call = format!("{AGENT}:{BASH}");
+    let ApprovalRequest::Permission {
+        actor,
+        call_id,
+        values,
+        ..
+    } = request
+    else {
+        panic!("{request:?}");
+    };
+    assert_eq!(actor.as_deref(), Some(AGENT));
+    assert_eq!(call_id, child_call);
+    assert_eq!(values, ["touch sub.txt"]);
+    assert!(
+        subagent_items(&before)
+            .iter()
+            .any(|child| child.id.0 == child_call
+                && matches!(&child.item, KnownItem::ToolCall { name, .. } if name == "bash")),
+        "the child step the card waits on exists before it"
+    );
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    let after = client.until(is_completed).await;
+    let events: Vec<SessionEvent> = before.into_iter().chain(after).collect();
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(
+        markers(&events).is_empty(),
+        "everything stays in the root turn"
+    );
+    assert_eq!(turns_completed(&events).len(), 1);
+
+    let items = known(&events);
+    assert!(items.iter().any(|item| matches!(item,
+        KnownItem::ToolCall { id, name, .. } if id.0 == SPAWN && name == "Agent")));
+    assert!(items.iter().any(|item| matches!(item,
+        KnownItem::ToolResult { call_id, .. } if call_id.0 == SPAWN)));
+    let children = subagent_items(&events);
+    assert!(
+        children
+            .iter()
+            .all(|child| child.agent_id == AGENT && child.parent_call_id.0 == SPAWN),
+        "{children:?}"
+    );
+    let ids: Vec<&str> = children.iter().map(|child| child.id.0.as_str()).collect();
+    assert_eq!(ids, [child_call.clone(), format!("{child_call}:result")]);
+    assert!(
+        !serde_json::to_string(&children)
+            .unwrap()
+            .contains("Your only job"),
+        "the prompt Claude gave the sub-agent is not a step"
+    );
+    let statuses = subagent_states(&events);
+    assert!(
+        statuses
+            .iter()
+            .all(|status| status.parent_call_id.0 == SPAWN
+                && status.name.as_deref() == Some("general-purpose")),
+        "{statuses:?}"
+    );
+    assert_eq!(
+        states_of(&statuses, AGENT),
+        [
+            (SubagentState::Running, None),
+            (SubagentState::Waiting, None),
+            (SubagentState::Running, None),
+            (SubagentState::Completed, Some("sub done".to_owned())),
+        ]
+    );
+    assert_script_followed(&fixture);
+    assert_eq!(responses_to(&fixture, "perm-1").len(), 1);
+}
+
+#[tokio::test]
+async fn a_recorded_background_subagent_asks_after_the_turn_and_claude_then_starts_a_turn() {
+    const AGENT: &str = "a7f166598edc427a7";
+    const SPAWN: &str = "toolu_01J3nzKk11UiMAwxacu8vxeQ";
+    const BASH: &str = "toolu_01SF2XZpjY3cCQfB9iqnoPvx";
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    let recorded = include_str!("fixtures/claude-subagent-background.ndjson");
+    steps.extend(
+        recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap()),
+    );
+    fixture.script(steps);
+    fixture.script_for_launch(1, handshake());
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("manual")).await;
+    let thread = opened.thread_id.0.clone();
+    let mut live: Vec<SessionEvent> = vec![];
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let root = client.until(is_completed).await;
+    assert_eq!(completed_status(&root), TurnStatus::Completed);
+    let root_turn = turns_completed(&root)[0].id.clone();
+    live.extend(root);
+
+    let (seen, approval, request) = next_approval(&mut client).await;
+    let child_call = format!("{AGENT}:{BASH}");
+    let derived = seen
+        .iter()
+        .find_map(|e| match &e.event.event {
+            EventKind::TurnStarted { turn } => Some(turn.id.clone()),
+            _ => None,
+        })
+        .expect("the sub-agent's output opens a derived turn");
+    assert!(
+        seen.iter().any(|e| matches!(&e.event.event,
+            EventKind::ApprovalRequested { turn_id: Some(turn), .. } if *turn == derived)),
+        "the approval sits in the derived turn"
+    );
+    let ApprovalRequest::Permission { actor, call_id, .. } = request else {
+        panic!("{request:?}");
+    };
+    assert_eq!(actor.as_deref(), Some(AGENT));
+    assert_eq!(call_id, child_call);
+    let marker = &markers(&seen)[0];
+    assert_eq!(
+        (marker.derived_from.clone(), marker.reason),
+        (root_turn.clone(), DerivedReason::Subagent)
+    );
+    live.extend(seen);
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    let closed = client.until(is_completed).await;
+    let turn = turns_completed(&closed).pop().unwrap();
+    assert_eq!(
+        (turn.id.clone(), turn.status),
+        (derived.clone(), TurnStatus::Completed),
+        "Idle closes the derived turn once the sub-agent is done"
+    );
+    live.extend(closed);
+    let own = client.until(is_completed).await;
+    let marker = markers(&own)
+        .pop()
+        .expect("Claude's own turn is a derived turn");
+    assert_eq!(marker.reason, DerivedReason::Runtime);
+    assert_eq!(completed_status(&own), TurnStatus::Completed);
+    assert!(known(&own).iter().any(|item| matches!(item,
+        KnownItem::AssistantMessage { text, .. } if text.contains("bg done"))));
+    live.extend(own);
+
+    assert!(errors(&live).is_empty(), "{:?}", errors(&live));
+    assert_script_followed(&fixture);
+    assert_eq!(responses_to(&fixture, "perm-1").len(), 1);
+    assert_eq!(fixture.launches().len(), 1, "the process was never reaped");
+    let children = subagent_items(&live);
+    let ids: Vec<&str> = children.iter().map(|child| child.id.0.as_str()).collect();
+    assert_eq!(
+        ids[..2],
+        [child_call.clone(), format!("{child_call}:result")]
+    );
+    assert!(children.iter().any(|child| matches!(&child.item,
+        KnownItem::AssistantMessage { text, .. } if text == "bg done")));
+    assert!(children.iter().all(|child| child.parent_call_id.0 == SPAWN));
+    assert_eq!(
+        states_of(&subagent_states(&live), AGENT),
+        [
+            (SubagentState::Running, None),
+            (SubagentState::Waiting, None),
+            (SubagentState::Running, None),
+            (SubagentState::Completed, Some("bg done".to_owned())),
+        ]
+    );
+
+    let shape: Vec<_> = structure(opened.events.iter().chain(live.iter().map(|e| &e.event)));
+    assert_eq!(
+        shape
+            .iter()
+            .map(|(reason, status, _)| (*reason, *status))
+            .collect::<Vec<_>>(),
+        [
+            (None, TurnStatus::Completed),
+            (Some(DerivedReason::Subagent), TurnStatus::Completed),
+            (Some(DerivedReason::Runtime), TurnStatus::Completed),
+        ]
+    );
+    client
+        .ok("session/close", json!({"thread_id": thread}))
+        .await;
+    let mut client = fixture.client();
+    let reopened = snapshot(
+        client
+            .ok("session/open", json!({"path": opened.path}))
+            .await,
+    );
+    assert_eq!(
+        structure(reopened.events.iter()),
+        shape,
+        "reopening rebuilds the fold and the derived turns"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_subagent_hangs_under_the_child_call_that_spawned_it() {
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.push(system("init", json!({})));
+    steps.extend(tool_message(
+        "msg_1",
+        "toolu_agent",
+        "Agent",
+        &json!({"description": "outer", "subagent_type": "general-purpose", "prompt": "do"}),
+    ));
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.push(task_started("a1", "toolu_agent", false));
+    steps.push(child(
+        "a1",
+        "toolu_agent",
+        frame(
+            "user",
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "do"}]}}),
+        ),
+    ));
+    steps.push(child_message(
+        "a1",
+        "toolu_agent",
+        "msg_c1",
+        json!({"type": "thinking", "thinking": "plan it", "signature": ""}),
+    ));
+    steps.push(child_tool_use(
+        "a1",
+        "toolu_agent",
+        "msg_c1",
+        "toolu_inner",
+        "Agent",
+        &json!({"description": "inner", "subagent_type": "Explore", "prompt": "look"}),
+    ));
+    steps.push(system(
+        "task_started",
+        json!({"task_id": "a2", "tool_use_id": "toolu_inner", "description": "inner",
+            "subagent_type": "Explore", "is_backgrounded": false, "task_type": "local_agent"}),
+    ));
+    // A child's stream events, should a Claude send them, are not steps.
+    let mut streamed = stream(
+        "msg_c2",
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "streamed"}}),
+    );
+    streamed["emit"]["parent_tool_use_id"] = json!("toolu_inner");
+    steps.push(streamed);
+    steps.push(child_text("a2", "toolu_inner", "msg_c2", "nested words"));
+    steps.extend(task_ended("a2", "toolu_inner", "completed", "nested words"));
+    steps.push(child_tool_result(
+        "a1",
+        "toolu_agent",
+        "toolu_inner",
+        "nested words",
+    ));
+    // A background shell command is a task too, but no sub-agent.
+    steps.push(system(
+        "task_started",
+        json!({"task_id": "b1", "tool_use_id": "toolu_shell", "description": "sleep",
+            "is_backgrounded": true, "task_type": "local_bash"}),
+    ));
+    steps.extend(task_ended("a1", "toolu_agent", "completed", "outer done"));
+    steps.push(tool_result("toolu_agent", json!("outer done"), false));
+    steps.extend(reply("msg_2", "parent words"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    let children = subagent_items(&events);
+    let shape: Vec<(&str, &str, &str)> = children
+        .iter()
+        .map(|c| {
+            (
+                c.agent_id.as_str(),
+                c.parent_call_id.0.as_str(),
+                c.id.0.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("a1", "toolu_agent", "a1:msg_c1:0"),
+            ("a1", "toolu_agent", "a1:toolu_inner"),
+            ("a2", "a1:toolu_inner", "a2:msg_c2:0"),
+            ("a1", "toolu_agent", "a1:toolu_inner:result"),
+        ]
+    );
+    assert!(matches!(&children[0].item, KnownItem::Thinking { text, .. } if text == "plan it"));
+    assert!(matches!(&children[1].item, KnownItem::ToolCall { name, .. } if name == "Agent"));
+    let text = serde_json::to_string(&children).unwrap();
+    assert!(!text.contains("streamed"), "{text}");
+    let statuses = subagent_states(&events);
+    assert!(statuses.iter().all(|s| s.agent_id != "b1"), "{statuses:?}");
+    let inner: Vec<_> = statuses.iter().filter(|s| s.agent_id == "a2").collect();
+    assert!(inner.iter().all(|s| s.parent_call_id.0 == "a1:toolu_inner"
+        && s.name.as_deref() == Some("Explore")));
+    assert_eq!(
+        states_of(&statuses, "a2"),
+        [
+            (SubagentState::Running, None),
+            (SubagentState::Completed, Some("nested words".to_owned())),
+        ]
+    );
+    assert_eq!(
+        states_of(&statuses, "a1").last().unwrap(),
+        &(SubagentState::Completed, Some("outer done".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn a_turn_claude_starts_itself_while_a_subagent_waits_leaves_the_approval_open() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch bg.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(background_spawn("a1", "toolu_agent"));
+    steps.extend([
+        child_tool_use("a1", "toolu_agent", "msg_c1", "toolu_bg", "Bash", &input),
+        child_can_use_tool("perm-1", "a1", &input, "toolu_bg"),
+        json!({"sleep_ms": 200}),
+        // A background shell command finished: Claude runs a turn of its own.
+        system("init", json!({})),
+        message_start("msg_3"),
+    ]);
+    steps.extend(block("msg_3", 0, "text", &["noticed"]));
+    steps.extend(message_end("msg_3", usage_json(1, 1, 0, 0), "end_turn"));
+    steps.extend([
+        result_ok("noticed"),
+        permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": input}),
+        ),
+        child_tool_result(
+            "a1",
+            "toolu_agent",
+            "toolu_bg",
+            "(Bash completed with no output)",
+        ),
+    ]);
+    steps.extend(task_ended("a1", "toolu_agent", "completed", "bg done"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("manual")).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    client.until(is_completed).await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let noticed = client
+        .until(|kind| {
+            matches!(kind, EventKind::ItemCompleted { item: Item::Known(
+            KnownItem::AssistantMessage { text, .. }), .. } if text == "noticed")
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let snap = snapshot(
+        client
+            .ok("session/snapshot", json!({"thread_id": thread}))
+            .await,
+    );
+    let shape = structure(snap.events.iter());
+    assert_eq!(
+        shape.last().map(|(reason, status, _)| (*reason, *status)),
+        Some((Some(DerivedReason::Subagent), TurnStatus::InProgress)),
+        "Claude's own turn ended inside the derived turn, which stays open: {shape:?}"
+    );
+    assert!(resolved(&noticed, &approval).is_none());
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(
+        states_of(&subagent_states(&events), "a1").last().unwrap(),
+        &(SubagentState::Completed, Some("bg done".to_owned()))
+    );
+    assert_script_followed(&fixture);
+    assert_eq!(responses_to(&fixture, "perm-1").len(), 1);
+}
+
+#[tokio::test]
+async fn a_result_with_no_turn_running_changes_nothing() {
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("first"));
+    steps.extend(simple_turn("msg_1", "one", usage_json(1, 1, 0, 0)));
+    steps.push(result_ok("stray"));
+    steps.push(user_message("second"));
+    steps.extend(simple_turn("msg_2", "two", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "first", "follow_up").await;
+    client.until(is_completed).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    submit(&mut client, &thread, "second", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    assert!(known(&events).iter().any(|item| matches!(item,
+        KnownItem::AssistantMessage { text, .. } if text == "two")));
+    assert!(markers(&events).is_empty(), "no derived turn: {events:?}");
+    assert_eq!(turns_completed(&events).len(), 1);
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+}
+
+#[tokio::test]
+async fn a_claude_that_exits_while_a_subagent_waits_withdraws_the_approval_and_interrupts_it() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch bg.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend(background_spawn("a1", "toolu_agent"));
+    steps.extend([
+        child_tool_use("a1", "toolu_agent", "msg_c1", "toolu_bg", "Bash", &input),
+        child_can_use_tool("perm-1", "a1", &input, "toolu_bg"),
+        json!({"sleep_ms": 300}),
+        json!({"exit": 1}),
+    ]);
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("manual")).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    client.until(is_completed).await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let events = client.until(is_completed).await;
+    assert!(resolved(&events, &approval).is_some());
+    assert_eq!(
+        states_of(&subagent_states(&events), "a1").last().unwrap().0,
+        SubagentState::Interrupted
+    );
+    let unfinished: Vec<_> = subagent_items(&events)
+        .into_iter()
+        .filter(|c| matches!(&c.item, KnownItem::ToolResult { is_error: true, .. }))
+        .collect();
+    assert_eq!(unfinished.len(), 1, "the waiting call is settled");
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_the_session_while_a_subagent_waits_withdraws_the_approval_and_leaves_no_process() {
+    let fixture = Fixture::new();
+    let (pid, kid) = (fixture.path("fake.pid"), fixture.path("child.pid"));
+    let input = json!({"command": "touch bg.txt"});
+    let mut steps = vec![json!({"self_pid": pid}), json!({"grandchild": kid})];
+    steps.extend(handshake());
+    steps.push(user_message("go"));
+    steps.extend(background_spawn("a1", "toolu_agent"));
+    steps.extend([
+        child_tool_use("a1", "toolu_agent", "msg_c1", "toolu_bg", "Bash", &input),
+        child_can_use_tool("perm-1", "a1", &input, "toolu_bg"),
+        json!({"hang": true}),
+    ]);
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, Some("manual")).await;
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    client.until(is_completed).await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let (fake, grandchild) = (pid_in(&pid), pid_in(&kid));
+    client
+        .ok("session/close", json!({"thread_id": opened.thread_id}))
+        .await;
+    let events = client
+        .until(|kind| matches!(kind, EventKind::ApprovalResolved { .. }))
+        .await;
+    assert!(resolved(&events, &approval).is_some());
+    assert!(gone_within(fake, Duration::from_secs(6)).await);
+    assert!(gone_within(grandchild, Duration::from_secs(6)).await);
+    let status = client.finish().await;
+    assert!(status.success(), "{status:?}");
 }
 
 #[tokio::test]

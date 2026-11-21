@@ -57,13 +57,23 @@ pub struct Shared {
     /// The process has not exited and is not being reaped.
     pub usable: AtomicBool,
     pub supervisor: mpsc::UnboundedSender<Supervise>,
+    /// The sub-agents whose permission request was answered, for the translator: a sub-agent
+    /// waits only while one of its requests is open.
+    settled: mpsc::UnboundedSender<String>,
     /// The permission requests Claude waits on, by approval id.
     approvals: Mutex<BTreeMap<String, Pending>>,
 }
 
 impl Shared {
-    pub fn new(init_id: String) -> (Arc<Self>, mpsc::UnboundedReceiver<Supervise>) {
+    pub fn new(
+        init_id: String,
+    ) -> (
+        Arc<Self>,
+        mpsc::UnboundedReceiver<Supervise>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
         let (supervisor, commands) = mpsc::unbounded_channel();
+        let (settled, answered) = mpsc::unbounded_channel();
         let shared = Arc::new(Self {
             hello: watch::channel(Hello::Pending).0,
             init_id,
@@ -72,9 +82,10 @@ impl Shared {
             interrupting: AtomicBool::new(false),
             usable: AtomicBool::new(true),
             supervisor,
+            settled,
             approvals: Mutex::default(),
         });
-        (shared, commands)
+        (shared, commands, answered)
     }
 
     pub fn is_usable(&self) -> bool {
@@ -92,6 +103,15 @@ impl Shared {
     /// Removes the request, so whoever takes it is the only one to answer it.
     pub fn take_approval(&self, id: &str) -> Option<Pending> {
         self.approvals().remove(id)
+    }
+
+    /// Takes the request to answer it, and tells the translator when a sub-agent asked.
+    pub fn answer_approval(&self, id: &str) -> Option<Pending> {
+        let pending = self.take_approval(id)?;
+        if let Some(agent) = &pending.agent {
+            let _ = self.settled.send(agent.clone());
+        }
+        Some(pending)
     }
 }
 

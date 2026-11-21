@@ -15,8 +15,19 @@ pub struct Incoming {
     #[serde(rename = "type")]
     pub kind: String,
     pub subtype: Option<String>,
-    /// Set on every frame a sub-agent produced.
+    /// Set on every frame a sub-agent produced: the call that spawned the sub-agent.
     pub parent_tool_use_id: Option<String>,
+    /// The sub-agent that produced the frame; the `task_*` frames call it `task_id`.
+    pub agent_id: Option<String>,
+    /// `system` `task_started` and `task_notification`: a background or sub-agent task, the call
+    /// that started it, and how it ended.
+    pub task_id: Option<String>,
+    pub task_type: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub subagent_type: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub summary: Option<String>,
     /// `control_request` and `control_response`.
     pub request_id: Option<String>,
     pub request: Option<Request>,
@@ -48,6 +59,8 @@ pub struct Request {
     pub tool_use_id: Option<String>,
     pub description: Option<String>,
     pub permission_suggestions: Value,
+    /// Set when one of Claude's sub-agents asks.
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,6 +124,8 @@ impl Message {
 pub struct Block {
     #[serde(rename = "type")]
     pub kind: String,
+    pub text: String,
+    pub thinking: String,
     pub id: String,
     pub name: String,
     pub input: Value,
