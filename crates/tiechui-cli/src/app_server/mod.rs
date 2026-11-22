@@ -1106,10 +1106,24 @@ impl Server {
         };
         // A resumed session keeps its own model unless the client asks otherwise.
         let thread = self.thread_of(&live)?;
-        if let Some(model) = model {
+        self.apply_reopen_overrides(&thread, &live, model, thinking)
+            .await?;
+        Ok(live)
+    }
+
+    async fn apply_reopen_overrides(
+        &self,
+        thread: &ThreadId,
+        live: &Live,
+        model: Option<String>,
+        thinking: Option<tiechui_protocol::ThinkingLevel>,
+    ) -> Result<(), rpc::Error> {
+        if let Some(model) = model
+            && live.capabilities.model
+        {
             let model = crate::exec::parse_model(&model).map_err(|(_, m)| invalid(m))?;
             self.submit(
-                &thread,
+                thread,
                 Op::SetModel {
                     provider: model.provider,
                     model: model.model.0,
@@ -1117,10 +1131,12 @@ impl Server {
             )
             .await?;
         }
-        if let Some(level) = thinking {
-            self.submit(&thread, Op::SetThinking { level }).await?;
+        if let Some(level) = thinking
+            && live.capabilities.thinking
+        {
+            self.submit(thread, Op::SetThinking { level }).await?;
         }
-        Ok(live)
+        Ok(())
     }
 
     fn thread_of(&self, live: &Arc<Live>) -> Result<ThreadId, rpc::Error> {

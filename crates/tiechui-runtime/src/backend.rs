@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use tiechui_protocol::{
-    ApprovalDecision, ApprovalRequest, InputContent, ItemId, KnownItem, ModelInfo, SubagentState,
-    ThinkingLevel, TokenUsage, TurnStatus,
+    ApprovalDecision, ApprovalRequest, CommandInfo, InputContent, ItemId, KnownItem, ModelInfo,
+    SubagentState, ThinkingLevel, TokenUsage, TurnStatus,
 };
 use tokio::sync::mpsc;
 
@@ -77,6 +77,15 @@ pub struct SubagentUpdate {
     pub message: Option<String>,
 }
 
+/// How a backend handles `Op::RunCommand`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAction {
+    /// Send the text as a normal user turn (or queue it if a turn is already running).
+    Prompt(String),
+    /// Updated the session's permission mode without opening a turn.
+    PermissionMode(String),
+}
+
 /// What a backend reports, in order. Root items stream: `ItemStarted`, any number of merged
 /// `ItemDelta`s and `ItemCompleted`. Sub-agent items are only ever completed.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +100,8 @@ pub enum BackendEvent {
     Usage(TokenUsage),
     /// The model's context window in tokens, when the runtime learns it after `Started`.
     ContextWindow(u64),
+    Commands(Vec<CommandInfo>),
+    Models(Vec<ModelInfo>),
     Approval {
         id: String,
         request: ApprovalRequest,
@@ -136,6 +147,27 @@ pub trait Backend: Send {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<(), String>;
+
+    /// Runs a slash or module command when `capabilities.commands` is enabled.
+    async fn run_command(&mut self, name: &str, arguments: &str) -> Result<CommandAction, String> {
+        let _ = (name, arguments);
+        Err("commands are not supported".into())
+    }
+
+    /// Delivers interactive command input when `capabilities.commands` is enabled.
+    async fn command_input(&mut self, name: &str, data: serde_json::Value) -> Result<(), String> {
+        let _ = (name, data);
+        Err("command input is not supported".into())
+    }
+
+    /// Switches the active model when `capabilities.model` is enabled.
+    async fn set_model(&mut self, model: &str) -> Result<ModelInfo, String> {
+        let _ = model;
+        Err("switching models is not supported".into())
+    }
+
+    /// Flushes any buffered output of an open derived turn before a new root turn closes it.
+    async fn finish_derived(&mut self) {}
 
     /// Stops the runtime and everything it started, and returns once they are gone.
     async fn shutdown(&mut self);

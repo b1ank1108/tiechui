@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tiechui_exec::Tree;
-use tiechui_protocol::ItemId;
+use tiechui_protocol::{ItemId, KnownItem};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::backend::BackendEvent;
+use crate::backend::{BackendEvent, BackendItem};
 
 /// The longest frame a driver reads; a longer one is reported and skipped.
 pub const MAX_FRAME: usize = 32 << 20;
@@ -68,7 +68,7 @@ impl Process {
         cwd: &Path,
         path: Option<&OsString>,
     ) -> io::Result<Self> {
-        Self::spawn_filtered(program, args, cwd, path, |_| false)
+        Self::spawn_env(program, args, cwd, path, |_| false, &[])
     }
 
     /// Like `spawn`, but the process does not inherit the variables whose names `strip` accepts.
@@ -79,21 +79,26 @@ impl Process {
         path: Option<&OsString>,
         strip: impl Fn(&str) -> bool,
     ) -> io::Result<Self> {
+        Self::spawn_env(program, args, cwd, path, strip, &[])
+    }
+
+    /// Like `spawn_filtered`, and sets `set` in the child's environment.
+    pub fn spawn_env(
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        path: Option<&OsString>,
+        strip: impl Fn(&str) -> bool,
+        set: &[(String, String)],
+    ) -> io::Result<Self> {
         let mut command = Command::new(program);
-        for (name, _) in std::env::vars_os() {
-            if name.to_str().is_some_and(&strip) {
-                command.env_remove(name);
-            }
-        }
+        configure_env(&mut command, path, strip, set);
         command
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(path) = path {
-            command.env("PATH", path);
-        }
         let (mut child, tree) = Tree::spawn(&mut command)?;
         Ok(Self {
             stdin: child.stdin.take(),
@@ -104,12 +109,60 @@ impl Process {
         })
     }
 
+    /// Takes the three piped stdio handles out of a freshly spawned process.
+    pub fn take_stdio(
+        &mut self,
+        peer: &str,
+    ) -> Result<(ChildStdin, ChildStdout, ChildStderr), String> {
+        match (self.stdin.take(), self.stdout.take(), self.stderr.take()) {
+            (Some(stdin), Some(stdout), Some(stderr)) => Ok((stdin, stdout, stderr)),
+            _ => Err(format!("{peer} started without piped stdio")),
+        }
+    }
+
     /// Stops the whole group (TERM, a grace period, then KILL) and reaps the root.
     pub async fn close(mut self) {
         self.stdin.take();
         let _ = self.tree.terminate(&mut self.child).await;
         let _ = self.child.wait().await;
     }
+}
+
+pub(crate) fn configure_env(
+    command: &mut Command,
+    path: Option<&OsString>,
+    strip: impl Fn(&str) -> bool,
+    set: &[(String, String)],
+) {
+    for (name, _) in std::env::vars_os() {
+        if should_remove_var(name.to_str(), &strip, set) {
+            command.env_remove(name);
+        }
+    }
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    for (key, value) in set {
+        command.env(key, value);
+    }
+}
+
+fn should_remove_var(
+    name: Option<&str>,
+    strip: &impl Fn(&str) -> bool,
+    set: &[(String, String)],
+) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    strip(name) || is_windows_shadow(name, set)
+}
+
+fn is_windows_shadow(name: &str, set: &[(String, String)]) -> bool {
+    cfg!(windows)
+        && set
+            .iter()
+            .any(|(target, _)| name != target && name.eq_ignore_ascii_case(target))
 }
 
 /// One line of a stream.
@@ -340,6 +393,35 @@ impl Outbox {
             self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
         }
         self.buffered < FLUSH_BYTES || self.flush().await
+    }
+
+    pub async fn complete_root_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+        output: serde_json::Value,
+        is_error: bool,
+    ) -> bool {
+        let call = ItemId(id.to_owned());
+        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
+            KnownItem::ToolCall {
+                id: call.clone(),
+                name: name.to_owned(),
+                arguments,
+            },
+        )))
+        .await
+            && self
+                .send_now(BackendEvent::ItemCompleted(BackendItem::root(
+                    KnownItem::ToolResult {
+                        id: ItemId(format!("{id}:result")),
+                        call_id: call,
+                        output,
+                        is_error,
+                    },
+                )))
+                .await
     }
 }
 

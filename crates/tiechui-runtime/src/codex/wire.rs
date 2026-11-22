@@ -6,28 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiechui_protocol::InputContent;
 
-/// One line from `codex app-server`: a response (`id` with `result` or `error`), a server
-/// request (`id` with `method`) or a notification (`method` only).
-#[derive(Debug, Deserialize)]
-pub struct Incoming {
-    #[serde(default)]
-    pub id: Option<Value>,
-    #[serde(default)]
-    pub method: Option<String>,
-    #[serde(default)]
-    pub params: Value,
-    #[serde(default)]
-    pub result: Option<Value>,
-    #[serde(default)]
-    pub error: Option<RpcError>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RpcError {
-    #[serde(default)]
-    pub message: String,
-}
-
 pub fn initialize_params() -> Value {
     json!({
         "clientInfo": {

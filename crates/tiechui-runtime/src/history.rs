@@ -207,6 +207,18 @@ pub fn external_id(store: &SessionStore) -> Option<String> {
         })
 }
 
+pub fn stored_model(store: &SessionStore, runtime: &str) -> Option<String> {
+    on_branch(store)
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            EntryKind::ModelChange { model } if model.provider == runtime => {
+                Some(model.model.0.clone())
+            }
+            _ => None,
+        })
+}
+
 pub fn usage(store: &SessionStore) -> (Option<TokenUsage>, TokenUsage) {
     let mut context = None;
     let mut total = TokenUsage::default();

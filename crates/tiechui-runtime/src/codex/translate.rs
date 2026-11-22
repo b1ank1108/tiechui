@@ -12,18 +12,18 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use super::debug;
 use super::items;
-use super::rpc::Rpc;
 mod agents;
 use agents::Agent;
 
 use super::wire::{
     AgentMessageItem, Breakdown, CommandApproval, CommandItem, DeltaNotification, Elicitation,
-    FileApproval, FileChangeItem, Incoming, ItemNotification, McpItem, OtherItem,
-    PermissionsApproval, ReasoningItem, ResolvedNotification, StatusNotification, TurnBody,
-    TurnError, TurnNotification, UsageNotification,
+    FileApproval, FileChangeItem, ItemNotification, McpItem, OtherItem, PermissionsApproval,
+    ReasoningItem, ResolvedNotification, StatusNotification, TurnBody, TurnError, TurnNotification,
+    UsageNotification,
 };
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::{Outbox, StderrTail};
+use crate::rpc::{Incoming, Rpc};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnState {
@@ -629,27 +629,9 @@ impl Translator {
         output: Value,
         is_error: bool,
     ) -> bool {
-        let call = ItemId(id.to_owned());
         self.out
-            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
-                KnownItem::ToolCall {
-                    id: call.clone(),
-                    name: name.to_owned(),
-                    arguments,
-                },
-            )))
+            .complete_root_tool(id, name, arguments, output, is_error)
             .await
-            && self
-                .out
-                .send_now(BackendEvent::ItemCompleted(BackendItem::root(
-                    KnownItem::ToolResult {
-                        id: ItemId(format!("{id}:result")),
-                        call_id: call,
-                        output,
-                        is_error,
-                    },
-                )))
-                .await
     }
 
     async fn token_usage(&mut self, note: UsageNotification) -> bool {
