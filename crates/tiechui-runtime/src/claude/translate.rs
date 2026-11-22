@@ -1,8 +1,3 @@
-//! Turns what `claude` writes into `BackendEvent`s: the root conversation's streamed text and
-//! thinking, tool calls and results, usage per model request, permission requests as approvals,
-//! the end of each turn at its `result` frame, and Claude's own sub-agents (`agents`). A turn
-//! Claude starts by itself (after a background task ends) ends no turn of the session.
-
 mod agents;
 
 use std::collections::{HashMap, HashSet};
@@ -18,7 +13,7 @@ use tokio::time::Instant;
 use super::debug;
 use super::items;
 use super::items::Pending;
-use super::run::{Hello, Inbound, Shared, StderrTail, Supervise, Writer};
+use super::run::{Handshake, Inbound, Shared, StderrTail, SupervisorCommand, Writer};
 use super::wire::{Block, Incoming, Request, StreamEvent, control_error};
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::DeltaCoalescer;
@@ -26,38 +21,38 @@ use agents::{Agent, ChildCall};
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The message ids whose usage was reported, across the processes of one session: Claude may
-/// repeat a message (a resumed conversation, a repeated `message_delta`) and each counts once.
-pub type Counted = Arc<Mutex<HashSet<String>>>;
+pub type CountedMessageIds = Arc<Mutex<HashSet<String>>>;
 
-/// A streamed text or thinking block.
-struct Open {
+struct StreamingBlock {
     id: ItemId,
     thinking: bool,
     started: bool,
     text: String,
 }
 
+struct UnresolvedCall {
+    id: String,
+    native_name: String,
+    input: Value,
+}
+
 pub struct Translator {
     shared: Arc<Shared>,
     writer: Writer,
     out: mpsc::Sender<BackendEvent>,
-    counted: Counted,
+    counted: CountedMessageIds,
     reap_grace: Duration,
     coalescer: DeltaCoalescer,
     flush_at: Option<Instant>,
-    /// The API message being streamed.
-    message: String,
-    blocks: HashMap<u64, Open>,
-    /// Tool calls shown whose result has not arrived: `(call id, native tool name, Claude's input)`.
-    calls: Vec<(String, String, Value)>,
+    streaming_message_id: String,
+    blocks: HashMap<u64, StreamingBlock>,
+    unresolved_calls: Vec<UnresolvedCall>,
     announced: HashSet<String>,
     context_window: u64,
     stderr: StderrTail,
     agents: HashMap<String, Agent>,
     child_calls: HashMap<String, ChildCall>,
-    /// The next index of a sub-agent's text block, by `<agent id>:<message id>`.
-    child_blocks: HashMap<String, u32>,
+    next_child_block_index: HashMap<String, u32>,
     outside_turn_output_seen: bool,
 }
 
@@ -66,7 +61,7 @@ impl Translator {
         shared: Arc<Shared>,
         writer: Writer,
         out: mpsc::Sender<BackendEvent>,
-        counted: Counted,
+        counted: CountedMessageIds,
         reap_grace: Duration,
         stderr: StderrTail,
     ) -> Self {
@@ -78,20 +73,19 @@ impl Translator {
             reap_grace,
             coalescer: DeltaCoalescer::default(),
             flush_at: None,
-            message: String::new(),
+            streaming_message_id: String::new(),
             blocks: HashMap::new(),
-            calls: Vec::new(),
+            unresolved_calls: Vec::new(),
             announced: HashSet::new(),
             context_window: 0,
             stderr,
             agents: HashMap::new(),
             child_calls: HashMap::new(),
-            child_blocks: HashMap::new(),
+            next_child_block_index: HashMap::new(),
             outside_turn_output_seen: false,
         }
     }
 
-    /// Handles Claude's output, and the sub-agents whose request `answer_approval` answered.
     pub async fn run(
         mut self,
         mut inbound: mpsc::Receiver<Inbound>,
@@ -141,22 +135,19 @@ impl Translator {
         }
     }
 
-    /// The process closed its output. A turn it was running fails and its sub-agents are
-    /// interrupted; a session whose process went away between turns carries on, and the next
-    /// turn starts a new process.
     async fn exited(&mut self) {
         self.shared.usable.store(false, Ordering::SeqCst);
         let detail = self.stderr_detail();
         if self
             .shared
-            .settle_hello(Hello::Failed(format!("claude exited{detail}")))
+            .try_finish_handshake(Handshake::Failed(format!("claude exited{detail}")))
         {
             return;
         }
         self.flush().await;
-        self.shared.own_turn.store(false, Ordering::SeqCst);
+        self.shared.claude_turn.store(false, Ordering::SeqCst);
         if !self.withdraw_approvals_where(|_| true).await
-            || !self.settle_turn().await
+            || !self.finish_open_items().await
             || !self.interrupt_agents().await
         {
             return;
@@ -222,7 +213,7 @@ impl Translator {
         match incoming.subtype.as_deref() {
             // Every turn begins with `init`; one while no turn of the session runs is Claude's own.
             Some("init") if !self.shared.turn_active() => {
-                self.shared.own_turn.store(true, Ordering::SeqCst);
+                self.shared.claude_turn.store(true, Ordering::SeqCst);
                 self.outside_turn_output_seen = true;
                 true
             }
@@ -235,18 +226,19 @@ impl Translator {
         let Some(response) = incoming.response else {
             return true;
         };
-        if response.request_id.as_deref() == Some(self.shared.init_id.as_str()) {
-            self.shared.settle_hello(if response.subtype == "success" {
-                Hello::Ready
-            } else {
-                Hello::Failed(response.error.unwrap_or_else(|| "initialize failed".into()))
-            });
+        if response.request_id.as_deref() == Some(self.shared.initialize_request_id.as_str()) {
+            self.shared
+                .try_finish_handshake(if response.subtype == "success" {
+                    Handshake::Ready
+                } else {
+                    Handshake::Failed(response.error.unwrap_or_else(|| "initialize failed".into()))
+                });
         }
         true
     }
 
-    /// A request Claude sends the host. `can_use_tool` waits for the user; every other request is
-    /// answered with an error at once, so Claude never waits on a request nothing maps.
+    /// Claude waits on every control request until it is answered, so a request nothing maps is
+    /// answered with an error at once.
     async fn control_request(&mut self, incoming: Incoming) -> bool {
         let (Some(id), Some(request)) = (incoming.request_id, incoming.request) else {
             return true;
@@ -264,37 +256,42 @@ impl Translator {
         true
     }
 
-    /// An approval on the step of the call it is about; that step is shown first when its
-    /// `assistant` frame has not arrived yet. Claude waits until `answer_approval` writes the
-    /// answer or it cancels the request; a sub-agent that asked waits meanwhile.
     async fn permission_request(&mut self, request_id: &str, request: &Request) -> bool {
-        let mut shown = request.input.clone();
+        let mut card_input = request.input.clone();
         let tool = request.tool_name.as_deref().unwrap_or_default();
         let call_id = match (&request.tool_use_id, &request.agent_id) {
             (Some(call), Some(agent)) => {
-                if !self.announce_child(agent, call, tool, &request.input).await {
+                if !self
+                    .announce_child_once(agent, call, tool, &request.input)
+                    .await
+                {
                     return false;
                 }
-                agents::scoped(agent, call)
+                agents::subagent_item_id(agent, call)
             }
             (Some(call), None) => {
-                if !self.announce(call, tool, &request.input).await {
+                if !self.announce_once(call, tool, &request.input).await {
                     return false;
                 }
                 // `ExitPlanMode` asks with an empty input: the plan is only in its `tool_use` block.
-                if shown.as_object().is_some_and(serde_json::Map::is_empty)
-                    && let Some((.., input)) = self.calls.iter().find(|(id, ..)| id == call)
+                if card_input
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty)
+                    && let Some(unresolved) = self
+                        .unresolved_calls
+                        .iter()
+                        .find(|unresolved| unresolved.id == *call)
                 {
-                    shown = input.clone();
+                    card_input = unresolved.input.clone();
                 }
                 call.clone()
             }
             (None, _) => request_id.to_owned(),
         };
-        let (pending, approval) = items::ask(request_id, request, &shown, &call_id);
+        let (pending, approval) = items::ask(request_id, request, &card_input, &call_id);
         let id = approval_id(request_id);
         self.shared.approvals().insert(id.clone(), pending);
-        self.note_derived();
+        self.note_outside_turn_output();
         if !self
             .emit_after_flush(BackendEvent::Approval {
                 id,
@@ -324,14 +321,12 @@ impl Translator {
         {
             return false;
         }
-        match pending.agent {
+        match pending.subagent_id {
             Some(agent) => self.approval_settled(&agent).await,
             None => true,
         }
     }
 
-    /// Withdraws the requests still waiting whose asker is done: the root turn ended, a sub-agent
-    /// ended, or the process is gone.
     async fn withdraw_approvals_where(&mut self, done: impl Fn(&Pending) -> bool) -> bool {
         let mut ids = vec![];
         self.shared.approvals().retain(|id, pending| {
@@ -361,7 +356,7 @@ impl Translator {
             _ => incoming
                 .api_message_id
                 .clone()
-                .unwrap_or_else(|| self.message.clone()),
+                .unwrap_or_else(|| self.streaming_message_id.clone()),
         }
     }
 
@@ -372,7 +367,7 @@ impl Translator {
         };
         match event.kind.as_str() {
             "message_start" => {
-                self.message = id;
+                self.streaming_message_id = id;
                 true
             }
             "content_block_start" => self.block_start(&event).await,
@@ -395,8 +390,8 @@ impl Translator {
         };
         self.blocks.insert(
             event.index,
-            Open {
-                id: ItemId(format!("{}:{}", self.message, event.index)),
+            StreamingBlock {
+                id: ItemId(format!("{}:{}", self.streaming_message_id, event.index)),
                 thinking,
                 started: false,
                 text: String::new(),
@@ -448,7 +443,7 @@ impl Translator {
         self.finish_block(open).await
     }
 
-    async fn finish_block(&mut self, open: Open) -> bool {
+    async fn finish_block(&mut self, open: StreamingBlock) -> bool {
         if !open.started {
             return true;
         }
@@ -460,33 +455,37 @@ impl Translator {
         .await
     }
 
-    /// The usage of a model request, once per message id and only for requests of this session's
-    /// turns: what a resumed process repeats before it has been given input is already counted.
     async fn message_usage(&mut self, id: &str, event: &StreamEvent) -> bool {
         let Some(usage) = &event.usage else {
             return true;
         };
-        let new = id.is_empty()
-            || self
-                .counted
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(id.to_owned());
-        if !new || !self.shared.input_written.load(Ordering::SeqCst) {
+        if !self.is_new_usage(id) {
             return true;
         }
         self.emit_after_flush(BackendEvent::Usage(items::usage(usage)))
             .await
     }
 
-    /// The tool calls of an `assistant` frame, which carries their complete input.
+    fn is_new_usage(&self, id: &str) -> bool {
+        let first_report = id.is_empty()
+            || self
+                .counted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.to_owned());
+        first_report && self.shared.user_message_sent.load(Ordering::SeqCst)
+    }
+
+    /// The `assistant` frame carries a tool call's complete input; its stream deltas do not.
     async fn assistant(&mut self, incoming: Incoming) -> bool {
         let Some(message) = incoming.message else {
             return true;
         };
         for block in message.blocks() {
             if block.kind == "tool_use"
-                && !self.announce(&block.id, &block.name, &block.input).await
+                && !self
+                    .announce_once(&block.id, &block.name, &block.input)
+                    .await
             {
                 return false;
             }
@@ -494,15 +493,16 @@ impl Translator {
         true
     }
 
-    /// Shows a tool call once, from whichever of its `assistant` frame and its permission request
-    /// arrives first.
-    async fn announce(&mut self, id: &str, tool: &str, input: &Value) -> bool {
+    async fn announce_once(&mut self, id: &str, tool: &str, input: &Value) -> bool {
         if !self.announced.insert(id.to_owned()) {
             return true;
         }
-        let (name, arguments) = items::tool_call(tool, input);
-        self.calls
-            .push((id.to_owned(), name.clone(), input.clone()));
+        let (name, arguments) = items::native_tool_call(tool, input);
+        self.unresolved_calls.push(UnresolvedCall {
+            id: id.to_owned(),
+            native_name: name.clone(),
+            input: input.clone(),
+        });
         let call = KnownItem::ToolCall {
             id: ItemId(id.to_owned()),
             name,
@@ -526,15 +526,15 @@ impl Translator {
 
     async fn tool_result(&mut self, block: &Block) -> bool {
         let Some(position) = self
-            .calls
+            .unresolved_calls
             .iter()
-            .position(|(id, ..)| *id == block.tool_use_id)
+            .position(|unresolved| unresolved.id == block.tool_use_id)
         else {
             return true;
         };
-        let (call, name, _) = self.calls.remove(position);
-        let output = items::tool_result(&name, &block.content, block.is_error);
-        self.emit_result(call, output, block.is_error).await
+        let call = self.unresolved_calls.remove(position);
+        let output = items::tool_result(&call.native_name, &block.content, block.is_error);
+        self.emit_result(call.id, output, block.is_error).await
     }
 
     async fn emit_result(&mut self, call: String, output: Value, is_error: bool) -> bool {
@@ -543,8 +543,7 @@ impl Translator {
             .await
     }
 
-    /// Completes whatever the turn left open: unfinished text, and calls that got no result.
-    async fn settle_turn(&mut self) -> bool {
+    async fn finish_open_items(&mut self) -> bool {
         let mut open: Vec<_> = self.blocks.drain().collect();
         open.sort_by_key(|(index, _)| *index);
         for (_, block) in open {
@@ -552,9 +551,9 @@ impl Translator {
                 return false;
             }
         }
-        for (call, ..) in std::mem::take(&mut self.calls) {
+        for call in std::mem::take(&mut self.unresolved_calls) {
             if !self
-                .emit_result(call, items::unfinished_result(), true)
+                .emit_result(call.id, items::unfinished_result(), true)
                 .await
             {
                 return false;
@@ -568,13 +567,17 @@ impl Translator {
         let subtype = incoming.subtype.clone().unwrap_or_default();
         let failed = incoming.is_error || (!subtype.is_empty() && subtype != "success");
         let message = failure_text(&incoming, &subtype);
-        if failed && self.shared.settle_hello(Hello::Failed(message.clone())) {
+        if failed
+            && self
+                .shared
+                .try_finish_handshake(Handshake::Failed(message.clone()))
+        {
             return true;
         }
         if !self
-            .withdraw_approvals_where(|pending| pending.agent.is_none())
+            .withdraw_approvals_where(|pending| pending.subagent_id.is_none())
             .await
-            || !self.settle_turn().await
+            || !self.finish_open_items().await
         {
             return false;
         }
@@ -594,18 +597,13 @@ impl Translator {
             .terminal_reason
             .as_deref()
             .is_some_and(|reason| reason.starts_with("aborted"))
-            || self.shared.interrupting.load(Ordering::SeqCst);
-        self.shared.interrupting.store(false, Ordering::SeqCst);
-        self.shared.own_turn.store(false, Ordering::SeqCst);
+            || self.shared.interrupt_sent.load(Ordering::SeqCst);
+        self.shared.interrupt_sent.store(false, Ordering::SeqCst);
+        self.shared.claude_turn.store(false, Ordering::SeqCst);
         if !self.shared.turn_active.swap(false, Ordering::SeqCst) {
-            // Claude's own turn, or a result outside any turn: no turn of the session ends.
-            if failed && !aborted {
-                if !self.send_now(BackendEvent::Error(message)).await {
-                    return false;
-                }
-                self.reap();
-            }
-            return self.maybe_idle().await;
+            return self
+                .end_result_outside_session_turn(failed, aborted, message)
+                .await;
         }
         self.outside_turn_output_seen = false;
         let (status, error) = match (failed, aborted) {
@@ -618,18 +616,31 @@ impl Translator {
             .send_now(BackendEvent::TurnCompleted { status, error })
             .await;
         if reap {
-            self.reap();
+            self.stop_after_error_grace();
         }
         sent
     }
 
-    /// A process that reported an error may keep running (background tasks, a dead connection);
-    /// it gets a short grace to exit and is then stopped.
-    fn reap(&self) {
+    async fn end_result_outside_session_turn(
+        &mut self,
+        failed: bool,
+        aborted: bool,
+        message: String,
+    ) -> bool {
+        if failed && !aborted {
+            if !self.send_now(BackendEvent::Error(message)).await {
+                return false;
+            }
+            self.stop_after_error_grace();
+        }
+        self.maybe_idle().await
+    }
+
+    fn stop_after_error_grace(&self) {
         let _ = self
             .shared
             .supervisor
-            .send(Supervise::Reap(self.reap_grace));
+            .send(SupervisorCommand::ReapAfter(self.reap_grace));
     }
 }
 

@@ -1,8 +1,3 @@
-//! The parts of Claude Code's stream-json protocol (`claude -p --input-format stream-json
-//! --output-format stream-json`, recordings of 2.1.322) the driver speaks. Only what it reads or
-//! sends is declared; everything else in a frame is ignored, so a newer Claude adding fields does
-//! not break it.
-
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tiechui_protocol::InputContent;
@@ -46,10 +41,9 @@ pub struct Incoming {
     pub model_usage: std::collections::BTreeMap<String, ModelUsage>,
 }
 
-/// A request Claude sends the host. `can_use_tool` carries the tool, its input, the id of its
-/// `tool_use` block, a short description and the permission updates Claude suggests for
-/// allowing it again (`[{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]`
-/// for a file write).
+/// `can_use_tool` carries the tool, its input, the id of its `tool_use` block, a short
+/// description and the permission updates Claude suggests for allowing it again
+/// (`[{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]` for a file write).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Request {
@@ -192,4 +186,30 @@ pub fn control_success(request_id: &str, response: Value) -> Value {
 pub fn control_error(request_id: &str, error: &str) -> Value {
     json!({"type": "control_response", "response": {
         "subtype": "error", "request_id": request_id, "error": error}})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_with_unknown_keys_and_without_optional_ones_parses() {
+        let incoming: Incoming = serde_json::from_value(json!({
+            "type": "assistant",
+            "added_later": {"nested": [1, 2]},
+            "message": {"id": "msg_1", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "caller": "direct"}]},
+        }))
+        .unwrap();
+        assert_eq!(incoming.kind, "assistant");
+        assert_eq!(incoming.subtype, None);
+        assert!(incoming.errors.is_empty());
+        let blocks = incoming.message.unwrap().blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            (blocks[0].id.as_str(), blocks[0].name.as_str()),
+            ("toolu_1", "Bash")
+        );
+        assert_eq!(blocks[0].input, Value::Null);
+    }
 }

@@ -1,10 +1,5 @@
-//! Claude Code (`claude -p` with bidirectional stream-json): the probe, and a backend that
-//! writes user messages and control requests to the process's stdin and maps what it prints.
-//!
-//! One `claude` process serves one conversation. Its session id is chosen by the driver
-//! (`--session-id`) so it is known before the first frame; a reopened session resumes it with
-//! `--resume`, which keeps the id. After an error `result` the process is stopped, and the next
-//! turn starts a new one that resumes the same conversation.
+//! The driver chooses the session id (`--session-id`): Claude's `system/init` only comes after
+//! the first user message. `--resume` keeps the id.
 
 mod items;
 mod run;
@@ -17,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tiechui_protocol::{
-    ApprovalDecision, InputContent, ModelInfo, RuntimeCapabilities, ThinkingLevel,
+    ApprovalDecision, InputContent, ModelInfo, RuntimeCapabilities, SteeringMode, ThinkingLevel,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -25,8 +20,8 @@ use tokio::task::JoinHandle;
 use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
 use crate::process::Process;
 use crate::registry::{Driver, Launch, Probe, probe_binary, resolve_in_path};
-use run::{Hello, Shared, StderrTail, Supervise, Writer};
-use translate::{Counted, Translator};
+use run::{Handshake, Shared, StderrTail, SupervisorCommand, Writer};
+use translate::{CountedMessageIds, Translator};
 
 /// The oldest Claude Code the driver supports: 2.1.322, the only version its frames were
 /// recorded from. The driver relies on `--session-id` and `--resume` in stream-json mode,
@@ -36,9 +31,7 @@ use translate::{Counted, Translator};
 pub const MIN_VERSION: &str = "2.1.322";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long a process that reported an error `result` may keep running before it is stopped.
-/// Stopping takes another 250 ms (TERM, then KILL), so the group is gone within 10 s.
-const REAP_GRACE: Duration = Duration::from_secs(9);
+const ERROR_RESULT_EXIT_GRACE: Duration = Duration::from_secs(9);
 
 #[cfg(feature = "fake-runtime")]
 pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CLAUDE_HANDSHAKE_TIMEOUT_MS";
@@ -56,7 +49,7 @@ impl Timeouts {
         #[allow(unused_mut)]
         let mut timeouts = Self {
             handshake: HANDSHAKE_TIMEOUT,
-            reap: REAP_GRACE,
+            reap: ERROR_RESULT_EXIT_GRACE,
         };
         #[cfg(feature = "fake-runtime")]
         {
@@ -120,8 +113,11 @@ impl Driver for ClaudeDriver {
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        // A message written while a turn runs joins that turn (recordings of 2.1.322).
-        RuntimeCapabilities::minimal()
+        RuntimeCapabilities {
+            // A message written while a turn runs joins that turn (recordings of 2.1.322).
+            steering: SteeringMode::Inject,
+            ..RuntimeCapabilities::minimal()
+        }
     }
 
     fn gated_ops(&self) -> &'static [&'static str] {
@@ -148,7 +144,7 @@ impl Driver for ClaudeDriver {
             params: None,
             session_id: String::new(),
             events: None,
-            counted: Counted::default(),
+            counted: CountedMessageIds::default(),
             run: None,
             requests: 0,
         }))
@@ -162,10 +158,14 @@ struct Run {
 }
 
 impl Run {
-    /// Stops the process group and waits until it is gone.
     async fn close(mut self) {
         let (ack, done) = oneshot::channel();
-        if self.shared.supervisor.send(Supervise::Close(ack)).is_ok() {
+        if self
+            .shared
+            .supervisor
+            .send(SupervisorCommand::Close(ack))
+            .is_ok()
+        {
             let _ = done.await;
         }
         self.abort();
@@ -184,20 +184,23 @@ impl Drop for Run {
     }
 }
 
-/// Why a `claude` process could not be brought up.
-enum Failure {
-    /// `--resume` named a conversation Claude does not have.
-    NoConversation,
+enum SpawnFailure {
+    ResumeNotFound,
     Other(String),
 }
 
-impl From<Failure> for String {
-    fn from(failure: Failure) -> Self {
+impl From<SpawnFailure> for String {
+    fn from(failure: SpawnFailure) -> Self {
         match failure {
-            Failure::NoConversation => "claude has no such conversation".into(),
-            Failure::Other(error) => error,
+            SpawnFailure::ResumeNotFound => "claude has no such conversation".into(),
+            SpawnFailure::Other(error) => error,
         }
     }
+}
+
+struct OpenedRun {
+    run: Run,
+    resumed: bool,
 }
 
 struct ClaudeBackend {
@@ -205,9 +208,8 @@ struct ClaudeBackend {
     timeouts: Timeouts,
     params: Option<StartParams>,
     session_id: String,
-    /// Kept so the channel outlives a process: a new one reports on the same channel.
     events: Option<mpsc::Sender<BackendEvent>>,
-    counted: Counted,
+    counted: CountedMessageIds,
     run: Option<Run>,
     requests: u64,
 }
@@ -243,13 +245,12 @@ impl ClaudeBackend {
         args
     }
 
-    /// Starts `claude` on the conversation `id` and waits until it answers `initialize`.
-    async fn spawn_run(&self, id: &str, resume: bool) -> Result<Run, Failure> {
+    async fn spawn_run(&self, id: &str, resume: bool) -> Result<Run, SpawnFailure> {
         let (Some(params), Some(events)) = (&self.params, &self.events) else {
-            return Err(Failure::Other("claude is not started".into()));
+            return Err(SpawnFailure::Other("claude is not started".into()));
         };
         let binary = resolve_in_path("claude", self.launch.path.as_deref())
-            .ok_or_else(|| Failure::Other("claude is not on PATH".into()))?;
+            .ok_or_else(|| SpawnFailure::Other("claude is not on PATH".into()))?;
         let args = self.args(params, id, resume);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut process = Process::spawn_filtered(
@@ -259,13 +260,17 @@ impl ClaudeBackend {
             self.launch.path.as_ref(),
             items::is_host_variable,
         )
-        .map_err(|error| Failure::Other(format!("cannot start {}: {error}", binary.display())))?;
+        .map_err(|error| {
+            SpawnFailure::Other(format!("cannot start {}: {error}", binary.display()))
+        })?;
         let (Some(stdin), Some(stdout), Some(stderr)) = (
             process.stdin.take(),
             process.stdout.take(),
             process.stderr.take(),
         ) else {
-            return Err(Failure::Other("claude started without its stdio".into()));
+            return Err(SpawnFailure::Other(
+                "claude started without its stdio".into(),
+            ));
         };
         let (writer, write_task) = Writer::spawn(stdin);
         let (shared, commands, answered) = Shared::new("tiechui-init".into());
@@ -294,29 +299,30 @@ impl ClaudeBackend {
         self.handshake(run, resume).await
     }
 
-    /// Sends `initialize` and waits for the answer. A run that does not come up is stopped.
-    async fn handshake(&self, run: Run, resume: bool) -> Result<Run, Failure> {
-        let mut hello = run.shared.hello.subscribe();
+    async fn handshake(&self, run: Run, resume: bool) -> Result<Run, SpawnFailure> {
+        let mut state = run.shared.handshake.subscribe();
         let sent = run
             .writer
-            .send(&wire::initialize_request(&run.shared.init_id));
+            .send(&wire::initialize_request(&run.shared.initialize_request_id));
         let outcome = match sent {
             Ok(()) => tokio::time::timeout(
                 self.timeouts.handshake,
-                hello.wait_for(|hello| *hello != Hello::Pending),
+                state.wait_for(|state| *state != Handshake::Pending),
             )
             .await
-            .map(|result| result.map(|hello| hello.clone())),
-            Err(error) => Ok(Ok(Hello::Failed(error))),
+            .map(|result| result.map(|state| state.clone())),
+            Err(error) => Ok(Ok(Handshake::Failed(error))),
         };
         let failure = match outcome {
-            Ok(Ok(Hello::Ready)) => return Ok(run),
-            Ok(Ok(Hello::Failed(reason))) if resume && reason.contains("No conversation found") => {
-                Failure::NoConversation
+            Ok(Ok(Handshake::Ready)) => return Ok(run),
+            Ok(Ok(Handshake::Failed(reason)))
+                if resume && reason.contains("No conversation found") =>
+            {
+                SpawnFailure::ResumeNotFound
             }
-            Ok(Ok(Hello::Failed(reason))) => Failure::Other(reason),
-            Ok(Ok(Hello::Pending) | Err(_)) => Failure::Other("claude exited".into()),
-            Err(_) => Failure::Other(format!(
+            Ok(Ok(Handshake::Failed(reason))) => SpawnFailure::Other(reason),
+            Ok(Ok(Handshake::Pending) | Err(_)) => SpawnFailure::Other("claude exited".into()),
+            Err(_) => SpawnFailure::Other(format!(
                 "claude timed out: no answer to initialize within {}",
                 seconds(self.timeouts.handshake)
             )),
@@ -325,23 +331,37 @@ impl ClaudeBackend {
         Err(failure)
     }
 
-    /// Starts the conversation: resumes `resume` when Claude still has it, else begins a new
-    /// one. The flag says which.
-    async fn open(&mut self, resume: Option<&str>) -> Result<(Run, bool), String> {
+    async fn open(&mut self, resume: Option<&str>) -> Result<OpenedRun, String> {
         if let Some(id) = resume {
             match self.spawn_run(id, true).await {
                 Ok(run) => {
                     self.session_id = id.to_owned();
-                    return Ok((run, true));
+                    return Ok(OpenedRun { run, resumed: true });
                 }
-                // Claude no longer has the conversation: the session continues on a new one.
-                Err(Failure::NoConversation) => debug("--resume found no conversation"),
-                Err(Failure::Other(error)) => return Err(error),
+                Err(SpawnFailure::ResumeNotFound) => debug("--resume found no conversation"),
+                Err(SpawnFailure::Other(error)) => return Err(error),
             }
         }
         self.session_id = items::new_session_id();
         let run = self.spawn_run(&self.session_id, false).await?;
-        Ok((run, false))
+        Ok(OpenedRun {
+            run,
+            resumed: false,
+        })
+    }
+
+    async fn respawn_resuming(&mut self) -> Result<(), String> {
+        if let Some(old) = self.run.take() {
+            old.close().await;
+        }
+        let id = self.session_id.clone();
+        let run = match self.spawn_run(&id, true).await {
+            Ok(run) => run,
+            Err(SpawnFailure::ResumeNotFound) => self.spawn_run(&id, false).await?,
+            Err(SpawnFailure::Other(error)) => return Err(error),
+        };
+        self.run = Some(run);
+        Ok(())
     }
 
     fn started(&self, params: &StartParams, resumed: bool) -> Started {
@@ -381,33 +401,19 @@ impl Backend for ClaudeBackend {
         let (events, received) = mpsc::channel(1024);
         self.events = Some(events);
         self.params = Some(params.clone());
-        let (run, resumed) = self.open(params.resume.as_deref()).await?;
-        self.run = Some(run);
-        Ok((self.started(&params, resumed), received))
+        let opened = self.open(params.resume.as_deref()).await?;
+        self.run = Some(opened.run);
+        Ok((self.started(&params, opened.resumed), received))
     }
 
     async fn start_turn(&mut self, input: &[InputContent]) -> Result<(), String> {
         if self.running().is_err() {
-            // The process exited or was stopped after an error: start one that resumes.
-            if let Some(old) = self.run.take() {
-                old.close().await;
-            }
-            let id = self.session_id.clone();
-            let run = match self.spawn_run(&id, true).await {
-                Ok(run) => run,
-                // Nothing was saved before the process went away: start the conversation anew
-                // under the same id.
-                Err(Failure::NoConversation) => {
-                    self.spawn_run(&id, false).await.map_err(String::from)?
-                }
-                Err(Failure::Other(error)) => return Err(error),
-            };
-            self.run = Some(run);
+            self.respawn_resuming().await?;
         }
         let run = self.running()?;
-        run.shared.interrupting.store(false, Ordering::SeqCst);
+        run.shared.interrupt_sent.store(false, Ordering::SeqCst);
         run.shared.turn_active.store(true, Ordering::SeqCst);
-        run.shared.input_written.store(true, Ordering::SeqCst);
+        run.shared.user_message_sent.store(true, Ordering::SeqCst);
         run.writer.send(&wire::user_message(input))
     }
 
@@ -429,12 +435,11 @@ impl Backend for ClaudeBackend {
         let Ok(run) = self.running() else {
             return Ok(());
         };
-        // A turn Claude started by itself (shown as a derived turn) is interrupted the same way;
-        // its aborted `result` is followed by `Idle`, which ends the derived turn.
-        if !run.shared.turn_active() && !run.shared.own_turn() {
+        // A turn Claude started by itself is interrupted the same way.
+        if !run.shared.turn_active() && !run.shared.claude_turn() {
             return Ok(());
         }
-        run.shared.interrupting.store(true, Ordering::SeqCst);
+        run.shared.interrupt_sent.store(true, Ordering::SeqCst);
         // The response only says the request was taken; the turn ends with an aborted `result`.
         run.writer.send(&wire::interrupt_request(&id))
     }
@@ -447,7 +452,7 @@ impl Backend for ClaudeBackend {
         let Some(run) = &self.run else {
             return Ok(());
         };
-        let Some(pending) = run.shared.answer_approval(approval_id) else {
+        let Some(pending) = run.shared.take_for_answer(approval_id) else {
             return Ok(());
         };
         run.writer.send(&wire::control_success(

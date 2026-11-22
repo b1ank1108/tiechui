@@ -1,9 +1,3 @@
-//! Claude's own sub-agents (the `Agent` tool). The spawning call stays a root tool call; what a
-//! sub-agent produces (frames with `parent_tool_use_id` and `agent_id`) is reported as complete
-//! items that name the spawning call, and its lifecycle (`task_started`, its permission requests,
-//! `task_notification`) as `Subagent` updates. A background sub-agent outlives the root turn: the
-//! session goes idle only once no turn runs, no sub-agent runs and no request is open.
-
 use tiechui_protocol::{ItemId, KnownItem, SubagentState};
 
 use super::super::items::{self, Pending};
@@ -11,8 +5,7 @@ use super::super::wire::{Block, Incoming, Message};
 use super::{Translator, result_item, text_item};
 use crate::backend::{BackendEvent, BackendItem, ChildOf, SubagentUpdate};
 
-/// A sub-agent's item id: Claude's ids are its own, the agent id keeps them apart from the root's.
-pub fn scoped(agent: &str, id: &str) -> String {
+pub fn subagent_item_id(agent: &str, id: &str) -> String {
     format!("{agent}:{id}")
 }
 
@@ -29,11 +22,9 @@ impl Agent {
     }
 }
 
-/// A tool call one of the sub-agents made, by Claude's call id.
 pub struct ChildCall {
     agent: String,
-    /// The native tool name, which shapes the result.
-    name: String,
+    native_tool_name: String,
     open: bool,
 }
 
@@ -46,13 +37,13 @@ fn ended(status: &str) -> SubagentState {
 }
 
 impl Translator {
-    /// `task_started` of a sub-agent (a background shell command is a task too, but no
-    /// sub-agent) and `task_notification`, which ends a task with its summary.
     pub(super) async fn task(&mut self, incoming: Incoming) -> bool {
         let Some(agent) = incoming.task_id else {
             return true;
         };
         match incoming.subtype.as_deref() {
+            // A background shell command also sends `task_*` frames (`local_bash`); it is no
+            // sub-agent.
             Some("task_started") if incoming.task_type.as_deref() == Some("local_agent") => {
                 let Some(call) = incoming.tool_use_id else {
                     return true;
@@ -72,15 +63,18 @@ impl Translator {
         }
     }
 
-    /// A sub-agent spawned by `call`: a root call, or a call of another sub-agent.
+    fn spawning_call_id(&self, call: &str) -> ItemId {
+        ItemId(match self.child_calls.get(call) {
+            Some(spawner) => subagent_item_id(&spawner.agent, call),
+            None => call.to_owned(),
+        })
+    }
+
     async fn register(&mut self, agent: &str, call: &str, name: Option<String>) -> bool {
         if self.agents.contains_key(agent) {
             return true;
         }
-        let parent_call_id = ItemId(match self.child_calls.get(call) {
-            Some(spawner) => scoped(&spawner.agent, call),
-            None => call.to_owned(),
-        });
+        let parent_call_id = self.spawning_call_id(call);
         self.agents.insert(
             agent.to_owned(),
             Agent {
@@ -90,7 +84,7 @@ impl Translator {
                 message: None,
             },
         );
-        self.note_derived();
+        self.note_outside_turn_output();
         self.emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
             agent_id: agent.to_owned(),
             parent_call_id,
@@ -101,8 +95,6 @@ impl Translator {
         .await
     }
 
-    /// Reports a change of state; only an end carries a message. A sub-agent that ends takes its
-    /// open requests and calls with it.
     async fn set_state(
         &mut self,
         agent: &str,
@@ -120,9 +112,9 @@ impl Translator {
         if ending
             && current.live()
             && !(self
-                .withdraw_approvals_where(|pending| pending.agent.as_deref() == Some(agent))
+                .withdraw_approvals_where(|pending| pending.subagent_id.as_deref() == Some(agent))
                 .await
-                && self.settle_child_calls(agent).await)
+                && self.fail_and_forget_child_calls(agent).await)
         {
             return false;
         }
@@ -138,11 +130,10 @@ impl Translator {
             state,
             message: current.message.clone(),
         };
-        self.note_derived();
+        self.note_outside_turn_output();
         self.emit_after_flush(BackendEvent::Subagent(update)).await && self.maybe_idle().await
     }
 
-    /// Ends every sub-agent still running: the process is gone.
     pub(super) async fn interrupt_agents(&mut self) -> bool {
         let mut live: Vec<String> = self
             .agents
@@ -162,8 +153,8 @@ impl Translator {
         true
     }
 
-    /// A frame a sub-agent produced. Sub-agents stream nothing: their `assistant` frames carry
-    /// complete blocks, their `user` frames the tool results (and the prompt, which is no step).
+    /// Sub-agents stream nothing: their `assistant` frames carry complete blocks, their `user`
+    /// frames the tool results (and the prompt, which is no step).
     pub(super) async fn child_frame(&mut self, incoming: Incoming) -> bool {
         let (Some(call), Some(agent), Some(message)) = (
             incoming.parent_tool_use_id,
@@ -188,7 +179,7 @@ impl Translator {
             let sent = match block.kind.as_str() {
                 "text" | "thinking" => self.child_text(agent, &msg, &block).await,
                 "tool_use" => {
-                    self.announce_child(agent, &block.id, &block.name, &block.input)
+                    self.announce_child_once(agent, &block.id, &block.name, &block.input)
                         .await
                 }
                 _ => true,
@@ -210,15 +201,17 @@ impl Translator {
         if text.is_empty() {
             return true;
         }
-        let index = self.child_blocks.entry(scoped(agent, msg)).or_default();
+        let index = self
+            .next_child_block_index
+            .entry(subagent_item_id(agent, msg))
+            .or_default();
         let id = ItemId(format!("{agent}:{msg}:{index}"));
         *index += 1;
         self.child_event(agent, text_item(&id, thinking, text.clone()))
             .await
     }
 
-    /// Shows a sub-agent's tool call once, from its `assistant` frame or its permission request.
-    pub(super) async fn announce_child(
+    pub(super) async fn announce_child_once(
         &mut self,
         agent: &str,
         call: &str,
@@ -228,17 +221,17 @@ impl Translator {
         if self.child_calls.contains_key(call) || !self.agents.contains_key(agent) {
             return true;
         }
-        let (name, arguments) = items::tool_call(tool, input);
+        let (name, arguments) = items::native_tool_call(tool, input);
         self.child_calls.insert(
             call.to_owned(),
             ChildCall {
                 agent: agent.to_owned(),
-                name: name.clone(),
+                native_tool_name: name.clone(),
                 open: true,
             },
         );
         let call = KnownItem::ToolCall {
-            id: ItemId(scoped(agent, call)),
+            id: ItemId(subagent_item_id(agent, call)),
             name,
             arguments,
         };
@@ -253,7 +246,7 @@ impl Translator {
             let name = match self.child_calls.get_mut(&block.tool_use_id) {
                 Some(call) if call.open && call.agent == agent => {
                     call.open = false;
-                    call.name.clone()
+                    call.native_tool_name.clone()
                 }
                 _ => continue,
             };
@@ -275,12 +268,11 @@ impl Translator {
         output: serde_json::Value,
         is_error: bool,
     ) -> bool {
-        let result = result_item(scoped(agent, call), output, is_error);
+        let result = result_item(subagent_item_id(agent, call), output, is_error);
         self.child_event(agent, result).await
     }
 
-    /// Fails the calls an ending sub-agent left without a result and forgets its calls.
-    async fn settle_child_calls(&mut self, agent: &str) -> bool {
+    async fn fail_and_forget_child_calls(&mut self, agent: &str) -> bool {
         let mut open: Vec<String> = self
             .child_calls
             .iter()
@@ -297,8 +289,9 @@ impl Translator {
             }
         }
         self.child_calls.retain(|_, call| call.agent != agent);
-        let prefix = scoped(agent, "");
-        self.child_blocks.retain(|id, _| !id.starts_with(&prefix));
+        let prefix = subagent_item_id(agent, "");
+        self.next_child_block_index
+            .retain(|id, _| !id.starts_with(&prefix));
         true
     }
 
@@ -310,7 +303,7 @@ impl Translator {
             parent_call_id: spawned.parent_call_id.clone(),
             agent_id: agent.to_owned(),
         };
-        self.note_derived();
+        self.note_outside_turn_output();
         self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
             item,
             child_of: Some(child_of),
@@ -327,7 +320,6 @@ impl Translator {
         }
     }
 
-    /// A request of the sub-agent was answered or withdrawn: it runs again once none is open.
     pub(super) async fn approval_settled(&mut self, agent: &str) -> bool {
         let waiting = self
             .agents
@@ -337,16 +329,14 @@ impl Translator {
             .shared
             .approvals()
             .values()
-            .any(|pending: &Pending| pending.agent.as_deref() == Some(agent));
+            .any(|pending: &Pending| pending.subagent_id.as_deref() == Some(agent));
         if waiting && !open {
             return self.set_state(agent, SubagentState::Running, None).await;
         }
         self.maybe_idle().await
     }
 
-    /// Notes output that reaches the session while none of its turns runs: it opens a derived
-    /// turn, which the next `Idle` closes.
-    pub(super) fn note_derived(&mut self) {
+    pub(super) fn note_outside_turn_output(&mut self) {
         if !self.shared.turn_active() {
             self.outside_turn_output_seen = true;
         }
@@ -354,7 +344,7 @@ impl Translator {
 
     pub(super) async fn maybe_idle(&mut self) -> bool {
         let busy = self.shared.turn_active()
-            || self.shared.own_turn()
+            || self.shared.claude_turn()
             || self.agents.values().any(Agent::live)
             || !self.shared.approvals().is_empty();
         if !self.outside_turn_output_seen || busy {

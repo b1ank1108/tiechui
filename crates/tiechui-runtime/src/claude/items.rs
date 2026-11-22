@@ -1,8 +1,3 @@
-//! Claude items and settings in the shapes the session protocol and its clients know: the native
-//! `bash`, `read`, `write` and `edit` tool arguments the desktop renders, the native bash output
-//! text, usage per model request, permission requests as approvals and the answers to them, and
-//! the launch flags for permission modes and thinking levels.
-
 use std::hash::{BuildHasher, Hasher};
 
 use serde_json::{Value, json};
@@ -16,25 +11,26 @@ use crate::tool_output;
 const DENIED: &str = "The user denied this tool call.";
 const UNANSWERED: &str = "The user did not answer the questions.";
 
-/// A `can_use_tool` request Claude waits on, kept until it is answered or withdrawn.
 pub struct Pending {
     pub request_id: String,
-    /// The sub-agent that asked; `None` for the root conversation.
-    pub agent: Option<String>,
+    pub subagent_id: Option<String>,
     input: Value,
     asked: Asked,
 }
 
 enum Asked {
-    /// A tool call. Allowing it for the session applies these permission updates.
-    Tool { grants: Vec<Value> },
-    /// `AskUserQuestion`: each question's text under the id the client answers it by.
-    Questions(Vec<(String, String)>),
+    Tool { session_grants: Vec<Value> },
+    Questions(Vec<AskedQuestion>),
+}
+
+struct AskedQuestion {
+    card_id: String,
+    text: String,
 }
 
 impl Pending {
-    /// The `can_use_tool` response for the user's decision. Every decision that does not allow
-    /// the call is a deny, so Claude carries on with the reason (or a default) as the result.
+    /// Every decision that does not allow the call is a deny, so Claude carries on with the
+    /// reason (or a default) as the call's result.
     pub fn response(&self, decision: &ApprovalDecision) -> Value {
         let allow = |input: Value| json!({"behavior": "allow", "updatedInput": input});
         let deny = |message: &str| json!({"behavior": "deny", "message": message});
@@ -51,10 +47,10 @@ impl Pending {
             (Asked::Tool { .. }, ApprovalDecision::AllowOnce | ApprovalDecision::Accept { .. }) => {
                 allow(self.input.clone())
             }
-            (Asked::Tool { grants }, ApprovalDecision::AllowSession { .. }) => {
+            (Asked::Tool { session_grants }, ApprovalDecision::AllowSession { .. }) => {
                 let mut response = allow(self.input.clone());
-                if !grants.is_empty() {
-                    response["updatedPermissions"] = json!(grants);
+                if !session_grants.is_empty() {
+                    response["updatedPermissions"] = json!(session_grants);
                 }
                 response
             }
@@ -70,28 +66,22 @@ impl Pending {
     }
 }
 
-/// What the user is asked for a `can_use_tool` request about the call `call_id`, and what is
-/// kept to answer it. `shown` is the call's input as the card shows it, the request's own input
-/// unless that is empty. `AskUserQuestion` becomes question cards; every other tool,
-/// `ExitPlanMode` included, a permission card whose text is the command, the file or the full
-/// plan. A sub-agent's request names the sub-agent as its actor. The answer always carries the
-/// request's own input back.
 pub fn ask(
     request_id: &str,
     request: &Request,
-    shown: &Value,
+    card_input: &Value,
     call_id: &str,
 ) -> (Pending, ApprovalRequest) {
     let tool = request.tool_name.as_deref().unwrap_or_default();
     let (asked, approval) = if tool == "AskUserQuestion" {
-        let (ids, questions) = questions(shown);
+        let (asked, questions) = questions(card_input);
         (
-            Asked::Questions(ids),
+            Asked::Questions(asked),
             ApprovalRequest::Questions { questions },
         )
     } else {
         let (grants, session_patterns) = session_grants(&request.permission_suggestions);
-        let (name, arguments) = tool_call(tool, shown);
+        let (name, arguments) = native_tool_call(tool, card_input);
         let (surface, value) = subject(&name, &arguments, request.description.as_deref());
         let approval = ApprovalRequest::Permission {
             actor: request.agent_id.as_deref().map(Box::from),
@@ -105,19 +95,22 @@ pub fn ask(
             session_patterns,
             preview: None,
         };
-        (Asked::Tool { grants }, approval)
+        (
+            Asked::Tool {
+                session_grants: grants,
+            },
+            approval,
+        )
     };
     let pending = Pending {
         request_id: request_id.to_owned(),
-        agent: request.agent_id.clone(),
+        subagent_id: request.agent_id.clone(),
         input: request.input.clone(),
         asked,
     };
     (pending, approval)
 }
 
-/// What a permission is about, as the card shows it: the command, the file, the plan, or failing
-/// those whatever describes the call.
 fn subject(tool: &str, arguments: &Value, description: Option<&str>) -> (&'static str, String) {
     let text = |key: &str| {
         arguments
@@ -143,8 +136,7 @@ fn subject(tool: &str, arguments: &Value, description: Option<&str>) -> (&'stati
     (surface, value.unwrap_or_else(|| tool.to_owned()))
 }
 
-/// `AskUserQuestion`'s questions as question cards, with ids `q1`, `q2`, … in order.
-fn questions(input: &Value) -> (Vec<(String, String)>, Vec<Question>) {
+fn questions(input: &Value) -> (Vec<AskedQuestion>, Vec<Question>) {
     let text = |value: &Value, key: &str| {
         value
             .get(key)
@@ -177,24 +169,27 @@ fn questions(input: &Value) -> (Vec<(String, String)>, Vec<Question>) {
                 question: text(question, "question"),
                 options: (!options.is_empty()).then_some(options),
             };
-            ((id, card.question.clone()), card)
+            let asked = AskedQuestion {
+                card_id: id,
+                text: card.question.clone(),
+            };
+            (asked, card)
         })
         .unzip()
 }
 
 /// The input with the user's answers added as `AskUserQuestion` reads them: each question's text
-/// maps to the chosen labels, joined with ", " when several were picked. `None` when nothing
-/// was answered.
-fn answered(input: &Value, questions: &[(String, String)], content: &Value) -> Option<Value> {
+/// maps to the chosen labels, joined with ", " when several were picked.
+fn answered(input: &Value, questions: &[AskedQuestion], content: &Value) -> Option<Value> {
     let answers: serde_json::Map<String, Value> = questions
         .iter()
-        .filter_map(|(id, question)| {
-            let picked: Vec<&str> = content["answers"][id]["answers"]
+        .filter_map(|asked| {
+            let picked: Vec<&str> = content["answers"][&asked.card_id]["answers"]
                 .as_array()?
                 .iter()
                 .filter_map(Value::as_str)
                 .collect();
-            (!picked.is_empty()).then(|| (question.clone(), json!(picked.join(", "))))
+            (!picked.is_empty()).then(|| (asked.text.clone(), json!(picked.join(", "))))
         })
         .collect();
     if answers.is_empty() {
@@ -207,11 +202,9 @@ fn answered(input: &Value, questions: &[(String, String)], content: &Value) -> O
     Some(input)
 }
 
-/// What allowing for the session grants, and how it reads on the card (`Bash(touch a.txt)`,
-/// `acceptEdits`, a directory). Claude offers alternatives: for a command that writes a file, a
-/// rule for that command, the directory and `acceptEdits` for the whole session. The narrowest
-/// is granted: the allow rules when there are any, else the rest. Each is scoped to this session,
-/// since a suggestion may name a settings file that would outlive it.
+/// Claude offers alternatives: for a command that writes a file, a rule for that command, the
+/// directory and `acceptEdits` for the whole session. Each is scoped to this session, since a
+/// suggestion may name a settings file that would outlive it.
 fn session_grants(suggestions: &Value) -> (Vec<Value>, Vec<String>) {
     let (mut rules, mut others) = (Vec::new(), Vec::new());
     for suggestion in suggestions.as_array().into_iter().flatten() {
@@ -221,7 +214,7 @@ fn session_grants(suggestions: &Value) -> (Vec<Value>, Vec<String>) {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(rule_text)
+                    .filter_map(claude_rule_syntax)
                     .collect(),
                 true,
             ),
@@ -258,8 +251,7 @@ fn session_grants(suggestions: &Value) -> (Vec<Value>, Vec<String>) {
     (grants, patterns.concat())
 }
 
-/// A permission rule in Claude's own syntax: `Bash(touch a.txt)`, or the bare tool name.
-fn rule_text(rule: &Value) -> Option<String> {
+fn claude_rule_syntax(rule: &Value) -> Option<String> {
     let tool = rule.get("toolName")?.as_str()?;
     Some(match rule.get("ruleContent").and_then(Value::as_str) {
         Some(content) if !content.is_empty() => format!("{tool}({content})"),
@@ -267,9 +259,7 @@ fn rule_text(rule: &Value) -> Option<String> {
     })
 }
 
-/// A tool call as the native tool it corresponds to, so every client renders it alike. Tools
-/// without a native counterpart keep Claude's name and input.
-pub fn tool_call(name: &str, input: &Value) -> (String, Value) {
+pub fn native_tool_call(name: &str, input: &Value) -> (String, Value) {
     let field = |key: &str| input.get(key).cloned().unwrap_or(Value::Null);
     let present = |keys: &[(&str, &str)]| {
         let fields: serde_json::Map<String, Value> = keys
@@ -324,12 +314,10 @@ fn edit(input: &Value) -> Value {
     })
 }
 
-/// The result of a call that ended without one.
 pub fn unfinished_result() -> Value {
     tool_output("The tool call did not finish.", true, Value::Null)
 }
 
-/// The text of a `tool_result` block's content: a string, or text blocks joined.
 fn result_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
@@ -342,8 +330,6 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-/// A tool's result in the native output shape. For `bash` the text is the native one: the output
-/// (or `(no output)`), and for a failure the status line the desktop parses the exit code from.
 pub fn tool_result(call_name: &str, content: &Value, is_error: bool) -> Value {
     let text = result_text(content);
     if call_name != "bash" {
@@ -367,7 +353,7 @@ pub fn tool_result(call_name: &str, content: &Value, is_error: bool) -> Value {
     tool_output(&text, is_error, Value::Null)
 }
 
-/// The usage of one model request. Claude's input excludes cache reads and writes already.
+/// Claude's `input_tokens` already excludes cache reads and writes.
 pub fn usage(usage: &Usage) -> TokenUsage {
     TokenUsage {
         input: usage.input_tokens,
@@ -380,8 +366,6 @@ pub fn usage(usage: &Usage) -> TokenUsage {
     }
 }
 
-/// `--permission-mode` for a session mode: `rules` (also the default and any unknown value) asks
-/// before changes, `auto` lets Claude's classifier decide, `yolo` allows everything.
 pub fn permission_mode(mode: Option<&str>) -> &'static str {
     match mode {
         Some("auto") => "auto",
@@ -390,8 +374,7 @@ pub fn permission_mode(mode: Option<&str>) -> &'static str {
     }
 }
 
-/// The launch flag for a thinking level: `off` turns thinking off, the others are `--effort`
-/// levels (`minimal` is Claude's lowest).
+/// Claude's `--effort` has no `minimal`: `low` is its lowest.
 pub fn thinking_flag(level: ThinkingLevel) -> (&'static str, &'static str) {
     match level {
         ThinkingLevel::Off => ("--thinking", "disabled"),
@@ -412,16 +395,9 @@ pub fn is_host_variable(name: &str) -> bool {
         || name == "ELECTRON_RUN_AS_NODE"
 }
 
-/// A random (version 4) UUID, the form `--session-id` takes. The randomness is the standard
-/// library's per-process hasher seed, which comes from the operating system.
+/// `--session-id` takes a version 4 UUID.
 pub fn new_session_id() -> String {
-    let random = std::collections::hash_map::RandomState::new();
-    let mut bytes = [0u8; 16];
-    for (index, chunk) in bytes.chunks_mut(8).enumerate() {
-        let mut hasher = random.build_hasher();
-        hasher.write_usize(index);
-        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
-    }
+    let mut bytes = os_seeded_random_bytes();
     bytes[6] = bytes[6] & 0x0f | 0x40;
     bytes[8] = bytes[8] & 0x3f | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -433,6 +409,17 @@ pub fn new_session_id() -> String {
         &hex[16..20],
         &hex[20..]
     )
+}
+
+fn os_seeded_random_bytes() -> [u8; 16] {
+    let random = std::collections::hash_map::RandomState::new();
+    let mut bytes = [0u8; 16];
+    for (index, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut hasher = random.build_hasher();
+        hasher.write_usize(index);
+        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -489,7 +476,7 @@ mod tests {
 
     #[test]
     fn multi_edit_becomes_one_edit_call_with_every_edit() {
-        let (name, args) = tool_call(
+        let (name, args) = native_tool_call(
             "MultiEdit",
             &json!({"file_path": "/a", "edits": [
                 {"old_string": "1", "new_string": "2"}, {"old_string": "3", "new_string": "4"}]}),
@@ -549,11 +536,13 @@ mod tests {
         );
         let allowed = json!({"behavior": "allow", "updatedInput": input});
         assert_eq!(pending.response(&ApprovalDecision::AllowOnce), allowed);
-        // With nothing to grant, allowing for the session allows this call alone.
-        let session = ApprovalDecision::AllowSession {
+        let allow_session_with_nothing_to_grant = ApprovalDecision::AllowSession {
             both_directions: false,
         };
-        assert_eq!(pending.response(&session), allowed);
+        assert_eq!(
+            pending.response(&allow_session_with_nothing_to_grant),
+            allowed
+        );
         for decision in [
             ApprovalDecision::Cancel,
             ApprovalDecision::Decline,
@@ -566,6 +555,21 @@ mod tests {
                 json!({"behavior": "deny", "message": DENIED})
             );
         }
+    }
+
+    #[test]
+    fn an_allowed_call_answers_with_the_request_input_not_the_card_input() {
+        let plan = json!({"plan": "1. edit"});
+        let (pending, _) = ask(
+            "r1",
+            &request("ExitPlanMode", json!({}), json!([])),
+            &plan,
+            "toolu_1",
+        );
+        assert_eq!(
+            pending.response(&ApprovalDecision::AllowOnce),
+            json!({"behavior": "allow", "updatedInput": {}})
+        );
     }
 
     #[test]

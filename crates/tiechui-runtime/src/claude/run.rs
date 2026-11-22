@@ -1,6 +1,3 @@
-//! One running `claude` process: the queue its stdin is written from, the tasks that drain its
-//! stdout and stderr, and the supervisor that owns the process and reaps its group.
-
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,84 +16,70 @@ use crate::process::{Frame, FrameReader, Process};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What the reader hands the translator.
 pub enum Inbound {
     Frame(Vec<u8>),
     Oversize(usize),
     Eof,
 }
 
-/// Where the handshake stands: Claude answers `initialize` once it is up and, when resuming,
-/// has found the conversation; otherwise it reports an error `result` or exits.
+/// Claude answers `initialize` once it is up and, when resuming, has found the conversation;
+/// otherwise it reports an error `result` or exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Hello {
+pub enum Handshake {
     Pending,
     Ready,
     Failed(String),
 }
 
-/// What the supervisor is asked to do with the process.
-pub enum Supervise {
-    /// Stop the process group after this long unless the process has exited by then.
-    Reap(Duration),
+pub enum SupervisorCommand {
+    ReapAfter(Duration),
     Close(oneshot::Sender<()>),
 }
 
-/// What the backend and the translator of one process share.
 pub struct Shared {
-    pub hello: watch::Sender<Hello>,
-    /// The `request_id` of the `initialize` request.
-    pub init_id: String,
-    /// The first user message was written to this process. Usage reported before it belongs to
-    /// the conversation's past (a resumed process repeating it) and is not counted again.
-    pub input_written: AtomicBool,
+    pub handshake: watch::Sender<Handshake>,
+    pub initialize_request_id: String,
+    pub user_message_sent: AtomicBool,
     /// A turn was started (or joined) and its `result` has not arrived.
     pub turn_active: AtomicBool,
-    /// Claude is running a turn it started by itself (`init` while no turn of the session runs).
-    pub own_turn: AtomicBool,
-    /// An `interrupt` request is out, so an aborted `result` is the interrupt's.
-    pub interrupting: AtomicBool,
-    /// The process has not exited and is not being reaped.
+    pub claude_turn: AtomicBool,
+    pub interrupt_sent: AtomicBool,
     pub usable: AtomicBool,
-    pub supervisor: mpsc::UnboundedSender<Supervise>,
-    /// The sub-agents whose permission request was answered, for the translator: a sub-agent
-    /// waits only while one of its requests is open.
-    settled: mpsc::UnboundedSender<String>,
-    /// The permission requests Claude waits on, by approval id.
-    approvals: Mutex<BTreeMap<String, Pending>>,
+    pub supervisor: mpsc::UnboundedSender<SupervisorCommand>,
+    answered_agents: mpsc::UnboundedSender<String>,
+    pending_by_approval_id: Mutex<BTreeMap<String, Pending>>,
 }
 
 impl Shared {
     pub fn new(
-        init_id: String,
+        initialize_request_id: String,
     ) -> (
         Arc<Self>,
-        mpsc::UnboundedReceiver<Supervise>,
+        mpsc::UnboundedReceiver<SupervisorCommand>,
         mpsc::UnboundedReceiver<String>,
     ) {
         let (supervisor, commands) = mpsc::unbounded_channel();
-        let (settled, answered) = mpsc::unbounded_channel();
+        let (answered_agents, answered) = mpsc::unbounded_channel();
         let shared = Arc::new(Self {
-            hello: watch::channel(Hello::Pending).0,
-            init_id,
-            input_written: AtomicBool::new(false),
+            handshake: watch::channel(Handshake::Pending).0,
+            initialize_request_id,
+            user_message_sent: AtomicBool::new(false),
             turn_active: AtomicBool::new(false),
-            own_turn: AtomicBool::new(false),
-            interrupting: AtomicBool::new(false),
+            claude_turn: AtomicBool::new(false),
+            interrupt_sent: AtomicBool::new(false),
             usable: AtomicBool::new(true),
             supervisor,
-            settled,
-            approvals: Mutex::default(),
+            answered_agents,
+            pending_by_approval_id: Mutex::default(),
         });
         (shared, commands, answered)
     }
 
-    /// Ends the handshake with `outcome` unless it has ended already; true when this call ended it.
-    pub fn settle_hello(&self, outcome: Hello) -> bool {
-        self.hello.send_if_modified(|hello| {
-            let waiting = *hello == Hello::Pending;
+    pub fn try_finish_handshake(&self, outcome: Handshake) -> bool {
+        self.handshake.send_if_modified(|state| {
+            let waiting = *state == Handshake::Pending;
             if waiting {
-                *hello = outcome;
+                *state = outcome;
             }
             waiting
         })
@@ -110,31 +93,31 @@ impl Shared {
         self.turn_active.load(Ordering::SeqCst)
     }
 
-    pub fn own_turn(&self) -> bool {
-        self.own_turn.load(Ordering::SeqCst)
+    pub fn claude_turn(&self) -> bool {
+        self.claude_turn.load(Ordering::SeqCst)
     }
 
     pub fn approvals(&self) -> MutexGuard<'_, BTreeMap<String, Pending>> {
-        self.approvals.lock().unwrap_or_else(|e| e.into_inner())
+        self.pending_by_approval_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Removes the request, so whoever takes it is the only one to answer it.
     pub fn take_approval(&self, id: &str) -> Option<Pending> {
         self.approvals().remove(id)
     }
 
-    /// Takes the request to answer it, and tells the translator when a sub-agent asked.
-    pub fn answer_approval(&self, id: &str) -> Option<Pending> {
+    pub fn take_for_answer(&self, id: &str) -> Option<Pending> {
         let pending = self.take_approval(id)?;
-        if let Some(agent) = &pending.agent {
-            let _ = self.settled.send(agent.clone());
+        if let Some(agent) = &pending.subagent_id {
+            let _ = self.answered_agents.send(agent.clone());
         }
         Some(pending)
     }
 }
 
-/// Queues frames for a task that writes them to Claude's stdin, so nothing that handles Claude's
-/// output ever waits on its input (a full pipe in both directions would deadlock both sides).
+/// Nothing that handles Claude's output may wait on its input: a full pipe in both directions
+/// would deadlock both sides.
 #[derive(Clone)]
 pub struct Writer {
     queue: mpsc::UnboundedSender<Vec<u8>>,
@@ -215,11 +198,9 @@ pub async fn read_stderr(stderr: impl AsyncRead + Unpin, tail: StderrTail) {
     }
 }
 
-/// Owns the process: reaps its group when asked to (or when the grace after an error `result`
-/// runs out), and when the process exits by itself stops whatever it left in its group.
 pub async fn supervise(
     mut process: Process,
-    mut commands: mpsc::UnboundedReceiver<Supervise>,
+    mut commands: mpsc::UnboundedReceiver<SupervisorCommand>,
     shared: Arc<Shared>,
 ) {
     let mut reap_at: Option<Instant> = None;
@@ -234,11 +215,11 @@ pub async fn supervise(
         tokio::select! {
             _ = process.child.wait() => break,
             command = commands.recv() => match command {
-                Some(Supervise::Reap(grace)) => {
+                Some(SupervisorCommand::ReapAfter(grace)) => {
                     shared.usable.store(false, Ordering::SeqCst);
                     reap_at = Some(Instant::now() + grace);
                 }
-                Some(Supervise::Close(ack)) => {
+                Some(SupervisorCommand::Close(ack)) => {
                     closing = Some(ack);
                     break;
                 }
