@@ -176,6 +176,28 @@ impl ChildRunner for Runner {
         Ok(())
     }
 }
+fn build_ctx(
+    cwd: PathBuf,
+    session: &str,
+    append: Arc<dyn Fn(tools::CustomSessionEntry) -> Result<(), ToolError> + Send + Sync>,
+) -> ToolContext {
+    ToolContext {
+        invoker: None,
+        cwd,
+        branch: Arc::new(vec![]),
+        parent_session: None,
+        cancel: CancellationToken::new(),
+        updates: Arc::new(|_| {}),
+        append_entry: append,
+        epoch: SessionEpoch(1),
+        scope: tools::ExecutionScope {
+            thread_id: ThreadId(session.into()),
+            turn_id: TurnId("turn".into()),
+        },
+        origin: Default::default(),
+    }
+}
+
 struct Harness {
     root: tempfile::TempDir,
     service: Arc<Service>,
@@ -200,27 +222,18 @@ impl Harness {
                 session: "parent".into(),
                 ..Default::default()
             }),
+            changes: watch::Sender::default(),
         });
         let entries = Arc::new(Mutex::new(vec![]));
         let output = entries.clone();
-        let ctx = ToolContext {
-            invoker: None,
-            cwd: root.path().into(),
-            branch: Arc::new(vec![]),
-            parent_session: None,
-            cancel: CancellationToken::new(),
-            updates: Arc::new(|_| {}),
-            append_entry: Arc::new(move |entry| {
+        let ctx = build_ctx(
+            root.path().into(),
+            "parent",
+            Arc::new(move |entry| {
                 output.lock().unwrap().push(entry);
                 Ok(())
             }),
-            epoch: SessionEpoch(1),
-            scope: tools::ExecutionScope {
-                thread_id: ThreadId("parent".into()),
-                turn_id: TurnId("turn".into()),
-            },
-            origin: Default::default(),
-        };
+        );
         Self {
             root,
             service,
@@ -305,10 +318,13 @@ async fn modes_limits_chain_substitution_and_real_failure_skip() {
         unreachable!()
     };
     assert!(
-        chain_text.contains("### [default · alpha/fast] Completed"),
+        chain_text.contains("### [ag2 · default · alpha/fast] Completed"),
         "{chain_text}"
     );
-    assert!(chain_text.contains("### [default] Skipped"), "{chain_text}");
+    assert!(
+        chain_text.contains("### [ag5 · default] Skipped"),
+        "{chain_text}"
+    );
     assert!(!h.runner.tasks.lock().unwrap().iter().any(|t| t == "never"));
     for value in [
         json!({}),
@@ -470,11 +486,11 @@ async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
         unreachable!()
     };
     assert!(
-        text.contains("### [default · beta/judge] Completed"),
+        text.contains("### [ag1 · default · beta/judge] Completed"),
         "{text}"
     );
     assert!(
-        text.contains("### [critic · alpha/fast] Completed"),
+        text.contains("### [ag2 · critic · alpha/fast] Completed"),
         "{text}"
     );
 
@@ -697,6 +713,7 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         tools: Some(vec!["read".into(), "grep".into()]),
         model: Some("fake/b".into()),
         thinking: Some(ChildThinking::Level(ThinkingLevel::Medium)),
+        background: Some(true),
         project: false,
         path: PathBuf::new(),
     };
@@ -873,7 +890,7 @@ async fn spill_is_private_bounded_retrievable_and_chain_gets_full_text() {
     let Content::Text { text: summary, .. } = &summary.content[0] else {
         unreachable!()
     };
-    assert!(summary.contains("### [default · alpha/fast] Completed"));
+    assert!(summary.contains("### [ag1 · default · alpha/fast] Completed"));
     assert!(summary.len() < 2 * (output::PREVIEW_BYTES + 1024));
     let path = result.tasks[0].output_path.as_ref().unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap(), text);
@@ -922,4 +939,424 @@ async fn live_memory_and_block_limits_fail_with_diagnostics_after_cleanup() {
         });
         assert_eq!(result.is_err(), i == 256);
     }
+}
+
+#[derive(Default)]
+struct ViewSink(Mutex<Vec<SubagentsView>>);
+
+#[async_trait]
+impl CommandHost for ViewSink {
+    async fn ask(
+        &self,
+        _: ApprovalRequest,
+        _: CancellationToken,
+    ) -> Result<ApprovalDecision, ToolError> {
+        Ok(ApprovalDecision::Cancel)
+    }
+    async fn update(&self, _: ApprovalRequest) -> Result<(), ToolError> {
+        Ok(())
+    }
+    async fn apply(&self, effect: SessionEffect) -> Result<(), ToolError> {
+        if let SessionEffect::Emit { kind, data } = effect {
+            assert_eq!(kind, SUBAGENTS_EVENT);
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::from_value(data).unwrap());
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn definition_background_parses_renders_and_rejects_non_booleans() {
+    let h = Harness::new();
+    let directory = h.service.home.join("agents");
+    std::fs::create_dir_all(&directory).unwrap();
+
+    let existing = "---\nname: worker\ndescription: old\nbackground: true\npermission:\n  mode: rules\n# comment\n---\nOld";
+    let mut def = definitions::Definition {
+        name: "worker".into(),
+        description: "Async worker".into(),
+        prompt: "Run async".into(),
+        tools: None,
+        model: None,
+        thinking: None,
+        background: Some(true),
+        project: false,
+        path: PathBuf::new(),
+    };
+    let rendered = definitions::render(existing, &def);
+    assert!(rendered.contains("background: true\n"), "{rendered}");
+    assert_eq!(rendered.matches("background:").count(), 1, "{rendered}");
+    std::fs::write(directory.join("worker.md"), &rendered).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["worker"].background, Some(true));
+
+    def.background = None;
+    let cleared = definitions::render(&rendered, &def);
+    assert!(!cleared.contains("background:"), "{cleared}");
+    assert!(cleared.contains("# comment\n"), "{cleared}");
+    std::fs::write(directory.join("worker.md"), &cleared).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["worker"].background, None);
+
+    for bad in ["\"true\"", "42", "[true]", "bogus"] {
+        let path = directory.join("bad_bg.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: bad_bg\ndescription: bad\nbackground: {bad}\n---\nBody"),
+        )
+        .unwrap();
+        let agents =
+            definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+        assert!(!agents.contains_key("bad_bg"), "accepted {bad}");
+        let err = h
+            .run_id("bad-bg", json!({"agent": "bad_bg", "task": "check"}))
+            .await
+            .unwrap_err()
+            .0;
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("background"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn agent_ids_names_restore_cursor_and_background_precedence() {
+    let h = Harness::new();
+    let directory = h.service.home.join("agents");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("bg_agent.md"),
+        "---\nname: bg_agent\ndescription: bg\nbackground: true\n---\nBG",
+    )
+    .unwrap();
+
+    for bad in [
+        json!({"task": "work", "name": ""}),
+        json!({"task": "work", "name": "   "}),
+        json!({"tasks": [{"task": "a", "name": "dup"}, {"task": "b", "name": "dup"}]}),
+        json!({"chain": [{"task": "a", "background": true}, {"task": "b", "background": false}]}),
+    ] {
+        assert!(h.run(bad).await.is_err());
+    }
+
+    let first_out = h
+        .service
+        .dispatch(
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "done-1", "name": "reusable"}),
+                opaque: None,
+            },
+            h.ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text, .. } = &first_out.content[0] else {
+        unreachable!()
+    };
+    assert!(text.contains("[agent_id: ag1]"), "{text}");
+
+    let bg_out = h
+        .service
+        .dispatch(
+            ToolCall {
+                id: "c2".into(),
+                name: "subagent".into(),
+                arguments: json!({"agent": "bg_agent", "task": "wait", "name": "reusable"}),
+                opaque: None,
+            },
+            h.ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bg_out.structured_content.as_ref().unwrap()["status"],
+        "async_launched"
+    );
+    let bg_record: AgentDispatch = serde_json::from_value(bg_out.details.unwrap()).unwrap();
+    assert!(bg_record.background);
+    assert_eq!(bg_record.tasks[0].id, "ag2");
+    assert!(bg_record.tasks[0].background);
+
+    let conflict = h
+        .run_id("c3", json!({"task": "clash", "name": "reusable"}))
+        .await
+        .unwrap_err()
+        .0;
+    assert!(conflict.contains("reusable"), "{conflict}");
+
+    let override_fg = h
+        .run_id(
+            "c4",
+            json!({"agent": "bg_agent", "task": "sync-override", "background": false}),
+        )
+        .await
+        .unwrap();
+    assert!(!override_fg.background);
+    assert_eq!(override_fg.tasks[0].id, "ag3");
+    assert!(!override_fg.tasks[0].background);
+
+    h.service.quiesce().await;
+    assert_eq!(h.runner.current.load(Ordering::SeqCst), 0);
+
+    let historical = AgentDispatch {
+        id: "old".into(),
+        session_id: "resumed".into(),
+        mode: "single".into(),
+        background: false,
+        started_at: 1,
+        tasks: vec![AgentTask {
+            id: "ag9".into(),
+            name: Some("old-name".into()),
+            background: false,
+            fork: false,
+            started_at: 1,
+            agent: "default".into(),
+            task: "past".into(),
+            state: AgentState::Completed,
+            output: "past".into(),
+            thinking: String::new(),
+            diagnostic: None,
+            output_path: None,
+            thinking_path: None,
+            usage: TokenUsage::default(),
+            turns: 1,
+            model: "alpha/fast".into(),
+        }],
+    };
+    h.service
+        .event(
+            &RuntimeEvent::Restore { navigation: false },
+            &BranchView {
+                session_id: "parent".into(),
+                leaf: "leaf".into(),
+                cwd: h.ctx.cwd.clone(),
+                parent_session: None,
+                entries: vec![BranchEntry {
+                    id: "e1".into(),
+                    parent_id: None,
+                    timestamp: 0,
+                    content: None,
+                    custom: Some((ENTRY.into(), json!(historical))),
+                }],
+            },
+        )
+        .unwrap();
+    let after_restore = h.run_id("c5", json!({"task": "after"})).await.unwrap();
+    assert_eq!(after_restore.tasks[0].id, "ag10");
+}
+
+#[tokio::test]
+async fn background_lifecycle_promotion_interrupt_isolation_notifications_and_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let runner = Arc::new(Runner::default());
+    let mut registry = Registry::default();
+    SubagentsModule {
+        home: root.path().join("home"),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(RegistryProbe::default()),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    for client in registry.actor_clients() {
+        client.bind(runner.clone());
+    }
+    let ext = &registry.runtime_extensions()[0];
+    let bg_work = &registry.background_work()[0];
+    let cmd = &registry.commands()[0];
+    assert_eq!(
+        cmd.info().argument_hint.as_deref(),
+        Some("[background|stop <id>]")
+    );
+    let subagent_tool = registry.tools().get("subagent").unwrap();
+    let stop_tool = registry.tools().get("subagent_stop").unwrap();
+    let list_tool = registry.tools().get("subagent_list").unwrap();
+    assert_eq!(stop_tool.concurrency(&json!({})), Concurrency::Shared);
+    assert_eq!(list_tool.concurrency(&json!({})), Concurrency::Shared);
+
+    let branch = BranchView {
+        session_id: "s1".into(),
+        leaf: "l1".into(),
+        cwd: root.path().into(),
+        parent_session: None,
+        entries: vec![],
+    };
+    ext.event(&RuntimeEvent::Restore { navigation: false }, &branch)
+        .unwrap();
+
+    let ctx = build_ctx(root.path().into(), "s1", Arc::new(|_| Ok(())));
+
+    let launched = subagent_tool
+        .run(
+            ToolCall {
+                id: "bg-1".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "bg-done", "name": "alpha", "background": true}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        launched.structured_content.as_ref().unwrap()["status"],
+        "async_launched"
+    );
+
+    let fg_tool = subagent_tool.clone();
+    let fg_ctx = ctx.clone();
+    let fg_waiter = tokio::spawn(async move {
+        fg_tool
+            .run(
+                ToolCall {
+                    id: "fg-promote".into(),
+                    name: "subagent".into(),
+                    arguments: json!({"task": "wait", "name": "beta"}),
+                    opaque: None,
+                },
+                fg_ctx,
+            )
+            .await
+    });
+    while runner.current.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let host = Arc::new(ViewSink::default());
+    cmd.input(
+        json!({"background_all": true}),
+        CommandSession {
+            branch: branch.clone(),
+            host: host.clone(),
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let promoted = tokio::time::timeout(Duration::from_secs(2), fg_waiter)
+        .await
+        .expect("promoted dispatch must return immediately")
+        .unwrap()
+        .unwrap();
+    let promoted_record: AgentDispatch = serde_json::from_value(promoted.details.unwrap()).unwrap();
+    assert!(promoted_record.background);
+    assert!(promoted_record.tasks[0].background);
+
+    ext.event(&RuntimeEvent::Interrupt, &branch).unwrap();
+    assert!(
+        runner.current.load(Ordering::SeqCst) >= 1,
+        "Interrupt must not cancel background subagents"
+    );
+
+    for _ in 0..200 {
+        if ext.continuation().is_some() && runner.cleaned.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runner.current.load(Ordering::SeqCst),
+        1,
+        "promoted subagent beta must remain running after Interrupt"
+    );
+    let cont = ext.continuation().expect("expected <task-notification>");
+    assert_eq!(cont.kind, "tiechui.subagents.completed");
+    assert!(!cont.visible);
+    assert!(
+        cont.text.contains("<task-id>ag1</task-id>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<tool-use-id>bg-1</tool-use-id>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<status>completed</status>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<result>bg-done</result>"),
+        "{}",
+        cont.text
+    );
+    assert!(ext.accepts(&cont));
+
+    let out = ext
+        .event(
+            &RuntimeEvent::Input {
+                continuation: Some(cont),
+                retry: false,
+            },
+            &branch,
+        )
+        .unwrap();
+    assert!(
+        out.events
+            .iter()
+            .any(|(name, data)| { name == SUBAGENTS_EVENT && data["pending_notifications"] == 0 })
+    );
+    assert!(ext.continuation().is_none());
+
+    let listed = list_tool
+        .run(
+            ToolCall {
+                id: "list-1".into(),
+                name: "subagent_list".into(),
+                arguments: json!({}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let stopped = stop_tool
+        .run(
+            ToolCall {
+                id: "stop-1".into(),
+                name: "subagent_stop".into(),
+                arguments: json!({"id": "beta"}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!stopped.is_error);
+    assert_eq!(runner.current.load(Ordering::SeqCst), 0);
+    assert!(
+        ext.continuation().is_none(),
+        "explicit subagent_stop must not queue <task-notification>"
+    );
+
+    assert!(
+        stop_tool
+            .run(
+                ToolCall {
+                    id: "stop-missing".into(),
+                    name: "subagent_stop".into(),
+                    arguments: json!({"id": "unknown"}),
+                    opaque: None,
+                },
+                ctx,
+            )
+            .await
+            .is_err()
+    );
+    bg_work.quiesce().await;
 }
