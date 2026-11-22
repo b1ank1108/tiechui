@@ -236,6 +236,9 @@ fn resolve_one_of_const(prop: &Value, val: &Value) -> Value {
 fn strip_recommended(label: &str) -> String {
     let trimmed = label.trim();
     for tag in ["(Recommended)", "(recommended)"] {
+        if let Some(after) = trimmed.strip_prefix(tag) {
+            return after.trim_start().to_owned();
+        }
         if let Some(before) = trimmed.strip_suffix(tag) {
             return before.trim_end().to_owned();
         }
@@ -405,8 +408,24 @@ fn field_choices(prop: &Value) -> Vec<(String, String)> {
     if prop["type"] == "boolean" {
         return vec![("true".into(), "Yes".into()), ("false".into(), "No".into())];
     }
-    if let Some(one_of) = prop["oneOf"].as_array() {
-        return one_of
+    if prop["type"] == "array" {
+        return array_item_choices(&prop["items"]);
+    }
+    enum_or_one_of_choices(prop, "oneOf")
+}
+
+fn array_item_choices(items: &Value) -> Vec<(String, String)> {
+    let choices = enum_or_one_of_choices(items, "anyOf");
+    if choices.is_empty() {
+        enum_or_one_of_choices(items, "oneOf")
+    } else {
+        choices
+    }
+}
+
+fn enum_or_one_of_choices(prop: &Value, key: &str) -> Vec<(String, String)> {
+    if let Some(variants) = prop[key].as_array() {
+        return variants
             .iter()
             .filter_map(|item| {
                 let val = item["const"].as_str()?.to_owned();
@@ -462,7 +481,7 @@ fn answer_form_questions(fields: &[FormQuestionField], decision: &ApprovalDecisi
             for (idx, field) in fields.iter().enumerate() {
                 let qid = format!("q{}", idx + 1);
                 if let Some(ans) = extract_question_answers(decision, &qid) {
-                    apply_question_field(&mut out, field, &ans[0]);
+                    apply_question_answers(&mut out, field, &ans);
                 }
             }
             json!({ "action": "accept", "content": Value::Object(out) })
@@ -474,13 +493,45 @@ fn answer_form_questions(fields: &[FormQuestionField], decision: &ApprovalDecisi
     }
 }
 
-fn apply_question_field(out: &mut Map<String, Value>, field: &FormQuestionField, chosen: &str) {
+fn apply_question_answers(
+    out: &mut Map<String, Value>,
+    field: &FormQuestionField,
+    answers: &[String],
+) {
+    if field.prop["type"] == "array" {
+        let mut selected = Vec::new();
+        for ans in answers {
+            match match_field_choice(&field.choices, ans) {
+                Some(val) => selected.push(json!(val)),
+                None if field.other_key.is_some() => {
+                    if let Some(other) = &field.other_key {
+                        out.insert(other.clone(), json!(ans));
+                    }
+                }
+                None => selected.push(json!(ans)),
+            }
+        }
+        if !selected.is_empty() {
+            out.insert(field.key.clone(), Value::Array(selected));
+        }
+        return;
+    }
+    apply_question_field(out, field, &answers[0]);
+}
+
+fn match_field_choice<'a>(choices: &'a [(String, String)], chosen: &str) -> Option<&'a str> {
     let normalized = strip_recommended(chosen);
-    let matched = field.choices.iter().find(|(val, label)| {
-        val == chosen || label == chosen || strip_recommended(label) == normalized
-    });
-    match (matched, &field.other_key) {
-        (Some((val, _)), _) => {
+    choices
+        .iter()
+        .find(|(val, label)| {
+            val == chosen || label == chosen || strip_recommended(label) == normalized
+        })
+        .map(|(val, _)| val.as_str())
+}
+
+fn apply_question_field(out: &mut Map<String, Value>, field: &FormQuestionField, chosen: &str) {
+    match (match_field_choice(&field.choices, chosen), &field.other_key) {
+        (Some(val), _) => {
             out.insert(field.key.clone(), coerce_scalar(&field.prop, &json!(val)));
         }
         (None, Some(other_key)) => {

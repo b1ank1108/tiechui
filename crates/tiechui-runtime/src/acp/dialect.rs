@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::{Value, json};
-use tiechui_protocol::{ApprovalDecision, ApprovalRequest, CommandInfo, SubagentState};
+use tiechui_protocol::{ApprovalDecision, ApprovalRequest, CommandInfo, ModelInfo, SubagentState};
 
 use crate::backend::StartParams;
 use crate::registry::Launch;
@@ -108,6 +109,7 @@ impl Default for AcpTimeouts {
     }
 }
 
+#[async_trait]
 pub trait AcpDialect: Send + Sync {
     fn provider_id(&self) -> &'static str {
         "acp"
@@ -115,6 +117,10 @@ pub trait AcpDialect: Send + Sync {
 
     fn launch(&self, _launch: &Launch, _params: &StartParams) -> Result<AcpLaunchSpec, String> {
         Err("no ACP launch command configured".into())
+    }
+
+    async fn fallback_models(&self, _launch: &Launch) -> Vec<ModelInfo> {
+        Vec::new()
     }
 
     fn client_info(&self) -> Value {

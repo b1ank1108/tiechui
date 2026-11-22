@@ -83,11 +83,26 @@ pub fn normalized_call(state: &ToolState) -> (String, Value) {
     }
     match state.kind.as_deref() {
         Some("execute") => ("bash".into(), bash_args(state)),
-        Some("read") => ("read".into(), read_args(state)),
-        Some("search") => ("grep".into(), search_args(state)),
+        Some("read") => (read_tool_name(state).into(), read_args(state)),
+        Some("search") => (search_tool_name(state).into(), search_args(state)),
+        Some("write") => ("write".into(), write_args(state)),
         Some("edit") => ("edit".into(), path_args(state)),
         Some("delete" | "move") => (state.kind.clone().unwrap_or_default(), path_args(state)),
         _ => fallback_call(state),
+    }
+}
+
+fn read_tool_name(state: &ToolState) -> &'static str {
+    match state.name.as_deref() {
+        Some("ls") => "ls",
+        _ => "read",
+    }
+}
+
+fn search_tool_name(state: &ToolState) -> &'static str {
+    match state.name.as_deref() {
+        Some("find") => "find",
+        _ => "grep",
     }
 }
 
@@ -171,13 +186,23 @@ fn search_args(state: &ToolState) -> Value {
     Value::Object(map)
 }
 
-fn path_args(state: &ToolState) -> Value {
+fn map_with_path(state: &ToolState) -> Map<String, Value> {
     let mut map = object_of(state.raw_input.as_ref());
     if !map.contains_key("path")
         && let Some(loc) = state.locations.first()
     {
         map.insert("path".into(), json!(loc.path));
     }
+    map
+}
+
+fn path_args(state: &ToolState) -> Value {
+    Value::Object(map_with_path(state))
+}
+
+fn write_args(state: &ToolState) -> Value {
+    let mut map = map_with_path(state);
+    map.entry("content").or_insert_with(|| json!(""));
     Value::Object(map)
 }
 
@@ -226,6 +251,9 @@ fn extract_output_text(state: &ToolState) -> String {
 }
 
 fn extract_object_output(map: &Map<String, Value>) -> String {
+    if map.is_empty() {
+        return String::new();
+    }
     let streams: Vec<&str> = [
         "stdout",
         "stderr",

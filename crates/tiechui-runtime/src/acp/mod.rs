@@ -165,7 +165,9 @@ impl AcpBackend {
             .open_acp_session(&init, &cwd, params.resume.as_deref())
             .await?;
         let provider = self.config.dialect.provider_id();
-        let (model, models) = items::extract_models(provider, &setup, params.model.as_deref());
+        let (model, models) = self
+            .resolve_models(provider, &setup, params.model.as_deref())
+            .await;
         self.available_modes = setup
             .modes
             .as_ref()
@@ -182,7 +184,7 @@ impl AcpBackend {
                 .await?;
         }
         let final_model = self
-            .maybe_apply_initial_model(&session_id, model, params.model.as_deref(), resumed)
+            .maybe_apply_initial_model(&session_id, model, params.model.as_deref())
             .await?;
         self.models = models.clone();
         self.current_model = Some(final_model.clone());
@@ -372,19 +374,44 @@ impl AcpBackend {
             .map_err(|e| e.describe(peer, "session/set_mode"))
     }
 
+    async fn resolve_models(
+        &self,
+        provider: &str,
+        setup: &SessionSetupWire,
+        requested: Option<&str>,
+    ) -> (ModelInfo, Vec<ModelInfo>) {
+        let has_wire_models = setup
+            .models
+            .as_ref()
+            .is_some_and(|state| !state.available_models.is_empty());
+        if !has_wire_models {
+            let fallback = self
+                .config
+                .dialect
+                .fallback_models(&self.config.launch)
+                .await;
+            if let Some(first) = fallback.first() {
+                let target = requested.unwrap_or(&first.id);
+                let current = fallback
+                    .iter()
+                    .find(|m| m.id == target)
+                    .cloned()
+                    .unwrap_or_else(|| first.clone());
+                return (current, fallback);
+            }
+        }
+        items::extract_models(provider, setup, requested)
+    }
+
     async fn maybe_apply_initial_model(
         &self,
         session_id: &str,
         default_model: ModelInfo,
         requested: Option<&str>,
-        resumed: bool,
     ) -> Result<ModelInfo, String> {
-        let Some(wanted) = requested.filter(|_| !resumed) else {
+        let Some(wanted) = requested.filter(|m| !m.is_empty() && *m != default_model.id) else {
             return Ok(default_model);
         };
-        if wanted == default_model.id {
-            return Ok(default_model);
-        }
         self.call_set_model(session_id, wanted).await
     }
 
@@ -462,6 +489,9 @@ impl AcpBackend {
         let mut next_params = self.params.clone().ok_or("ACP backend was never started")?;
         next_params.mode = mode;
         next_params.resume = Some(session_id);
+        if let Some(current) = &self.current_model {
+            next_params.model = Some(current.id.clone());
+        }
         self.shutdown_run().await;
         self.run = Some(self.spawn_run(&next_params, events)?);
         match self.handshake(&next_params).await {

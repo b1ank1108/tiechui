@@ -91,7 +91,7 @@ impl Process {
     }
 }
 
-fn apply_env(
+pub(crate) fn apply_env(
     command: &mut Command,
     path: Option<&OsString>,
     env_set: &[(String, String)],

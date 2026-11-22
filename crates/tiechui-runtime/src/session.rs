@@ -107,10 +107,14 @@ pub async fn open_session(
     let path = store.path().to_owned();
     let cwd = store.header().cwd.clone();
     let resume = history::external_id(&store);
+    let requested_model = config
+        .model
+        .clone()
+        .or_else(|| history::stored_model(&store, runtime));
     let (started, backend_events) = match backend
         .start(StartParams {
             cwd: cwd.clone(),
-            model: config.model.clone(),
+            model: requested_model,
             thinking: config.thinking,
             mode: config.mode.clone(),
             resume: resume.clone(),

@@ -166,7 +166,10 @@ impl Registry {
 
 fn builtin_drivers() -> Vec<Arc<dyn Driver>> {
     #[allow(unused_mut)]
-    let mut drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(crate::codex::CodexDriver)];
+    let mut drivers: Vec<Arc<dyn Driver>> = vec![
+        Arc::new(crate::codex::CodexDriver),
+        Arc::new(crate::agy::AgyDriver),
+    ];
     #[cfg(feature = "fake-runtime")]
     drivers.push(Arc::new(crate::fake::FakeDriver));
     drivers
@@ -446,6 +449,15 @@ mod tests {
         assert_eq!(
             registry.capabilities("codex"),
             Some(RuntimeCapabilities::minimal())
+        );
+        assert_eq!(
+            registry.capabilities("agy"),
+            Some(RuntimeCapabilities {
+                steering: tiechui_protocol::SteeringMode::Queue,
+                commands: true,
+                model: true,
+                ..RuntimeCapabilities::minimal()
+            })
         );
         assert_eq!(
             registry.capabilities("chui"),

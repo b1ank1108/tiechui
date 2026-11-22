@@ -5,6 +5,7 @@
 //! already consumes for native sessions.
 
 pub mod acp;
+pub mod agy;
 mod backend;
 mod codex;
 #[cfg(feature = "fake-runtime")]
@@ -15,6 +16,7 @@ mod registry;
 mod rpc;
 mod session;
 
+pub use agy::AgyDriver;
 pub use backend::{
     Backend, BackendEvent, BackendItem, ChildOf, CommandAction, StartParams, Started, Steered,
     SubagentUpdate,
