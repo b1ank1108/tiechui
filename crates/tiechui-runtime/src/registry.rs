@@ -116,7 +116,7 @@ impl Registry {
         Ok(Self { drivers, launch })
     }
 
-    /// The runtimes this build ships: `codex`, and `fake` with the `fake-runtime` feature.
+    /// The runtimes this build ships: `codex`, `claude`, and `fake` with the `fake-runtime` feature.
     pub fn builtin(launch: Launch) -> Self {
         Self::new(builtin_drivers(), launch).expect("built-in runtimes are consistent")
     }
@@ -166,7 +166,10 @@ impl Registry {
 
 fn builtin_drivers() -> Vec<Arc<dyn Driver>> {
     #[allow(unused_mut)]
-    let mut drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(crate::codex::CodexDriver)];
+    let mut drivers: Vec<Arc<dyn Driver>> = vec![
+        Arc::new(crate::codex::CodexDriver),
+        Arc::new(crate::claude::ClaudeDriver),
+    ];
     #[cfg(feature = "fake-runtime")]
     drivers.push(Arc::new(crate::fake::FakeDriver));
     drivers
@@ -216,6 +219,46 @@ pub fn parse_version(text: &str) -> Option<String> {
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
         })
         .map(str::to_owned)
+}
+
+/// `probe_binary` with `--version`, unavailable when the version is older than `minimum`.
+pub async fn probe_at_least(binary: &str, minimum: &str, launch: &Launch) -> Probe {
+    let mut probe = probe_binary(binary, "--version", launch).await;
+    if let (true, Some(version)) = (probe.available, &probe.version)
+        && let Some(reason) = too_old(binary, version, minimum)
+    {
+        probe.reason = Some(reason);
+        probe.available = false;
+    }
+    probe
+}
+
+/// Why `binary` cannot run at `version`: it is older than `minimum` (as dotted numbers).
+pub fn too_old(binary: &str, version: &str, minimum: &str) -> Option<String> {
+    (!at_least(version, minimum)).then(|| {
+        format!("{binary} {version} is older than the minimum supported version {minimum}")
+    })
+}
+
+fn at_least(version: &str, minimum: &str) -> bool {
+    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
+    let len = version.len().max(minimum.len());
+    version.resize(len, 0);
+    minimum.resize(len, 0);
+    version >= minimum
+}
+
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 /// Locates `binary` on `launch.path` and runs `binary <version_arg>`, which must not touch the
@@ -440,6 +483,25 @@ mod tests {
         );
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn versions_compare_as_dotted_numbers() {
+        assert!(at_least("0.171.0", "0.156.1"));
+        assert!(at_least("0.156.1", "0.156.1"));
+        assert!(at_least("1.0.0", "0.156.1"));
+        assert!(at_least("0.156.1-alpha.2", "0.156.1"));
+        assert!(at_least("0.200", "0.156.1"));
+        assert!(!at_least("0.156.0", "0.156.1"));
+        assert!(!at_least("0.99.9", "0.156.1"));
+        assert!(!at_least("0.156", "0.156.1"));
+        assert!(at_least("2.1.322", "2.1.322"));
+        assert!(at_least("2.1.400", "2.1.322"));
+        assert!(at_least("2.2.0", "2.1.322"));
+        assert!(at_least("3.0.0", "2.1.322"));
+        assert!(!at_least("2.1.321", "2.1.322"));
+        assert!(!at_least("2.0.999", "2.1.322"));
+        assert!(!at_least("1.9.9", "2.1.322"));
     }
 
     #[test]

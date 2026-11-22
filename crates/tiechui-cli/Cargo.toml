@@ -21,6 +21,12 @@ path = "../../tests/e2e/fake_codex.rs"
 required-features = ["fake-runtime"]
 test = false
 
+[[bin]]
+name = "fake-claude"
+path = "../../tests/e2e/fake_claude.rs"
+required-features = ["fake-runtime"]
+test = false
+
 [dependencies]
 tiechui-module-subagents.workspace = true
 tiechui-module-compaction.workspace = true
@@ -91,6 +97,11 @@ required-features = ["fake-runtime"]
 [[test]]
 name = "codex"
 path = "../../tests/e2e/codex.rs"
+required-features = ["fake-runtime"]
+
+[[test]]
+name = "claude"
+path = "../../tests/e2e/claude.rs"
 required-features = ["fake-runtime"]
 
 [target.'cfg(unix)'.dependencies]
