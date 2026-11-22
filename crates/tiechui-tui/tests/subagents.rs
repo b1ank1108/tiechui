@@ -15,8 +15,15 @@ fn records() -> Vec<AgentDispatch> {
         id: "dispatch".into(),
         session_id: "main".into(),
         mode: "parallel".into(),
+        background: false,
+        started_at: 0,
         tasks: vec![
             AgentTask {
+                id: String::new(),
+                name: None,
+                background: false,
+                fork: false,
+                started_at: 0,
                 agent: "default".into(),
                 task: "Update the parser 👩‍💻 中文".into(),
                 state: AgentState::Completed,
@@ -34,6 +41,11 @@ fn records() -> Vec<AgentDispatch> {
                 model: "alpha/fast".into(),
             },
             AgentTask {
+                id: String::new(),
+                name: None,
+                background: false,
+                fork: false,
+                started_at: 0,
                 agent: "reviewer".into(),
                 task: "Review parser changes".into(),
                 state: AgentState::Cancelled,
@@ -201,7 +213,8 @@ fn viewer_defers_parent_approval_and_empty_composer_shortcut_respects_drafts() {
         name: SUBAGENTS_EVENT.into(),
         data: json!(SubagentsView {
             records: records(),
-            open: true
+            open: true,
+            pending_notifications: 0,
         }),
     }));
     app.event(event(EventKind::ApprovalRequested {

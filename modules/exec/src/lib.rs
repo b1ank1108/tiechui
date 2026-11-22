@@ -496,6 +496,32 @@ impl ShellsCommand {
             })
             .await
     }
+
+    fn apply_watch<'a>(
+        shells: &Shells,
+        data: &'a Value,
+    ) -> Result<Option<Option<&'a str>>, ToolError> {
+        if let Some(target) = data["detail"].as_str() {
+            shells.watch(Some(target))?;
+            return Ok(Some(Some(target)));
+        }
+        if data["close"].as_bool() == Some(true) {
+            shells.watch(None)?;
+            return Ok(Some(None));
+        }
+        Ok(None)
+    }
+
+    fn apply_task_action(shells: &Shells, data: &Value) -> Result<(), ToolError> {
+        if let Some(target) = data["stop"].as_str() {
+            shells.stop(target)?;
+        } else if let Some(target) = data["background"].as_str() {
+            shells.background(target)?;
+        } else if data["background_all"].as_bool() == Some(true) {
+            shells.background_all()?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -539,18 +565,13 @@ impl Command for ShellsCommand {
         if shells.session()? != session.branch.session_id {
             return Ok(String::new());
         }
-        let id = |key: &str| data[key].as_str();
-        let mut detail = None;
-        if let Some(target) = id("detail") {
-            shells.watch(Some(target))?;
-            detail = Some(target);
-        } else if data["close"].as_bool() == Some(true) {
-            shells.watch(None)?;
-        } else if let Some(target) = id("stop") {
-            shells.stop(target)?;
-        } else if let Some(target) = id("background") {
-            shells.background(target)?;
-        }
+        let detail = match Self::apply_watch(shells, &data)? {
+            Some(detail) => detail,
+            None => {
+                Self::apply_task_action(shells, &data)?;
+                None
+            }
+        };
         self.emit(&session, shells.view(false, detail)?).await?;
         Ok(String::new())
     }

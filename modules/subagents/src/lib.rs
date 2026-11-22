@@ -133,7 +133,8 @@ impl RuntimeExtension for Service {
                 SUBAGENTS_EVENT.into(),
                 json!(SubagentsView {
                     records: state.records.values().cloned().collect(),
-                    open: false
+                    open: false,
+                    pending_notifications: 0,
                 }),
             )],
             ..Default::default()
@@ -444,6 +445,11 @@ fn read_completed_output(buffer: &mut Collector) -> Option<(String, String)> {
 
 fn blank_agent_task(task: &PreparedTask) -> AgentTask {
     AgentTask {
+        id: String::new(),
+        name: None,
+        background: false,
+        fork: false,
+        started_at: 0,
         agent: task.label.clone(),
         task: task.task.clone(),
         state: AgentState::Waiting,
@@ -527,6 +533,8 @@ impl Service {
             id: id.to_owned(),
             session_id: ctx.scope.thread_id.0.clone(),
             mode: mode.into(),
+            background: false,
+            started_at: 0,
             tasks: tasks.iter().map(blank_agent_task).collect(),
         };
         {
@@ -749,6 +757,9 @@ impl Service {
                     model: task.model,
                     thinking: task.thinking,
                     tools,
+                    mode: ChildMode::Standard,
+                    store_path: None,
+                    steer: None,
                 },
                 registry,
                 slot.child_cancel,
@@ -1138,7 +1149,8 @@ impl Command for Service {
                 kind: SUBAGENTS_EVENT.into(),
                 data: json!(SubagentsView {
                     records,
-                    open: true
+                    open: true,
+                    pending_notifications: 0,
                 }),
             })
             .await?;

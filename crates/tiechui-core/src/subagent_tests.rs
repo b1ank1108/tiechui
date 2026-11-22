@@ -601,6 +601,9 @@ impl Tool for SpawnChildTool {
                     model,
                     thinking,
                     tools: None,
+                    mode: tiechui_plugin_api::ChildMode::Standard,
+                    store_path: None,
+                    steer: None,
                 },
                 Registry::default(),
                 ctx.cancel.child_token(),
@@ -1397,4 +1400,897 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
     assert_eq!(saved_records[1].tasks[0].model, "beta/judge");
     assert_eq!(saved_records[1].tasks[1].model, "alpha/fast");
     drop(_root);
+}
+
+#[tokio::test]
+async fn child_store_path_creates_private_file_and_resumes_prior_turns() {
+    let setup = MultiProviderFixture::probe_setup(
+        vec![answer("PARENT_UNUSED")],
+        vec![answer("FIRST_CHILD_REPLY"), answer("SECOND_CHILD_REPLY")],
+    );
+    let mut f = MultiProviderFixture::spawn(
+        tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap(),
+        setup.alpha,
+        setup.beta,
+        setup.registry,
+        setup.probe,
+        Some(ReasoningLevel::Low),
+    )
+    .await;
+
+    let runner = f.probe.runner.lock().unwrap().clone().unwrap();
+    let child_store = f
+        ._root
+        .path()
+        .join("profile/state/subagents/sessions/parent-1/ag1.jsonl");
+    let read_spec = ToolSpec {
+        name: "read".into(),
+        description: "Read file".into(),
+        input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+    };
+    let make_registry = || {
+        let mut reg = Registry::default();
+        tiechui_module_editing::EditingModule
+            .register_child(&mut reg, &ModuleConfig::default())
+            .unwrap();
+        reg
+    };
+
+    let cwd = f._root.path().to_path_buf();
+    let run_standard = |task: &str, system: &str, thinking: ThinkingLevel| {
+        let runner = runner.clone();
+        let cwd = cwd.clone();
+        let store_path = Some(child_store.clone());
+        let reg = make_registry();
+        let task = task.to_owned();
+        let system = system.to_owned();
+        async move {
+            runner
+                .run(
+                    tiechui_plugin_api::ChildRequest {
+                        cwd,
+                        task,
+                        system,
+                        model: Some("beta/judge".into()),
+                        thinking: Some(thinking),
+                        tools: Some(vec!["read".into()]),
+                        mode: tiechui_plugin_api::ChildMode::Standard,
+                        store_path,
+                        steer: None,
+                    },
+                    reg,
+                    CancellationToken::new(),
+                    Arc::new(|_| {}),
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    run_standard("first child task", "first-system", ThinkingLevel::Medium).await;
+
+    assert!(child_store.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in child_store.parent().unwrap().ancestors().take(4) {
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(&child_store)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let first_req = recv(&mut f.beta_rx).await;
+    assert_eq!(users(&first_req), ["first child task"]);
+    assert_eq!(first_req.tools.len(), 1);
+    assert_eq!(first_req.tools[0].name, read_spec.name);
+
+    run_standard("second child task", "resumed-system", ThinkingLevel::High).await;
+
+    let second_req = recv(&mut f.beta_rx).await;
+    assert_eq!(
+        users(&second_req),
+        ["first child task", "second child task"]
+    );
+    assert_eq!(second_req.reasoning, Some(ReasoningLevel::High));
+    assert!(
+        serde_json::to_string(&second_req)
+            .unwrap()
+            .contains("FIRST_CHILD_REPLY")
+    );
+    assert!(
+        serde_json::to_string(&second_req.messages[0])
+            .unwrap()
+            .contains("resumed-system")
+    );
+
+    #[cfg(unix)]
+    {
+        let symlink_path = f
+            ._root
+            .path()
+            .join("profile/state/subagents/sessions/parent-1/symlink.jsonl");
+        std::os::unix::fs::symlink(&child_store, &symlink_path).unwrap();
+        let err = runner
+            .run(
+                tiechui_plugin_api::ChildRequest {
+                    cwd: f._root.path().to_path_buf(),
+                    task: "reject symlink".into(),
+                    system: String::new(),
+                    model: None,
+                    thinking: None,
+                    tools: None,
+                    mode: tiechui_plugin_api::ChildMode::Standard,
+                    store_path: Some(symlink_path),
+                    steer: None,
+                },
+                Registry::default(),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await;
+        assert!(err.is_err());
+    }
+
+    f.stop().await;
+}
+
+struct GateTool {
+    spec: ToolSpec,
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl Tool for GateTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+    fn concurrency(&self, _: &serde_json::Value) -> Concurrency {
+        Concurrency::Shared
+    }
+    async fn run(&self, _: ToolCall, _: ToolContext) -> Result<ToolOutput, ToolError> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        let rx = self.release.lock().unwrap().take();
+        if let Some(rx) = rx {
+            let _ = rx.await;
+        }
+        Ok(ToolOutput::text("gate-released"))
+    }
+}
+
+#[tokio::test]
+async fn live_steer_injects_at_child_tool_boundary_and_drains_queued_steers_before_exit() {
+    let (mid_entered_tx, mid_entered_rx) = oneshot::channel();
+    let (mid_release_tx, mid_release_rx) = oneshot::channel();
+    let (tail_release_tx, tail_release_rx) = oneshot::channel();
+
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(FakeProvider {
+        scripts: Mutex::new(VecDeque::from([
+            invoke("gate", json!({})),
+            Script {
+                error: None,
+                steps: VecDeque::from([
+                    Step::Wait(tail_release_rx),
+                    Step::Event(StreamEvent::TextDelta {
+                        index: 0,
+                        delta: "AFTER_FIRST_STEER".into(),
+                    }),
+                    Step::Event(finish(StopReason::EndTurn)),
+                ]),
+            },
+            answer("AFTER_QUEUED_STEER"),
+        ])),
+        requests: req_tx,
+    });
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let store = SessionStore::create(
+        &root.path().join("sessions"),
+        root.path(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let probe = Arc::new(ChildProbe::default());
+    let mut parent_reg = Registry::default();
+    parent_reg.register_actor_client(probe.clone());
+    let shutdown = CancellationToken::new();
+    let mut parent = SessionActor::spawn(
+        store,
+        SessionConfig {
+            compaction: Default::default(),
+            model: origin("a"),
+            thinking: None,
+            providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
+            registry: parent_reg,
+            retry: Arc::new(BoundedRetry::default()),
+            interactions: None,
+            epoch: SessionEpoch(0),
+            short_cache: false,
+        },
+        shutdown.clone(),
+    );
+    while !matches!(
+        parent.events.recv().await.unwrap().event,
+        EventKind::ThreadStarted { .. }
+    ) {}
+
+    let runner = probe.runner.lock().unwrap().clone().unwrap();
+    let mut child_reg = Registry::default();
+    child_reg
+        .register_tool(Arc::new(GateTool {
+            spec: ToolSpec {
+                name: "gate".into(),
+                description: "Gate".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            entered: Mutex::new(Some(mid_entered_tx)),
+            release: Mutex::new(Some(mid_release_rx)),
+        }))
+        .unwrap();
+
+    let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+    let cwd = root.path().to_path_buf();
+    let seen_texts = Arc::new(Mutex::new(Vec::new()));
+    let seen_clone = seen_texts.clone();
+    let child_task = tokio::spawn(async move {
+        runner
+            .run(
+                tiechui_plugin_api::ChildRequest {
+                    cwd,
+                    task: "initial task".into(),
+                    system: String::new(),
+                    model: None,
+                    thinking: None,
+                    tools: None,
+                    mode: tiechui_plugin_api::ChildMode::Standard,
+                    store_path: None,
+                    steer: Some(steer_rx),
+                },
+                child_reg,
+                CancellationToken::new(),
+                Arc::new(move |event| {
+                    if let EventKind::ItemCompleted {
+                        item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                        ..
+                    } = event.event
+                    {
+                        seen_clone.lock().unwrap().push(text);
+                    }
+                }),
+            )
+            .await
+    });
+
+    let req1 = recv(&mut req_rx).await;
+    assert_eq!(users(&req1), ["initial task"]);
+
+    tokio::time::timeout(Duration::from_secs(5), mid_entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    steer_tx.send("steer at tool boundary".into()).unwrap();
+    mid_release_tx.send(()).unwrap();
+
+    let req2 = recv(&mut req_rx).await;
+    assert_eq!(users(&req2), ["initial task", "steer at tool boundary"]);
+    steer_tx.send("steer queued before finish".into()).unwrap();
+    tail_release_tx.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), child_task)
+        .await
+        .expect("child should finish after processing steers")
+        .unwrap()
+        .unwrap();
+
+    let req3 = recv(&mut req_rx).await;
+    assert_eq!(
+        users(&req3),
+        [
+            "initial task",
+            "steer at tool boundary",
+            "steer queued before finish"
+        ]
+    );
+    assert_eq!(
+        *seen_texts.lock().unwrap(),
+        vec!["AFTER_FIRST_STEER", "AFTER_QUEUED_STEER"]
+    );
+
+    shutdown.cancel();
+    parent.task.await.unwrap().unwrap();
+}
+
+struct ForkProbeTool {
+    probe: Arc<ChildProbe>,
+    stores: BTreeMap<String, PathBuf>,
+    spec: ToolSpec,
+}
+
+#[async_trait]
+impl Tool for ForkProbeTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+    fn concurrency(&self, _: &serde_json::Value) -> Concurrency {
+        Concurrency::Shared
+    }
+    async fn run(&self, call: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
+        let runner = self
+            .probe
+            .runner
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| ToolError("unbound runner".into()))?;
+        let slot = call.arguments["slot"].as_str().unwrap_or("f1");
+        let task = call.arguments["task"].as_str().unwrap_or("fork").to_owned();
+        let store_path = self.stores.get(slot).cloned();
+        let mut child_registry = Registry::default();
+        tiechui_module_editing::EditingModule
+            .register_child(&mut child_registry, &ModuleConfig::default())
+            .unwrap();
+        let final_text = Arc::new(Mutex::new(String::new()));
+        let slot_text = final_text.clone();
+        runner
+            .run(
+                tiechui_plugin_api::ChildRequest {
+                    cwd: ctx.cwd.clone(),
+                    task,
+                    system: "ignored-in-fork".into(),
+                    model: None,
+                    thinking: None,
+                    tools: None,
+                    mode: tiechui_plugin_api::ChildMode::Fork,
+                    store_path,
+                    steer: None,
+                },
+                child_registry,
+                ctx.cancel.child_token(),
+                Arc::new(move |event| {
+                    if let EventKind::ItemCompleted {
+                        item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                        ..
+                    } = event.event
+                    {
+                        *slot_text.lock().unwrap() = text;
+                    }
+                }),
+            )
+            .await?;
+        Ok(ToolOutput::text(final_text.lock().unwrap().clone()))
+    }
+}
+
+fn anthropic_text_sse(text: &str) -> String {
+    format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":8,\"cache_creation_input_tokens\":4}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":null,\"output_tokens\":3}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+        serde_json::to_string(text).unwrap()
+    )
+}
+
+fn anthropic_tool_calls_sse(
+    thinking: Option<(&str, &str)>,
+    lead_text: Option<&str>,
+    calls: &[(&str, &str, serde_json::Value)],
+) -> String {
+    let mut out = String::from(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":15,\"output_tokens\":0,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":5}}}\n\n",
+    );
+    let mut idx = 0;
+    if let Some((thought, sig)) = thinking {
+        out.push_str(&format!(
+            "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"thinking_delta\",\"thinking\":{}}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"signature_delta\",\"signature\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+            serde_json::to_string(thought).unwrap(),
+            serde_json::to_string(sig).unwrap()
+        ));
+        idx += 1;
+    }
+    if let Some(text) = lead_text {
+        out.push_str(&format!(
+            "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+            serde_json::to_string(text).unwrap()
+        ));
+        idx += 1;
+    }
+    for (id, name, input) in calls {
+        let raw = serde_json::to_string(input).unwrap();
+        out.push_str(&format!(
+            "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"tool_use\",\"id\":{},\"name\":{},\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+            serde_json::to_string(id).unwrap(),
+            serde_json::to_string(name).unwrap(),
+            serde_json::to_string(&raw).unwrap()
+        ));
+        idx += 1;
+    }
+    out.push_str(
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":12}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    out
+}
+
+struct ForkWireRouter;
+
+impl wiremock::Respond for ForkWireRouter {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let last_msg = parsed["messages"]
+            .as_array()
+            .and_then(|msgs| msgs.last())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let sse = if last_msg.contains("call_rec_resume")
+            && last_msg.contains("Forked subagents cannot spawn or manage subagents")
+        {
+            anthropic_text_sse("FORK_A_RESUMED_DONE")
+        } else if last_msg.contains("Resume Fork A") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[("call_rec_resume", "subagent_list", json!({}))],
+            )
+        } else if last_msg.contains("Forked subagents cannot spawn or manage subagents") {
+            anthropic_text_sse("FORK_B_RECOVERED")
+        } else if last_msg.contains("call_write_a") {
+            anthropic_text_sse("FORK_A_DONE")
+        } else if last_msg.contains("Task A: inspect parser") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[(
+                    "call_write_a",
+                    "write",
+                    json!({"path": "fork-a.txt", "content": "from fork a"}),
+                )],
+            )
+        } else if last_msg.contains("Task B: attempt recursion") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[
+                    ("call_rec_1", "subagent", json!({"task": "illegal nested"})),
+                    (
+                        "call_rec_2",
+                        "subagent_send",
+                        json!({"to": "ag1", "message": "illegal send"}),
+                    ),
+                ],
+            )
+        } else if last_msg.contains("FORK_A_DONE") && last_msg.contains("FORK_B_RECOVERED") {
+            anthropic_text_sse("PARENT_ALL_DONE")
+        } else {
+            anthropic_tool_calls_sse(
+                Some(("Analyze parent context.", "sig-parent-fork-1")),
+                Some("Spawning two forks."),
+                &[
+                    (
+                        "call_fork_1",
+                        "fork_probe",
+                        json!({
+                            "slot": "f1",
+                            "task": "<fork_boilerplate>stay in scope</fork_boilerplate>\nTask A: inspect parser"
+                        }),
+                    ),
+                    (
+                        "call_fork_2",
+                        "fork_probe",
+                        json!({
+                            "slot": "f2",
+                            "task": "<fork_boilerplate>stay in scope</fork_boilerplate>\nTask B: attempt recursion"
+                        }),
+                    ),
+                ],
+            )
+        };
+        wiremock::ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+    }
+}
+
+struct StubTool(ToolSpec);
+
+#[async_trait]
+impl Tool for StubTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.0
+    }
+    fn concurrency(&self, _: &serde_json::Value) -> Concurrency {
+        Concurrency::Shared
+    }
+    async fn run(&self, _: ToolCall, _: ToolContext) -> Result<ToolOutput, ToolError> {
+        panic!("subagent management tools must be rejected before execution in fork children")
+    }
+}
+
+#[tokio::test]
+async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoints_and_resumes_across_fresh_runner()
+ {
+    use wiremock::{Mock, MockServer, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ForkWireRouter)
+        .mount(&server)
+        .await;
+
+    let make_provider = || {
+        Arc::from(
+            tiechui_providers::testing::provider(
+                "anth",
+                &tiechui_config::ProviderConfig {
+                    wire: tiechui_config::Wire::AnthropicMessages,
+                    base_url: Some(server.uri()),
+                    api_key: None,
+                    api_key_env: None,
+                    compat: Default::default(),
+                    models: vec![
+                        serde_json::from_value(json!({
+                            "id": "sonnet",
+                            "context_window": 200_000,
+                            "max_output": 8192,
+                            "reasoning": true,
+                            "thinking": "adaptive",
+                            "cache_retention": "long"
+                        }))
+                        .unwrap(),
+                    ],
+                },
+            )
+            .unwrap(),
+        ) as Arc<dyn ModelProvider>
+    };
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let f1_store = root
+        .path()
+        .join("profile/state/subagents/sessions/parent-fork/ag1.jsonl");
+    let f2_store = root
+        .path()
+        .join("profile/state/subagents/sessions/parent-fork/ag2.jsonl");
+
+    let probe = Arc::new(ChildProbe::default());
+    let mut registry = Registry::default();
+    registry.register_actor_client(probe.clone());
+    registry.register_context_provider(Arc::new(StaticContext(vec![
+        "Primary coding instructions.".into(),
+        "<subagent_models>\nActive session model: anth/sonnet\n</subagent_models>".into(),
+    ])));
+    tiechui_module_editing::EditingModule
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    registry
+        .register_tool(Arc::new(ForkProbeTool {
+            probe: probe.clone(),
+            stores: BTreeMap::from([
+                ("f1".into(), f1_store.clone()),
+                ("f2".into(), f2_store.clone()),
+            ]),
+            spec: ToolSpec {
+                name: "fork_probe".into(),
+                description: "Spawn fork child".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["slot", "task"],
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "task": {"type": "string"}
+                    }
+                }),
+            },
+        }))
+        .unwrap();
+    for name in [
+        "subagent",
+        "subagent_send",
+        "subagent_stop",
+        "subagent_list",
+    ] {
+        registry
+            .register_tool(Arc::new(StubTool(ToolSpec {
+                name: name.into(),
+                description: format!("Parent {name} tool"),
+                input_schema: json!({"type": "object"}),
+            })))
+            .unwrap();
+    }
+
+    let parent_store = SessionStore::create(
+        &root.path().join("sessions"),
+        root.path(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let parent_thread = ThreadId(parent_store.header().id.clone());
+    let shutdown = CancellationToken::new();
+    let mut parent = SessionActor::spawn(
+        parent_store,
+        SessionConfig {
+            compaction: Default::default(),
+            model: ModelRef {
+                provider: "anth".into(),
+                model: ModelId("anth/sonnet".into()),
+            },
+            thinking: Some(ReasoningLevel::High),
+            providers: BTreeMap::from([("anth".into(), make_provider())]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: SessionEpoch(0),
+            short_cache: false,
+        },
+        shutdown.clone(),
+    );
+    while !matches!(
+        parent.events.recv().await.unwrap().event,
+        EventKind::ThreadStarted { .. }
+    ) {}
+
+    parent
+        .submissions
+        .send(Submission {
+            id: SubmissionId("turn-1".into()),
+            thread_id: parent_thread,
+            epoch: SessionEpoch(0),
+            op: Op::UserInput {
+                content: vec![InputContent::Text {
+                    text: "Coordinate two parallel forks".into(),
+                }],
+                delivery: InputDelivery::FollowUp,
+            },
+        })
+        .await
+        .unwrap();
+
+    loop {
+        if let EventKind::TurnCompleted { turn } = parent.events.recv().await.unwrap().event {
+            assert_eq!(turn.status, TurnStatus::Completed);
+            break;
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("fork-a.txt")).unwrap(),
+        "from fork a"
+    );
+
+    shutdown.cancel();
+    parent.task.await.unwrap().unwrap();
+
+    let received = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = received
+        .iter()
+        .map(|req| serde_json::from_slice(&req.body).unwrap())
+        .collect();
+    let parent_initial = &bodies[0];
+
+    let last_of = |b: &serde_json::Value| {
+        b["messages"]
+            .as_array()
+            .and_then(|msgs| msgs.last())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    };
+    let fork_a_initial = bodies
+        .iter()
+        .find(|b| last_of(b).contains("Task A: inspect parser"))
+        .expect("missing Fork A initial request");
+    let fork_b_initial = bodies
+        .iter()
+        .find(|b| last_of(b).contains("Task B: attempt recursion"))
+        .expect("missing Fork B initial request");
+    let fork_b_after_rejection = bodies
+        .iter()
+        .find(|b| last_of(b).contains("Forked subagents cannot spawn or manage subagents"))
+        .expect("missing Fork B post-rejection request");
+
+    assert_eq!(
+        parent_initial["system"][0]["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+    assert_eq!(
+        parent_initial["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+
+    for fork_body in [fork_a_initial, fork_b_initial] {
+        assert_eq!(
+            serde_json::to_vec(&fork_body["system"]).unwrap(),
+            serde_json::to_vec(&parent_initial["system"]).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&fork_body["tools"]).unwrap(),
+            serde_json::to_vec(&parent_initial["tools"]).unwrap()
+        );
+        assert_eq!(fork_body["model"], parent_initial["model"]);
+        assert_eq!(fork_body["thinking"], parent_initial["thinking"]);
+        assert_eq!(fork_body["output_config"], parent_initial["output_config"]);
+        assert_eq!(
+            serde_json::to_vec(&fork_body["messages"][0]).unwrap(),
+            serde_json::to_vec(&parent_initial["messages"][0]).unwrap(),
+            "1h long cache breakpoint on parent user message must stay byte-identical"
+        );
+    }
+
+    assert_eq!(
+        serde_json::to_vec(&fork_a_initial["messages"][1]).unwrap(),
+        serde_json::to_vec(&fork_b_initial["messages"][1]).unwrap()
+    );
+    assert_eq!(
+        fork_a_initial["messages"][1]["content"][0],
+        json!({
+            "type": "thinking",
+            "thinking": "Analyze parent context.",
+            "signature": "sig-parent-fork-1"
+        })
+    );
+
+    let fork_a_tools_and_task = fork_a_initial["messages"][2]["content"].as_array().unwrap();
+    let fork_b_tools_and_task = fork_b_initial["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(fork_a_tools_and_task.len(), 3);
+    assert_eq!(fork_b_tools_and_task.len(), 3);
+    assert_eq!(
+        serde_json::to_vec(&fork_a_tools_and_task[..2]).unwrap(),
+        serde_json::to_vec(&fork_b_tools_and_task[..2]).unwrap()
+    );
+    for (idx, expected_id) in ["call_fork_1", "call_fork_2"].into_iter().enumerate() {
+        assert_eq!(
+            fork_a_tools_and_task[idx],
+            json!({
+                "type": "tool_result",
+                "tool_use_id": expected_id,
+                "content": [{"type": "text", "text": "Fork started — processing in background"}],
+                "is_error": false
+            })
+        );
+    }
+
+    let rejected_blocks = fork_b_after_rejection["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["content"]
+        .as_array()
+        .unwrap();
+    for expected_id in ["call_rec_1", "call_rec_2"] {
+        let block = rejected_blocks
+            .iter()
+            .find(|b| b["tool_use_id"] == expected_id)
+            .expect("missing rejected tool_result");
+        assert_eq!(block["is_error"], true);
+        assert_eq!(
+            block["content"][0]["text"],
+            "Forked subagents cannot spawn or manage subagents; complete your task directly using your tools."
+        );
+    }
+
+    let fresh_probe = Arc::new(ChildProbe::default());
+    let mut fresh_parent_reg = Registry::default();
+    fresh_parent_reg.register_actor_client(fresh_probe.clone());
+    let fresh_store = SessionStore::create(
+        &root.path().join("fresh-sessions"),
+        root.path(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let fresh_shutdown = CancellationToken::new();
+    let mut fresh_parent = SessionActor::spawn(
+        fresh_store,
+        SessionConfig {
+            compaction: Default::default(),
+            model: ModelRef {
+                provider: "anth".into(),
+                model: ModelId("anth/sonnet".into()),
+            },
+            thinking: None,
+            providers: BTreeMap::from([("anth".into(), make_provider())]),
+            registry: fresh_parent_reg,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: SessionEpoch(0),
+            short_cache: false,
+        },
+        fresh_shutdown.clone(),
+    );
+    while !matches!(
+        fresh_parent.events.recv().await.unwrap().event,
+        EventKind::ThreadStarted { .. }
+    ) {}
+    let fresh_runner = fresh_probe.runner.lock().unwrap().clone().unwrap();
+
+    let mut resumed_child_reg = Registry::default();
+    tiechui_module_editing::EditingModule
+        .register_child(&mut resumed_child_reg, &ModuleConfig::default())
+        .unwrap();
+    resumed_child_reg
+        .register_tool(Arc::new(StubTool(ToolSpec {
+            name: "subagent_list".into(),
+            description: "Should be intercepted".into(),
+            input_schema: json!({"type": "object"}),
+        })))
+        .unwrap();
+
+    let resumed_reply = Arc::new(Mutex::new(String::new()));
+    let resumed_slot = resumed_reply.clone();
+    fresh_runner
+        .run(
+            tiechui_plugin_api::ChildRequest {
+                cwd: root.path().to_path_buf(),
+                task: "Resume Fork A".into(),
+                system: "must-not-override-persisted-fork-system".into(),
+                model: None,
+                thinking: None,
+                tools: None,
+                mode: tiechui_plugin_api::ChildMode::Fork,
+                store_path: Some(f1_store.clone()),
+                steer: None,
+            },
+            resumed_child_reg,
+            CancellationToken::new(),
+            Arc::new(move |event| {
+                if let EventKind::ItemCompleted {
+                    item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                    ..
+                } = event.event
+                {
+                    *resumed_slot.lock().unwrap() = text;
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*resumed_reply.lock().unwrap(), "FORK_A_RESUMED_DONE");
+
+    let all_received = server.received_requests().await.unwrap();
+    let resumed_req: serde_json::Value = serde_json::from_slice(
+        &all_received
+            .iter()
+            .find(|r| {
+                let s = String::from_utf8_lossy(&r.body);
+                s.contains("Resume Fork A") && !s.contains("call_rec_resume")
+            })
+            .expect("missing resumed fork request")
+            .body,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&resumed_req["system"]).unwrap(),
+        serde_json::to_vec(&parent_initial["system"]).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&resumed_req["tools"]).unwrap(),
+        serde_json::to_vec(&parent_initial["tools"]).unwrap()
+    );
+    assert_eq!(resumed_req["thinking"], parent_initial["thinking"]);
+    assert_eq!(
+        resumed_req["output_config"],
+        parent_initial["output_config"]
+    );
+    let placeholder_occurrences = resumed_req
+        .to_string()
+        .matches("Fork started — processing in background")
+        .count();
+    assert_eq!(
+        placeholder_occurrences, 2,
+        "resuming fork store must not re-seed parent prefix"
+    );
+    assert!(resumed_req.to_string().contains("FORK_A_DONE"));
+
+    fresh_shutdown.cancel();
+    fresh_parent.task.await.unwrap().unwrap();
 }

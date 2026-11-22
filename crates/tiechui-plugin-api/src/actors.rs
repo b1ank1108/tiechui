@@ -25,6 +25,13 @@ impl ModelCatalog {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChildMode {
+    #[default]
+    Standard,
+    Fork,
+}
+
 pub struct ChildRequest {
     pub cwd: PathBuf,
     pub task: String,
@@ -32,6 +39,9 @@ pub struct ChildRequest {
     pub model: Option<String>,
     pub thinking: Option<protocol::ThinkingLevel>,
     pub tools: Option<Vec<String>>,
+    pub mode: ChildMode,
+    pub store_path: Option<PathBuf>,
+    pub steer: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

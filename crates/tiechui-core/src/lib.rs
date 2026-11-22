@@ -127,13 +127,25 @@ pub struct SessionActor {
     pending_compaction: Option<Submission>,
     pending_shell: Option<Submission>,
     breaker: compaction::Breaker,
+    fork_snapshot: Arc<std::sync::Mutex<Option<actors::ForkSnapshot>>>,
+    last_wire_request: Option<actors::WireRequest>,
+    overrides: actors::ActorOverrides,
 }
 
 impl SessionActor {
     /// Open/create the store on a blocking thread before transferring ownership here.
     pub fn spawn(
         store: SessionStore,
+        config: SessionConfig,
+        shutdown: CancellationToken,
+    ) -> SessionHandle {
+        Self::spawn_with_overrides(store, config, actors::ActorOverrides::default(), shutdown)
+    }
+
+    pub(crate) fn spawn_with_overrides(
+        store: SessionStore,
         mut config: SessionConfig,
+        overrides: actors::ActorOverrides,
         shutdown: CancellationToken,
     ) -> SessionHandle {
         let (submissions, ops) = mpsc::channel(64);
@@ -199,6 +211,9 @@ impl SessionActor {
             pending_compaction: None,
             pending_shell: None,
             breaker: compaction::Breaker::default(),
+            fork_snapshot: Arc::default(),
+            last_wire_request: None,
+            overrides,
         };
         let task = tokio::spawn(actor.run());
         SessionHandle {
@@ -374,6 +389,7 @@ impl SessionActor {
             model: self.model.clone(),
             thinking: self.requested,
             retry: self.config.retry.clone(),
+            fork_snapshot: self.fork_snapshot.clone(),
         });
         for client in self.registry.actor_clients() {
             client.bind(runner.clone());
@@ -917,6 +933,8 @@ impl SessionActor {
         self.command_cancel.cancel();
         self.command_cancel = self.shutdown.child_token();
         self.last_request = None;
+        self.last_wire_request = None;
+        *self.fork_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.system_fragments.clear();
         let shown = self.shown();
         self.prompts.clear();
@@ -1151,30 +1169,32 @@ impl SessionActor {
                 return Ok(false);
             }
             self.turn_context.extend(outcome.context);
-            let input = TurnInput {
-                cwd: PathBuf::from(&self.store()?.header().cwd),
-                content: content.clone(),
-            };
-            let registry = self.registry.clone();
-            let cancel = self.cancel.clone();
-            let system = self.drive(async move {
-                let mut fragments = Vec::new();
-                let mut descriptions = Vec::new();
-                for provider in registry.context_providers() {
-                    let contribution = tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => return Err("Operation aborted".to_owned()),
-                        result = provider.fragments(&input, cancel.clone()) => result.map_err(|e| e.to_string())?,
-                    };
-                    descriptions.extend(provider.describe(&contribution));
-                    fragments.extend(contribution);
+            if self.overrides.system.is_none() {
+                let input = TurnInput {
+                    cwd: PathBuf::from(&self.store()?.header().cwd),
+                    content: content.clone(),
+                };
+                let registry = self.registry.clone();
+                let cancel = self.cancel.clone();
+                let system = self.drive(async move {
+                    let mut fragments = Vec::new();
+                    let mut descriptions = Vec::new();
+                    for provider in registry.context_providers() {
+                        let contribution = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err("Operation aborted".to_owned()),
+                            result = provider.fragments(&input, cancel.clone()) => result.map_err(|e| e.to_string())?,
+                        };
+                        descriptions.extend(provider.describe(&contribution));
+                        fragments.extend(contribution);
+                    }
+                    Ok((assemble_system_prompt(&fragments), descriptions))
+                }).await?;
+                if self.cancel.is_cancelled() {
+                    return Ok(false);
                 }
-                Ok((assemble_system_prompt(&fragments), descriptions))
-            }).await?;
-            if self.cancel.is_cancelled() {
-                return Ok(false);
+                (self.system, self.system_fragments) = system?;
             }
-            (self.system, self.system_fragments) = system?;
             if let Some(input) = self.automatic_input.clone() {
                 let id = self.append(EntryKind::CustomMessage { kind: input.kind, text: input.text, hidden: !input.visible,
                     details: serde_json::json!({"sessionId": self.thread.0, "identity": input.identity, "generation": input.generation}),
@@ -1418,10 +1438,11 @@ impl SessionActor {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            self.persist_assistant(message, origin, reason, usage, reasoning)
+            self.persist_assistant(message.clone(), origin.clone(), reason, usage, reasoning)
                 .await?;
             self.drain_submissions().await?;
             if !calls.is_empty() {
+                self.capture_fork_snapshot(&message, &origin, reason, reasoning);
                 self.execute(calls, reason).await?;
             }
             self.drain_submissions().await?;
@@ -1678,6 +1699,12 @@ impl SessionActor {
         );
         let system = self.system_message();
         let assembled_system = system.is_some();
+        let wire_system = system
+            .as_ref()
+            .and_then(|msg| match msg.content.as_slice() {
+                [Content::Text { text, .. }] => Some(text.clone()),
+                _ => None,
+            });
         messages.splice(0..0, system);
         let durable = messages.len();
         messages.extend(temporary);
@@ -1696,11 +1723,22 @@ impl SessionActor {
             assembled_system.then(|| &messages[0]),
             &tools,
         )?);
+        let cache_key = self
+            .overrides
+            .cache_key
+            .clone()
+            .or_else(|| Some(self.thread.0.clone()));
+        self.last_wire_request = Some(actors::WireRequest {
+            system: wire_system,
+            tools: tools.clone(),
+            messages: messages[usize::from(assembled_system)..].to_vec(),
+            cache_key: cache_key.clone(),
+        });
         let request = ModelRequest {
             disable_cache: false,
             short_cache: self.config.short_cache,
             temporary_tail,
-            cache_key: Some(self.thread.0.clone()),
+            cache_key,
             input_tokens: Some(input_tokens),
             model: self.model.model.clone(),
             messages,
@@ -2062,8 +2100,44 @@ impl SessionActor {
         Ok(())
     }
 
+    fn capture_fork_snapshot(
+        &self,
+        message: &Message,
+        origin: &ModelRef,
+        stop_reason: StopReason,
+        reasoning: Option<ReasoningLevel>,
+    ) {
+        if let Some(wire) = &self.last_wire_request {
+            *self.fork_snapshot.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(actors::ForkSnapshot {
+                    system: wire.system.clone(),
+                    tools: wire.tools.clone(),
+                    messages: wire.messages.clone(),
+                    assistant: actors::ForkAssistant {
+                        message: message.clone(),
+                        model: origin.clone(),
+                        stop_reason,
+                        reasoning,
+                    },
+                    model: self.model.clone(),
+                    thinking: self.thinking,
+                    cache_key: wire.cache_key.clone(),
+                });
+        }
+    }
+
     /// The next request's system message, absent when every fragment is empty.
     fn system_message(&self) -> Option<Message> {
+        if let Some(override_system) = &self.overrides.system {
+            return override_system
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .map(|s| Message {
+                    role: Role::System,
+                    content: vec![text_content(s.clone())],
+                    opaque: None,
+                });
+        }
         let system = assemble_system_prompt(
             &self
                 .session_context
@@ -2081,6 +2155,9 @@ impl SessionActor {
     }
 
     fn visible_tools(&self) -> Vec<tiechui_model::ToolSpec> {
+        if let Some(tools) = &self.overrides.tools {
+            return tools.clone();
+        }
         match self.registry.presentation() {
             Some(presentation) => presentation.present(tiechui_plugin_api::PresentationContext {
                 tools: self.registry.tools().callable(),
