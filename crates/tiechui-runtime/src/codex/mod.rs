@@ -4,12 +4,10 @@
 //! connection; their frames never touch the root thread's turn (see `translate`).
 
 mod items;
-mod rpc;
 mod translate;
 mod wire;
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,16 +15,17 @@ use serde_json::json;
 use tiechui_protocol::{
     ApprovalDecision, InputContent, ModelInfo, RuntimeCapabilities, ThinkingLevel,
 };
-use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
-use crate::process::{Frame, FrameReader, Process};
-use crate::registry::{Driver, Launch, Probe, parse_version, probe_binary, resolve_in_path};
+use crate::process::{Process, StderrTail, read_frames, read_stderr};
+use crate::registry::{
+    Driver, Launch, Probe, parse_version, probe_binary, resolve_in_path, seconds, version_at_least,
+};
+use crate::rpc::{CallError, Rpc};
 use items::Policy;
-use rpc::{CallError, Rpc};
-use translate::{Inbound, Shared, Translator, TurnState};
+use translate::{Shared, Translator, TurnState};
 
 /// The oldest Codex the driver supports: the oldest one whose frames were recorded for it
 /// (0.156.1, which has `turn/steer`, `thread/resume` without turns and sub-agent items). The
@@ -69,39 +68,10 @@ impl Timeouts {
     }
 }
 
-fn seconds(duration: Duration) -> String {
-    if duration.subsec_millis() == 0 {
-        format!("{} s", duration.as_secs())
-    } else {
-        format!("{:.1} s", duration.as_secs_f64())
-    }
-}
-
 fn debug(message: &str) {
     if std::env::var_os("CHUI_CODEX_DEBUG").is_some() {
         eprintln!("chui codex: {message}");
     }
-}
-
-fn version_parts(version: &str) -> Vec<u64> {
-    version
-        .split('.')
-        .map(|part| {
-            part.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-fn at_least(version: &str, minimum: &str) -> bool {
-    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
-    let len = version.len().max(minimum.len());
-    version.resize(len, 0);
-    minimum.resize(len, 0);
-    version >= minimum
 }
 
 pub struct CodexDriver;
@@ -127,7 +97,7 @@ impl Driver for CodexDriver {
     async fn probe(&self, launch: &Launch) -> Probe {
         let mut probe = probe_binary("codex", "--version", launch).await;
         if let (true, Some(version)) = (probe.available, &probe.version)
-            && !at_least(version, MIN_VERSION)
+            && !version_at_least(version, MIN_VERSION)
         {
             probe.reason = Some(format!(
                 "codex {version} is older than the minimum supported version {MIN_VERSION}"
@@ -171,47 +141,6 @@ struct CodexBackend {
     policy: Policy,
     cwd: String,
     model: Option<String>,
-}
-
-type StderrTail = Arc<Mutex<VecDeque<String>>>;
-
-async fn read_frames(stdout: impl AsyncRead + Unpin, frames: mpsc::Sender<Inbound>) {
-    let mut reader = FrameReader::new(stdout);
-    loop {
-        let message = match reader.next().await {
-            Ok(Some(Frame::Line(line))) if line.is_empty() => continue,
-            Ok(Some(Frame::Line(line))) => Inbound::Frame(line),
-            Ok(Some(Frame::Oversize(size))) => Inbound::Oversize(size),
-            Ok(None) | Err(_) => {
-                let _ = frames.send(Inbound::Eof).await;
-                return;
-            }
-        };
-        if frames.send(message).await.is_err() {
-            return;
-        }
-    }
-}
-
-async fn read_stderr(stderr: impl AsyncRead + Unpin, tail: StderrTail) {
-    let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
-    while let Ok(Some(frame)) = reader.next().await {
-        let Frame::Line(line) = frame else { continue };
-        let line: String = String::from_utf8_lossy(&line)
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
-        if line.is_empty() {
-            continue;
-        }
-        debug(&format!("stderr: {line}"));
-        let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-        if tail.len() == 8 {
-            tail.pop_front();
-        }
-        tail.push_back(line);
-    }
 }
 
 impl CodexBackend {
@@ -265,7 +194,7 @@ impl CodexBackend {
         let (_, initialized) = rpc
             .send("initialize", wire::initialize_params())
             .await
-            .map_err(|error| error.describe("initialize"))?;
+            .map_err(|error| error.describe("codex", "initialize"))?;
         tokio::time::timeout(timeouts.handshake, shared.first_frame.notified())
             .await
             .map_err(|_| {
@@ -286,7 +215,7 @@ impl CodexBackend {
             .map_err(|error| format!("codex initialize: {}", error.message))?;
         let agent = response["userAgent"].as_str().unwrap_or_default();
         if let Some(version) = parse_version(agent)
-            && !at_least(&version, MIN_VERSION)
+            && !version_at_least(&version, MIN_VERSION)
         {
             return Err(format!(
                 "codex {version} is older than the minimum supported version {MIN_VERSION}"
@@ -315,13 +244,13 @@ impl CodexBackend {
                 Err(CallError::Rpc(error)) => {
                     debug(&format!("thread/resume failed: {}", error.message));
                 }
-                Err(error) => return Err(error.describe("thread/resume")),
+                Err(error) => return Err(error.describe("codex", "thread/resume")),
             }
         }
         let value = rpc
             .call("thread/start", self.thread_params(None), timeouts.thread)
             .await
-            .map_err(|error| error.describe("thread/start"))?;
+            .map_err(|error| error.describe("codex", "thread/start"))?;
         Ok((value, false))
     }
 
@@ -351,14 +280,8 @@ impl Backend for CodexBackend {
             self.launch.path.as_ref(),
         )
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
-        let (Some(stdin), Some(stdout), Some(stderr)) = (
-            process.stdin.take(),
-            process.stdout.take(),
-            process.stderr.take(),
-        ) else {
-            return Err("codex started without its stdio".into());
-        };
-        let rpc = Arc::new(Rpc::new(stdin));
+        let (stdin, stdout, stderr) = process.take_stdio("codex")?;
+        let rpc = Arc::new(Rpc::new(stdin, "codex", false));
         let shared = Arc::new(Shared::default());
         let tail = StderrTail::default();
         let (events, received) = mpsc::channel(1024);
@@ -366,7 +289,7 @@ impl Backend for CodexBackend {
         let translator = Translator::new(shared.clone(), rpc.clone(), events, tail.clone());
         let tasks = vec![
             tokio::spawn(read_frames(stdout, frames)),
-            tokio::spawn(read_stderr(stderr, tail)),
+            tokio::spawn(read_stderr(stderr, tail, "CHUI_CODEX_DEBUG", "chui codex")),
             tokio::spawn(translator.run(inbound)),
         ];
         self.run = Some(Run {
@@ -411,7 +334,7 @@ impl Backend for CodexBackend {
             )
             .await;
         let started = result
-            .map_err(|error| error.describe("turn/start"))
+            .map_err(|error| error.describe("codex", "turn/start"))
             .and_then(|value| {
                 serde_json::from_value::<wire::TurnResponse>(value)
                     .map_err(|error| format!("codex turn/start response: {error}"))
@@ -448,7 +371,7 @@ impl Backend for CodexBackend {
             .await;
         Ok(match result {
             Ok(_) => Steered::Accepted,
-            Err(error) => Steered::Rejected(error.describe("turn/steer")),
+            Err(error) => Steered::Rejected(error.describe("codex", "turn/steer")),
         })
     }
 
@@ -476,7 +399,7 @@ impl Backend for CodexBackend {
             )
             .await
             .map(|_| ())
-            .map_err(|error| error.describe("turn/interrupt"))
+            .map_err(|error| error.describe("codex", "turn/interrupt"))
     }
 
     async fn answer_approval(
@@ -511,13 +434,13 @@ mod tests {
 
     #[test]
     fn versions_compare_as_dotted_numbers() {
-        assert!(at_least("0.171.0", "0.156.1"));
-        assert!(at_least("0.156.1", "0.156.1"));
-        assert!(at_least("1.0.0", "0.156.1"));
-        assert!(at_least("0.156.1-alpha.2", "0.156.1"));
-        assert!(at_least("0.200", "0.156.1"));
-        assert!(!at_least("0.156.0", "0.156.1"));
-        assert!(!at_least("0.99.9", "0.156.1"));
-        assert!(!at_least("0.156", "0.156.1"));
+        assert!(version_at_least("0.171.0", "0.156.1"));
+        assert!(version_at_least("0.156.1", "0.156.1"));
+        assert!(version_at_least("1.0.0", "0.156.1"));
+        assert!(version_at_least("0.156.1-alpha.2", "0.156.1"));
+        assert!(version_at_least("0.200", "0.156.1"));
+        assert!(!version_at_least("0.156.0", "0.156.1"));
+        assert!(!version_at_least("0.99.9", "0.156.1"));
+        assert!(!version_at_least("0.156", "0.156.1"));
     }
 }

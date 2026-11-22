@@ -1,16 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use tiechui_exec::Tree;
 use tiechui_protocol::ItemId;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::sync::mpsc;
 
 /// The longest frame a driver reads; a longer one is reported and skipped.
 pub const MAX_FRAME: usize = 32 << 20;
+
+pub type StderrTail = Arc<Mutex<VecDeque<String>>>;
+
+pub enum Inbound {
+    Frame(Vec<u8>),
+    Oversize(usize),
+    Eof,
+}
 
 /// A spawned CLI in its own process group (a job object on Windows). Dropping it kills the
 /// group; `close` stops it gracefully first.
@@ -31,6 +41,19 @@ impl Process {
         cwd: &Path,
         path: Option<&OsString>,
     ) -> io::Result<Self> {
+        let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        Self::spawn_with_env(program, &owned, cwd, path, &[], &[])
+    }
+
+    /// Starts `program` with piped stdio and explicit environment additions and removals.
+    pub fn spawn_with_env(
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        path: Option<&OsString>,
+        env_set: &[(String, String)],
+        env_remove: &[String],
+    ) -> io::Result<Self> {
         let mut command = Command::new(program);
         command
             .args(args)
@@ -38,9 +61,7 @@ impl Process {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(path) = path {
-            command.env("PATH", path);
-        }
+        apply_env(&mut command, path, env_set, env_remove);
         let (mut child, tree) = Tree::spawn(&mut command)?;
         Ok(Self {
             stdin: child.stdin.take(),
@@ -51,11 +72,119 @@ impl Process {
         })
     }
 
+    /// Takes the three piped stdio handles out of a freshly spawned process.
+    pub fn take_stdio(
+        &mut self,
+        peer: &str,
+    ) -> Result<(ChildStdin, ChildStdout, ChildStderr), String> {
+        match (self.stdin.take(), self.stdout.take(), self.stderr.take()) {
+            (Some(stdin), Some(stdout), Some(stderr)) => Ok((stdin, stdout, stderr)),
+            _ => Err(format!("{peer} started without piped stdio")),
+        }
+    }
+
     /// Stops the whole group (TERM, a grace period, then KILL) and reaps the root.
     pub async fn close(mut self) {
         self.stdin.take();
         let _ = self.tree.terminate(&mut self.child).await;
         let _ = self.child.wait().await;
+    }
+}
+
+fn apply_env(
+    command: &mut Command,
+    path: Option<&OsString>,
+    env_set: &[(String, String)],
+    env_remove: &[String],
+) {
+    for key in env_remove {
+        command.env_remove(key);
+    }
+    #[cfg(windows)]
+    scrub_windows_env(command, env_set, env_remove);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    for (key, value) in env_set {
+        command.env(key, value);
+    }
+}
+
+#[cfg(windows)]
+fn scrub_windows_env(command: &mut Command, env_set: &[(String, String)], env_remove: &[String]) {
+    for (existing, _) in std::env::vars_os() {
+        let Some(name) = existing.to_str() else {
+            continue;
+        };
+        let remove_match = env_remove
+            .iter()
+            .any(|target| name.eq_ignore_ascii_case(target));
+        let shadow_match = env_set
+            .iter()
+            .any(|(target, _)| name != target && name.eq_ignore_ascii_case(target));
+        if remove_match || shadow_match {
+            command.env_remove(&existing);
+        }
+    }
+}
+
+pub async fn read_frames(stdout: impl AsyncRead + Unpin, frames: mpsc::Sender<Inbound>) {
+    let mut reader = FrameReader::new(stdout);
+    loop {
+        let message = match reader.next().await {
+            Ok(Some(Frame::Line(line))) if line.is_empty() => continue,
+            Ok(Some(Frame::Line(line))) => Inbound::Frame(line),
+            Ok(Some(Frame::Oversize(size))) => Inbound::Oversize(size),
+            Ok(None) | Err(_) => {
+                let _ = frames.send(Inbound::Eof).await;
+                return;
+            }
+        };
+        if frames.send(message).await.is_err() {
+            return;
+        }
+    }
+}
+
+pub async fn read_stderr(
+    stderr: impl AsyncRead + Unpin,
+    tail: StderrTail,
+    debug_env: &'static str,
+    prefix: &'static str,
+) {
+    let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
+    while let Ok(Some(frame)) = reader.next().await {
+        let Frame::Line(line) = frame else { continue };
+        let line: String = String::from_utf8_lossy(&line)
+            .trim()
+            .chars()
+            .take(300)
+            .collect();
+        if line.is_empty() {
+            continue;
+        }
+        if std::env::var_os(debug_env).is_some() {
+            eprintln!("{prefix}: stderr: {line}");
+        }
+        let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+        if tail.len() == 8 {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+pub fn stderr_detail(tail: &StderrTail) -> String {
+    let lines: Vec<String> = tail
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", lines.join(" | "))
     }
 }
 

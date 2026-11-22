@@ -1,0 +1,217 @@
+//! Dialect hooks for customizing ACP handshakes, session modes, tool normalization, subagents,
+//! interactive prompts, command filtering, and vendor error rewriting without altering the
+//! generic ACP client.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use tiechui_protocol::{ApprovalDecision, ApprovalRequest, CommandInfo, SubagentState};
+
+use crate::backend::StartParams;
+use crate::registry::Launch;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResumePreference {
+    #[default]
+    PreferResume,
+    PreferLoad,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextDisposition {
+    Keep,
+    Ignore,
+    FailTurn(String),
+}
+
+pub struct CustomApproval {
+    pub request: ApprovalRequest,
+    pub respond: Box<dyn FnOnce(&ApprovalDecision) -> Value + Send>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpSubagent {
+    pub agent_id: String,
+    pub name: Option<String>,
+    pub state: SubagentState,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolLocation {
+    pub path: String,
+    pub line: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolState {
+    pub id: String,
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub locations: Vec<ToolLocation>,
+    pub raw_input: Option<Value>,
+    pub raw_output: Option<Value>,
+    pub content: Vec<Value>,
+    pub meta: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InitializeInfo {
+    pub protocol_version: u64,
+    pub agent_name: Option<String>,
+    pub agent_version: Option<String>,
+    pub load_session: bool,
+    pub resume_session: bool,
+    pub image_prompts: bool,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpLaunchSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env_set: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
+}
+
+impl AcpLaunchSpec {
+    pub fn new(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AcpTimeouts {
+    pub handshake: Duration,
+    pub session: Duration,
+    pub request: Duration,
+    pub wakeup_idle: Duration,
+}
+
+impl Default for AcpTimeouts {
+    fn default() -> Self {
+        Self {
+            handshake: Duration::from_secs(60),
+            session: Duration::from_secs(60),
+            request: Duration::from_secs(30),
+            wakeup_idle: Duration::from_secs(2),
+        }
+    }
+}
+
+pub trait AcpDialect: Send + Sync {
+    fn provider_id(&self) -> &'static str {
+        "acp"
+    }
+
+    fn launch(&self, _launch: &Launch, _params: &StartParams) -> Result<AcpLaunchSpec, String> {
+        Err("no ACP launch command configured".into())
+    }
+
+    fn client_info(&self) -> Value {
+        json!({
+            "name": "tiechui",
+            "title": "Tiechui",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    }
+
+    fn client_capabilities(&self) -> Value {
+        json!({ "elicitation": { "form": {} } })
+    }
+
+    fn check_initialize(&self, _info: &InitializeInfo) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn session_meta(&self, _info: &InitializeInfo, _resuming: bool) -> Option<Value> {
+        None
+    }
+
+    fn resume_preference(&self) -> ResumePreference {
+        ResumePreference::PreferResume
+    }
+
+    fn reactive_wakeups(&self) -> bool {
+        true
+    }
+
+    fn session_mode(&self, mode: &str, available: &[String]) -> Option<String> {
+        let candidates: &[&str] = match mode {
+            "auto" => &["accept-edits", "auto_edit", "auto"],
+            "yolo" => &["yolo", "bypassPermissions"],
+            _ => &["default", "ask"],
+        };
+        candidates
+            .iter()
+            .find(|candidate| available.iter().any(|item| item == **candidate))
+            .map(|picked| (*picked).to_owned())
+    }
+
+    /// Whether switching to `mode` mid-session requires restarting the ACP process and resuming.
+    fn mode_requires_restart(&self, _current: Option<&str>, _next: &str) -> bool {
+        false
+    }
+
+    fn filter_command(&self, _command: &CommandInfo) -> bool {
+        true
+    }
+
+    fn on_text_chunk(&self, _thinking: bool, _text: &str) -> TextDisposition {
+        TextDisposition::Keep
+    }
+
+    fn normalize_tool(&self, _tool: &mut ToolState) {}
+
+    fn tool_subagent(&self, _tool: &ToolState) -> Option<AcpSubagent> {
+        None
+    }
+
+    fn intercept_request(&self, _method: &str, _params: &Value) -> Option<CustomApproval> {
+        None
+    }
+
+    fn format_error(&self, _code: i64, message: &str, _data: Option<&Value>) -> String {
+        message.to_owned()
+    }
+
+    fn is_auth_error(&self, _code: i64, _message: &str, _data: Option<&Value>) -> bool {
+        false
+    }
+}
+
+pub struct GenericAcpDialect {
+    pub spec: AcpLaunchSpec,
+}
+
+impl AcpDialect for GenericAcpDialect {
+    fn launch(&self, _launch: &Launch, _params: &StartParams) -> Result<AcpLaunchSpec, String> {
+        Ok(self.spec.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct AcpConfig {
+    pub launch: Launch,
+    pub dialect: Arc<dyn AcpDialect>,
+    pub timeouts: AcpTimeouts,
+}
+
+impl AcpConfig {
+    pub fn generic(launch: Launch, spec: AcpLaunchSpec) -> Self {
+        Self {
+            launch,
+            dialect: Arc::new(GenericAcpDialect { spec }),
+            timeouts: AcpTimeouts::default(),
+        }
+    }
+}

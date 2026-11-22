@@ -218,6 +218,36 @@ pub fn parse_version(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Whether dotted `version` is at least `minimum`.
+pub fn version_at_least(version: &str, minimum: &str) -> bool {
+    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
+    let len = version.len().max(minimum.len());
+    version.resize(len, 0);
+    minimum.resize(len, 0);
+    version >= minimum
+}
+
+pub(crate) fn seconds(duration: Duration) -> String {
+    if duration.subsec_millis() == 0 {
+        format!("{} s", duration.as_secs())
+    } else {
+        format!("{:.1} s", duration.as_secs_f64())
+    }
+}
+
 /// Locates `binary` on `launch.path` and runs `binary <version_arg>`, which must not touch the
 /// runtime's state. A missing binary, a failing or hanging command is unavailable with a reason.
 pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> Probe {

@@ -14,18 +14,18 @@ use tokio::time::Instant;
 
 use super::debug;
 use super::items;
-use super::rpc::Rpc;
 mod agents;
 use agents::Agent;
 
 use super::wire::{
     AgentMessageItem, Breakdown, CommandApproval, CommandItem, DeltaNotification, Elicitation,
-    FileApproval, FileChangeItem, Incoming, ItemNotification, McpItem, OtherItem,
-    PermissionsApproval, ReasoningItem, ResolvedNotification, StatusNotification, TurnBody,
-    TurnError, TurnNotification, UsageNotification,
+    FileApproval, FileChangeItem, ItemNotification, McpItem, OtherItem, PermissionsApproval,
+    ReasoningItem, ResolvedNotification, StatusNotification, TurnBody, TurnError, TurnNotification,
+    UsageNotification,
 };
 use crate::backend::{BackendEvent, BackendItem};
-use crate::process::DeltaCoalescer;
+use crate::process::{DeltaCoalescer, Inbound, StderrTail, stderr_detail};
+use crate::rpc::{Incoming, Rpc};
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 const FLUSH_BYTES: usize = 64 * 1024;
@@ -106,12 +106,6 @@ impl Shared {
     }
 }
 
-pub enum Inbound {
-    Frame(Vec<u8>),
-    Oversize(usize),
-    Eof,
-}
-
 pub(super) struct ToolStub {
     pub id: String,
     pub name: String,
@@ -142,7 +136,7 @@ pub struct Translator {
     outside_turn_output_seen: bool,
     agents: HashMap<String, Agent>,
     child_tools: HashMap<String, Vec<ToolStub>>,
-    stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
+    stderr: StderrTail,
 }
 
 impl Translator {
@@ -150,7 +144,7 @@ impl Translator {
         shared: Arc<Shared>,
         rpc: Arc<Rpc>,
         out: mpsc::Sender<BackendEvent>,
-        stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
+        stderr: StderrTail,
     ) -> Self {
         Self {
             shared,
@@ -203,18 +197,7 @@ impl Translator {
 
     async fn exited(&mut self) {
         self.flush().await;
-        let tail: Vec<String> = self
-            .stderr
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect();
-        let detail = if tail.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", tail.join(" | "))
-        };
+        let detail = stderr_detail(&self.stderr);
         self.send_now(BackendEvent::Error(format!(
             "codex app-server exited{detail}"
         )))
