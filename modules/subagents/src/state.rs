@@ -24,6 +24,7 @@ pub(crate) enum StopCause {
 pub(crate) struct ActiveTask {
     pub dispatch_id: String,
     pub cancel: CancellationToken,
+    pub steer: tokio::sync::mpsc::UnboundedSender<String>,
     pub done: watch::Receiver<bool>,
     pub stop: Option<StopCause>,
     pub notified: bool,
@@ -210,6 +211,38 @@ impl State {
         Err(ToolError(format!(
             "No subagent or dispatch '{id}' in this session"
         )))
+    }
+
+    pub fn resolve_send_task(&self, raw: &str) -> Result<AgentTask, ToolError> {
+        let id = raw.trim();
+        if let Some(Target::Task {
+            dispatch_id, index, ..
+        }) = self
+            .find_task_by(|task| task.id == id)
+            .or_else(|| self.find_task_by(|task| task.name.as_deref() == Some(id)))
+        {
+            let task = &self.records[&dispatch_id].tasks[index];
+            if task.state == AgentState::Skipped {
+                return Err(ToolError(format!(
+                    "Subagent {} was skipped and has no session to resume",
+                    task.id
+                )));
+            }
+            return Ok(task.clone());
+        }
+        if self.records.contains_key(id) {
+            return Err(ToolError(format!(
+                "'{id}' is a dispatch ID; pass an agent_id (e.g. ag1) or subagent name to subagent_send"
+            )));
+        }
+        Err(ToolError(format!("No subagent '{id}' in this session")))
+    }
+
+    pub fn name_resolves_to(&self, name: &str, task_id: &str) -> bool {
+        matches!(
+            self.find_task_by(|t| t.name.as_deref() == Some(name)),
+            Some(Target::Task { task_id: found, .. }) if found == task_id
+        )
     }
 
     fn promote_dispatch_record(record: &mut AgentDispatch) -> bool {

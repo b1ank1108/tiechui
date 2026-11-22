@@ -13,10 +13,28 @@ pub(crate) struct Collector {
     thinking_blocks: Vec<(String, String)>,
     pub status: Option<TurnStatus>,
     pub error: Option<String>,
+    baseline_usage: Option<TokenUsage>,
     pub usage: TokenUsage,
     pub turns: u64,
     pub model: String,
     next_response: bool,
+}
+
+fn sub_token_usage(total: TokenUsage, base: TokenUsage) -> TokenUsage {
+    let cost_nano_usd = match (total.cost_nano_usd, base.cost_nano_usd) {
+        (Some(t), Some(b)) => Some(t.saturating_sub(b)),
+        (Some(t), None) => Some(t),
+        (None, _) => None,
+    };
+    TokenUsage {
+        input: total.input.saturating_sub(base.input),
+        output: total.output.saturating_sub(base.output),
+        cache_read: total.cache_read.saturating_sub(base.cache_read),
+        cache_write: total.cache_write.saturating_sub(base.cache_write),
+        reasoning: total.reasoning.saturating_sub(base.reasoning),
+        cache_write_1h: total.cache_write_1h.saturating_sub(base.cache_write_1h),
+        cost_nano_usd,
+    }
 }
 
 impl Collector {
@@ -31,6 +49,7 @@ impl Collector {
             thinking_blocks: vec![],
             status: None,
             error: None,
+            baseline_usage: None,
             usage: TokenUsage::default(),
             turns: 0,
             model: String::new(),
@@ -146,6 +165,13 @@ impl Collector {
         Ok(())
     }
 
+    fn record_session(&mut self, model: &ModelInfo, total: TokenUsage) {
+        self.model = format!("{}/{}", model.provider, model.id);
+        if self.baseline_usage.is_none() && self.turns == 0 {
+            self.baseline_usage = Some(total);
+        }
+    }
+
     pub fn event(&mut self, event: &EventKind) -> Result<(), ToolError> {
         if !self.item_event(event)? {
             match event {
@@ -156,12 +182,12 @@ impl Collector {
                         .is_none_or(|usage| usage.partial);
                 }
                 EventKind::TokenUsageUpdated { total, .. } => {
-                    self.usage = *total;
+                    self.usage = sub_token_usage(*total, self.baseline_usage.unwrap_or_default());
                     self.turns += 1;
                     self.next_response = true;
                 }
-                EventKind::SessionUpdated { model, .. } => {
-                    self.model = format!("{}/{}", model.provider, model.id);
+                EventKind::SessionUpdated { model, total, .. } => {
+                    self.record_session(model, *total);
                 }
                 EventKind::TurnCompleted { turn } => self.status = Some(turn.status),
                 EventKind::Error { message } => self.error = Some(message.clone()),

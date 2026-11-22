@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tiechui_plugin_api::{
     model::{ToolCall, ToolSpec},
     protocol::*,
@@ -9,7 +9,7 @@ use tiechui_plugin_api::{
 use crate::{
     Service,
     dispatch::wait_done,
-    params::{dispatch_spec, list_spec, stop_spec},
+    params::{dispatch_spec, list_spec, send_spec, stop_spec},
     state::{StopCause, Target},
 };
 
@@ -17,6 +17,7 @@ const USAGE: &str = "Usage: /subagents [background|stop <id>]";
 
 enum ManageKind {
     Dispatch,
+    Send,
     List,
     Stop,
 }
@@ -33,6 +34,14 @@ impl ManageTool {
             service,
             kind: ManageKind::Dispatch,
             spec: dispatch_spec(),
+        }
+    }
+
+    pub fn send(service: Arc<Service>) -> Self {
+        Self {
+            service,
+            kind: ManageKind::Send,
+            spec: send_spec(),
         }
     }
 
@@ -64,13 +73,12 @@ impl ManageTool {
         if state.session != ctx.scope.thread_id.0 {
             return Err(ToolError("Subagents belong to another session".into()));
         }
-        let mut lines = Vec::new();
-        let mut items = Vec::new();
-        for record in state.ordered_records() {
-            for task in &record.tasks {
-                lines.push(format_list_line(task));
-                items.push(list_item_json(&record.id, task));
-            }
+        let unique = collect_unique_tasks(&state);
+        let mut lines = Vec::with_capacity(unique.len());
+        let mut items = Vec::with_capacity(unique.len());
+        for (dispatch_id, task) in &unique {
+            lines.push(format_list_line(task));
+            items.push(list_item_json(dispatch_id, task));
         }
         let text = if lines.is_empty() {
             "No subagents in this session.".into()
@@ -117,10 +125,41 @@ impl Tool for ManageTool {
     async fn run(&self, call: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
         match self.kind {
             ManageKind::Dispatch => self.service.dispatch(call, ctx).await,
+            ManageKind::Send => self.service.send(call, ctx).await,
             ManageKind::List => self.run_list(&call, &ctx),
             ManageKind::Stop => self.run_stop(&call, &ctx).await,
         }
     }
+}
+
+fn merge_list_task(prev: &AgentTask, latest: &AgentTask) -> AgentTask {
+    let mut merged = latest.clone();
+    merged.turns = prev.turns.saturating_add(latest.turns);
+    if merged.model.is_empty() {
+        merged.model = prev.model.clone();
+    }
+    merged
+}
+
+fn collect_unique_tasks(state: &crate::state::State) -> Vec<(String, AgentTask)> {
+    let mut index_by_id: BTreeMap<String, usize> = BTreeMap::new();
+    let mut items: Vec<(String, AgentTask)> = Vec::new();
+    for record in state.ordered_records() {
+        for task in &record.tasks {
+            if !task.id.is_empty()
+                && let Some(&idx) = index_by_id.get(&task.id)
+            {
+                let merged = merge_list_task(&items[idx].1, task);
+                items[idx] = (record.id.clone(), merged);
+            } else {
+                if !task.id.is_empty() {
+                    index_by_id.insert(task.id.clone(), items.len());
+                }
+                items.push((record.id.clone(), task.clone()));
+            }
+        }
+    }
+    items
 }
 
 fn one_line_summary(text: &str) -> String {

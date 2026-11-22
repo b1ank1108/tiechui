@@ -1,4 +1,5 @@
 use std::{
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -7,16 +8,18 @@ use tiechui_plugin_api::{
     futures::{FutureExt, StreamExt},
     model::{ToolCall, Usage},
     protocol::*,
-    serde_json::{Value, json},
+    serde_json::{self, Value, json},
     *,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     MAX_PARALLEL_TASKS, Service,
     collector::{Collector, read_completed_output, resolve_task_state},
     definitions, output,
-    params::{PreparedTask, parameters, prepare_tasks},
+    params::{
+        PreparedTask, SendParams, parameters, parse_send_params, prepare_tasks, resolve_thinking,
+    },
     state::{ActiveDispatch, ActiveTask, StopCause, now_ms},
 };
 
@@ -50,6 +53,7 @@ struct TaskRun {
     task: PreparedTask,
     ctx: ToolContext,
     cancel: CancellationToken,
+    steer_rx: Option<mpsc::UnboundedReceiver<String>>,
     done_tx: watch::Sender<bool>,
 }
 
@@ -77,7 +81,32 @@ enum WaitStep {
     Running,
 }
 
+struct PersistedChildMeta {
+    cwd: PathBuf,
+    model: Option<String>,
+    thinking: Option<ThinkingLevel>,
+}
+
+struct ResumeSeed {
+    id: String,
+    name: Option<String>,
+    agent: String,
+    model: String,
+    fork: bool,
+}
+
+enum SteerAttempt {
+    Queued(ToolOutput),
+    WaitThenResume(watch::Receiver<bool>),
+    Resume(ResumeSeed),
+}
+
 fn blank_agent_task(task: &PreparedTask, started_at: i64) -> AgentTask {
+    let model = if task.resumed {
+        task.model.clone().unwrap_or_default()
+    } else {
+        String::new()
+    };
     AgentTask {
         id: task.id.clone(),
         name: task.name.clone(),
@@ -94,12 +123,12 @@ fn blank_agent_task(task: &PreparedTask, started_at: i64) -> AgentTask {
         thinking_path: None,
         usage: TokenUsage::default(),
         turns: 0,
-        model: String::new(),
+        model,
     }
 }
 
-fn resolve_child_cwd(parent_cwd: &Path, child: Option<&str>) -> Result<PathBuf, ToolError> {
-    let cwd = std::fs::canonicalize(parent_cwd.join(child.unwrap_or(".")))?;
+fn verify_workspace_cwd(parent_cwd: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
+    let cwd = std::fs::canonicalize(candidate)?;
     let boundary = std::fs::canonicalize(parent_cwd)?;
     if !cwd.starts_with(&boundary) || !cwd.is_dir() {
         return Err(ToolError(
@@ -107,6 +136,213 @@ fn resolve_child_cwd(parent_cwd: &Path, child: Option<&str>) -> Result<PathBuf, 
         ));
     }
     Ok(cwd)
+}
+
+fn resolve_child_cwd(parent_cwd: &Path, child: Option<&str>) -> Result<PathBuf, ToolError> {
+    verify_workspace_cwd(parent_cwd, &parent_cwd.join(child.unwrap_or(".")))
+}
+
+fn validate_safe_segment(raw: &str, label: &str) -> Result<(), ToolError> {
+    let mut components = Path::new(raw).components();
+    let valid = !raw.is_empty()
+        && !raw.contains(['/', '\\', '\0'])
+        && matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !valid {
+        return Err(ToolError(format!("Invalid {label} '{raw}'")));
+    }
+    Ok(())
+}
+
+pub(crate) fn child_session_path(
+    home: &Path,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<Option<PathBuf>, ToolError> {
+    if session_id.is_empty() || agent_id.is_empty() {
+        return Ok(None);
+    }
+    validate_safe_segment(session_id, "session identifier")?;
+    validate_safe_segment(agent_id, "subagent identifier")?;
+    Ok(Some(
+        home.join("state/subagents/sessions")
+            .join(session_id)
+            .join(format!("{agent_id}.jsonl")),
+    ))
+}
+
+fn wrap_fork_directive(task: &str) -> String {
+    format!(
+        "<fork_boilerplate>\n\
+You are a forked subagent worker. You are NOT the main session agent.\n\
+Rules:\n\
+1. Do NOT call subagent, subagent_send, subagent_stop, or subagent_list. Execute your task directly using workspace tools.\n\
+2. Do NOT ask the user questions or converse; stay strictly within the assigned directive scope.\n\
+3. Report concise factual findings and any files modified, then finish.\n\
+</fork_boilerplate>\n\n\
+Directive: {task}"
+    )
+}
+
+fn fork_resumed_task(prev: ResumeSeed, cwd: PathBuf, params: SendParams) -> PreparedTask {
+    PreparedTask {
+        id: prev.id,
+        name: prev.name,
+        background: params.background,
+        fork: true,
+        resumed: true,
+        label: "fork".into(),
+        custom_agent: None,
+        task: params.message,
+        cwd: None,
+        resolved_cwd: Some(cwd),
+        model: (!prev.model.is_empty()).then_some(prev.model),
+        thinking: None,
+    }
+}
+
+fn resolve_task_cwd(run: &TaskRun) -> Result<PathBuf, ToolError> {
+    match &run.task.resolved_cwd {
+        Some(resolved) => verify_workspace_cwd(&run.ctx.cwd, resolved),
+        None => resolve_child_cwd(&run.ctx.cwd, run.task.cwd.as_deref()),
+    }
+}
+
+fn resolve_child_prompt(task: &PreparedTask) -> (ChildMode, String, Option<String>) {
+    if !task.fork {
+        return (ChildMode::Standard, task.task.clone(), task.model.clone());
+    }
+    let prompt = if task.resumed {
+        task.task.clone()
+    } else {
+        wrap_fork_directive(&task.task)
+    };
+    (ChildMode::Fork, prompt, None)
+}
+
+fn open_persisted_file(path: &Path, task_id: &str) -> Result<std::fs::File, ToolError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ToolError(format!(
+                "No persisted session found for subagent '{task_id}'"
+            )));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(ToolError(format!(
+            "Invalid persisted session file for subagent '{task_id}'"
+        )));
+    }
+    Ok(std::fs::File::open(path)?)
+}
+
+fn parse_header_cwd(line: &str, task_id: &str, parent_cwd: &Path) -> Result<PathBuf, ToolError> {
+    let header: Value = serde_json::from_str(line)
+        .map_err(|e| ToolError(format!("Invalid session header for '{task_id}': {e}")))?;
+    let valid_id = header["id"].as_str().is_some_and(|s| !s.is_empty());
+    let Some(raw_cwd) = header["cwd"]
+        .as_str()
+        .filter(|_| header["format_version"] == 1 && valid_id)
+    else {
+        return Err(ToolError(format!("Invalid session header for '{task_id}'")));
+    };
+    let cwd = Path::new(raw_cwd);
+    if !cwd.is_absolute() {
+        return Err(ToolError(format!(
+            "Invalid session cwd for subagent '{task_id}'"
+        )));
+    }
+    verify_workspace_cwd(parent_cwd, cwd)
+}
+
+fn apply_persisted_entry(
+    entry: &Value,
+    model: &mut Option<String>,
+    thinking: &mut Option<ThinkingLevel>,
+) {
+    match entry["kind"].as_str() {
+        Some("model_change") => {
+            if let Some(m) = entry["model"]["model"].as_str() {
+                *model = Some(m.to_owned());
+            }
+        }
+        Some("thinking_change") => {
+            if entry["level"].is_null() {
+                *thinking = Some(ThinkingLevel::Off);
+            } else if let Some(ChildThinking::Level(level)) = entry["level"]
+                .as_str()
+                .and_then(|s| parse_child_thinking(s).ok())
+            {
+                *thinking = Some(level);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inspect_persisted_child(
+    path: &Path,
+    task_id: &str,
+    parent_cwd: &Path,
+) -> Result<PersistedChildMeta, ToolError> {
+    let file = open_persisted_file(path, task_id)?;
+    let mut first = String::new();
+    let mut head_reader = BufReader::new(&file).take(1024 * 1024);
+    head_reader.read_line(&mut first)?;
+    let cwd = parse_header_cwd(&first, task_id, parent_cwd)?;
+    let mut reader = head_reader.into_inner();
+    let mut model = None;
+    let mut thinking = None;
+    let mut line = String::new();
+    while reader.read_line(&mut line)? > 0 {
+        if let Ok(entry) = serde_json::from_str::<Value>(&line) {
+            apply_persisted_entry(&entry, &mut model, &mut thinking);
+        }
+        line.clear();
+    }
+    Ok(PersistedChildMeta {
+        cwd,
+        model,
+        thinking,
+    })
+}
+
+fn queued_steer_output(task_id: &str, task_name: &Option<String>) -> ToolOutput {
+    let label = match task_name {
+        Some(name) => format!("{task_id} ({name})"),
+        None => task_id.to_owned(),
+    };
+    ToolOutput {
+        structured_content: Some(json!({
+            "status": "queued",
+            "agent_id": task_id,
+            "name": task_name,
+        })),
+        ..ToolOutput::text(format!(
+            "Queued message for subagent {label}; it will be delivered at the next tool or turn boundary."
+        ))
+    }
+}
+
+fn lookup_resume_agent(
+    home: &Path,
+    cwd: &Path,
+    agent_name: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<definitions::Definition>, ToolError> {
+    if agent_name == "default" {
+        return Ok(None);
+    }
+    let catalog = definitions::discover_catalog(home, cwd, "both", cancel)?;
+    if let Some((path, reason)) = catalog.invalid.get(agent_name) {
+        return Err(ToolError(format!(
+            "Invalid agent definition '{agent_name}' in {}: {reason}",
+            path.display()
+        )));
+    }
+    Ok(catalog.agents.get(agent_name).cloned())
 }
 
 pub(crate) fn agent_model_label(task: &AgentTask) -> String {
@@ -417,7 +653,14 @@ impl Service {
         }
         state.ensure_available_names(&tasks)?;
         for task in &mut tasks {
-            task.id = state.allocate_id();
+            if task.id.is_empty() {
+                task.id = state.allocate_id();
+            } else if state.tasks.contains_key(&task.id) {
+                return Err(ToolError(format!(
+                    "Subagent '{}' is already active; retry subagent_send to queue steering",
+                    task.id
+                )));
+            }
         }
         let dispatch_id = if state.records.contains_key(id) {
             format!("{id}#{}", state.order.len() + 1)
@@ -512,6 +755,9 @@ impl Service {
         arguments: &Value,
         ctx: &ToolContext,
     ) -> Result<(&'static str, Vec<PreparedTask>, Arc<dyn ChildRunner>), ToolError> {
+        if !ctx.scope.thread_id.0.is_empty() {
+            validate_safe_segment(&ctx.scope.thread_id.0, "session identifier")?;
+        }
         let (mode, top_bg, raw_tasks) = parameters(arguments)?;
         let scope = arguments["agentScope"].as_str().unwrap_or("user");
         let catalog = definitions::discover_catalog(&self.home, &ctx.cwd, scope, &ctx.cancel)?;
@@ -521,31 +767,174 @@ impl Service {
         Ok((mode, tasks, runner))
     }
 
+    async fn launch_and_finish(
+        self: &Arc<Self>,
+        call_id: &str,
+        mode: &str,
+        tasks: Vec<PreparedTask>,
+        runner: Arc<dyn ChildRunner>,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        if ctx.cancel.is_cancelled() {
+            return Err(ToolError("Dispatch cancelled".into()));
+        }
+        let mut changes = self.changes.subscribe();
+        let output_dir = self.home.join("state/subagents/output");
+        let started = self.start_dispatch(call_id, mode, tasks, runner, ctx)?;
+        self.flush_entries(ctx)?;
+        if started.all_background {
+            return Ok(async_output(&started.record, &output_dir, false));
+        }
+        self.publish_foreground(&started.dispatch_id, call_id, started.session_gen, ctx);
+        self.wait_foreground(
+            (&started.dispatch_id, call_id),
+            started.session_gen,
+            started.done,
+            &mut changes,
+            ctx,
+        )
+        .await
+    }
+
     pub(crate) async fn dispatch(
         self: &Arc<Self>,
         call: ToolCall,
         ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let (mode, tasks, runner) = self.prepare_dispatch(&call.arguments, &ctx).await?;
-        if ctx.cancel.is_cancelled() {
-            return Err(ToolError("Dispatch cancelled".into()));
+        self.launch_and_finish(&call.id, mode, tasks, runner, &ctx)
+            .await
+    }
+
+    fn try_steer_active(
+        &self,
+        params: &SendParams,
+        ctx: &ToolContext,
+    ) -> Result<SteerAttempt, ToolError> {
+        let state = self.lock_state()?;
+        if state.session != ctx.scope.thread_id.0 {
+            return Err(ToolError("Subagents belong to another session".into()));
         }
-        let mut changes = self.changes.subscribe();
-        let output_dir = self.home.join("state/subagents/output");
-        let started = self.start_dispatch(&call.id, mode, tasks, runner, &ctx)?;
-        self.flush_entries(&ctx)?;
-        if started.all_background {
-            return Ok(async_output(&started.record, &output_dir, false));
+        let prev = state.resolve_send_task(&params.to)?;
+        if let Some(active) = state.tasks.get(&prev.id) {
+            if active.steer.send(params.message.clone()).is_ok() {
+                return Ok(SteerAttempt::Queued(queued_steer_output(
+                    &prev.id, &prev.name,
+                )));
+            }
+            return Ok(SteerAttempt::WaitThenResume(active.done.clone()));
         }
-        self.publish_foreground(&started.dispatch_id, &call.id, started.session_gen, &ctx);
-        self.wait_foreground(
-            (&started.dispatch_id, &call.id),
-            started.session_gen,
-            started.done,
-            &mut changes,
-            &ctx,
-        )
+        let resumed_name = prev
+            .name
+            .as_deref()
+            .filter(|name| state.name_resolves_to(name, &prev.id))
+            .map(str::to_owned);
+        Ok(SteerAttempt::Resume(ResumeSeed {
+            id: prev.id,
+            name: resumed_name,
+            agent: prev.agent,
+            model: prev.model,
+            fork: prev.fork,
+        }))
+    }
+
+    async fn load_persisted_child(
+        &self,
+        task_id: &str,
+        ctx: &ToolContext,
+    ) -> Result<PersistedChildMeta, ToolError> {
+        let store_path = child_session_path(&self.home, &ctx.scope.thread_id.0, task_id)?
+            .ok_or_else(|| {
+                ToolError(format!(
+                    "No persisted session found for subagent '{task_id}'"
+                ))
+            })?;
+        let parent_cwd = ctx.cwd.clone();
+        let owned_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            inspect_persisted_child(&store_path, &owned_id, &parent_cwd)
+        })
         .await
+        .map_err(|e| ToolError(e.to_string()))?
+    }
+
+    fn build_standard_resumed_task(
+        &self,
+        prev: ResumeSeed,
+        persisted: PersistedChildMeta,
+        params: SendParams,
+        runner: &dyn ChildRunner,
+        ctx: &ToolContext,
+    ) -> Result<PreparedTask, ToolError> {
+        let custom_agent = lookup_resume_agent(&self.home, &ctx.cwd, &prev.agent, &ctx.cancel)?;
+        let model = (!prev.model.is_empty())
+            .then_some(prev.model)
+            .or(persisted.model);
+        if let Some(m) = model.as_deref() {
+            runner.validate_model(m)?;
+        }
+        let thinking = persisted
+            .thinking
+            .or_else(|| resolve_thinking(None, custom_agent.as_ref().and_then(|d| d.thinking)));
+        Ok(PreparedTask {
+            id: prev.id,
+            name: prev.name,
+            background: params.background,
+            fork: false,
+            resumed: true,
+            label: prev.agent,
+            custom_agent,
+            task: params.message,
+            cwd: None,
+            resolved_cwd: Some(persisted.cwd),
+            model,
+            thinking,
+        })
+    }
+
+    async fn prepare_resume(
+        &self,
+        prev: ResumeSeed,
+        params: SendParams,
+        ctx: &ToolContext,
+    ) -> Result<(PreparedTask, Arc<dyn ChildRunner>), ToolError> {
+        let persisted = self.load_persisted_child(&prev.id, ctx).await?;
+        let runner = self.bound_runner()?;
+        if prev.fork {
+            return Ok((fork_resumed_task(prev, persisted.cwd, params), runner));
+        }
+        let prepared =
+            self.build_standard_resumed_task(prev, persisted, params, runner.as_ref(), ctx)?;
+        self.confirm_project_agents(std::slice::from_ref(&prepared), &ctx.cancel)
+            .await?;
+        Ok((prepared, runner))
+    }
+
+    pub(crate) async fn send(
+        self: &Arc<Self>,
+        call: ToolCall,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let params = parse_send_params(&call.arguments)?;
+        let prev = match self.try_steer_active(&params, &ctx)? {
+            SteerAttempt::Queued(out) => return Ok(out),
+            SteerAttempt::Resume(prev) => prev,
+            SteerAttempt::WaitThenResume(done) => {
+                wait_done(vec![done], Duration::from_secs(5)).await;
+                match self.try_steer_active(&params, &ctx)? {
+                    SteerAttempt::Queued(out) => return Ok(out),
+                    SteerAttempt::Resume(prev) => prev,
+                    SteerAttempt::WaitThenResume(_) => {
+                        return Err(ToolError(
+                            "Subagent is still settling; retry subagent_send".into(),
+                        ));
+                    }
+                }
+            }
+        };
+        let (prepared, runner) = self.prepare_resume(prev, params, &ctx).await?;
+        self.launch_and_finish(&call.id, "single", vec![prepared], runner, &ctx)
+            .await
     }
 
     async fn wait_foreground(
@@ -724,36 +1113,46 @@ impl Service {
         })
     }
 
+    fn build_child_registry(
+        &self,
+        run: &TaskRun,
+    ) -> Result<(Registry, String, Option<Vec<String>>), ToolError> {
+        match &run.task.custom_agent {
+            Some(agent) => Ok((
+                self.children.build(&run.ctx, &agent.name)?,
+                agent.prompt.clone(),
+                agent.tools.clone(),
+            )),
+            None => Ok((self.children.build_default(&run.ctx)?, String::new(), None)),
+        }
+    }
+
     async fn execute_child(
         self: &Arc<Self>,
         run: &TaskRun,
         runner: Arc<dyn ChildRunner>,
         collector: Arc<Mutex<Collector>>,
+        steer: Option<mpsc::UnboundedReceiver<String>>,
         child_cancel: CancellationToken,
     ) -> Result<(), ToolError> {
-        let cwd = resolve_child_cwd(&run.ctx.cwd, run.task.cwd.as_deref())?;
-        let (registry, system, tools) = match &run.task.custom_agent {
-            Some(agent) => (
-                self.children.build(&run.ctx, &agent.name)?,
-                agent.prompt.clone(),
-                agent.tools.clone(),
-            ),
-            None => (self.children.build_default(&run.ctx)?, String::new(), None),
-        };
+        let cwd = resolve_task_cwd(run)?;
+        let store_path = child_session_path(&self.home, &run.ctx.scope.thread_id.0, &run.task.id)?;
+        let (registry, system, tools) = self.build_child_registry(run)?;
+        let (mode, prompt, model) = resolve_child_prompt(&run.task);
         self.mark_running(run, &run.task.task)?;
         let events = self.make_event_sink(run, collector, child_cancel.clone());
         runner
             .run(
                 ChildRequest {
                     cwd,
-                    task: run.task.task.clone(),
+                    task: prompt,
                     system,
-                    model: run.task.model.clone(),
+                    model,
                     thinking: run.task.thinking,
                     tools,
-                    mode: ChildMode::Standard,
-                    store_path: None,
-                    steer: None,
+                    mode,
+                    store_path,
+                    steer,
                 },
                 registry,
                 child_cancel,
@@ -787,8 +1186,10 @@ impl Service {
                 output: task.usage.output,
                 cache_read: task.usage.cache_read,
                 cache_write: task.usage.cache_write,
+                reasoning: task.usage.reasoning,
+                cache_write_1h: task.usage.cache_write_1h,
+                cost_nano_usd: task.usage.cost_nano_usd,
                 partial,
-                ..Default::default()
             };
             let task_id = task.id.clone();
             let ok = task.state == AgentState::Completed;
@@ -836,7 +1237,7 @@ impl Service {
 
     async fn run_task(
         self: &Arc<Self>,
-        run: TaskRun,
+        mut run: TaskRun,
         runner: Arc<dyn ChildRunner>,
     ) -> Result<String, ToolError> {
         let _done = DoneSignal(run.done_tx.clone());
@@ -850,7 +1251,8 @@ impl Service {
         let directory = self.home.join("state/subagents/output");
         let collector = Arc::new(Mutex::new(Collector::new(&directory)));
         let child_cancel = run.cancel.child_token();
-        let fut = self.execute_child(&run, runner, collector.clone(), child_cancel);
+        let steer = run.steer_rx.take();
+        let fut = self.execute_child(&run, runner, collector.clone(), steer, child_cancel);
         let outcome = match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
             Ok(res) => res,
             Err(_) => Err(ToolError("Child execution panicked; task isolated".into())),
@@ -896,11 +1298,13 @@ fn register_task_runs(
                 CancellationToken::new()
             };
             let (done_tx, done_rx) = watch::channel(false);
+            let (steer_tx, steer_rx) = mpsc::unbounded_channel();
             state.tasks.insert(
                 task.id.clone(),
                 ActiveTask {
                     dispatch_id: dispatch_id.to_owned(),
                     cancel: cancel.clone(),
+                    steer: steer_tx,
                     done: done_rx,
                     stop: None,
                     notified: false,
@@ -914,6 +1318,7 @@ fn register_task_runs(
                 task,
                 ctx: ctx.clone(),
                 cancel,
+                steer_rx: Some(steer_rx),
                 done_tx,
             }
         })

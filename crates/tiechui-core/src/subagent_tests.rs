@@ -2593,3 +2593,793 @@ async fn foreground_subagent_promotes_on_background_all_and_subagent_stop_suppre
     h.valid_transcript().await;
     h.stop().await;
 }
+
+struct SteerGateTool {
+    spec: ToolSpec,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Tool for SteerGateTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+    fn concurrency(&self, _: &serde_json::Value) -> Concurrency {
+        Concurrency::Shared
+    }
+    async fn run(&self, _: ToolCall, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
+        self.entered.notify_one();
+        tokio::select! {
+            () = self.release.notified() => Ok(ToolOutput::text(format!("cwd={}", ctx.cwd.display()))),
+            () = ctx.cancel.cancelled() => Err(ToolError("cancelled".into())),
+        }
+    }
+}
+
+struct SteerGateChildren {
+    rewind: PathBuf,
+    gate: Arc<SteerGateTool>,
+}
+
+impl ChildRegistry for SteerGateChildren {
+    fn build(&self, parent: &ToolContext, _: &str) -> Result<Registry, ToolError> {
+        self.build_default(parent)
+    }
+
+    fn build_default(&self, parent: &ToolContext) -> Result<Registry, ToolError> {
+        let mut registry = Children(self.rewind.clone()).build_default(parent)?;
+        registry.register_tool(self.gate.clone())?;
+        Ok(registry)
+    }
+}
+
+#[tokio::test]
+async fn subagent_send_steers_running_child_resumes_across_restart_and_avoids_double_counting_usage()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let gate = Arc::new(SteerGateTool {
+        spec: ToolSpec {
+            name: "hold_gate".into(),
+            description: "Hold child mid-tool".into(),
+            input_schema: json!({"type": "object"}),
+        },
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut base = harness(vec![], root.path()).await;
+    let sub_cwd = base._root.path().join("sub");
+    std::fs::create_dir_all(&sub_cwd).unwrap();
+    base.shutdown.cancel();
+    (&mut base.handle.task).await.unwrap().unwrap();
+
+    let store = SessionStore::open(&base.path, &CancellationToken::new()).unwrap();
+    let parent_id = store.header().id.clone();
+    let (parent_tx, parent_rx) = mpsc::unbounded_channel();
+    let (child_tx, mut child_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SplitProvider {
+        parent: FakeProvider {
+            scripts: Mutex::new(
+                vec![
+                    invoke(
+                        "subagent",
+                        json!({"task": "initial child work", "name": "worker", "cwd": "sub", "background": true}),
+                    ),
+                    answer("BG_STARTED"),
+                    invoke(
+                        "subagent_send",
+                        json!({"to": "worker", "message": "steered mid-tool"}),
+                    ),
+                    answer("STEER_QUEUED"),
+                    answer("CONTINUATION_ACK_1"),
+                    invoke("create_goal", json!({"objective": "track resumed child tokens"})),
+                    invoke(
+                        "subagent_send",
+                        json!({"to": "ag1", "message": "foreground resume turn", "background": false}),
+                    ),
+                    invoke("update_goal", json!({"status": "complete"})),
+                    answer("FG_RESUME_ACK"),
+                ]
+                .into(),
+            ),
+            requests: parent_tx,
+        },
+        child: FakeProvider {
+            scripts: Mutex::new(
+                vec![
+                    invoke("hold_gate", json!({})),
+                    answer("CHILD_STEERED_DONE"),
+                    answer("CHILD_FG_RESUMED_DONE"),
+                ]
+                .into(),
+            ),
+            requests: child_tx,
+        },
+    });
+    let mut registry = Registry::default();
+    tiechui_module_subagents::SubagentsModule {
+        home: root.path().into(),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(SteerGateChildren {
+            rewind: root.path().join("rewind"),
+            gate: gate.clone(),
+        }),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    tiechui_module_goal::GoalModule
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+
+    base.shutdown = CancellationToken::new();
+    base.epoch.0 += 1;
+    base.requests = parent_rx;
+    base.seen.clear();
+    base.handle = SessionActor::spawn(
+        store,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: origin("a"),
+            thinking: None,
+            providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: base.epoch,
+            short_cache: false,
+        },
+        base.shutdown.clone(),
+    );
+    base.until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+        .await;
+
+    base.input("launch worker", InputDelivery::FollowUp).await;
+    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = base.request().await;
+    let _ = base.request().await;
+
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("child must enter hold_gate");
+    let _child_req_1 = tokio::time::timeout(Duration::from_secs(5), child_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let child_file = root
+        .path()
+        .join("state/subagents/sessions")
+        .join(&parent_id)
+        .join("ag1.jsonl");
+    assert!(child_file.is_file(), "expected {}", child_file.display());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&child_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(child_file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    let listed_top =
+        tiechui_session::list(root.path(), base._root.path(), &CancellationToken::new()).unwrap();
+    assert!(
+        !listed_top.sessions.iter().any(|s| s.path == child_file),
+        "child session must never appear in top-level session list"
+    );
+
+    base.input("steer worker while running", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = base.request().await;
+    let steer_ack_req = base.request().await;
+    let steer_results = results(&steer_ack_req);
+    let steer_tool_result = steer_results.last().unwrap();
+    assert!(!steer_tool_result.is_error);
+    assert!(
+        steer_tool_result
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("ag1") && text.contains("Queued"))),
+        "{steer_tool_result:?}"
+    );
+
+    gate.release.notify_one();
+    let child_req_2 = tokio::time::timeout(Duration::from_secs(5), child_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        users(&child_req_2),
+        ["initial child work", "steered mid-tool"]
+    );
+    assert!(
+        results(&child_req_2)[0]
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("sub"))),
+        "child tool must run in custom sub cwd"
+    );
+
+    let cont_req = tokio::time::timeout(Duration::from_secs(5), base.request())
+        .await
+        .expect("steered background child must wake idle continuation");
+    let cont_user = users(&cont_req).pop().unwrap();
+    assert!(cont_user.contains("CHILD_STEERED_DONE"), "{cont_user}");
+    base.end(TurnStatus::Completed).await;
+
+    base.input("resume worker in foreground", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = base.request().await;
+    let _ = base.request().await;
+    let fg_resume_parent_req = base.request().await;
+    let _ = base.request().await;
+    assert!(
+        results(&fg_resume_parent_req)
+            .last()
+            .unwrap()
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("CHILD_FG_RESUMED_DONE") && text.contains("[agent_id: ag1]")))
+    );
+    let child_req_3 = tokio::time::timeout(Duration::from_secs(5), child_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        users(&child_req_3),
+        [
+            "initial child work",
+            "steered mid-tool",
+            "foreground resume turn"
+        ]
+    );
+
+    let snap_before_restart = base.snapshot().await;
+    let child_usages: Vec<&serde_json::Value> = snap_before_restart
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntryKind::Custom { kind, data } if kind == "runtime.usage" => Some(&data["usage"]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(child_usages.len(), 2);
+    assert_eq!(child_usages[0]["input"], 6);
+    assert_eq!(child_usages[1]["input"], 3);
+    let goal_before = snap_before_restart
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.kind {
+            EntryKind::Custom { kind, data } if kind == "tiechui.goal.state" => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        goal_before["goal"]["tokens_used"], 36,
+        "resumed child must report only incremental usage, never double-counting prior runs"
+    );
+
+    base.shutdown.cancel();
+    (&mut base.handle.task).await.unwrap().unwrap();
+
+    let reopened_store = SessionStore::open(&base.path, &CancellationToken::new()).unwrap();
+    let (p2_tx, p2_rx) = mpsc::unbounded_channel();
+    let (c2_tx, mut c2_rx) = mpsc::unbounded_channel();
+    let reopened_provider = Arc::new(SplitProvider {
+        parent: FakeProvider {
+            scripts: Mutex::new(
+                vec![
+                    invoke(
+                        "subagent_send",
+                        json!({"to": "worker", "message": "after process restart", "background": true}),
+                    ),
+                    answer("RESTART_BG_ACK"),
+                    invoke("subagent_list", json!({})),
+                    answer("LISTED_AFTER_RESTART"),
+                    answer("RESTART_CONT_SUMMARY"),
+                ]
+                .into(),
+            ),
+            requests: p2_tx,
+        },
+        child: FakeProvider {
+            scripts: Mutex::new(
+                vec![
+                    invoke("hold_gate", json!({})),
+                    answer("AFTER_RESTART_CHILD_DONE"),
+                ]
+                .into(),
+            ),
+            requests: c2_tx,
+        },
+    });
+    let mut reg2 = Registry::default();
+    tiechui_module_subagents::SubagentsModule {
+        home: root.path().into(),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(SteerGateChildren {
+            rewind: root.path().join("rewind"),
+            gate: gate.clone(),
+        }),
+    }
+    .register(&mut reg2, &ModuleConfig::default())
+    .unwrap();
+
+    base.shutdown = CancellationToken::new();
+    base.epoch.0 += 1;
+    base.requests = p2_rx;
+    base.seen.clear();
+    base.handle = SessionActor::spawn(
+        reopened_store,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: origin("a"),
+            thinking: None,
+            providers: BTreeMap::from([(
+                "fake".into(),
+                reopened_provider as Arc<dyn ModelProvider>,
+            )]),
+            registry: reg2,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: base.epoch,
+            short_cache: false,
+        },
+        base.shutdown.clone(),
+    );
+    base.until(|e| matches!(e, EventKind::ThreadStarted { .. }))
+        .await;
+
+    base.input("resume worker after restart", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = base.request().await;
+    let _ = base.request().await;
+
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("resumed child after restart must enter hold_gate");
+    gate.release.notify_one();
+
+    let c2_req_1 = tokio::time::timeout(Duration::from_secs(5), c2_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let c2_req_2 = tokio::time::timeout(Duration::from_secs(5), c2_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        users(&c2_req_1),
+        [
+            "initial child work",
+            "steered mid-tool",
+            "foreground resume turn",
+            "after process restart"
+        ]
+    );
+    assert!(
+        results(&c2_req_2)[0]
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("sub"))),
+        "resumed child after parent restart must retain custom sub cwd from child store header"
+    );
+
+    let restart_cont = tokio::time::timeout(Duration::from_secs(5), base.request())
+        .await
+        .expect("resumed background child after restart must wake continuation");
+    assert!(
+        users(&restart_cont)
+            .pop()
+            .unwrap()
+            .contains("AFTER_RESTART_CHILD_DONE")
+    );
+    base.end(TurnStatus::Completed).await;
+
+    base.input("check list deduplication", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = base.request().await;
+    let list_after_req = base.request().await;
+    let list_text = results(&list_after_req)
+        .last()
+        .unwrap()
+        .content
+        .iter()
+        .find_map(|c| match c {
+            Content::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        list_text.lines().count(),
+        1,
+        "subagent_list must deduplicate resumed ag1 into a single line: {list_text}"
+    );
+    assert!(list_text.contains("ag1 (worker)"), "{list_text}");
+    assert!(list_text.contains("5t"), "{list_text}");
+
+    base.valid_transcript().await;
+    base.stop().await;
+}
+
+struct ModuleForkWireRouter;
+
+impl wiremock::Respond for ModuleForkWireRouter {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let last_msg = parsed["messages"]
+            .as_array()
+            .and_then(|msgs| msgs.last())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let sse = if last_msg.contains("Follow up on Fork A") {
+            anthropic_text_sse("MODULE_FORK_A_RESUMED")
+        } else if last_msg.contains("MODULE_FORK_A_RESUMED") {
+            anthropic_text_sse("PARENT_RESUMED_FORK_DONE")
+        } else if last_msg.contains("Forked subagents cannot spawn or manage subagents") {
+            anthropic_text_sse("MODULE_FORK_B_RECOVERED")
+        } else if last_msg.contains("call_mod_write_a") {
+            anthropic_text_sse("MODULE_FORK_A_DONE")
+        } else if last_msg.contains("Directive: Task A: write module fork file") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[(
+                    "call_mod_write_a",
+                    "write",
+                    json!({"path": "mod-fork-a.txt", "content": "module fork a"}),
+                )],
+            )
+        } else if last_msg.contains("Directive: Task B: attempt recursive subagent") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[
+                    ("call_mod_rec_1", "subagent", json!({"task": "nested"})),
+                    (
+                        "call_mod_rec_2",
+                        "subagent_send",
+                        json!({"to": "ag1", "message": "nested send"}),
+                    ),
+                ],
+            )
+        } else if last_msg.contains("<task-notification>") {
+            anthropic_text_sse("PARENT_FORK_NOTIFIED_SUMMARY")
+        } else if last_msg.contains("Subagent launched in the background") {
+            anthropic_text_sse("PARENT_FORKS_LAUNCHED_ACK")
+        } else if last_msg.contains("Resume Fork A synchronously") {
+            anthropic_tool_calls_sse(
+                None,
+                None,
+                &[(
+                    "call_send_fork_a",
+                    "subagent_send",
+                    json!({
+                        "to": "fa",
+                        "message": "Follow up on Fork A",
+                        "background": false
+                    }),
+                )],
+            )
+        } else {
+            anthropic_tool_calls_sse(
+                Some(("Parent deep reasoning.", "sig-mod-fork")),
+                Some("Launching two parallel forked workers."),
+                &[
+                    (
+                        "call_sub_fork_1",
+                        "subagent",
+                        json!({
+                            "task": "Task A: write module fork file",
+                            "name": "fa",
+                            "fork": true
+                        }),
+                    ),
+                    (
+                        "call_sub_fork_2",
+                        "subagent",
+                        json!({
+                            "task": "Task B: attempt recursive subagent",
+                            "name": "fb",
+                            "fork": true
+                        }),
+                    ),
+                ],
+            )
+        };
+        wiremock::ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn subagent_module_fork_mode_shares_1h_cache_prefix_wraps_boilerplate_once_and_blocks_recursion()
+ {
+    use wiremock::{Mock, MockServer, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ModuleForkWireRouter)
+        .mount(&server)
+        .await;
+
+    let provider = Arc::from(
+        tiechui_providers::testing::provider(
+            "anth",
+            &tiechui_config::ProviderConfig {
+                wire: tiechui_config::Wire::AnthropicMessages,
+                base_url: Some(server.uri()),
+                api_key: None,
+                api_key_env: None,
+                compat: Default::default(),
+                models: vec![
+                    serde_json::from_value(json!({
+                        "id": "sonnet",
+                        "context_window": 200_000,
+                        "max_output": 8192,
+                        "reasoning": true,
+                        "thinking": "adaptive",
+                        "cache_retention": "long"
+                    }))
+                    .unwrap(),
+                ],
+            },
+        )
+        .unwrap(),
+    ) as Arc<dyn ModelProvider>;
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let home = root.path().join("profile");
+    let mut registry = Registry::default();
+    registry.register_context_provider(Arc::new(StaticContext(vec![
+        "Workspace coding instructions.".into(),
+    ])));
+    tiechui_module_editing::EditingModule
+        .register(&mut registry, &ModuleConfig::default())
+        .unwrap();
+    tiechui_module_subagents::SubagentsModule {
+        home: home.clone(),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(Children(home.join("rewind"))),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+
+    let parent_store = SessionStore::create(
+        &home.join("sessions"),
+        root.path(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let parent_id = parent_store.header().id.clone();
+    let parent_thread = ThreadId(parent_id.clone());
+    let shutdown = CancellationToken::new();
+    let mut parent = SessionActor::spawn(
+        parent_store,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: ModelRef {
+                provider: "anth".into(),
+                model: ModelId("anth/sonnet".into()),
+            },
+            thinking: Some(ReasoningLevel::High),
+            providers: BTreeMap::from([("anth".into(), provider)]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: SessionEpoch(0),
+            short_cache: false,
+        },
+        shutdown.clone(),
+    );
+    while !matches!(
+        parent.events.recv().await.unwrap().event,
+        EventKind::ThreadStarted { .. }
+    ) {}
+
+    parent
+        .submissions
+        .send(Submission {
+            id: SubmissionId("fork-turn-1".into()),
+            thread_id: parent_thread.clone(),
+            epoch: SessionEpoch(0),
+            op: Op::UserInput {
+                content: vec![InputContent::Text {
+                    text: "Run two parallel forks".into(),
+                }],
+                delivery: InputDelivery::FollowUp,
+            },
+        })
+        .await
+        .unwrap();
+
+    let wait_summary = async {
+        let mut both_settled = false;
+        let mut pending = usize::MAX;
+        let mut in_continuation_turn = false;
+        loop {
+            match parent.events.recv().await.unwrap().event {
+                EventKind::ItemCompleted {
+                    item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                    ..
+                } if text == "PARENT_FORK_NOTIFIED_SUMMARY" => {
+                    in_continuation_turn = true;
+                }
+                EventKind::Extension { name, data } if name == SUBAGENTS_EVENT => {
+                    let settled = data["records"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|r| r["tasks"].as_array().into_iter().flatten())
+                        .filter(|t| t["state"] == "Completed")
+                        .count();
+                    both_settled = settled == 2;
+                    pending = data["pending_notifications"].as_u64().unwrap_or(0) as usize;
+                }
+                EventKind::TurnCompleted { turn } => {
+                    assert_eq!(turn.status, TurnStatus::Completed);
+                    if in_continuation_turn && both_settled && pending == 0 {
+                        break;
+                    }
+                    in_continuation_turn = false;
+                }
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), wait_summary)
+        .await
+        .expect("both background forks must complete and trigger continuation summary");
+
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("mod-fork-a.txt")).unwrap(),
+        "module fork a"
+    );
+
+    parent
+        .submissions
+        .send(Submission {
+            id: SubmissionId("fork-turn-2".into()),
+            thread_id: parent_thread,
+            epoch: SessionEpoch(0),
+            op: Op::UserInput {
+                content: vec![InputContent::Text {
+                    text: "Resume Fork A synchronously".into(),
+                }],
+                delivery: InputDelivery::FollowUp,
+            },
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let EventKind::TurnCompleted { turn } = parent.events.recv().await.unwrap().event {
+                assert_eq!(turn.status, TurnStatus::Completed);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    parent.task.await.unwrap().unwrap();
+
+    for agent_id in ["ag1", "ag2"] {
+        assert!(
+            home.join("state/subagents/sessions")
+                .join(&parent_id)
+                .join(format!("{agent_id}.jsonl"))
+                .is_file()
+        );
+    }
+
+    let received = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = received
+        .iter()
+        .map(|req| serde_json::from_slice(&req.body).unwrap())
+        .collect();
+    let parent_initial = &bodies[0];
+    let last_of = |b: &serde_json::Value| {
+        b["messages"]
+            .as_array()
+            .and_then(|msgs| msgs.last())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    };
+    let fork_a = bodies
+        .iter()
+        .find(|b| last_of(b).contains("Directive: Task A: write module fork file"))
+        .expect("missing Fork A initial wire request");
+    let fork_b = bodies
+        .iter()
+        .find(|b| last_of(b).contains("Directive: Task B: attempt recursive subagent"))
+        .expect("missing Fork B initial wire request");
+    let resumed_fork_a = bodies
+        .iter()
+        .find(|b| {
+            last_of(b).contains("Follow up on Fork A") && !last_of(b).contains("call_send_fork_a")
+        })
+        .expect("missing Fork A resumed wire request");
+
+    for fb in [fork_a, fork_b] {
+        assert_eq!(
+            serde_json::to_vec(&fb["system"]).unwrap(),
+            serde_json::to_vec(&parent_initial["system"]).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&fb["tools"]).unwrap(),
+            serde_json::to_vec(&parent_initial["tools"]).unwrap()
+        );
+        assert_eq!(
+            fb["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            serde_json::to_vec(&fb["messages"][0]).unwrap(),
+            serde_json::to_vec(&parent_initial["messages"][0]).unwrap()
+        );
+    }
+    let a_msg2 = fork_a["messages"][2]["content"].as_array().unwrap();
+    let b_msg2 = fork_b["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&a_msg2[..2]).unwrap(),
+        serde_json::to_vec(&b_msg2[..2]).unwrap()
+    );
+    let directive_a = a_msg2[2]["text"].as_str().unwrap();
+    assert!(directive_a.contains("<fork_boilerplate>"), "{directive_a}");
+    assert!(
+        directive_a.contains("Directive: Task A: write module fork file"),
+        "{directive_a}"
+    );
+    assert_eq!(
+        resumed_fork_a
+            .to_string()
+            .matches("<fork_boilerplate>")
+            .count(),
+        1,
+        "subagent_send resume on fork must not wrap <fork_boilerplate> a second time"
+    );
+}

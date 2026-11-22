@@ -71,6 +71,7 @@ impl Module for SubagentsModule {
         registry.register_background_work(service.clone());
         registry.register_command(service.clone());
         registry.register_tool(Arc::new(manage::ManageTool::dispatch(service.clone())))?;
+        registry.register_tool(Arc::new(manage::ManageTool::send(service.clone())))?;
         registry.register_tool(Arc::new(manage::ManageTool::stop(service.clone())))?;
         registry.register_tool(Arc::new(manage::ManageTool::list(service)))
     }
