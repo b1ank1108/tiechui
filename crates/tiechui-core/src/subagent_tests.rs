@@ -1363,11 +1363,11 @@ async fn subagents_module_routes_cross_provider_exposes_catalog_and_queues_ten_c
     assert!(!tool_results[0].1);
     let summary_text = tool_results[0].0["content"][0]["text"].as_str().unwrap();
     assert!(
-        summary_text.contains("### [default · beta/judge] Completed"),
+        summary_text.contains("### [ag1 · default · beta/judge] Completed"),
         "{summary_text}"
     );
     assert!(
-        summary_text.contains("### [pinned · alpha/fast] Completed"),
+        summary_text.contains("### [ag2 · pinned · alpha/fast] Completed"),
         "{summary_text}"
     );
 
@@ -2293,4 +2293,303 @@ async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoi
 
     fresh_shutdown.cancel();
     fresh_parent.task.await.unwrap().unwrap();
+}
+
+struct SplitProvider {
+    parent: FakeProvider,
+    child: FakeProvider,
+}
+
+#[async_trait]
+impl ModelProvider for SplitProvider {
+    fn capabilities(&self, model: &ModelId) -> ModelCapabilities {
+        self.parent.capabilities(model)
+    }
+
+    fn thinking_levels(&self, model: &ModelId) -> Vec<Option<ReasoningLevel>> {
+        self.parent.thinking_levels(model)
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        if request.tools.iter().any(|t| t.name == "subagent") {
+            self.parent.stream(request, cancel).await
+        } else {
+            self.child.stream(request, cancel).await
+        }
+    }
+}
+
+async fn split_harness(
+    parent_scripts: Vec<Script>,
+    child_scripts: Vec<Script>,
+    home: &std::path::Path,
+) -> (Harness, mpsc::UnboundedReceiver<ModelRequest>) {
+    let mut h = harness(vec![], home).await;
+    h.shutdown.cancel();
+    (&mut h.handle.task).await.unwrap().unwrap();
+    let store = SessionStore::open(&h.path, &CancellationToken::new()).unwrap();
+    let (parent_tx, parent_rx) = mpsc::unbounded_channel();
+    let (child_tx, child_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SplitProvider {
+        parent: FakeProvider {
+            scripts: Mutex::new(parent_scripts.into()),
+            requests: parent_tx,
+        },
+        child: FakeProvider {
+            scripts: Mutex::new(child_scripts.into()),
+            requests: child_tx,
+        },
+    });
+    let mut registry = Registry::default();
+    tiechui_module_subagents::SubagentsModule {
+        home: home.into(),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(Children(home.join("rewind"))),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    let (interactions, inbox) = Interactions::new();
+    h.shutdown = CancellationToken::new();
+    h.epoch.0 += 1;
+    h.requests = parent_rx;
+    h.interactions = interactions;
+    h.seen.clear();
+    h.handle = SessionActor::spawn(
+        store,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: origin("a"),
+            thinking: None,
+            providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: Some(inbox),
+            epoch: h.epoch,
+            short_cache: false,
+        },
+        h.shutdown.clone(),
+    );
+    h.until(|event| matches!(event, EventKind::ThreadStarted { .. }))
+        .await;
+    (h, child_rx)
+}
+
+#[tokio::test]
+async fn background_subagent_releases_turn_survives_parent_esc_and_wakes_idle_continuation_once() {
+    let root = tempfile::tempdir().unwrap();
+    let (release_bg, wait_bg) = oneshot::channel();
+    let (release_parent_slow, wait_parent_slow) = oneshot::channel();
+    let (mut h, mut child_rx) = split_harness(
+        vec![
+            invoke(
+                "subagent",
+                json!({"task": "background audit", "name": "auditor", "background": true}),
+            ),
+            answer("LAUNCHED_ACK"),
+            Script {
+                error: None,
+                steps: VecDeque::from([
+                    Step::Wait(wait_parent_slow),
+                    Step::Event(finish(StopReason::EndTurn)),
+                ]),
+            },
+            answer("FINAL_SUMMARY_FROM_CONTINUATION"),
+        ],
+        vec![Script {
+            error: None,
+            steps: VecDeque::from([
+                Step::Wait(wait_bg),
+                Step::Event(StreamEvent::TextDelta {
+                    index: 0,
+                    delta: "BG_AUDIT_RESULT".into(),
+                }),
+                Step::Event(finish(StopReason::EndTurn)),
+            ]),
+        }],
+        root.path(),
+    )
+    .await;
+
+    h.input("start background audit", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), h.end(TurnStatus::Completed))
+        .await
+        .expect("background subagent must release parent turn without waiting for child");
+
+    let parent_req_1 = h.request().await;
+    assert!(parent_req_1.tools.iter().any(|t| t.name == "subagent_stop"));
+    assert!(parent_req_1.tools.iter().any(|t| t.name == "subagent_list"));
+    let parent_req_2 = h.request().await;
+    assert!(
+        results(&parent_req_2)[0]
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("ag1") && text.contains("task-notification")))
+    );
+    let _child_req = tokio::time::timeout(Duration::from_secs(2), child_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    h.input("slow foreground question", InputDelivery::FollowUp)
+        .await;
+    let slow_turn = h.started_turn().await;
+    let _slow_req = h.request().await;
+    h.send(Op::Interrupt { turn_id: slow_turn }).await;
+    h.end(TurnStatus::Interrupted).await;
+
+    let _ = release_bg.send(());
+    let continuation_req = tokio::time::timeout(Duration::from_secs(2), h.request())
+        .await
+        .expect("expected idle continuation request");
+    let last_user = users(&continuation_req).pop().unwrap();
+    assert!(last_user.contains("<task-notification>"), "{last_user}");
+    assert!(last_user.contains("<task-id>ag1</task-id>"), "{last_user}");
+    assert!(last_user.contains("BG_AUDIT_RESULT"), "{last_user}");
+    h.end(TurnStatus::Completed).await;
+
+    assert!(
+        !h.seen.iter().any(|ev| matches!(
+            &ev.event,
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::UserMessage { content, .. }),
+                ..
+            } if content.iter().any(|part| matches!(part, InputContent::Text { text } if text.contains("<task-notification>")))
+        )),
+        "hidden continuation must not emit a visible UserMessage bubble"
+    );
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        h.requests.try_recv().is_err(),
+        "continuation must fire once"
+    );
+    let saved = h.snapshot().await;
+    let saved_records = records(&saved);
+    let latest = saved_records.last().unwrap();
+    assert!(latest.background);
+    assert_eq!(latest.tasks[0].id, "ag1");
+    assert_eq!(latest.tasks[0].state, AgentState::Completed);
+    assert_eq!(latest.tasks[0].output, "BG_AUDIT_RESULT");
+    let _ = release_parent_slow;
+    h.valid_transcript().await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn foreground_subagent_promotes_on_background_all_and_subagent_stop_suppresses_wakeup() {
+    let root = tempfile::tempdir().unwrap();
+    let (release_promoted, wait_promoted) = oneshot::channel();
+    let (_hold_stopped, wait_stopped) = oneshot::channel();
+    let (mut h, mut child_rx) = split_harness(
+        vec![
+            invoke("subagent", json!({"task": "slow fg work", "name": "fg1"})),
+            answer("PROMOTED_ACK"),
+            invoke(
+                "subagent",
+                json!({"task": "stoppable bg", "name": "bg2", "background": true}),
+            ),
+            invoke("subagent_list", json!({})),
+            invoke("subagent_stop", json!({"id": "bg2"})),
+            answer("STOPPED_BG2_ACK"),
+            answer("PROMOTED_CONTINUATION_SUMMARY"),
+        ],
+        vec![
+            Script {
+                error: None,
+                steps: VecDeque::from([
+                    Step::Wait(wait_promoted),
+                    Step::Event(StreamEvent::TextDelta {
+                        index: 0,
+                        delta: "PROMOTED_CHILD_DONE".into(),
+                    }),
+                    Step::Event(finish(StopReason::EndTurn)),
+                ]),
+            },
+            Script {
+                error: None,
+                steps: VecDeque::from([
+                    Step::Wait(wait_stopped),
+                    Step::Event(finish(StopReason::EndTurn)),
+                ]),
+            },
+        ],
+        root.path(),
+    )
+    .await;
+
+    h.input("run foreground subagent", InputDelivery::FollowUp)
+        .await;
+    let _parent_req = h.request().await;
+    let _child_fg_req = tokio::time::timeout(Duration::from_secs(2), child_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    h.send(Op::CommandInput {
+        name: "subagents".into(),
+        data: json!({"background_all": true}),
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), h.end(TurnStatus::Completed))
+        .await
+        .expect("background_all must promote foreground subagent and release parent turn");
+    let promoted_tool_req = h.request().await;
+    assert!(
+        results(&promoted_tool_req)[0]
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("background") && text.contains("ag1")))
+    );
+
+    h.input("launch second and stop it", InputDelivery::FollowUp)
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), h.end(TurnStatus::Completed))
+        .await
+        .expect("launch + list + stop turn must complete cleanly");
+    let _launch_bg2_req = h.request().await;
+    let _list_req = h.request().await;
+    let stop_req = h.request().await;
+    assert!(results(&stop_req).last().unwrap().content.iter().any(
+        |c| matches!(c, Content::Text { text, .. } if text.contains("ag2") && text.contains("ag1"))
+    ));
+    let after_stop_req = h.request().await;
+    assert!(
+        results(&after_stop_req)
+            .last()
+            .unwrap()
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text, .. } if text.contains("ag2")))
+    );
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        h.requests.try_recv().is_err(),
+        "stopped ag2 must not wake continuation"
+    );
+
+    let _ = release_promoted.send(());
+    let cont_req = tokio::time::timeout(Duration::from_secs(2), h.request())
+        .await
+        .expect("promoted ag1 must wake continuation");
+    let cont_text = users(&cont_req).pop().unwrap();
+    assert!(cont_text.contains("<task-id>ag1</task-id>"), "{cont_text}");
+    assert!(!cont_text.contains("<task-id>ag2</task-id>"), "{cont_text}");
+    assert!(cont_text.contains("PROMOTED_CHILD_DONE"), "{cont_text}");
+    h.end(TurnStatus::Completed).await;
+
+    h.valid_transcript().await;
+    h.stop().await;
 }

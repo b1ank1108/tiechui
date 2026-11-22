@@ -1156,7 +1156,7 @@ mod dual_subagents {
         let single_results = tool_results(&events(&single));
         assert_eq!(
             single_results,
-            vec![("SINGLE_CHILD_DONE".to_owned(), false)]
+            vec![("SINGLE_CHILD_DONE\n\n[agent_id: ag1]".to_owned(), false)]
         );
         let single_records = settled_dispatches(&fixture.latest_store());
         assert_eq!(single_records.len(), 1);
@@ -1166,7 +1166,10 @@ mod dual_subagents {
         let chain = fixture.exec_json("run-chain").await;
         assert_eq!(chain.status.code(), Some(0), "{chain:?}");
         let chain_results = tool_results(&events(&chain));
-        assert_eq!(chain_results, vec![("CHAIN_FINAL_DONE".to_owned(), false)]);
+        assert_eq!(
+            chain_results,
+            vec![("CHAIN_FINAL_DONE\n\n[agent_id: ag2]".to_owned(), false)]
+        );
         let chain_records = settled_dispatches(&fixture.latest_store());
         assert_eq!(chain_records.len(), 1);
         assert!(
@@ -1317,9 +1320,10 @@ mod dual_subagents {
         assert!(!results[0].1, "{results:?}");
         let summary = &results[0].0;
         for expected in [
-            "### [default · beta/judge] Completed",
-            "### [custom · alpha/fast] Completed",
-            "### [judge_preset · alpha/fast] Completed",
+            "### [ag1 · default · beta/judge] Completed",
+            "### [ag2 · custom · alpha/fast] Completed",
+            "### [ag3 · judge_preset · alpha/fast] Completed",
+            "### [ag4 · default · beta/judge] Completed",
             "BETA_HIGH_OK",
             "ALPHA_CUSTOM_OK",
             "ALPHA_PRESET_OK",
@@ -1423,7 +1427,10 @@ mod dual_subagents {
             .await;
         assert_eq!(turn_two.status.code(), Some(0), "{turn_two:?}");
         let results = tool_results(&events(&turn_two));
-        assert_eq!(results, vec![("RESUMED_BETA_HIGH_OK".to_owned(), false)]);
+        assert_eq!(
+            results,
+            vec![("RESUMED_BETA_HIGH_OK\n\n[agent_id: ag1]".to_owned(), false)]
+        );
 
         for parent_req in fixture.alpha.requests() {
             assert_eq!(parent_req["model"], "fast");
@@ -1472,7 +1479,10 @@ mod dual_subagents {
         assert_eq!(results.len(), 10);
         for (index, (text, is_error)) in results.iter().enumerate() {
             assert!(!is_error, "call {index} failed: {text}");
-            assert_eq!(text, &format!("ACK:slot-job-{index}"));
+            assert_eq!(
+                text,
+                &format!("ACK:slot-job-{index}\n\n[agent_id: ag{}]", index + 1)
+            );
         }
 
         assert_eq!(fixture.alpha.child_requests().len(), 10);

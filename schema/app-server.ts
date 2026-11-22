@@ -17,7 +17,11 @@ model: string | null,
  * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
  * requested thinking level when absent.
  */
-thinking: string | null, prompt: string, path: string, 
+thinking: string | null, 
+/**
+ * Runs in the background by default when `Some(true)`.
+ */
+background?: boolean | null, prompt: string, path: string, 
 /**
  * `user` or `project`.
  */
@@ -45,7 +49,7 @@ scope: string, name: string, description: string, tools: Array<string> | null, m
 /**
  * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`.
  */
-thinking: string | null, prompt: string, 
+thinking: string | null, background?: boolean | null, prompt: string, 
 /**
  * The file being edited: rewritten in place keeping its other frontmatter, or removed
  * when the name or scope changes.
