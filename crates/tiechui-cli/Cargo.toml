@@ -21,7 +21,6 @@ path = "../../tests/e2e/fake_codex.rs"
 required-features = ["fake-runtime"]
 test = false
 
-# A stand-in for `claude` that replays a script, for the claude runtime tests.
 [[bin]]
 name = "fake-claude"
 path = "../../tests/e2e/fake_claude.rs"

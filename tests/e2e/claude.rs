@@ -25,7 +25,6 @@ fn emit(frame: Value) -> Value {
     json!({ "emit": frame })
 }
 
-/// The `initialize` exchange every launch starts with.
 fn handshake() -> Vec<Value> {
     vec![
         expect(json!({"type": "control_request", "request": {"subtype": "initialize"}})),
@@ -83,8 +82,7 @@ fn message_end(msg: &str, usage: Value, stop: &str) -> Vec<Value> {
     ]
 }
 
-/// A streamed text or thinking block.
-fn block(msg: &str, index: u64, kind: &str, deltas: &[&str]) -> Vec<Value> {
+fn streamed_block(msg: &str, index: u64, kind: &str, deltas: &[&str]) -> Vec<Value> {
     let (field, delta) = if kind == "text" {
         ("text", "text_delta")
     } else {
@@ -174,13 +172,12 @@ fn recorded_script(frames: &str) -> Vec<Value> {
     steps
 }
 
-/// A turn that answers with one short text.
 fn simple_turn(msg: &str, text: &str, usage: Value) -> Vec<Value> {
     let mut steps = vec![
         system("init", json!({"model": "claude-fake"})),
         message_start(msg),
     ];
-    steps.extend(block(msg, 0, "text", &[text]));
+    steps.extend(streamed_block(msg, 0, "text", &[text]));
     steps.extend(message_end(msg, usage, "end_turn"));
     steps.push(result_ok(text));
     steps
@@ -227,9 +224,8 @@ impl Fixture {
         self.write_script("script.ndjson", &steps);
     }
 
-    /// The script of the launch with this 0-based index.
-    fn script_for_launch(&self, launch: usize, steps: Vec<Value>) {
-        self.write_script(&format!("script.ndjson.{launch}"), &steps);
+    fn script_for_launch(&self, zero_based_launch: usize, steps: Vec<Value>) {
+        self.write_script(&format!("script.ndjson.{zero_based_launch}"), &steps);
     }
 
     fn log(&self) -> Vec<Value> {
@@ -240,7 +236,6 @@ impl Fixture {
             .collect()
     }
 
-    /// The argument vectors of every `claude` launch (not `--version`).
     fn launches(&self) -> Vec<Vec<String>> {
         self.log()
             .iter()
@@ -282,7 +277,6 @@ impl Fixture {
         Client::spawn(command)
     }
 
-    /// `chui app-server` with the fake `claude` first on its `PATH`.
     fn app_server(&self) -> tokio::process::Command {
         let bin = self.path("bin");
         let search =
@@ -300,7 +294,6 @@ impl Fixture {
         command
     }
 
-    /// A `chui app-server` daemon on `socket`, which several clients can connect to.
     #[cfg(unix)]
     fn daemon(&self, socket: &Path) -> tokio::process::Child {
         let mut command = self.app_server();
@@ -400,8 +393,7 @@ fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// The Claude session id the session file saved as its `runtime.thread` entry.
-fn saved_thread(path: &str) -> String {
+fn saved_claude_session_id(path: &str) -> String {
     fn find(value: &Value) -> Option<String> {
         match value {
             Value::Object(fields) => {
@@ -533,8 +525,13 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
         system("status", json!({"status": "requesting"})),
         message_start("msg_1"),
     ]);
-    steps.extend(block("msg_1", 0, "thinking", &["let me ", "think"]));
-    steps.extend(block("msg_1", 1, "text", &["I will ", "read."]));
+    steps.extend(streamed_block(
+        "msg_1",
+        0,
+        "thinking",
+        &["let me ", "think"],
+    ));
+    steps.extend(streamed_block("msg_1", 1, "text", &["I will ", "read."]));
     steps.extend(tool_use(
         "msg_1",
         2,
@@ -572,13 +569,13 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
         "Edit",
         &json!({"file_path": "/work/c.txt", "old_string": "hi", "new_string": "yo", "replace_all": false}),
     ));
-    // The same message's usage twice (a replay): counted once.
     steps.extend(message_end("msg_2", usage_json(2, 10, 1500, 0), "tool_use"));
-    steps.push(stream(
+    let repeated_message_delta = stream(
         "msg_2",
         json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
         "usage": usage_json(2, 10, 1500, 0)}),
-    ));
+    );
+    steps.push(repeated_message_delta);
     steps.push(tool_result("toolu_write", json!("File created"), false));
     steps.push(tool_result(
         "toolu_edit",
@@ -586,10 +583,10 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
         false,
     ));
     steps.push(message_start("msg_3"));
-    steps.extend(block("msg_3", 0, "text", &["done"]));
+    steps.extend(streamed_block("msg_3", 0, "text", &["done"]));
     steps.extend(message_end("msg_3", usage_json(2, 5, 1700, 0), "end_turn"));
-    // Nothing before `result` ends the turn.
-    steps.push(json!({"sleep_ms": 300}));
+    let gap_before_result = json!({"sleep_ms": 300});
+    steps.push(gap_before_result);
     steps.push(result_ok("done"));
     fixture.script(steps);
 
@@ -776,8 +773,7 @@ fn can_use_tool_suggesting(
     )
 }
 
-/// The fake waits for the answer to one permission request.
-fn permission_answer(request_id: &str, response: Value) -> Value {
+fn expect_permission_answer(request_id: &str, response: Value) -> Value {
     expect(json!({"type": "control_response", "response": {
         "subtype": "success", "request_id": request_id, "response": response}}))
 }
@@ -792,23 +788,20 @@ fn bash_suggestions(command: &str) -> Value {
     ])
 }
 
-/// Claude's text reply after the tools ran, and the end of the turn.
 fn reply(msg: &str, text: &str) -> Vec<Value> {
     let mut steps = vec![message_start(msg)];
-    steps.extend(block(msg, 0, "text", &[text]));
+    steps.extend(streamed_block(msg, 0, "text", &[text]));
     steps.extend(message_end(msg, usage_json(1, 1, 0, 0), "end_turn"));
     steps.push(result_ok(text));
     steps
 }
 
-/// A message whose only block is one tool call.
 fn tool_message(msg: &str, id: &str, name: &str, input: &Value) -> Vec<Value> {
     let mut steps = vec![message_start(msg)];
     steps.extend(tool_use(msg, 0, id, name, input));
     steps
 }
 
-/// Waits for the next approval: the events up to it, its id and its request.
 async fn next_approval(client: &mut Client) -> (Vec<SessionEvent>, String, ApprovalRequest) {
     let seen = client
         .until(|kind| matches!(kind, EventKind::ApprovalRequested { .. }))
@@ -835,7 +828,6 @@ async fn answer(client: &mut Client, thread: &str, approval: &str, decision: Val
         .await;
 }
 
-/// The `control_response`s written for one of Claude's requests.
 fn responses_to(fixture: &Fixture, request_id: &str) -> Vec<Value> {
     fixture
         .received()
@@ -884,7 +876,7 @@ async fn a_permission_request_waits_on_its_tool_step_and_allowing_writes_the_inp
             "toolu_touch",
             bash_suggestions("touch approved.txt"),
         ),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "allow", "updatedInput": input}),
         ),
@@ -958,7 +950,7 @@ async fn denying_writes_the_reason_back_so_claude_sees_it() {
     steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
     steps.extend([
         can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "deny", "message": "not that file"}),
         ),
@@ -969,7 +961,7 @@ async fn denying_writes_the_reason_back_so_claude_sees_it() {
     steps.extend(tool_message("msg_2", "toolu_other", "Bash", &second));
     steps.extend([
         can_use_tool("perm-2", "Bash", &second, "toolu_other"),
-        permission_answer("perm-2", json!({"behavior": "deny"})),
+        expect_permission_answer("perm-2", json!({"behavior": "deny"})),
     ]);
     steps.push(tool_result("toolu_other", json!("denied"), true));
     steps.extend(reply("msg_3", "skipped"));
@@ -1019,6 +1011,9 @@ async fn allowing_for_the_session_grants_claudes_suggestions_for_this_session_on
     let early = json!({"file_path": "/work/c.txt", "content": "c\n"});
     let mut steps = handshake();
     steps.push(user_message("go"));
+    let narrowest_rule_for_session = json!({"type": "addRules",
+        "rules": [{"toolName": "Bash", "ruleContent": "touch a.txt"}],
+        "behavior": "allow", "destination": "session"});
     steps.extend(tool_message("msg_1", "toolu_bash", "Bash", &bash));
     steps.extend([
         can_use_tool_suggesting(
@@ -1028,12 +1023,10 @@ async fn allowing_for_the_session_grants_claudes_suggestions_for_this_session_on
             "toolu_bash",
             bash_suggestions("touch a.txt"),
         ),
-        // Only the narrowest alternative, the rule, scoped to the session.
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
-            json!({"behavior": "allow", "updatedInput": bash, "updatedPermissions": [
-                {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch a.txt"}],
-                    "behavior": "allow", "destination": "session"}]}),
+            json!({"behavior": "allow", "updatedInput": bash,
+                "updatedPermissions": [narrowest_rule_for_session]}),
         ),
         tool_result("toolu_bash", json!(""), false),
     ]);
@@ -1047,22 +1040,22 @@ async fn allowing_for_the_session_grants_claudes_suggestions_for_this_session_on
             "toolu_write",
             json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
         ),
-        permission_answer(
+        expect_permission_answer(
             "perm-2",
             json!({"behavior": "allow", "updatedInput": write, "updatedPermissions": [
                 {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}),
         ),
         tool_result("toolu_write", json!("File created"), false),
     ]);
-    // A request that arrives before the `assistant` frame of its call, without suggestions.
-    steps.extend([
+    let request_before_its_assistant_frame = [
         message_start("msg_3"),
         can_use_tool("perm-3", "Write", &early, "toolu_early"),
-        permission_answer(
+        expect_permission_answer(
             "perm-3",
             json!({"behavior": "allow", "updatedInput": early}),
         ),
-    ]);
+    ];
+    steps.extend(request_before_its_assistant_frame);
     steps.extend(tool_use("msg_3", 0, "toolu_early", "Write", &early));
     steps.push(tool_result("toolu_early", json!("File created"), false));
     steps.extend(reply("msg_4", "done"));
@@ -1146,7 +1139,7 @@ async fn ask_user_question_becomes_question_cards_and_the_answers_go_back_in_the
     ));
     steps.extend([
         can_use_tool("perm-1", "AskUserQuestion", &input, "toolu_ask"),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "allow", "updatedInput": answered}),
         ),
@@ -1215,6 +1208,12 @@ async fn ask_user_question_becomes_question_cards_and_the_answers_go_back_in_the
     );
 }
 
+fn desktop_card_text(arguments: &Value, values: &[String]) -> String {
+    arguments["command"]
+        .as_str()
+        .map_or_else(|| values.join(" "), str::to_owned)
+}
+
 #[tokio::test]
 async fn a_plan_is_shown_in_full_and_both_rejecting_and_approving_let_claude_continue() {
     let fixture = Fixture::new();
@@ -1246,7 +1245,7 @@ async fn a_plan_is_shown_in_full_and_both_rejecting_and_approving_let_claude_con
     steps.extend(tool_message("msg_2", "toolu_plan1", "ExitPlanMode", &first));
     steps.extend([
         exit_plan("perm-1", "toolu_plan1"),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "deny", "message": "Also update the docs"}),
         ),
@@ -1260,7 +1259,7 @@ async fn a_plan_is_shown_in_full_and_both_rejecting_and_approving_let_claude_con
     ));
     steps.extend([
         exit_plan("perm-2", "toolu_plan2"),
-        permission_answer("perm-2", json!({"behavior": "allow", "updatedInput": {}})),
+        expect_permission_answer("perm-2", json!({"behavior": "allow", "updatedInput": {}})),
         tool_result(
             "toolu_plan2",
             json!("User has approved exiting plan mode. You can now proceed."),
@@ -1295,16 +1294,14 @@ async fn a_plan_is_shown_in_full_and_both_rejecting_and_approving_let_claude_con
         assert_eq!(tool, "ExitPlanMode");
         assert!(call_id.starts_with("toolu_plan"), "{call_id}");
         assert!(session_patterns.is_empty());
-        // The desktop shows `arguments.command`, or else the values, as the card's text.
-        assert!(arguments.get("command").is_none(), "{arguments}");
-        plans.push(values);
+        plans.push(desktop_card_text(&arguments, &values));
         answer(&mut client, &thread, &approval, decision).await;
     }
     assert_eq!(
         plans,
         [
-            vec![first["plan"].as_str().unwrap().to_owned()],
-            vec![second["plan"].as_str().unwrap().to_owned()],
+            first["plan"].as_str().unwrap(),
+            second["plan"].as_str().unwrap(),
         ]
     );
     let events = client.until(is_completed).await;
@@ -1353,9 +1350,8 @@ async fn a_cancelled_request_is_withdrawn_and_a_late_answer_writes_nothing() {
 
 #[tokio::test]
 async fn an_interrupt_withdraws_the_pending_request_before_the_turn_ends() {
-    // 2.1.322 cancels the request before it answers the interrupt; a Claude that does not still
-    // has it withdrawn when the turn ends.
-    for cancels in [true, false] {
+    // 2.1.322 cancels the request before it answers the interrupt.
+    for cancels_before_interrupt_response in [true, false] {
         let fixture = Fixture::new();
         let input = json!({"command": "touch x"});
         let mut steps = handshake();
@@ -1365,7 +1361,7 @@ async fn an_interrupt_withdraws_the_pending_request_before_the_turn_ends() {
             can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
             expect(json!({"type": "control_request", "request": {"subtype": "interrupt"}})),
         ]);
-        if cancels {
+        if cancels_before_interrupt_response {
             steps.push(emit(
                 json!({"type": "control_cancel_request", "request_id": "perm-1"}),
             ));
@@ -1402,7 +1398,10 @@ async fn an_interrupt_withdraws_the_pending_request_before_the_turn_ends() {
         let events = client.until(is_completed).await;
         assert_eq!(completed_status(&events), TurnStatus::Interrupted);
         let withdrawn = resolved(&events, &approval).expect("withdrawn");
-        assert!(withdrawn < events.len() - 1, "cancels: {cancels}");
+        assert!(
+            withdrawn < events.len() - 1,
+            "cancels before the interrupt response: {cancels_before_interrupt_response}"
+        );
         assert_script_followed(&fixture);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(responses_to(&fixture, "perm-1").is_empty());
@@ -1443,7 +1442,7 @@ async fn two_clients_allowing_the_same_request_at_once_write_one_answer() {
     steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
     steps.extend([
         can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "allow", "updatedInput": input}),
         ),
@@ -1489,17 +1488,15 @@ async fn two_clients_allowing_the_same_request_at_once_write_one_answer() {
     assert_script_followed(&fixture);
 }
 
-/// A frame one of Claude's sub-agents produced: it names the call that spawned the agent and the
-/// agent's id.
-fn child(agent: &str, call: &str, step: Value) -> Value {
+fn from_subagent(agent: &str, spawning_call: &str, step: Value) -> Value {
     let mut step = step;
-    step["emit"]["parent_tool_use_id"] = json!(call);
+    step["emit"]["parent_tool_use_id"] = json!(spawning_call);
     step["emit"]["agent_id"] = json!(agent);
     step
 }
 
 fn child_message(agent: &str, call: &str, msg: &str, block: Value) -> Value {
-    child(
+    from_subagent(
         agent,
         call,
         frame(
@@ -1530,7 +1527,7 @@ fn child_text(agent: &str, call: &str, msg: &str, text: &str) -> Value {
 }
 
 fn child_tool_result(agent: &str, call: &str, id: &str, content: &str) -> Value {
-    child(agent, call, tool_result(id, json!(content), false))
+    from_subagent(agent, call, tool_result(id, json!(content), false))
 }
 
 fn task_started(agent: &str, call: &str, background: bool) -> Value {
@@ -1562,7 +1559,6 @@ fn child_can_use_tool(request_id: &str, agent: &str, input: &Value, tool_use_id:
     step
 }
 
-/// A root turn that spawns a background sub-agent and ends at once.
 fn background_spawn(agent: &str, call: &str) -> Vec<Value> {
     let mut steps = vec![system("init", json!({}))];
     steps.extend(tool_message(
@@ -1623,11 +1619,14 @@ fn turns_completed(events: &[SessionEvent]) -> Vec<tiechui_protocol::Turn> {
         .collect()
 }
 
-/// Each turn of a session as `(derived reason, status, ids of its sub-agent items, statuses and
-/// marker)`, from its live events or its snapshot: what reopening must rebuild.
-fn structure<'a>(
-    events: impl Iterator<Item = &'a tiechui_protocol::Event>,
-) -> Vec<(Option<DerivedReason>, TurnStatus, Vec<String>)> {
+#[derive(Debug, PartialEq)]
+struct TurnShape {
+    derived: Option<DerivedReason>,
+    status: TurnStatus,
+    subagent_item_ids: Vec<String>,
+}
+
+fn structure<'a>(events: impl Iterator<Item = &'a tiechui_protocol::Event>) -> Vec<TurnShape> {
     let mut turns: Vec<(TurnId, TurnStatus, Vec<Item>)> = vec![];
     for event in events {
         match &event.event {
@@ -1664,11 +1663,14 @@ fn structure<'a>(
                     }
                 }
             }
-            let reason = items
-                .first()
-                .and_then(DerivedTurnMarker::from_item)
-                .map(|marker| marker.reason);
-            (reason, status, ids)
+            TurnShape {
+                derived: items
+                    .first()
+                    .and_then(DerivedTurnMarker::from_item)
+                    .map(|marker| marker.reason),
+                status,
+                subagent_item_ids: ids,
+            }
         })
         .collect()
 }
@@ -1862,7 +1864,7 @@ async fn a_recorded_background_subagent_asks_after_the_turn_and_claude_then_star
     assert_eq!(
         shape
             .iter()
-            .map(|(reason, status, _)| (*reason, *status))
+            .map(|turn| (turn.derived, turn.status))
             .collect::<Vec<_>>(),
         [
             (None, TurnStatus::Completed),
@@ -1900,7 +1902,7 @@ async fn a_nested_subagent_hangs_under_the_child_call_that_spawned_it() {
     ));
     steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "tool_use"));
     steps.push(task_started("a1", "toolu_agent", false));
-    steps.push(child(
+    steps.push(from_subagent(
         "a1",
         "toolu_agent",
         frame(
@@ -1927,13 +1929,12 @@ async fn a_nested_subagent_hangs_under_the_child_call_that_spawned_it() {
         json!({"task_id": "a2", "tool_use_id": "toolu_inner", "description": "inner",
             "subagent_type": "Explore", "is_backgrounded": false, "task_type": "local_agent"}),
     ));
-    // A child's stream events, should a Claude send them, are not steps.
-    let mut streamed = stream(
+    let mut child_stream_event = stream(
         "msg_c2",
         json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "streamed"}}),
     );
-    streamed["emit"]["parent_tool_use_id"] = json!("toolu_inner");
-    steps.push(streamed);
+    child_stream_event["emit"]["parent_tool_use_id"] = json!("toolu_inner");
+    steps.push(child_stream_event);
     steps.push(child_text("a2", "toolu_inner", "msg_c2", "nested words"));
     steps.extend(task_ended("a2", "toolu_inner", "completed", "nested words"));
     steps.push(child_tool_result(
@@ -2015,11 +2016,11 @@ async fn a_turn_claude_starts_itself_while_a_subagent_waits_leaves_the_approval_
         system("init", json!({})),
         message_start("msg_3"),
     ]);
-    steps.extend(block("msg_3", 0, "text", &["noticed"]));
+    steps.extend(streamed_block("msg_3", 0, "text", &["noticed"]));
     steps.extend(message_end("msg_3", usage_json(1, 1, 0, 0), "end_turn"));
     steps.extend([
         result_ok("noticed"),
-        permission_answer(
+        expect_permission_answer(
             "perm-1",
             json!({"behavior": "allow", "updatedInput": input}),
         ),
@@ -2053,7 +2054,7 @@ async fn a_turn_claude_starts_itself_while_a_subagent_waits_leaves_the_approval_
     );
     let shape = structure(snap.events.iter());
     assert_eq!(
-        shape.last().map(|(reason, status, _)| (*reason, *status)),
+        shape.last().map(|turn| (turn.derived, turn.status)),
         Some((Some(DerivedReason::Subagent), TurnStatus::InProgress)),
         "Claude's own turn ended inside the derived turn, which stays open: {shape:?}"
     );
@@ -2208,7 +2209,7 @@ async fn a_new_session_launches_with_its_id_and_flags_and_saves_the_id_as_the_th
     assert!(!argv.iter().any(|arg| arg == "--resume"), "{argv:?}");
     let id = arg_after(argv, "--session-id").unwrap();
     assert_eq!(id.len(), 36, "{id}");
-    assert_eq!(saved_thread(&opened.path), id);
+    assert_eq!(saved_claude_session_id(&opened.path), id);
 }
 
 #[tokio::test]
@@ -2276,14 +2277,13 @@ async fn reopening_resumes_the_same_session_and_usage_is_not_counted_twice() {
         client
             .ok("session/close", json!({"thread_id": opened.thread_id}))
             .await;
-        let id = saved_thread(&opened.path);
+        let id = saved_claude_session_id(&opened.path);
         (opened.path, id)
     };
-    // The resumed process repeats msg_1's usage before it gets input (2.1.322 does not, a
-    // different Claude might) and answers anew.
+    let msg_1_usage_before_input = message_end("msg_1", usage_json(2, 7, 100, 50), "end_turn");
     let mut steps = handshake();
     steps.push(message_start("msg_1"));
-    steps.extend(message_end("msg_1", usage_json(2, 7, 100, 50), "end_turn"));
+    steps.extend(msg_1_usage_before_input);
     steps.push(user_message("what was it"));
     steps.extend(simple_turn("msg_2", "4217", usage_json(1, 3, 200, 0)));
     fixture.script(steps);
@@ -2325,7 +2325,7 @@ async fn reopening_resumes_the_same_session_and_usage_is_not_counted_twice() {
         unreachable!()
     };
     assert_eq!((total.output, total.cache_read), (10, 300), "{total:?}");
-    assert_eq!(saved_thread(&path), id, "resume keeps the id");
+    assert_eq!(saved_claude_session_id(&path), id, "resume keeps the id");
     assert_script_followed(&fixture);
 }
 
@@ -2344,7 +2344,7 @@ async fn a_failed_resume_starts_a_new_session_and_says_so() {
         client
             .ok("session/close", json!({"thread_id": opened.thread_id}))
             .await;
-        let old = saved_thread(&opened.path);
+        let old = saved_claude_session_id(&opened.path);
         (opened.path, old)
     };
     fixture.script_for_launch(
@@ -2376,9 +2376,49 @@ async fn a_failed_resume_starts_a_new_session_and_says_so() {
     assert_eq!(arg_after(&launches[1], "--resume"), Some(old.as_str()));
     let fresh = arg_after(&launches[2], "--session-id").unwrap();
     assert_ne!(fresh, old);
-    assert_eq!(saved_thread(&path), fresh);
+    assert_eq!(saved_claude_session_id(&path), fresh);
     submit(&mut client, &reopened.thread_id.0, "again", "follow_up").await;
     client.until(is_completed).await;
+}
+
+#[tokio::test]
+async fn a_resume_that_finds_nothing_after_the_process_died_starts_anew_under_the_same_id() {
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.push(json!({"exit": 1}));
+    fixture.script_for_launch(0, steps);
+    fixture.script_for_launch(
+        1,
+        vec![
+            expect(json!({"type": "control_request", "request": {"subtype": "initialize"}})),
+            result_error(
+                "error_during_execution",
+                &["No conversation found with session ID: x"],
+            ),
+            json!({"exit": 1}),
+        ],
+    );
+    let mut steps = handshake();
+    steps.push(user_message("again"));
+    steps.extend(simple_turn("msg_1", "fresh", usage_json(1, 1, 0, 0)));
+    fixture.script_for_launch(2, steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Failed);
+    submit(&mut client, &thread, "again", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 3, "{launches:?}");
+    let id = arg_after(&launches[0], "--session-id").unwrap();
+    assert_eq!(arg_after(&launches[1], "--resume"), Some(id));
+    assert_eq!(arg_after(&launches[2], "--session-id"), Some(id));
+    assert_eq!(saved_claude_session_id(&opened.path), id);
+    assert_script_followed(&fixture);
 }
 
 #[tokio::test]
@@ -2389,10 +2429,9 @@ async fn a_message_written_during_a_turn_joins_it_and_does_not_start_another() {
     steps.extend([
         system("init", json!({})),
         message_start("msg_1"),
-        // The steered text arrives while the turn is running.
         user_message("also this"),
     ]);
-    steps.extend(block("msg_1", 0, "text", &["both"]));
+    steps.extend(streamed_block("msg_1", 0, "text", &["both"]));
     steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "end_turn"));
     steps.push(result_ok("both"));
     fixture.script(steps);
@@ -2461,7 +2500,6 @@ async fn an_interrupt_is_a_control_request_and_the_aborted_result_ends_the_turn_
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Interrupted);
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
-    // The process stays up for the next turn.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(alive(pid_in(&pid)));
     submit(&mut client, &thread, "after", "follow_up").await;
@@ -2538,9 +2576,8 @@ async fn interrupting_a_turn_claude_started_itself_sends_the_interrupt_and_ends_
         .ok("session/submit", interrupt(&thread, &derived))
         .await;
     let events = client.until(is_completed).await;
-    // Ended by Claude's aborted `result`, not by the session's 10 s confirmation window.
     assert!(
-        asked.elapsed() < Duration::from_secs(5),
+        asked.elapsed() < tiechui_runtime::INTERRUPT_WINDOW / 2,
         "{:?}",
         asked.elapsed()
     );
@@ -2598,13 +2635,12 @@ async fn an_error_result_fails_the_turn_and_the_process_group_is_reaped_within_t
         "{:?}",
         began.elapsed()
     );
-    // The session survives: the next turn starts a new process that resumes the session.
     submit(&mut client, &thread, "retry", "follow_up").await;
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Completed);
     let launches = fixture.launches();
     assert_eq!(launches.len(), 2, "{launches:?}");
-    let id = saved_thread(&opened.path);
+    let id = saved_claude_session_id(&opened.path);
     assert_eq!(arg_after(&launches[1], "--resume"), Some(id.as_str()));
 }
 
@@ -2656,7 +2692,6 @@ async fn a_claude_that_never_answers_initialize_times_out_and_is_killed() {
 async fn host_environment_variables_do_not_reach_claude() {
     let fixture = Fixture::new();
     fixture.script(handshake());
-    // The fake records the environment it received.
     let log = fixture.path("env.log");
     let mut client = fixture.client_with(&[
         ("FAKE_CLAUDE_ENV_LOG", log.to_str().unwrap()),

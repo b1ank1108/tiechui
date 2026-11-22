@@ -16,8 +16,6 @@
 //!   directory (a stand-in for Claude editing the workspace).
 //! - `{"grandchild": "<file>"}`: start a long-lived child in this process group and write its
 //!   pid to the file.
-//!
-//! When the script ends the fake keeps reading (and logging) stdin until it closes.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::zombie_processes)]
 
@@ -71,7 +69,6 @@ fn log_argv(args: &[String]) {
     );
 }
 
-/// How many launches the log already shows.
 fn launch_index() -> usize {
     let Ok(path) = std::env::var("FAKE_CLAUDE_LOG") else {
         return 0;
