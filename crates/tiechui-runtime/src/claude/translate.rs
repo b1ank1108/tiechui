@@ -8,18 +8,15 @@ use std::time::Duration;
 use serde_json::Value;
 use tiechui_protocol::{ItemId, KnownItem, TurnStatus};
 use tokio::sync::mpsc;
-use tokio::time::Instant;
 
 use super::debug;
 use super::items;
 use super::items::Pending;
-use super::run::{Handshake, Inbound, Shared, StderrTail, SupervisorCommand, Writer};
+use super::run::{Handshake, Shared, SupervisorCommand, Writer};
 use super::wire::{Block, Incoming, Request, RequestIdOnly, StreamEvent, control_error};
 use crate::backend::{BackendEvent, BackendItem};
-use crate::process::DeltaCoalescer;
+use crate::process::{Outbox, StderrTail};
 use agents::{Agent, ChildCall};
-
-const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 
 pub type CountedMessageIds = Arc<Mutex<HashSet<String>>>;
 
@@ -45,11 +42,9 @@ struct UnresolvedCall {
 pub struct Translator {
     shared: Arc<Shared>,
     writer: Writer,
-    out: mpsc::Sender<BackendEvent>,
+    out: Outbox,
     counted: CountedMessageIds,
     reap_grace: Duration,
-    coalescer: DeltaCoalescer,
-    flush_at: Option<Instant>,
     streaming: StreamingMessage,
     blocks: HashMap<u64, StreamingBlock>,
     unresolved_calls: Vec<UnresolvedCall>,
@@ -74,11 +69,9 @@ impl Translator {
         Self {
             shared,
             writer,
-            out,
+            out: Outbox::new(out),
             counted,
             reap_grace,
-            coalescer: DeltaCoalescer::default(),
-            flush_at: None,
             streaming: StreamingMessage::default(),
             blocks: HashMap::new(),
             unresolved_calls: Vec::new(),
@@ -94,31 +87,21 @@ impl Translator {
 
     pub async fn run(
         mut self,
-        mut inbound: mpsc::Receiver<Inbound>,
+        mut frames: mpsc::Receiver<Vec<u8>>,
         mut answered: mpsc::UnboundedReceiver<String>,
     ) {
         loop {
-            let wake = async {
-                match self.flush_at {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            };
             let alive = tokio::select! {
                 biased;
-                message = inbound.recv() => match message {
-                    Some(Inbound::Frame(frame)) => self.frame(&frame).await,
-                    Some(Inbound::Oversize(size)) => {
-                        debug(&format!("dropped a frame of {size} bytes over the limit"));
-                        true
-                    }
-                    Some(Inbound::Eof) | None => {
+                frame = frames.recv() => match frame {
+                    Some(frame) => self.frame(&frame).await,
+                    None => {
                         self.exited().await;
                         false
                     }
                 },
                 Some(agent) = answered.recv() => self.approval_settled(&agent).await,
-                () = wake => self.flush().await,
+                () = self.out.flush_due() => self.out.flush().await,
             };
             if !alive {
                 break;
@@ -126,31 +109,16 @@ impl Translator {
         }
     }
 
-    fn stderr_detail(&self) -> String {
-        let tail: Vec<String> = self
-            .stderr
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect();
-        if tail.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", tail.join(" | "))
-        }
-    }
-
     async fn exited(&mut self) {
         self.shared.usable.store(false, Ordering::SeqCst);
-        let detail = self.stderr_detail();
+        let detail = self.stderr.detail();
         if self
             .shared
             .try_finish_handshake(Handshake::Failed(format!("claude exited{detail}")))
         {
             return;
         }
-        self.flush().await;
+        self.out.flush().await;
         self.shared.claude_turn.store(false, Ordering::SeqCst);
         if !self.withdraw_approvals_where(|_| true).await
             || !self.finish_open_items().await
@@ -159,35 +127,15 @@ impl Translator {
             return;
         }
         if self.shared.turn_active.swap(false, Ordering::SeqCst) {
-            self.send_now(BackendEvent::TurnCompleted {
-                status: TurnStatus::Failed,
-                error: Some(format!("claude exited{detail}")),
-            })
-            .await;
+            self.out
+                .send_now(BackendEvent::TurnCompleted {
+                    status: TurnStatus::Failed,
+                    error: Some(format!("claude exited{detail}")),
+                })
+                .await;
         } else {
             self.maybe_idle().await;
         }
-    }
-
-    async fn flush(&mut self) -> bool {
-        self.flush_at = None;
-        for (item_id, delta) in self.coalescer.drain() {
-            if !self
-                .send_now(BackendEvent::ItemDelta { item_id, delta })
-                .await
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    async fn send_now(&self, event: BackendEvent) -> bool {
-        self.out.send(event).await.is_ok()
-    }
-
-    async fn emit_after_flush(&mut self, event: BackendEvent) -> bool {
-        self.flush().await && self.send_now(event).await
     }
 
     async fn frame(&mut self, frame: &[u8]) -> bool {
@@ -205,13 +153,19 @@ impl Translator {
             "control_response" => self.control_response(incoming),
             "result" => self.result(incoming).await,
             "system" => self.system(incoming).await,
-            "stream_event" if incoming.parent_tool_use_id.is_some() => true,
-            "assistant" | "user" if incoming.parent_tool_use_id.is_some() => {
-                self.child_frame(incoming).await
-            }
-            "stream_event" => self.stream_event(incoming).await,
-            "assistant" => self.assistant(incoming).await,
-            "user" => self.user(incoming).await,
+            _ => self.content(incoming).await,
+        }
+    }
+
+    /// Frames of a sub-agent carry the `parent_tool_use_id` of the call that spawned it.
+    async fn content(&mut self, incoming: Incoming) -> bool {
+        let of_child = incoming.parent_tool_use_id.is_some();
+        match (incoming.kind.as_str(), of_child) {
+            ("stream_event", true) => true,
+            ("assistant" | "user", true) => self.child_frame(incoming).await,
+            ("stream_event", false) => self.stream_event(incoming).await,
+            ("assistant", false) => self.assistant(incoming).await,
+            ("user", false) => self.user(incoming).await,
             _ => true,
         }
     }
@@ -319,6 +273,7 @@ impl Translator {
         self.shared.approvals().insert(id.clone(), pending);
         self.note_outside_turn_output();
         if !self
+            .out
             .emit_after_flush(BackendEvent::Approval {
                 id,
                 request: approval,
@@ -342,6 +297,7 @@ impl Translator {
             return true;
         };
         if !self
+            .out
             .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
             .await
         {
@@ -364,6 +320,7 @@ impl Translator {
         });
         for id in ids {
             if !self
+                .out
                 .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
                 .await
             {
@@ -449,6 +406,7 @@ impl Translator {
         open.started = true;
         if !started
             && !self
+                .out
                 .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_item(
                     &id,
                     thinking,
@@ -458,11 +416,7 @@ impl Translator {
         {
             return false;
         }
-        self.coalescer.push(&id, text);
-        if self.flush_at.is_none() {
-            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
-        }
-        true
+        self.out.push_delta(&id, text).await
     }
 
     async fn block_stop(&mut self, index: u64) -> bool {
@@ -476,12 +430,13 @@ impl Translator {
         if !open.started {
             return true;
         }
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(text_item(
-            &open.id,
-            open.thinking,
-            open.text,
-        ))))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(text_item(
+                &open.id,
+                open.thinking,
+                open.text,
+            ))))
+            .await
     }
 
     async fn message_usage(&mut self, id: &str, event: &StreamEvent) -> bool {
@@ -496,7 +451,8 @@ impl Translator {
         } else {
             0
         };
-        self.emit_after_flush(BackendEvent::Usage(items::usage(usage, cache_write_1h)))
+        self.out
+            .emit_after_flush(BackendEvent::Usage(items::usage(usage, cache_write_1h)))
             .await
     }
 
@@ -542,7 +498,8 @@ impl Translator {
             name,
             arguments,
         };
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(call)))
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(call)))
             .await
     }
 
@@ -573,7 +530,8 @@ impl Translator {
 
     async fn emit_result(&mut self, call: String, output: Value, is_error: bool) -> bool {
         let result = result_item(call, output, is_error);
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(result)))
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(result)))
             .await
     }
 
@@ -598,9 +556,7 @@ impl Translator {
     }
 
     async fn result(&mut self, incoming: Incoming) -> bool {
-        let subtype = incoming.subtype.clone().unwrap_or_default();
-        let failed = incoming.is_error || (!subtype.is_empty() && subtype != "success");
-        let message = failure_text(&incoming, &subtype);
+        let (failed, message) = outcome(&incoming);
         if failed
             && self
                 .shared
@@ -612,27 +568,11 @@ impl Translator {
             .withdraw_approvals_where(|pending| pending.subagent_id.is_none())
             .await
             || !self.finish_open_items().await
+            || !self.report_context_window(&incoming).await
         {
             return false;
         }
-        let window = incoming
-            .model_usage
-            .values()
-            .map(|usage| usage.context_window)
-            .max()
-            .unwrap_or(0);
-        if window > self.context_window {
-            self.context_window = window;
-            if !self.send_now(BackendEvent::ContextWindow(window)).await {
-                return false;
-            }
-        }
-        let aborted = incoming
-            .terminal_reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("aborted"))
-            || self.shared.interrupt_sent.load(Ordering::SeqCst);
-        self.shared.interrupt_sent.store(false, Ordering::SeqCst);
+        let aborted = self.aborted(&incoming);
         self.shared.claude_turn.store(false, Ordering::SeqCst);
         if !self.shared.turn_active.swap(false, Ordering::SeqCst) {
             return self
@@ -640,16 +580,36 @@ impl Translator {
                 .await;
         }
         self.outside_turn_output_seen = false;
-        let (status, error) = match (failed, aborted) {
-            (false, _) => (TurnStatus::Completed, None),
-            (true, true) => (TurnStatus::Interrupted, None),
-            (true, false) => (TurnStatus::Failed, Some(message)),
-        };
+        let (status, error) = turn_end(failed, aborted, message);
         if status == TurnStatus::Failed {
             self.stop_after_error_grace();
         }
-        self.send_now(BackendEvent::TurnCompleted { status, error })
+        self.out
+            .send_now(BackendEvent::TurnCompleted { status, error })
             .await
+    }
+
+    async fn report_context_window(&mut self, incoming: &Incoming) -> bool {
+        let window = incoming
+            .model_usage
+            .values()
+            .map(|usage| usage.context_window)
+            .max()
+            .unwrap_or(0);
+        if window <= self.context_window {
+            return true;
+        }
+        self.context_window = window;
+        self.out.send_now(BackendEvent::ContextWindow(window)).await
+    }
+
+    fn aborted(&self, incoming: &Incoming) -> bool {
+        let interrupt_sent = self.shared.interrupt_sent.swap(false, Ordering::SeqCst);
+        interrupt_sent
+            || incoming
+                .terminal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("aborted"))
     }
 
     async fn end_result_outside_session_turn(
@@ -660,7 +620,7 @@ impl Translator {
     ) -> bool {
         if failed && !aborted {
             self.stop_after_error_grace();
-            if !self.send_now(BackendEvent::Error(message)).await {
+            if !self.out.send_now(BackendEvent::Error(message)).await {
                 return false;
             }
         }
@@ -695,6 +655,20 @@ fn result_item(call: String, output: Value, is_error: bool) -> KnownItem {
         call_id: ItemId(call),
         output,
         is_error,
+    }
+}
+
+fn outcome(incoming: &Incoming) -> (bool, String) {
+    let subtype = incoming.subtype.as_deref().unwrap_or_default();
+    let failed = incoming.is_error || !matches!(subtype, "" | "success");
+    (failed, failure_text(incoming, subtype))
+}
+
+fn turn_end(failed: bool, aborted: bool, message: String) -> (TurnStatus, Option<String>) {
+    match (failed, aborted) {
+        (false, _) => (TurnStatus::Completed, None),
+        (true, true) => (TurnStatus::Interrupted, None),
+        (true, false) => (TurnStatus::Failed, Some(message)),
     }
 }
 

@@ -141,11 +141,12 @@ impl Translator {
             agent_id: thread.to_owned(),
         };
         self.note_derived();
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
-            item,
-            child_of: Some(child_of),
-        }))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
+                item,
+                child_of: Some(child_of),
+            }))
+            .await
     }
 
     async fn child_call(
@@ -381,14 +382,15 @@ impl Translator {
             },
         );
         self.note_derived();
-        self.emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
-            agent_id: thread.to_owned(),
-            parent_call_id,
-            name,
-            state: SubagentState::Running,
-            message: None,
-        }))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
+                agent_id: thread.to_owned(),
+                parent_call_id,
+                name,
+                state: SubagentState::Running,
+                message: None,
+            }))
+            .await
     }
 
     async fn set_state(
@@ -411,7 +413,10 @@ impl Translator {
             message: agent.message.clone(),
         };
         self.note_derived();
-        self.emit_after_flush(BackendEvent::Subagent(update)).await && self.maybe_idle().await
+        self.out
+            .emit_after_flush(BackendEvent::Subagent(update))
+            .await
+            && self.maybe_idle().await
     }
 
     pub(super) async fn agent_turn_started(&mut self, thread: &str) -> bool {
@@ -493,6 +498,6 @@ impl Translator {
             return true;
         }
         self.outside_turn_output_seen = false;
-        self.emit_after_flush(BackendEvent::Idle).await
+        self.out.emit_after_flush(BackendEvent::Idle).await
     }
 }

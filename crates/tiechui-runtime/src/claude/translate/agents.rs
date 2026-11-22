@@ -18,8 +18,12 @@ pub struct Agent {
 
 impl Agent {
     fn live(&self) -> bool {
-        matches!(self.state, SubagentState::Running | SubagentState::Waiting)
+        is_live(self.state)
     }
+}
+
+fn is_live(state: SubagentState) -> bool {
+    matches!(state, SubagentState::Running | SubagentState::Waiting)
 }
 
 pub struct ChildCall {
@@ -85,14 +89,15 @@ impl Translator {
             },
         );
         self.note_outside_turn_output();
-        self.emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
-            agent_id: agent.to_owned(),
-            parent_call_id,
-            name,
-            state: SubagentState::Running,
-            message: None,
-        }))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
+                agent_id: agent.to_owned(),
+                parent_call_id,
+                name,
+                state: SubagentState::Running,
+                message: None,
+            }))
+            .await
     }
 
     async fn set_state(
@@ -104,34 +109,46 @@ impl Translator {
         let Some(current) = self.agents.get(agent) else {
             return true;
         };
-        let ending = !matches!(state, SubagentState::Running | SubagentState::Waiting);
-        let message = if ending { message } else { None };
+        let ending = !is_live(state);
+        let message = message.filter(|_| ending);
         if current.state == state && current.message == message {
             return true;
         }
-        if ending
-            && current.live()
-            && !(self
-                .withdraw_approvals_where(|pending| pending.subagent_id.as_deref() == Some(agent))
-                .await
-                && self.fail_and_forget_child_calls(agent).await)
-        {
+        if ending && current.live() && !self.end_agent(agent).await {
             return false;
         }
-        let Some(current) = self.agents.get_mut(agent) else {
+        let Some(update) = self.record_state(agent, state, message) else {
             return true;
         };
+        self.note_outside_turn_output();
+        self.out
+            .emit_after_flush(BackendEvent::Subagent(update))
+            .await
+            && self.maybe_idle().await
+    }
+
+    async fn end_agent(&mut self, agent: &str) -> bool {
+        self.withdraw_approvals_where(|pending| pending.subagent_id.as_deref() == Some(agent))
+            .await
+            && self.fail_and_forget_child_calls(agent).await
+    }
+
+    fn record_state(
+        &mut self,
+        agent: &str,
+        state: SubagentState,
+        message: Option<String>,
+    ) -> Option<SubagentUpdate> {
+        let current = self.agents.get_mut(agent)?;
         current.state = state;
         current.message = message;
-        let update = SubagentUpdate {
+        Some(SubagentUpdate {
             agent_id: agent.to_owned(),
             parent_call_id: current.parent_call_id.clone(),
             name: current.name.clone(),
             state,
             message: current.message.clone(),
-        };
-        self.note_outside_turn_output();
-        self.emit_after_flush(BackendEvent::Subagent(update)).await && self.maybe_idle().await
+        })
     }
 
     pub(super) async fn interrupt_agents(&mut self) -> bool {
@@ -304,11 +321,12 @@ impl Translator {
             agent_id: agent.to_owned(),
         };
         self.note_outside_turn_output();
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
-            item,
-            child_of: Some(child_of),
-        }))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem {
+                item,
+                child_of: Some(child_of),
+            }))
+            .await
     }
 
     pub(super) async fn agent_waits(&mut self, agent: &str) -> bool {
@@ -351,6 +369,6 @@ impl Translator {
             return true;
         }
         self.outside_turn_output_seen = false;
-        self.emit_after_flush(BackendEvent::Idle).await
+        self.out.emit_after_flush(BackendEvent::Idle).await
     }
 }

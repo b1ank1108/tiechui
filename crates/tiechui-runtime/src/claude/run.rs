@@ -1,25 +1,19 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::debug;
 use super::items::Pending;
-use crate::process::{Frame, FrameReader, Process};
+use crate::process::Process;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-
-pub enum Inbound {
-    Frame(Vec<u8>),
-    Oversize(usize),
-    Eof,
-}
 
 /// Claude answers `initialize` once it is up and, when resuming, has found the conversation;
 /// otherwise it reports an error `result` or exits.
@@ -155,47 +149,6 @@ impl Writer {
         self.queue
             .send(line)
             .map_err(|_| "claude is not taking input".to_owned())
-    }
-}
-
-pub type StderrTail = Arc<Mutex<VecDeque<String>>>;
-
-pub async fn read_frames(stdout: impl AsyncRead + Unpin, frames: mpsc::Sender<Inbound>) {
-    let mut reader = FrameReader::new(stdout);
-    loop {
-        let message = match reader.next().await {
-            Ok(Some(Frame::Line(line))) if line.is_empty() => continue,
-            Ok(Some(Frame::Line(line))) => Inbound::Frame(line),
-            Ok(Some(Frame::Oversize(size))) => Inbound::Oversize(size),
-            Ok(None) | Err(_) => {
-                let _ = frames.send(Inbound::Eof).await;
-                return;
-            }
-        };
-        if frames.send(message).await.is_err() {
-            return;
-        }
-    }
-}
-
-pub async fn read_stderr(stderr: impl AsyncRead + Unpin, tail: StderrTail) {
-    let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
-    while let Ok(Some(frame)) = reader.next().await {
-        let Frame::Line(line) = frame else { continue };
-        let line: String = String::from_utf8_lossy(&line)
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
-        if line.is_empty() {
-            continue;
-        }
-        debug(&format!("stderr: {line}"));
-        let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-        if tail.len() == 8 {
-            tail.pop_front();
-        }
-        tail.push_back(line);
     }
 }
 

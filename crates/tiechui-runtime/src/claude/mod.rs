@@ -18,9 +18,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
-use crate::process::Process;
-use crate::registry::{Driver, Launch, Probe, probe_binary, resolve_in_path};
-use run::{Handshake, Shared, StderrTail, SupervisorCommand, Writer};
+use crate::process::{self, Process, StderrTail, overridable, seconds};
+use crate::registry::{Driver, Launch, Probe, probe_at_least, resolve_in_path};
+use run::{Handshake, Shared, SupervisorCommand, Writer};
 use translate::{CountedMessageIds, Translator};
 
 /// The oldest Claude Code the driver supports: 2.1.322, the only version its frames were
@@ -33,10 +33,8 @@ pub const MIN_VERSION: &str = "2.1.322";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const ERROR_RESULT_EXIT_GRACE: Duration = Duration::from_secs(9);
 
-#[cfg(feature = "fake-runtime")]
-pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CLAUDE_HANDSHAKE_TIMEOUT_MS";
-#[cfg(feature = "fake-runtime")]
-pub const REAP_TIMEOUT_ENV: &str = "CHUI_CLAUDE_REAP_TIMEOUT_MS";
+const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CLAUDE_HANDSHAKE_TIMEOUT_MS";
+const REAP_TIMEOUT_ENV: &str = "CHUI_CLAUDE_REAP_TIMEOUT_MS";
 
 #[derive(Debug, Clone, Copy)]
 struct Timeouts {
@@ -46,58 +44,15 @@ struct Timeouts {
 
 impl Timeouts {
     fn current() -> Self {
-        #[allow(unused_mut)]
-        let mut timeouts = Self {
-            handshake: HANDSHAKE_TIMEOUT,
-            reap: ERROR_RESULT_EXIT_GRACE,
-        };
-        #[cfg(feature = "fake-runtime")]
-        {
-            let millis = |name: &str| std::env::var(name).ok().and_then(|v| v.parse().ok());
-            if let Some(ms) = millis(HANDSHAKE_TIMEOUT_ENV) {
-                timeouts.handshake = Duration::from_millis(ms);
-            }
-            if let Some(ms) = millis(REAP_TIMEOUT_ENV) {
-                timeouts.reap = Duration::from_millis(ms);
-            }
+        Self {
+            handshake: overridable(HANDSHAKE_TIMEOUT, HANDSHAKE_TIMEOUT_ENV),
+            reap: overridable(ERROR_RESULT_EXIT_GRACE, REAP_TIMEOUT_ENV),
         }
-        timeouts
-    }
-}
-
-fn seconds(duration: Duration) -> String {
-    if duration.subsec_millis() == 0 {
-        format!("{} s", duration.as_secs())
-    } else {
-        format!("{:.1} s", duration.as_secs_f64())
     }
 }
 
 fn debug(message: &str) {
-    if std::env::var_os("CHUI_CLAUDE_DEBUG").is_some() {
-        eprintln!("chui claude: {message}");
-    }
-}
-
-fn version_parts(version: &str) -> Vec<u64> {
-    version
-        .split('.')
-        .map(|part| {
-            part.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-fn at_least(version: &str, minimum: &str) -> bool {
-    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
-    let len = version.len().max(minimum.len());
-    version.resize(len, 0);
-    minimum.resize(len, 0);
-    version >= minimum
+    process::debug("claude", message);
 }
 
 pub struct ClaudeDriver;
@@ -125,16 +80,7 @@ impl Driver for ClaudeDriver {
     }
 
     async fn probe(&self, launch: &Launch) -> Probe {
-        let mut probe = probe_binary("claude", "--version", launch).await;
-        if let (true, Some(version)) = (probe.available, &probe.version)
-            && !at_least(version, MIN_VERSION)
-        {
-            probe.reason = Some(format!(
-                "claude {version} is older than the minimum supported version {MIN_VERSION}"
-            ));
-            probe.available = false;
-        }
-        probe
+        probe_at_least("claude", MIN_VERSION, launch).await
     }
 
     fn backend(&self, launch: &Launch) -> Result<Box<dyn Backend>, String> {
@@ -286,8 +232,8 @@ impl ClaudeBackend {
         );
         let tasks = vec![
             write_task,
-            tokio::spawn(run::read_frames(stdout, frames)),
-            tokio::spawn(run::read_stderr(stderr, tail)),
+            tokio::spawn(process::read_frames("claude", stdout, frames)),
+            tokio::spawn(process::read_stderr("claude", stderr, tail)),
             tokio::spawn(translator.run(inbound, answered)),
             tokio::spawn(run::supervise(process, commands, shared.clone())),
         ];
@@ -474,21 +420,5 @@ impl Backend for ClaudeBackend {
         if let Some(run) = self.run.take() {
             run.close().await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn versions_compare_as_dotted_numbers() {
-        assert!(at_least("2.1.322", MIN_VERSION));
-        assert!(at_least("2.1.400", MIN_VERSION));
-        assert!(at_least("2.2.0", MIN_VERSION));
-        assert!(at_least("3.0.0", MIN_VERSION));
-        assert!(!at_least("2.1.321", MIN_VERSION));
-        assert!(!at_least("2.0.999", MIN_VERSION));
-        assert!(!at_least("1.9.9", MIN_VERSION));
     }
 }

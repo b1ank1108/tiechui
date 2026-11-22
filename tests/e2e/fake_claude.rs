@@ -109,17 +109,7 @@ fn serve(args: &[String]) {
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
         let step: Value = serde_json::from_str(line).unwrap();
         if let Some(expected) = step.get("expect") {
-            let Some(Ok(text)) = inbound.next() else {
-                log(&log_path, "EOF while expecting");
-                std::process::exit(4);
-            };
-            log(&log_path, &text);
-            let actual: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            if !matches(expected, &actual) {
-                log(&log_path, &format!("MISMATCH expected {expected}"));
-                eprintln!("fake claude: expected {expected}, got {text}");
-                std::process::exit(3);
-            }
+            let actual = expect(&mut inbound, &log_path, expected);
             if let Some(id) = actual.get("request_id") {
                 last_id = id.clone();
             }
@@ -128,39 +118,64 @@ fn serve(args: &[String]) {
             replace_id(&mut frame, &last_id);
             writeln!(stdout, "{frame}").unwrap();
             stdout.flush().unwrap();
-        } else if let Some(ms) = step.get("sleep_ms").and_then(Value::as_u64) {
-            std::thread::sleep(Duration::from_millis(ms));
-        } else if step.get("hang").is_some() {
-            loop {
-                std::thread::sleep(Duration::from_secs(3600));
-            }
-        } else if let Some(text) = step.get("stderr").and_then(Value::as_str) {
-            eprintln!("{text}");
-        } else if let Some(code) = step.get("exit").and_then(Value::as_i64) {
-            std::process::exit(code as i32);
-        } else if let Some(file) = step.get("self_pid").and_then(Value::as_str) {
-            std::fs::write(file, std::process::id().to_string()).unwrap();
-        } else if let Some(write) = step.get("write") {
-            std::fs::write(
-                write["path"].as_str().unwrap(),
-                write["content"].as_str().unwrap(),
-            )
-            .unwrap();
-        } else if let Some(file) = step.get("grandchild").and_then(Value::as_str) {
-            let child = Command::new(std::env::current_exe().unwrap())
-                .arg("--sleeper")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            std::fs::write(file, child.id().to_string()).unwrap();
-        } else if step.get("close_stdin").is_some() {
-            close_stdin();
+        } else {
+            act(&step);
         }
     }
     for text in inbound.map_while(Result::ok) {
         log(&log_path, &text);
+    }
+}
+
+fn expect(
+    inbound: &mut impl Iterator<Item = std::io::Result<String>>,
+    log_path: &Option<String>,
+    expected: &Value,
+) -> Value {
+    let Some(Ok(text)) = inbound.next() else {
+        log(log_path, "EOF while expecting");
+        std::process::exit(4);
+    };
+    log(log_path, &text);
+    let actual: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !matches(expected, &actual) {
+        log(log_path, &format!("MISMATCH expected {expected}"));
+        eprintln!("fake claude: expected {expected}, got {text}");
+        std::process::exit(3);
+    }
+    actual
+}
+
+fn act(step: &Value) {
+    if let Some(ms) = step.get("sleep_ms").and_then(Value::as_u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    } else if step.get("hang").is_some() {
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    } else if let Some(text) = step.get("stderr").and_then(Value::as_str) {
+        eprintln!("{text}");
+    } else if let Some(code) = step.get("exit").and_then(Value::as_i64) {
+        std::process::exit(code as i32);
+    } else if let Some(file) = step.get("self_pid").and_then(Value::as_str) {
+        std::fs::write(file, std::process::id().to_string()).unwrap();
+    } else if let Some(write) = step.get("write") {
+        std::fs::write(
+            write["path"].as_str().unwrap(),
+            write["content"].as_str().unwrap(),
+        )
+        .unwrap();
+    } else if let Some(file) = step.get("grandchild").and_then(Value::as_str) {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--sleeper")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(file, child.id().to_string()).unwrap();
+    } else if step.get("close_stdin").is_some() {
+        close_stdin();
     }
 }
 

@@ -4,13 +4,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tiechui_protocol::{ApprovalDecision, ApprovalRequest, ItemId, KnownItem, TurnStatus};
 use tokio::sync::{Notify, mpsc, watch};
-use tokio::time::Instant;
 
 use super::debug;
 use super::items;
@@ -25,10 +23,7 @@ use super::wire::{
     TurnError, TurnNotification, UsageNotification,
 };
 use crate::backend::{BackendEvent, BackendItem};
-use crate::process::DeltaCoalescer;
-
-const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
-const FLUSH_BYTES: usize = 64 * 1024;
+use crate::process::{Outbox, StderrTail};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnState {
@@ -106,12 +101,6 @@ impl Shared {
     }
 }
 
-pub enum Inbound {
-    Frame(Vec<u8>),
-    Oversize(usize),
-    Eof,
-}
-
 pub(super) struct ToolStub {
     pub id: String,
     pub name: String,
@@ -130,10 +119,7 @@ enum Live {
 pub struct Translator {
     shared: Arc<Shared>,
     rpc: Arc<Rpc>,
-    out: mpsc::Sender<BackendEvent>,
-    coalescer: DeltaCoalescer,
-    buffered: usize,
-    flush_at: Option<Instant>,
+    out: Outbox,
     live: HashMap<String, Live>,
     open: Vec<String>,
     last_total: Option<Breakdown>,
@@ -142,7 +128,7 @@ pub struct Translator {
     outside_turn_output_seen: bool,
     agents: HashMap<String, Agent>,
     child_tools: HashMap<String, Vec<ToolStub>>,
-    stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
+    stderr: StderrTail,
 }
 
 impl Translator {
@@ -150,15 +136,12 @@ impl Translator {
         shared: Arc<Shared>,
         rpc: Arc<Rpc>,
         out: mpsc::Sender<BackendEvent>,
-        stderr: Arc<Mutex<std::collections::VecDeque<String>>>,
+        stderr: StderrTail,
     ) -> Self {
         Self {
             shared,
             rpc,
-            out,
-            coalescer: DeltaCoalescer::default(),
-            buffered: 0,
-            flush_at: None,
+            out: Outbox::new(out),
             live: HashMap::new(),
             open: Vec::new(),
             last_total: None,
@@ -171,28 +154,18 @@ impl Translator {
         }
     }
 
-    pub async fn run(mut self, mut inbound: mpsc::Receiver<Inbound>) {
+    pub async fn run(mut self, mut frames: mpsc::Receiver<Vec<u8>>) {
         loop {
-            let wake = async {
-                match self.flush_at {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            };
             let alive = tokio::select! {
                 biased;
-                message = inbound.recv() => match message {
-                    Some(Inbound::Frame(frame)) => self.frame(&frame).await,
-                    Some(Inbound::Oversize(size)) => {
-                        debug(&format!("dropped a frame of {size} bytes over the limit"));
-                        true
-                    }
-                    Some(Inbound::Eof) | None => {
+                frame = frames.recv() => match frame {
+                    Some(frame) => self.frame(&frame).await,
+                    None => {
                         self.exited().await;
                         false
                     }
                 },
-                () = wake => self.flush().await,
+                () = self.out.flush_due() => self.out.flush().await,
             };
             if !alive {
                 break;
@@ -202,53 +175,13 @@ impl Translator {
     }
 
     async fn exited(&mut self) {
-        self.flush().await;
-        let tail: Vec<String> = self
-            .stderr
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect();
-        let detail = if tail.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", tail.join(" | "))
-        };
-        self.send_now(BackendEvent::Error(format!(
-            "codex app-server exited{detail}"
-        )))
-        .await;
-    }
-
-    async fn flush(&mut self) -> bool {
-        self.flush_at = None;
-        self.buffered = 0;
-        for (item_id, delta) in self.coalescer.drain() {
-            if !self
-                .send_now(BackendEvent::ItemDelta { item_id, delta })
-                .await
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    async fn send_now(&self, event: BackendEvent) -> bool {
-        self.out.send(event).await.is_ok()
-    }
-
-    pub(super) async fn emit_after_flush(&mut self, event: BackendEvent) -> bool {
-        self.flush().await && self.send_now(event).await
-    }
-
-    fn push_delta(&mut self, item: &str, delta: &str) {
-        self.coalescer.push(&ItemId(item.to_owned()), delta);
-        self.buffered += delta.len();
-        if self.flush_at.is_none() && !delta.is_empty() {
-            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
-        }
+        self.out.flush().await;
+        let detail = self.stderr.detail();
+        self.out
+            .send_now(BackendEvent::Error(format!(
+                "codex app-server exited{detail}"
+            )))
+            .await;
     }
 
     pub(super) fn parse<T: DeserializeOwned>(params: Value, what: &str) -> Option<T> {
@@ -390,6 +323,7 @@ impl Translator {
         let id = approval_id(&note.request_id);
         if self.shared.take_approval(&id).is_some()
             && !self
+                .out
                 .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
                 .await
         {
@@ -432,7 +366,8 @@ impl Translator {
         self.last_completed = Some(turn.id);
         self.outside_turn_output_seen = false;
         let error = turn.error.map(turn_error_text);
-        self.emit_after_flush(BackendEvent::TurnCompleted { status, error })
+        self.out
+            .emit_after_flush(BackendEvent::TurnCompleted { status, error })
             .await
     }
 
@@ -465,6 +400,7 @@ impl Translator {
         };
         for id in withdrawn {
             if !self
+                .out
                 .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
                 .await
             {
@@ -482,7 +418,10 @@ impl Translator {
                     started: true,
                     text,
                 }) => {
-                    let sent = self.emit_after_flush(text_item(&id, thinking, text)).await;
+                    let sent = self
+                        .out
+                        .emit_after_flush(text_item(&id, thinking, text))
+                        .await;
                     if !sent {
                         return false;
                     }
@@ -597,12 +536,13 @@ impl Translator {
                 text: String::new(),
             },
         );
-        self.emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_known(
-            id,
-            thinking,
-            String::new(),
-        ))))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_known(
+                id,
+                thinking,
+                String::new(),
+            ))))
+            .await
     }
 
     async fn text_delta(&mut self, id: &str, thinking: bool, delta: &str) -> bool {
@@ -627,17 +567,14 @@ impl Translator {
         if start {
             let started = BackendItem::root(text_known(id, thinking, String::new()));
             if !self
+                .out
                 .emit_after_flush(BackendEvent::ItemStarted(started))
                 .await
             {
                 return false;
             }
         }
-        self.push_delta(id, delta);
-        if self.buffered >= FLUSH_BYTES {
-            return self.flush().await;
-        }
-        true
+        self.out.push_delta(&ItemId(id.to_owned()), delta).await
     }
 
     async fn finish_text(&mut self, id: &str, thinking: bool, text: String) -> bool {
@@ -648,6 +585,7 @@ impl Translator {
         }
         if !started
             && !self
+                .out
                 .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(text_known(
                     id,
                     thinking,
@@ -657,7 +595,9 @@ impl Translator {
         {
             return false;
         }
-        self.emit_after_flush(text_item(id, thinking, text)).await
+        self.out
+            .emit_after_flush(text_item(id, thinking, text))
+            .await
     }
 
     async fn start_tools(&mut self, id: &str, calls: Vec<(String, Value, String)>) -> bool {
@@ -668,7 +608,7 @@ impl Translator {
                 name: name.clone(),
                 arguments: arguments.clone(),
             }));
-            if !self.emit_after_flush(event).await {
+            if !self.out.emit_after_flush(event).await {
                 return false;
             }
             stubs.push(ToolStub {
@@ -690,15 +630,17 @@ impl Translator {
         is_error: bool,
     ) -> bool {
         let call = ItemId(id.to_owned());
-        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
-            KnownItem::ToolCall {
-                id: call.clone(),
-                name: name.to_owned(),
-                arguments,
-            },
-        )))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
+                KnownItem::ToolCall {
+                    id: call.clone(),
+                    name: name.to_owned(),
+                    arguments,
+                },
+            )))
+            .await
             && self
+                .out
                 .send_now(BackendEvent::ItemCompleted(BackendItem::root(
                     KnownItem::ToolResult {
                         id: ItemId(format!("{id}:result")),
@@ -728,13 +670,15 @@ impl Translator {
         {
             self.context_window = Some(window);
             if !self
+                .out
                 .emit_after_flush(BackendEvent::ContextWindow(window))
                 .await
             {
                 return false;
             }
         }
-        self.emit_after_flush(BackendEvent::Usage(items::usage(&note.token_usage.last)))
+        self.out
+            .emit_after_flush(BackendEvent::Usage(items::usage(&note.token_usage.last)))
             .await
     }
 
@@ -776,7 +720,7 @@ impl Translator {
     async fn after_answer(&mut self, answered: Result<(), String>) -> bool {
         if let Err(error) = answered {
             debug(&error);
-            return self.emit_after_flush(BackendEvent::Error(error)).await;
+            return self.out.emit_after_flush(BackendEvent::Error(error)).await;
         }
         true
     }
@@ -932,7 +876,8 @@ impl Translator {
                 thread: thread.to_owned(),
             },
         );
-        self.emit_after_flush(BackendEvent::Approval { id, request })
+        self.out
+            .emit_after_flush(BackendEvent::Approval { id, request })
             .await
             && self.agent_waits(thread).await
     }
