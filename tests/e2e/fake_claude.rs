@@ -16,6 +16,7 @@
 //!   directory (a stand-in for Claude editing the workspace).
 //! - `{"grandchild": "<file>"}`: start a long-lived child in this process group and write its
 //!   pid to the file.
+//! - `{"close_stdin": true}`: stop reading input for good, so writes to this process fail (unix).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::zombie_processes)]
 
@@ -154,9 +155,26 @@ fn serve(args: &[String]) {
                 .spawn()
                 .unwrap();
             std::fs::write(file, child.id().to_string()).unwrap();
+        } else if step.get("close_stdin").is_some() {
+            close_stdin();
         }
     }
     for text in inbound.map_while(Result::ok) {
         log(&log_path, &text);
     }
+}
+
+/// Replaces stdin with `/dev/null`, which closes this end of the pipe while descriptor 0 stays
+/// valid.
+#[cfg(unix)]
+fn close_stdin() {
+    use std::os::fd::AsRawFd;
+    let null = std::fs::File::open("/dev/null").unwrap();
+    // SAFETY: both descriptors are open; dup2 only swaps what descriptor 0 refers to.
+    assert_eq!(unsafe { libc::dup2(null.as_raw_fd(), 0) }, 0);
+}
+
+#[cfg(not(unix))]
+fn close_stdin() {
+    unimplemented!("close_stdin is unix-only");
 }

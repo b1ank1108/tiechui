@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncWriteExt};
-use tokio::process::ChildStdin;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -124,7 +123,12 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn spawn(mut stdin: ChildStdin) -> (Self, JoinHandle<()>) {
+    /// When a write fails or times out the writer stops and the run becomes unusable, so the
+    /// next turn starts a new process.
+    pub fn spawn(
+        mut stdin: impl AsyncWrite + Unpin + Send + 'static,
+        shared: Arc<Shared>,
+    ) -> (Self, JoinHandle<()>) {
         let (queue, mut lines) = mpsc::unbounded_channel::<Vec<u8>>();
         let task = tokio::spawn(async move {
             while let Some(line) = lines.recv().await {
@@ -132,17 +136,14 @@ impl Writer {
                     stdin.write_all(&line).await?;
                     stdin.flush().await
                 };
-                match tokio::time::timeout(WRITE_TIMEOUT, write).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        debug(&format!("cannot write to claude: {error}"));
-                        return;
-                    }
-                    Err(_) => {
-                        debug("claude stopped reading its input");
-                        return;
-                    }
-                }
+                let failure = match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(error)) => format!("cannot write to claude: {error}"),
+                    Err(_) => "claude stopped reading its input".to_owned(),
+                };
+                debug(&failure);
+                shared.usable.store(false, Ordering::SeqCst);
+                return;
             }
         });
         (Self { queue }, task)
@@ -216,7 +217,6 @@ pub async fn supervise(
             _ = process.child.wait() => break,
             command = commands.recv() => match command {
                 Some(SupervisorCommand::ReapAfter(grace)) => {
-                    shared.usable.store(false, Ordering::SeqCst);
                     reap_at = Some(Instant::now() + grace);
                 }
                 Some(SupervisorCommand::Close(ack)) => {

@@ -272,8 +272,8 @@ impl ClaudeBackend {
                 "claude started without its stdio".into(),
             ));
         };
-        let (writer, write_task) = Writer::spawn(stdin);
         let (shared, commands, answered) = Shared::new("tiechui-init".into());
+        let (writer, write_task) = Writer::spawn(stdin, shared.clone());
         let tail = StderrTail::default();
         let (frames, inbound) = mpsc::channel(256);
         let translator = Translator::new(
@@ -411,10 +411,18 @@ impl Backend for ClaudeBackend {
             self.respawn_resuming().await?;
         }
         let run = self.running()?;
-        run.shared.interrupt_sent.store(false, Ordering::SeqCst);
-        run.shared.turn_active.store(true, Ordering::SeqCst);
-        run.shared.user_message_sent.store(true, Ordering::SeqCst);
-        run.writer.send(&wire::user_message(input))
+        let shared = &run.shared;
+        shared.interrupt_sent.store(false, Ordering::SeqCst);
+        shared.turn_active.store(true, Ordering::SeqCst);
+        let first_message = !shared.user_message_sent.swap(true, Ordering::SeqCst);
+        let sent = run.writer.send(&wire::user_message(input));
+        if sent.is_err() {
+            shared.turn_active.store(false, Ordering::SeqCst);
+            shared
+                .user_message_sent
+                .store(!first_message, Ordering::SeqCst);
+        }
+        sent
     }
 
     async fn steer(&mut self, input: &[InputContent]) -> Result<Steered, String> {

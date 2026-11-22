@@ -14,7 +14,7 @@ use super::debug;
 use super::items;
 use super::items::Pending;
 use super::run::{Handshake, Inbound, Shared, StderrTail, SupervisorCommand, Writer};
-use super::wire::{Block, Incoming, Request, StreamEvent, control_error};
+use super::wire::{Block, Incoming, Request, RequestIdOnly, StreamEvent, control_error};
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::DeltaCoalescer;
 use agents::{Agent, ChildCall};
@@ -22,6 +22,12 @@ use agents::{Agent, ChildCall};
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 
 pub type CountedMessageIds = Arc<Mutex<HashSet<String>>>;
+
+#[derive(Default)]
+struct StreamingMessage {
+    id: String,
+    cache_write_1h: u64,
+}
 
 struct StreamingBlock {
     id: ItemId,
@@ -44,7 +50,7 @@ pub struct Translator {
     reap_grace: Duration,
     coalescer: DeltaCoalescer,
     flush_at: Option<Instant>,
-    streaming_message_id: String,
+    streaming: StreamingMessage,
     blocks: HashMap<u64, StreamingBlock>,
     unresolved_calls: Vec<UnresolvedCall>,
     announced: HashSet<String>,
@@ -73,7 +79,7 @@ impl Translator {
             reap_grace,
             coalescer: DeltaCoalescer::default(),
             flush_at: None,
-            streaming_message_id: String::new(),
+            streaming: StreamingMessage::default(),
             blocks: HashMap::new(),
             unresolved_calls: Vec::new(),
             announced: HashSet::new(),
@@ -189,6 +195,7 @@ impl Translator {
             Ok(incoming) => incoming,
             Err(error) => {
                 debug(&format!("dropped a frame that is not stream-json: {error}"));
+                self.refuse_unreadable_request(frame, &error);
                 return true;
             }
         };
@@ -213,6 +220,7 @@ impl Translator {
         match incoming.subtype.as_deref() {
             // Every turn begins with `init`; one while no turn of the session runs is Claude's own.
             Some("init") if !self.shared.turn_active() => {
+                self.shared.interrupt_sent.store(false, Ordering::SeqCst);
                 self.shared.claude_turn.store(true, Ordering::SeqCst);
                 self.outside_turn_output_seen = true;
                 true
@@ -246,14 +254,32 @@ impl Translator {
         if request.subtype == "can_use_tool" {
             return self.permission_request(&id, &request).await;
         }
-        let reply = control_error(
+        self.refuse(
             &id,
             &format!("unsupported control request: {}", request.subtype),
         );
-        if self.writer.send(&reply).is_err() {
+        true
+    }
+
+    fn refuse_unreadable_request(&self, frame: &[u8], error: &serde_json::Error) {
+        if let Ok(request) = serde_json::from_slice::<RequestIdOnly>(frame)
+            && request.kind == "control_request"
+        {
+            self.refuse(
+                &request.request_id,
+                &format!("unreadable control request: {error}"),
+            );
+        }
+    }
+
+    fn refuse(&self, request_id: &str, reason: &str) {
+        if self
+            .writer
+            .send(&control_error(request_id, reason))
+            .is_err()
+        {
             debug("cannot answer a control request: claude is not taking input");
         }
-        true
     }
 
     async fn permission_request(&mut self, request_id: &str, request: &Request) -> bool {
@@ -356,7 +382,7 @@ impl Translator {
             _ => incoming
                 .api_message_id
                 .clone()
-                .unwrap_or_else(|| self.streaming_message_id.clone()),
+                .unwrap_or_else(|| self.streaming.id.clone()),
         }
     }
 
@@ -367,7 +393,10 @@ impl Translator {
         };
         match event.kind.as_str() {
             "message_start" => {
-                self.streaming_message_id = id;
+                let cache_write_1h = event.message.map_or(0, |message| {
+                    message.usage.cache_creation.ephemeral_1h_input_tokens
+                });
+                self.streaming = StreamingMessage { id, cache_write_1h };
                 true
             }
             "content_block_start" => self.block_start(&event).await,
@@ -391,7 +420,7 @@ impl Translator {
         self.blocks.insert(
             event.index,
             StreamingBlock {
-                id: ItemId(format!("{}:{}", self.streaming_message_id, event.index)),
+                id: ItemId(format!("{}:{}", self.streaming.id, event.index)),
                 thinking,
                 started: false,
                 text: String::new(),
@@ -462,7 +491,12 @@ impl Translator {
         if !self.is_new_usage(id) {
             return true;
         }
-        self.emit_after_flush(BackendEvent::Usage(items::usage(usage)))
+        let cache_write_1h = if id == self.streaming.id {
+            self.streaming.cache_write_1h
+        } else {
+            0
+        };
+        self.emit_after_flush(BackendEvent::Usage(items::usage(usage, cache_write_1h)))
             .await
     }
 
@@ -611,14 +645,11 @@ impl Translator {
             (true, true) => (TurnStatus::Interrupted, None),
             (true, false) => (TurnStatus::Failed, Some(message)),
         };
-        let reap = status == TurnStatus::Failed;
-        let sent = self
-            .send_now(BackendEvent::TurnCompleted { status, error })
-            .await;
-        if reap {
+        if status == TurnStatus::Failed {
             self.stop_after_error_grace();
         }
-        sent
+        self.send_now(BackendEvent::TurnCompleted { status, error })
+            .await
     }
 
     async fn end_result_outside_session_turn(
@@ -628,15 +659,16 @@ impl Translator {
         message: String,
     ) -> bool {
         if failed && !aborted {
+            self.stop_after_error_grace();
             if !self.send_now(BackendEvent::Error(message)).await {
                 return false;
             }
-            self.stop_after_error_grace();
         }
         self.maybe_idle().await
     }
 
     fn stop_after_error_grace(&self) {
+        self.shared.usable.store(false, Ordering::SeqCst);
         let _ = self
             .shared
             .supervisor
@@ -674,5 +706,78 @@ fn failure_text(incoming: &Incoming, subtype: &str) -> String {
         Some(text) if !text.is_empty() => text.to_owned(),
         _ if subtype.is_empty() => "claude reported an error".to_owned(),
         _ => format!("claude reported {subtype}"),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::task::Poll;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn translator(out: mpsc::Sender<BackendEvent>) -> (Translator, Arc<Shared>) {
+        let (shared, _supervisor, _answered) = Shared::new("init".into());
+        shared.try_finish_handshake(Handshake::Ready);
+        let (writer, _) = Writer::spawn(tokio::io::sink(), shared.clone());
+        let translator = Translator::new(
+            shared.clone(),
+            writer,
+            out,
+            CountedMessageIds::default(),
+            Duration::from_secs(9),
+            StderrTail::default(),
+        );
+        (translator, shared)
+    }
+
+    fn error_result() -> Vec<u8> {
+        json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+            "errors": ["boom"]})
+        .to_string()
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn an_error_result_marks_the_run_unusable_before_it_fails_the_turn() {
+        let (out, mut events) = mpsc::channel(1);
+        let fills_the_channel = BackendEvent::Idle;
+        out.try_send(fills_the_channel).unwrap();
+        let (mut translator, shared) = translator(out);
+        shared.turn_active.store(true, Ordering::SeqCst);
+        let frame = error_result();
+        let mut handling = std::pin::pin!(translator.frame(&frame));
+        let first_poll = std::future::poll_fn(|cx| Poll::Ready(handling.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending(), "waiting to send TurnCompleted");
+        assert!(!shared.is_usable());
+        assert!(matches!(events.recv().await, Some(BackendEvent::Idle)));
+        assert!(handling.await);
+        assert!(matches!(
+            events.recv().await,
+            Some(BackendEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_flag_left_from_an_earlier_turn_does_not_hide_an_error_of_claudes_own_turn()
+     {
+        let (out, mut events) = mpsc::channel(8);
+        let (mut translator, shared) = translator(out);
+        let interrupt_after_the_last_result = true;
+        shared
+            .interrupt_sent
+            .store(interrupt_after_the_last_result, Ordering::SeqCst);
+        assert!(
+            translator
+                .frame(br#"{"type": "system", "subtype": "init"}"#)
+                .await
+        );
+        assert!(translator.frame(&error_result()).await);
+        assert!(matches!(events.try_recv(), Ok(BackendEvent::Error(message)) if message == "boom"));
     }
 }

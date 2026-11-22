@@ -41,6 +41,14 @@ pub struct Incoming {
     pub model_usage: std::collections::BTreeMap<String, ModelUsage>,
 }
 
+/// What answering a `control_request` takes, for one whose other fields do not parse.
+#[derive(Debug, Deserialize)]
+pub struct RequestIdOnly {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub request_id: String,
+}
+
 /// `can_use_tool` carries the tool, its input, the id of its `tool_use` block, a short
 /// description and the permission updates Claude suggests for allowing it again
 /// (`[{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]` for a file write).
@@ -74,13 +82,15 @@ pub struct StreamEvent {
     pub content_block: Option<Block>,
     pub delta: Option<Delta>,
     pub usage: Option<Usage>,
-    pub message: Option<MessageId>,
+    pub message: Option<StreamMessage>,
 }
 
+/// `message_start`'s message. Its usage is the only one that breaks the cache write down.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct MessageId {
+pub struct StreamMessage {
     pub id: String,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Default, Deserialize)]

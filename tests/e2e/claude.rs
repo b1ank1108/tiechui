@@ -685,16 +685,20 @@ async fn a_turn_streams_text_and_thinking_maps_tools_counts_usage_once_and_ends_
 
 /// Frames of a real 2.1.322 turn (thinking summary, Write, Bash, Read, Edit, final text) as
 /// recorded, with paths and signatures scrubbed.
-#[tokio::test]
-async fn a_recorded_turn_maps_like_the_synthetic_ones() {
-    let fixture = Fixture::new();
+async fn recorded_tools_turn(fixture: &Fixture) -> Vec<SessionEvent> {
     fixture.script(recorded_script(include_str!(
         "fixtures/claude-tools-turn.ndjson"
     )));
     let mut client = fixture.client();
-    let opened = open(&mut client, &fixture, None).await;
+    let opened = open(&mut client, fixture, None).await;
     submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
-    let events = client.until(is_completed).await;
+    client.until(is_completed).await
+}
+
+#[tokio::test]
+async fn a_recorded_turn_maps_like_the_synthetic_ones() {
+    let fixture = Fixture::new();
+    let events = recorded_tools_turn(&fixture).await;
     assert_eq!(completed_status(&events), TurnStatus::Completed);
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
     let items = known(&events);
@@ -723,26 +727,42 @@ async fn a_recorded_turn_maps_like_the_synthetic_ones() {
         KnownItem::Thinking { text, .. } if text.contains("make the edit"))));
     assert!(items.iter().any(|item| matches!(item,
         KnownItem::AssistantMessage { text, .. } if text == "done")));
-    let used = usages(&events);
-    assert_eq!(used.len(), 4, "{used:?}");
-    assert!(
-        used.iter()
-            .all(|usage| usage.output > 0 && usage.cache_read > 0)
+}
+
+/// The values are the recording's `message_delta` totals, and the 1 h cache write of the
+/// message's `message_start`, the only frame that breaks the write down.
+#[tokio::test]
+async fn a_recorded_turn_reports_each_messages_usage_with_its_one_hour_cache_write() {
+    let fixture = Fixture::new();
+    let events = recorded_tools_turn(&fixture).await;
+    let recorded = |output, cache_read, cache_write, reasoning, cache_write_1h| TokenUsage {
+        input: 2,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+        cache_write_1h,
+        cost_nano_usd: None,
+    };
+    assert_eq!(
+        usages(&events),
+        [
+            recorded(188, 10624, 11663, 0, 11663),
+            recorded(282, 22287, 2165, 187, 2165),
+            recorded(143, 24452, 318, 0, 318),
+            recorded(3, 24770, 246, 0, 246),
+        ]
     );
 }
 
-#[tokio::test]
-async fn control_requests_without_a_mapping_are_answered_so_claude_never_waits() {
+async fn assert_answered_with_an_error(request_id: &str, request: Value) {
     let fixture = Fixture::new();
     let mut steps = handshake();
     steps.push(user_message("go"));
     steps.extend([
-        emit(
-            json!({"type": "control_request", "request_id": "hook-1", "request": {
-            "subtype": "hook_callback", "callback_id": "x"}}),
-        ),
+        emit(json!({"type": "control_request", "request_id": request_id, "request": request})),
         expect(json!({"type": "control_response", "response": {
-            "subtype": "error", "request_id": "hook-1"}})),
+            "subtype": "error", "request_id": request_id}})),
     ]);
     steps.extend(simple_turn("msg_1", "ok", usage_json(1, 1, 0, 0)));
     fixture.script(steps);
@@ -752,6 +772,23 @@ async fn control_requests_without_a_mapping_are_answered_so_claude_never_waits()
     let events = client.until(is_completed).await;
     assert_eq!(completed_status(&events), TurnStatus::Completed);
     assert_script_followed(&fixture);
+}
+
+#[tokio::test]
+async fn control_requests_without_a_mapping_are_answered_so_claude_never_waits() {
+    assert_answered_with_an_error(
+        "hook-1",
+        json!({"subtype": "hook_callback", "callback_id": "x"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_control_request_that_does_not_parse_is_answered_so_claude_never_waits() {
+    let description_not_a_string = json!({"subtype": "can_use_tool", "tool_name": "Bash",
+        "input": {"command": "ls"}, "description": 7, "permission_suggestions": [],
+        "tool_use_id": "toolu_ls"});
+    assert_answered_with_an_error("perm-odd", description_not_a_string).await;
 }
 
 /// A `can_use_tool` request as Claude 2.1.322 sends it (recorded shape).
@@ -2642,6 +2679,81 @@ async fn an_error_result_fails_the_turn_and_the_process_group_is_reaped_within_t
     assert_eq!(launches.len(), 2, "{launches:?}");
     let id = saved_claude_session_id(&opened.path);
     assert_eq!(arg_after(&launches[1], "--resume"), Some(id.as_str()));
+}
+
+#[tokio::test]
+async fn a_follow_up_queued_before_an_error_result_runs_in_a_new_process_that_resumes() {
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.push(user_message("go"));
+    steps.extend([
+        system("init", json!({})),
+        message_start("msg_1"),
+        json!({"sleep_ms": 1000}),
+        result_error("error_during_execution", &["API Error: 529 overloaded"]),
+        json!({"hang": true}),
+    ]);
+    fixture.script_for_launch(0, steps);
+    let mut steps = handshake();
+    steps.push(user_message("next"));
+    steps.extend(simple_turn("msg_2", "resumed", usage_json(1, 1, 0, 0)));
+    fixture.script_for_launch(1, steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "go", "follow_up").await;
+    client
+        .until(|kind| matches!(kind, EventKind::TurnStarted { .. }))
+        .await;
+    submit(&mut client, &thread, "next", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Failed);
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let id = arg_after(&launches[0], "--session-id").unwrap();
+    assert_eq!(arg_after(&launches[1], "--resume"), Some(id));
+    assert_script_followed(&fixture);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn after_claude_stops_taking_input_the_next_turn_runs_in_a_new_process_that_resumes() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch a.txt"});
+    let mut steps = handshake();
+    steps.push(user_message("one"));
+    steps.extend(tool_message("msg_1", "toolu_touch", "Bash", &input));
+    steps.extend([
+        json!({"close_stdin": true}),
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        json!({"sleep_ms": 1000}),
+        result_ok("done"),
+        json!({"hang": true}),
+    ]);
+    fixture.script_for_launch(0, steps);
+    let mut steps = handshake();
+    steps.push(user_message("two"));
+    steps.extend(simple_turn("msg_2", "resumed", usage_json(1, 1, 0, 0)));
+    fixture.script_for_launch(1, steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    submit(&mut client, &thread, "one", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    let answer_write_fails = json!({"kind": "allow_once"});
+    answer(&mut client, &thread, &approval, answer_write_fails).await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    submit(&mut client, &thread, "two", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let id = arg_after(&launches[0], "--session-id").unwrap();
+    assert_eq!(arg_after(&launches[1], "--resume"), Some(id));
+    assert_script_followed(&fixture);
 }
 
 #[cfg(unix)]

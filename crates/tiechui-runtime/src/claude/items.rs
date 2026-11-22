@@ -354,14 +354,16 @@ pub fn tool_result(call_name: &str, content: &Value, is_error: bool) -> Value {
 }
 
 /// Claude's `input_tokens` already excludes cache reads and writes.
-pub fn usage(usage: &Usage) -> TokenUsage {
+/// `totals` is a message's final usage (`message_delta`), which does not break the cache write
+/// down; `message_start` does.
+pub fn usage(totals: &Usage, cache_write_1h: u64) -> TokenUsage {
     TokenUsage {
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        cache_read: usage.cache_read_input_tokens,
-        cache_write: usage.cache_creation_input_tokens,
-        reasoning: usage.output_tokens_details.thinking_tokens,
-        cache_write_1h: usage.cache_creation.ephemeral_1h_input_tokens,
+        input: totals.input_tokens,
+        output: totals.output_tokens,
+        cache_read: totals.cache_read_input_tokens,
+        cache_write: totals.cache_creation_input_tokens,
+        reasoning: totals.output_tokens_details.thinking_tokens,
+        cache_write_1h,
         cost_nano_usd: None,
     }
 }
