@@ -3364,3 +3364,131 @@ fn zero_length_drag_in_short_chat_keeps_cursor_live_stream_and_enter_submit() {
         [user("send on enter", InputDelivery::FollowUp)]
     );
 }
+
+#[test]
+fn ctrl_b_backgrounds_foreground_work_only_when_composer_is_empty() {
+    let ctrl_b = with(KeyCode::Char('b'), KeyModifiers::CONTROL);
+    let start_tool = |app: &mut App, id: &str, name: &str, args: serde_json::Value, at: Instant| {
+        app.event_at(started_item(call(id, name, args)), at);
+        app.event_at(
+            started_item(KnownItem::ToolResult {
+                id: ItemId(format!("r-{id}")),
+                call_id: ItemId(id.into()),
+                output: json!(null),
+                is_error: false,
+            }),
+            at,
+        );
+    };
+
+    let t0 = Instant::now();
+    let mut app = ready(80);
+    app.event_at(
+        event(EventKind::TurnStarted {
+            turn: turn(TurnStatus::InProgress),
+        }),
+        t0,
+    );
+    app.key_at(ctrl_b, t0);
+    assert!(ops(&mut app).is_empty());
+
+    start_tool(&mut app, "sub1", "subagent", json!({"task": "slow"}), t0);
+    let early = text(&app.live_at(t0 + Duration::from_millis(1999)).0).join("\n");
+    assert!(
+        early.contains("Delegating") && !early.contains("ctrl+b background"),
+        "{early}"
+    );
+    let ready_hint = text(&app.live_at(t0 + Duration::from_secs(2)).0).join("\n");
+    assert!(
+        ready_hint.contains("Delegating · ctrl+b background"),
+        "{ready_hint}"
+    );
+
+    typed(&mut app, "ab");
+    app.key(ctrl_b);
+    assert!(ops(&mut app).is_empty());
+    typed(&mut app, "X");
+    assert_eq!(draft(&mut app), ["› aXb"]);
+
+    app.key(with(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(draft(&mut app), ["›"]);
+    app.event(event(EventKind::ComposerRefilled {
+        content: vec![InputContent::Image {
+            mime_type: "image/png".into(),
+            data: "AA==".into(),
+        }],
+    }));
+    app.key(ctrl_b);
+    assert!(ops(&mut app).is_empty());
+    app.key(with(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(ops(&mut app), [Op::ClearDraft]);
+    assert_eq!(draft(&mut app), ["›"]);
+    app.key(ctrl_b);
+    assert_eq!(
+        ops(&mut app),
+        [Op::CommandInput {
+            name: "subagents".into(),
+            data: json!({"background_all": true}),
+        }]
+    );
+
+    app.event_at(
+        event(completed(result("sub1", "backgrounded", false))),
+        t0 + Duration::from_secs(2),
+    );
+    app.key(ctrl_b);
+    assert!(ops(&mut app).is_empty());
+
+    start_tool(
+        &mut app,
+        "send1",
+        "subagent_send",
+        json!({"to": "ag1", "message": "resume", "background": false}),
+        t0,
+    );
+    app.key(ctrl_b);
+    assert_eq!(
+        ops(&mut app),
+        [Op::CommandInput {
+            name: "subagents".into(),
+            data: json!({"background_all": true}),
+        }]
+    );
+    app.event_at(event(completed(result("send1", "done", false))), t0);
+
+    start_tool(&mut app, "sh-fg", "bash", json!({"command": "sleep 5"}), t0);
+    let bash_early = text(&app.live_at(t0 + Duration::from_millis(1999)).0).join("\n");
+    assert!(bash_early.contains("Running sleep 5") && !bash_early.contains("ctrl+b background"));
+    let bash_2s = text(&app.live_at(t0 + Duration::from_secs(2)).0).join("\n");
+    assert!(
+        bash_2s.contains("Running sleep 5 · ctrl+b background"),
+        "{bash_2s}"
+    );
+    typed(&mut app, "xy");
+    app.key(ctrl_b);
+    assert!(ops(&mut app).is_empty());
+    typed(&mut app, "Z");
+    assert_eq!(draft(&mut app), ["› xZy"]);
+    app.key(with(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    app.key(ctrl_b);
+    assert_eq!(
+        ops(&mut app),
+        [Op::CommandInput {
+            name: "shells".into(),
+            data: json!({"background_all": true}),
+        }]
+    );
+    app.event_at(event(completed(result("sh-fg", "done", false))), t0);
+
+    start_tool(
+        &mut app,
+        "sh-bg",
+        "bash",
+        json!({"command": "sleep 5", "background": true}),
+        t0,
+    );
+    let bg_2s = text(&app.live_at(t0 + Duration::from_secs(2)).0).join("\n");
+    assert!(!bg_2s.contains("ctrl+b background"), "{bg_2s}");
+    app.key(ctrl_b);
+    assert!(ops(&mut app).is_empty());
+}

@@ -122,6 +122,8 @@ pub struct App {
     side_visible: bool,
     agents: Option<crate::subagents::Panel>,
     agents_visible: bool,
+    agent_indicator: Option<String>,
+    agent_pending: bool,
     shells: Option<crate::shells::Panel>,
     shells_visible: bool,
     shell_indicator: Option<String>,
@@ -325,6 +327,8 @@ impl App {
             side_visible: false,
             agents: None,
             agents_visible: false,
+            agent_indicator: None,
+            agent_pending: false,
             shells: None,
             shells_visible: false,
             shell_indicator: None,
@@ -419,6 +423,13 @@ impl App {
         self.turn.is_some()
     }
 
+    fn tracks_input_block(&self) -> bool {
+        self.goal_status.is_some()
+            || self.loop_status.is_some()
+            || self.agent_pending
+            || self.shells.as_ref().is_some_and(|panel| !panel.is_empty())
+    }
+
     pub fn take_submissions(&mut self) -> Vec<Submission> {
         let Some((thread_id, epoch)) = self.thread.clone().filter(|_| !self.fresh) else {
             return Vec::new();
@@ -430,11 +441,7 @@ impl App {
             || self.theme_picker.is_some()
             || self.prompt.is_some();
         // Drafts hold back module work that starts turns on its own.
-        if (self.goal_status.is_some()
-            || self.loop_status.is_some()
-            || self.shells.as_ref().is_some_and(|panel| !panel.is_empty()))
-            && blocked != self.input_blocked
-        {
+        if self.tracks_input_block() && blocked != self.input_blocked {
             self.input_blocked = blocked;
             self.send(Op::InputState { blocked });
         }
@@ -607,6 +614,8 @@ impl App {
         self.pager = None;
         self.agents = None;
         self.agents_visible = false;
+        self.agent_indicator = None;
+        self.agent_pending = false;
         self.shells = None;
         self.shells_visible = false;
         self.shell_indicator = None;
@@ -753,6 +762,8 @@ impl App {
                 self.side_visible = false;
                 self.agents = None;
                 self.agents_visible = false;
+                self.agent_indicator = None;
+                self.agent_pending = false;
                 self.shells = None;
                 self.shells_visible = false;
                 self.shell_indicator = None;
@@ -1046,16 +1057,7 @@ impl App {
                 self.notice = data.as_str().map(str::to_owned);
             }
             EventKind::Extension { name, data } if name == tiechui_protocol::SUBAGENTS_EVENT => {
-                if let Ok(view) = serde_json::from_value::<tiechui_protocol::SubagentsView>(data) {
-                    if let Some(panel) = &mut self.agents {
-                        panel.update(view.records);
-                    } else {
-                        self.agents = Some(crate::subagents::Panel::new(view.records));
-                    }
-                    if view.open && !self.context_open() && self.prompt.is_none() {
-                        self.agents_visible = true;
-                    }
-                }
+                self.on_subagents_event(data);
             }
             EventKind::Extension { name, data } if name == tiechui_protocol::SHELLS_EVENT => {
                 if let Ok(view) = serde_json::from_value::<tiechui_protocol::ShellsView>(data) {
@@ -1130,6 +1132,42 @@ impl App {
             EventKind::Error { message } => self.transcript.error(message),
             _ => {}
         }
+    }
+
+    fn on_subagents_event(&mut self, data: serde_json::Value) {
+        let Ok(view) = serde_json::from_value::<tiechui_protocol::SubagentsView>(data) else {
+            return;
+        };
+        self.agent_indicator = crate::subagents::indicator(&view);
+        self.agent_pending = view.has_pending_work();
+        if let Some(panel) = &mut self.agents {
+            panel.update(view.records);
+        } else {
+            self.agents = Some(crate::subagents::Panel::new(view.records));
+        }
+        if view.open && !self.context_open() && self.prompt.is_none() {
+            self.agents_visible = true;
+        }
+    }
+
+    fn background_foreground_work(&mut self) -> bool {
+        if !self.running() || !self.composer.is_empty() || self.composer.image_count() > 0 {
+            return false;
+        }
+        let (bash, subagent) = self.transcript.foreground_blocking();
+        if bash {
+            self.send(Op::CommandInput {
+                name: "shells".into(),
+                data: serde_json::json!({"background_all": true}),
+            });
+        }
+        if subagent {
+            self.send(Op::CommandInput {
+                name: "subagents".into(),
+                data: serde_json::json!({"background_all": true}),
+            });
+        }
+        bash || subagent
     }
 
     fn backfill(&mut self, inputs: &[QueuedInput]) {
@@ -2483,10 +2521,10 @@ impl App {
             match panel.key(key) {
                 crate::subagents::Outcome::Open => {}
                 crate::subagents::Outcome::Close => self.agents_visible = false,
-                crate::subagents::Outcome::Cancel(id) => {
+                crate::subagents::Outcome::Send(data) => {
                     self.send(Op::CommandInput {
                         name: "subagents".into(),
-                        data: serde_json::json!({"cancel":id}),
+                        data,
                     });
                 }
             }
@@ -2682,6 +2720,9 @@ impl App {
             return exit;
         }
         if self.mention_key(&key).is_some() {
+            return Exit::Running;
+        }
+        if key.code == KeyCode::Char('b') && control && !alt && self.background_foreground_work() {
             return Exit::Running;
         }
         let running = self.running();
@@ -3269,16 +3310,38 @@ impl App {
         (frame, cursor)
     }
 
-    /// Background shells, the goal and scheduled tasks on one row under the status line,
-    /// absent while none runs; the shell count always leads and survives narrow screens.
+    fn has_activity_row(&self) -> bool {
+        self.goal_status.is_some()
+            || self.loop_status.is_some()
+            || self.shell_indicator.is_some()
+            || self.agent_indicator.is_some()
+    }
+
+    fn join_activity(items: &[Vec<Span<'static>>]) -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw("  ")];
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            spans.extend(item.iter().cloned());
+        }
+        spans
+    }
+
     fn activity(&self) -> Option<Line<'static>> {
         let mut items: Vec<Vec<Span<'static>>> = Vec::new();
-        if let Some(count) = &self.shell_indicator {
-            items.push(vec![
-                Span::styled(count.clone(), self.theme.accent2),
-                Span::styled(" · /shells", self.theme.dim),
-            ]);
+        for (indicator, cmd) in [
+            (&self.shell_indicator, " · /shells"),
+            (&self.agent_indicator, " · /subagents"),
+        ] {
+            if let Some(count) = indicator {
+                items.push(vec![
+                    Span::styled(count.clone(), self.theme.accent2),
+                    Span::styled(cmd, self.theme.dim),
+                ]);
+            }
         }
+        let indicators = items.len();
         if let Some(text) = &self.goal_status {
             items.push(vec![Span::styled(format!("◈ {text}"), self.theme.accent2)]);
         }
@@ -3286,20 +3349,13 @@ impl App {
             items.push(vec![Span::styled(format!("◇ {text}"), self.theme.dim)]);
         }
         let width = self.width.saturating_sub(2);
-        let join = |items: &[Vec<Span<'static>>]| {
-            let mut spans = vec![Span::raw("  ")];
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    spans.push(Span::raw("   "));
-                }
-                spans.extend(item.iter().cloned());
+        let mut spans = Self::join_activity(&items);
+        for index in (0..indicators).rev() {
+            if wrap::line_width(&Line::from(spans.clone())) <= width {
+                break;
             }
-            spans
-        };
-        let mut spans = join(&items);
-        if self.shell_indicator.is_some() && wrap::line_width(&Line::from(spans.clone())) > width {
-            items[0].pop();
-            spans = join(&items);
+            items[index].pop();
+            spans = Self::join_activity(&items);
         }
         (!items.is_empty()).then(|| wrap::fit(spans, width, true))
     }
@@ -3417,11 +3473,7 @@ impl App {
         let budget = (self.height * 2 / 3).max(8).min(self.height);
         let footer = 3
             + self.plugin_status.len()
-            + usize::from(
-                self.goal_status.is_some()
-                    || self.loop_status.is_some()
-                    || self.shell_indicator.is_some(),
-            )
+            + usize::from(self.has_activity_row())
             + usize::from(self.stash.is_some())
             + usize::from(self.notice.is_some())
             + usize::from(self.retry_countdown.is_some())

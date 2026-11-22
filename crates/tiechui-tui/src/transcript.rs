@@ -516,6 +516,19 @@ impl Transcript {
         !self.tools.is_empty()
     }
 
+    pub fn foreground_blocking(&self) -> (bool, bool) {
+        let mut bash = false;
+        let mut subagent = false;
+        for tool in self.tools.iter().filter(|tool| !tool.done()) {
+            match tool.name.as_str() {
+                "bash" if tool.arguments["background"] != Value::Bool(true) => bash = true,
+                "subagent" | "subagent_send" => subagent = true,
+                _ => {}
+            }
+        }
+        (bash, subagent)
+    }
+
     pub fn cell_count(&self) -> usize {
         self.cells.len()
     }
