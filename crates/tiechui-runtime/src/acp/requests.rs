@@ -106,7 +106,7 @@ fn pick_option<'a>(options: &'a [PermissionOptionWire], kinds: &[&str]) -> Optio
 pub fn permission_response(options: &[PermissionOptionWire], decision: &ApprovalDecision) -> Value {
     let chosen = match decision {
         ApprovalDecision::AllowOnce | ApprovalDecision::Accept { .. } => {
-            pick_option(options, &["allow_once", "allow_always"])
+            pick_option(options, &["allow_once"])
         }
         ApprovalDecision::AllowSession { .. } => {
             pick_option(options, &["allow_always", "allow_once"])
@@ -575,5 +575,30 @@ mod tests {
         );
         assert_eq!(strip_recommended("  (Recommended)  "), "");
         assert_eq!(strip_recommended("Plain choice"), "Plain choice");
+    }
+
+    #[test]
+    fn allow_once_never_selects_an_allow_always_option() {
+        let option = |id: &str, kind: &str| PermissionOptionWire {
+            option_id: id.into(),
+            name: id.into(),
+            kind: kind.into(),
+        };
+        let always_only = [
+            option("always", "allow_always"),
+            option("no", "reject_once"),
+        ];
+        assert_eq!(
+            permission_response(&always_only, &ApprovalDecision::AllowOnce),
+            json!({ "outcome": { "outcome": "cancelled" } })
+        );
+        let both = [
+            option("once", "allow_once"),
+            option("always", "allow_always"),
+        ];
+        assert_eq!(
+            permission_response(&both, &ApprovalDecision::AllowOnce),
+            json!({ "outcome": { "outcome": "selected", "optionId": "once" } })
+        );
     }
 }

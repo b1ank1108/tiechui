@@ -737,6 +737,25 @@ async fn child_env_scrubs_google_keys_sets_disable_auto_update_and_filters_logou
         "{err_ev:?}"
     );
 
+    submit_text(&mut client, &thread_id, "/Logout now").await;
+    let typed = client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    assert!(
+        typed.iter().any(|e| matches!(
+            &e.event.event,
+            EventKind::Error { message } if message == "command /Logout is not available"
+        )),
+        "{typed:?}"
+    );
+    assert!(
+        !fixture
+            .logs()
+            .iter()
+            .any(|e| e["kind"] == "inbound" && e["msg"]["method"] == "session/prompt"),
+        "a filtered command must not reach agy"
+    );
+
     let acp_spawn = fixture
         .logs()
         .into_iter()
@@ -879,6 +898,23 @@ async fn models_fallback_set_model_and_config_update_preserve_native_config() {
     assert_eq!(
         set_model_calls,
         vec!["gemini-3.8-flash-low", "gemini-3.8-flash-low"]
+    );
+
+    let providers = fixture.home.join("providers.toml");
+    let mut declared = std::fs::read_to_string(&providers).unwrap();
+    declared.push_str("\n[agy]\nwire = \"openai-completions\"\nbase_url = \"http://127.0.0.1:9\"\napi_key_env = \"TC_AGY_TEST_KEY\"\nmodels = [{ id = \"native\", context_window = 200000, max_output = 4096 }]\n");
+    std::fs::write(&providers, declared).unwrap();
+    client
+        .ok(
+            "config/update",
+            json!({ "key": "model", "value": "agy/native" }),
+        )
+        .await;
+    assert!(
+        std::fs::read_to_string(fixture.home.join("config.toml"))
+            .unwrap()
+            .contains("model = \"agy/native\""),
+        "a declared native provider wins over a runtime id"
     );
     let _ = client.finish().await;
 }
@@ -1226,6 +1262,148 @@ async fn session_open_strips_runtime_prefix_from_initial_model_and_persists_acro
         ]
     );
 
+    let _ = client.finish().await;
+}
+
+fn session_model(snap: &tiechui_protocol::app::Snapshot) -> String {
+    snap.events
+        .iter()
+        .find_map(|ev| match &ev.event {
+            EventKind::SessionUpdated { model, .. } => Some(model.id.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reopen_with_an_unavailable_model_warns_and_records_the_model_in_use() {
+    let fixture = AgyFixture::new();
+    let neon = json!({ "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" });
+    let opus = json!({ "modelId": "claude-opus-5-5-high", "name": "Claude Opus 5.5 (High)" });
+    let flash = json!({ "modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)" });
+    fixture.write_scenario(&json!({
+        "sessionId": "agy-sess-stale-model",
+        "models": { "currentModelId": "gemini-4-neon-high", "availableModels": [neon, opus] }
+    }));
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({ "cwd": fixture.cwd, "runtime": "agy", "model": "agy/claude-opus-5-5-high" }),
+            )
+            .await,
+    );
+    assert_eq!(session_model(&opened), "claude-opus-5-5-high");
+    client
+        .ok("session/close", json!({ "thread_id": opened.thread_id }))
+        .await;
+
+    fixture.write_scenario(&json!({
+        "sessionId": "agy-sess-stale-model",
+        "resumeModels": { "currentModelId": "gemini-4-neon-high", "availableModels": [neon, flash] }
+    }));
+    let reopened = snapshot(
+        client
+            .ok("session/open", json!({ "path": opened.path }))
+            .await,
+    );
+    assert_eq!(session_model(&reopened), "gemini-4-neon-high");
+    client
+        .until(|e| {
+            matches!(
+                e,
+                EventKind::Error { message }
+                if message == "agy model claude-opus-5-5-high is not available; using gemini-4-neon-high"
+            )
+        })
+        .await;
+    client
+        .ok("session/close", json!({ "thread_id": reopened.thread_id }))
+        .await;
+
+    fixture.write_scenario(&json!({
+        "sessionId": "agy-sess-stale-model",
+        "resumeModels": { "currentModelId": "gemini-3.8-flash-low", "availableModels": [neon, flash] },
+        "setModelError": { "code": -32603, "message": "model quota exhausted" }
+    }));
+    let third = snapshot(
+        client
+            .ok("session/open", json!({ "path": opened.path }))
+            .await,
+    );
+    assert_eq!(session_model(&third), "gemini-3.8-flash-low");
+    client
+        .until(|e| {
+            matches!(
+                e,
+                EventKind::Error { message }
+                if message == "agy model gemini-4-neon-high is not available (agy session/set_model: model quota exhausted); using gemini-3.8-flash-low"
+            )
+        })
+        .await;
+
+    let set_model_ids: Vec<String> = fixture
+        .logs()
+        .into_iter()
+        .filter(|e| e["kind"] == "inbound" && e["msg"]["method"] == "session/set_model")
+        .map(|e| e["msg"]["params"]["modelId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        set_model_ids,
+        ["claude-opus-5-5-high", "gemini-4-neon-high"]
+    );
+    let _ = client.finish().await;
+}
+
+#[tokio::test]
+async fn yolo_restart_reports_an_error_instead_of_starting_a_new_session_when_resume_fails() {
+    let fixture = AgyFixture::new();
+    fixture.write_scenario(&json!({
+        "sessionId": "agy-sess-restart-lost",
+        "resumeError": { "code": -32002, "message": "session not found" }
+    }));
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({ "cwd": fixture.cwd, "runtime": "agy", "mode": "rules" }),
+            )
+            .await,
+    );
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": opened.thread_id,
+                "op": { "kind": "run_command", "name": "permissions", "arguments": "yolo" }
+            }),
+        )
+        .await;
+    let events = client.until(|e| matches!(e, EventKind::Error { .. })).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.event.event,
+            EventKind::Error { message } if message == "agy could not resume session agy-sess-restart-lost"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.event.event,
+            EventKind::Extension { name, data } if name == PERMISSION_MODE_EVENT && data == "yolo"
+        )),
+        "{events:?}"
+    );
+    let logs = fixture.logs();
+    let inbound = |method: &str| {
+        logs.iter()
+            .filter(|e| e["kind"] == "inbound" && e["msg"]["method"] == method)
+            .count()
+    };
+    assert_eq!(inbound("session/resume"), 1);
+    assert_eq!(inbound("session/new"), 1);
     let _ = client.finish().await;
 }
 

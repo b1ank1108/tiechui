@@ -179,12 +179,16 @@ impl AcpBackend {
         })
     }
 
-    async fn handshake(&mut self, params: &StartParams) -> Result<Started, String> {
+    async fn handshake(
+        &mut self,
+        params: &StartParams,
+        allow_new: bool,
+    ) -> Result<Started, String> {
         let init = self.initialize().await?;
         self.config.dialect.check_initialize(&init)?;
         let cwd = params.cwd.display().to_string();
         let (session_id, setup, resumed) = self
-            .open_acp_session(&init, &cwd, params.resume.as_deref())
+            .open_acp_session(&init, &cwd, params.resume.as_deref(), allow_new)
             .await?;
         let provider = self.config.dialect.provider_id();
         let (model, models) = self
@@ -205,10 +209,10 @@ impl AcpBackend {
             self.apply_session_mode(&session_id, requested_mode, current_mode)
                 .await?;
         }
+        self.models = models.clone();
         let final_model = self
             .maybe_apply_initial_model(&session_id, model, params.model.as_deref())
-            .await?;
-        self.models = models.clone();
+            .await;
         self.current_model = Some(final_model.clone());
         if models.len() > 1
             && let Some(tx) = self.events_tx.as_ref().and_then(mpsc::WeakSender::upgrade)
@@ -262,10 +266,17 @@ impl AcpBackend {
         init: &InitializeInfo,
         cwd: &str,
         resume: Option<&str>,
+        allow_new: bool,
     ) -> Result<(String, SessionSetupWire, bool), String> {
         if let Some(target_id) = resume {
             match self.try_reopen(init, cwd, target_id).await {
                 Ok(Some(setup)) => return Ok((target_id.to_owned(), setup, true)),
+                Ok(None) if !allow_new => {
+                    return Err(format!(
+                        "{} could not resume session {target_id}",
+                        self.config.dialect.provider_id()
+                    ));
+                }
                 Ok(None) => {}
                 Err(fatal) => return Err(fatal),
             }
@@ -329,11 +340,8 @@ impl AcpBackend {
         match error {
             CallError::Timeout | CallError::Closed(_) => Err(error.describe(peer, method)),
             CallError::Rpc(err) => {
-                if is_session_unusable(&err) && !self.is_auth_failure(&err) {
-                    debug(&format!("{method} rejected saved session: {}", err.message));
-                    return Ok(None);
-                }
-                if err.code == -32002 {
+                if err.code == -32002 || (is_session_unusable(&err) && !self.is_auth_failure(&err))
+                {
                     debug(&format!("{method} rejected saved session: {}", err.message));
                     return Ok(None);
                 }
@@ -440,11 +448,28 @@ impl AcpBackend {
         session_id: &str,
         default_model: ModelInfo,
         requested: Option<&str>,
-    ) -> Result<ModelInfo, String> {
+    ) -> ModelInfo {
         let Some(wanted) = requested.filter(|m| !m.is_empty() && *m != default_model.id) else {
-            return Ok(default_model);
+            return default_model;
         };
-        self.call_set_model(session_id, wanted).await
+        let peer = self.config.dialect.provider_id();
+        let listed = self.models.len() <= 1 || self.models.iter().any(|m| m.id == wanted);
+        let reason = if listed {
+            match self.call_set_model(session_id, wanted).await {
+                Ok(info) => return info,
+                Err(error) => format!(" ({error})"),
+            }
+        } else {
+            String::new()
+        };
+        if let Some(tx) = self.events_tx.as_ref().and_then(mpsc::WeakSender::upgrade) {
+            let message = format!(
+                "{peer} model {wanted} is not available{reason}; using {}",
+                default_model.id
+            );
+            let _ = tx.send(BackendEvent::Error(message)).await;
+        }
+        default_model
     }
 
     async fn call_set_model(&self, session_id: &str, model_id: &str) -> Result<ModelInfo, String> {
@@ -509,7 +534,7 @@ impl AcpBackend {
         }
         self.shutdown_run().await;
         self.run = Some(self.spawn_run(&next_params, keep_open.clone())?);
-        let result = self.handshake(&next_params).await;
+        let result = self.handshake(&next_params, false).await;
         match result {
             Ok(_) => {
                 drop(keep_open);
@@ -580,6 +605,14 @@ impl AcpBackend {
         }
         self.seal_derived(true).await;
         self.restart_and_resume(Some(mode.to_owned())).await
+    }
+
+    fn command_allowed(&self, name: &str) -> bool {
+        self.config.dialect.filter_command(&CommandInfo {
+            name: name.to_owned(),
+            description: String::new(),
+            argument_hint: None,
+        })
     }
 }
 
@@ -652,7 +685,7 @@ impl Backend for AcpBackend {
         let (events, received) = mpsc::channel(1024);
         self.events_tx = Some(events.downgrade());
         self.run = Some(self.spawn_run(&params, events)?);
-        match self.handshake(&params).await {
+        match self.handshake(&params, true).await {
             Ok(started) => {
                 self.params = Some(params);
                 Ok((started, received))
@@ -666,6 +699,13 @@ impl Backend for AcpBackend {
 
     async fn start_turn(&mut self, input: &[InputContent]) -> Result<(), String> {
         let session_id = self.session_id()?;
+        if let Some(InputContent::Text { text }) = input.first()
+            && let Some(name) = text.trim_start().strip_prefix('/')
+            && let Some(name) = name.split_whitespace().next()
+            && !self.command_allowed(name)
+        {
+            return Err(format!("command /{name} is not available"));
+        }
         let blocks = wire::user_prompt_blocks(input);
         if blocks.is_empty() {
             return Err("a turn requires non-empty input".into());
@@ -745,12 +785,7 @@ impl Backend for AcpBackend {
         if clean == "permissions" {
             return self.switch_permission_mode(arguments.trim()).await;
         }
-        let probe = CommandInfo {
-            name: clean.to_owned(),
-            description: String::new(),
-            argument_hint: None,
-        };
-        if !self.config.dialect.filter_command(&probe) {
+        if !self.command_allowed(clean) {
             return Err(format!("command /{clean} is not available"));
         }
         let args = arguments.trim();

@@ -363,6 +363,10 @@ rl.on("line", async (line) => {
   }
 
   if (msg.method === "session/set_model") {
+    if (scenario.setModelError) {
+      send({ jsonrpc: "2.0", id: msg.id, error: scenario.setModelError });
+      return;
+    }
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
     return;
   }

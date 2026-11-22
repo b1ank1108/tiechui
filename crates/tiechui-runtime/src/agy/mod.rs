@@ -345,4 +345,28 @@ mod tests {
             errors::LOGIN_REQUIRED_MESSAGE
         );
     }
+
+    #[test]
+    fn only_agy_status_notices_fail_the_turn() {
+        for text in [
+            "⚠️ 注意 (code review 前先跑测试)",
+            "⚠️ You're not logged in to npm",
+            "⚠ 注意 (code review 前先跑测试)",
+            "⚠ Not logged in to npm",
+        ] {
+            assert_eq!(
+                errors::classify_text_chunk(false, text),
+                TextDisposition::Keep,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            errors::classify_text_chunk(false, "\n⚠ UNAUTHENTICATED (code 401): token expired\n"),
+            TextDisposition::FailTurn(errors::LOGIN_REQUIRED_MESSAGE.into())
+        );
+        assert_eq!(
+            errors::classify_text_chunk(false, "⚠ RESOURCE_EXHAUSTED (code 429): Quota exceeded."),
+            TextDisposition::FailTurn("RESOURCE_EXHAUSTED (code 429): Quota exceeded.".into())
+        );
+    }
 }

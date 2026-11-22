@@ -45,14 +45,23 @@ pub fn classify_text_chunk(thinking: bool, text: &str) -> TextDisposition {
 }
 
 fn is_error_notice_chunk(trimmed: &str) -> bool {
-    if let Some(rest) = trimmed.strip_prefix('⚠') {
-        let first_line = rest.lines().next().unwrap_or_default().trim();
-        return first_line.contains("(code ")
-            || first_line.starts_with("Internal error:")
-            || is_auth_text(&first_line.to_ascii_lowercase());
+    if let Some(rest) = trimmed.strip_prefix("⚠ ") {
+        let first_line = rest.lines().next().unwrap_or_default();
+        return is_status_code_line(first_line) || first_line.starts_with("Internal error:");
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("api key not valid") || lower.starts_with("failed to create gemini client")
+}
+
+fn is_status_code_line(line: &str) -> bool {
+    let Some((status, rest)) = line.split_once(" (code ") else {
+        return false;
+    };
+    let code = rest.split_once(')').map_or("", |(code, _)| code);
+    !status.is_empty()
+        && status.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        && !code.is_empty()
+        && code.chars().all(|c| c.is_ascii_digit())
 }
 
 fn clean_chunk_notice(trimmed: &str) -> String {

@@ -388,11 +388,14 @@ fn save_string_preference(
     let text = value
         .as_str()
         .ok_or_else(|| format!("{key} has the wrong type"))?;
-    if key == "model" && is_external_runtime_model(text) {
-        return Ok(true);
-    }
-    if MODEL_KEYS.contains(&key) {
-        declared_model(home, key, text)?;
+    if MODEL_KEYS.contains(&key)
+        && let Err(error) = declared_model(home, key, text)
+    {
+        return if key == "model" && is_external_runtime_model(text) {
+            Ok(true)
+        } else {
+            Err(error)
+        };
     }
     tiechui_config::save_preference(path, key, text.into()).map_err(|e| e.to_string())?;
     Ok(true)

@@ -108,19 +108,17 @@ pub async fn open_session(
     let cwd = store.header().cwd.clone();
     let resume = history::external_id(&store);
     let is_new = matches!(config.open, Open::New { .. });
-    let explicit_model = config
+    let requested_model = config
         .model
         .as_deref()
         .map(|m| strip_runtime_prefix(runtime, m))
         .filter(|m| !m.is_empty())
-        .map(str::to_owned);
-    let requested_model = explicit_model
-        .clone()
+        .map(str::to_owned)
         .or_else(|| history::stored_model(&store, runtime));
     let (started, backend_events) = match backend
         .start(StartParams {
             cwd: cwd.clone(),
-            model: requested_model,
+            model: requested_model.clone(),
             thinking: config.thinking,
             mode: config.mode.clone(),
             resume: resume.clone(),
@@ -142,6 +140,7 @@ pub async fn open_session(
     };
     let (context, total) = history::usage(&store);
     let initial_models = vec![started.model.clone()];
+    let persist_initial_model = requested_model.is_some_and(|m| is_new || m != started.model.id);
     let session = Session {
         runtime: runtime.to_owned(),
         capabilities,
@@ -155,7 +154,7 @@ pub async fn open_session(
         models: initial_models,
         commands: Vec::new(),
         model_ref,
-        persist_initial_model: is_new && explicit_model.is_some(),
+        persist_initial_model,
         events,
         turn: None,
         last_turn: None,
