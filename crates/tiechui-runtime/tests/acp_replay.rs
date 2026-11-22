@@ -24,287 +24,7 @@ use tiechui_session::SessionStore;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-const FAKE_ACP_SERVER_JS: &str = r#"
-import fs from "node:fs";
-import path from "node:path";
-import readline from "node:readline";
-
-const scenarioPath = process.env.FAKE_ACP_SCENARIO;
-const logPath = process.env.FAKE_ACP_LOG;
-const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf8"));
-
-function logFrame(entry) {
-  if (logPath) {
-    fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
-  }
-}
-
-function send(frame) {
-  process.stdout.write(JSON.stringify(frame) + "\n");
-}
-
-let promptCount = 0;
-let activePromptId = null;
-const pendingServerRequests = new Map();
-let nextServerReqId = 1;
-
-function askClient(method, params) {
-  const id = `srv-${nextServerReqId++}`;
-  return new Promise((resolve) => {
-    pendingServerRequests.set(id, resolve);
-    send({ jsonrpc: "2.0", id, method, params });
-  });
-}
-
-async function runSteps(steps, sessionId, promptId) {
-  for (const step of steps ?? []) {
-    if (activePromptId !== promptId && promptId !== null) {
-      return "cancelled";
-    }
-    if (step.sleepMs) {
-      await new Promise((r) => setTimeout(r, step.sleepMs));
-      if (activePromptId !== promptId && promptId !== null) {
-        return "cancelled";
-      }
-    }
-    if (step.writeFile) {
-      const target = path.resolve(process.cwd(), step.writeFile.path);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, step.writeFile.content, "utf8");
-    }
-    if (step.notify) {
-      send({
-        jsonrpc: "2.0",
-        method: step.notify.method ?? "session/update",
-        params: { sessionId, ...step.notify.params },
-      });
-    }
-    if (step.permission) {
-      const res = await askClient("session/request_permission", {
-        sessionId,
-        ...step.permission,
-      });
-      logFrame({ kind: "permission_reply", reply: res });
-      if (step.echoDecision) {
-        send({
-          jsonrpc: "2.0",
-          method: "session/update",
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `decision=${JSON.stringify(res.outcome)}` },
-            },
-          },
-        });
-      }
-    }
-    if (step.elicitation) {
-      const res = await askClient("elicitation/create", {
-        sessionId,
-        ...step.elicitation,
-      });
-      logFrame({ kind: "elicitation_reply", reply: res });
-      if (step.echoDecision) {
-        send({
-          jsonrpc: "2.0",
-          method: "session/update",
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `elicitation=${JSON.stringify(res)}` },
-            },
-          },
-        });
-      }
-    }
-    if (step.waitCancel) {
-      while (activePromptId === promptId) {
-        await new Promise((r) => setTimeout(r, 15));
-      }
-      return "cancelled";
-    }
-  }
-  return null;
-}
-
-const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-
-rl.on("line", async (line) => {
-  if (!line.trim()) return;
-  const msg = JSON.parse(line);
-  logFrame({ kind: "inbound", msg });
-
-  if (msg.id !== undefined && msg.method === undefined) {
-    const waiter = pendingServerRequests.get(String(msg.id));
-    if (waiter) {
-      pendingServerRequests.delete(String(msg.id));
-      waiter(msg.result ?? { error: msg.error });
-    }
-    return;
-  }
-
-  if (msg.method === "initialize") {
-    if (scenario.exitOnInitialize) {
-      console.error("fatal boot error");
-      process.exit(1);
-    }
-    if (scenario.hangOnInitialize) {
-      return;
-    }
-    send({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: scenario.initialize ?? {
-        protocolVersion: 1,
-        agentInfo: { name: "fake-acp", title: "Fake ACP", version: "1.5.13" },
-        agentCapabilities: {
-          loadSession: true,
-          promptCapabilities: { image: true },
-          sessionCapabilities: { resume: {} },
-        },
-      },
-    });
-    return;
-  }
-
-  if (msg.method === "session/new") {
-    if (scenario.newError) {
-      send({ jsonrpc: "2.0", id: msg.id, error: scenario.newError });
-      return;
-    }
-    const sessionId = scenario.newSessionId ?? "acp-sess-new";
-    if (scenario.commandsOnStart) {
-      send({
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: {
-          sessionId,
-          update: {
-            sessionUpdate: "available_commands_update",
-            availableCommands: scenario.commandsOnStart,
-          },
-        },
-      });
-    }
-    send({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        sessionId,
-        modes: scenario.modes ?? {
-          currentModeId: "default",
-          availableModes: [
-            { id: "default", name: "Default" },
-            { id: "accept-edits", name: "Accept edits" },
-          ],
-        },
-        models: scenario.models ?? {
-          currentModelId: "gemini-2.5-pro",
-          availableModels: [
-            { modelId: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-            { modelId: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-          ],
-        },
-      },
-    });
-    return;
-  }
-
-  if (msg.method === "session/resume") {
-    if (scenario.resumeError) {
-      send({ jsonrpc: "2.0", id: msg.id, error: scenario.resumeError });
-      return;
-    }
-    send({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }] },
-        models: {
-          currentModelId: "gemini-2.5-pro",
-          availableModels: [{ modelId: "gemini-2.5-pro", name: "Gemini 2.5 Pro" }],
-        },
-      },
-    });
-    return;
-  }
-
-  if (msg.method === "session/load") {
-    if (scenario.loadError) {
-      send({ jsonrpc: "2.0", id: msg.id, error: scenario.loadError });
-      return;
-    }
-    const sessionId = msg.params.sessionId;
-    for (const replay of scenario.loadReplayBefore ?? []) {
-      send({
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: { sessionId, ...replay },
-      });
-    }
-    send({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }] },
-        models: {
-          currentModelId: "gemini-2.5-pro",
-          availableModels: [{ modelId: "gemini-2.5-pro", name: "Gemini 2.5 Pro" }],
-        },
-      },
-    });
-    for (const replay of scenario.loadReplayAfter ?? []) {
-      send({
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: { sessionId, ...replay },
-      });
-    }
-    return;
-  }
-
-  if (msg.method === "session/set_mode" || msg.method === "session/set_model") {
-    send({ jsonrpc: "2.0", id: msg.id, result: {} });
-    return;
-  }
-
-  if (msg.method === "session/cancel") {
-    activePromptId = null;
-    return;
-  }
-
-  if (msg.method === "session/prompt") {
-    const turnSpec = (scenario.turns ?? [])[promptCount++] ?? {};
-    if (turnSpec.error) {
-      send({ jsonrpc: "2.0", id: msg.id, error: turnSpec.error });
-      return;
-    }
-    const sessionId = msg.params.sessionId;
-    const promptId = msg.id;
-    activePromptId = promptId;
-    const interrupted = await runSteps(turnSpec.steps ?? [], sessionId, promptId);
-    const stopReason = interrupted ?? turnSpec.stopReason ?? "end_turn";
-    if (activePromptId === promptId) {
-      activePromptId = null;
-    }
-    send({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        stopReason,
-        ...(turnSpec.usage ? { usage: turnSpec.usage } : {}),
-      },
-    });
-    if (turnSpec.afterEndTurn && stopReason === "end_turn") {
-      void (async () => {
-        await runSteps(turnSpec.afterEndTurn, sessionId, null);
-      })();
-    }
-  }
-});
-"#;
+const FAKE_ACP_SERVER_JS: &str = include_str!("fixtures/fake-acp-server.mjs");
 
 struct AcpRig {
     _root: TempDir,
@@ -1339,13 +1059,22 @@ async fn resume_prefers_session_resume_falls_back_to_session_load_and_discards_r
             }}
         ],
         "loadReplayAfter": [
-            { "update": {
-                "sessionUpdate": "tool_call",
-                "toolCallId": "old-call",
-                "kind": "read",
-                "title": "old read",
-                "status": "completed"
-            }}
+            {
+                "_meta": { "isReplay": true },
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "old-call",
+                    "kind": "read",
+                    "title": "old read",
+                    "status": "completed"
+                }
+            },
+            {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "Post-load reactive wakeup!" }
+                }
+            }
         ],
         "turns": [{
             "steps": [{
@@ -1375,6 +1104,22 @@ async fn resume_prefers_session_resume_falls_back_to_session_load_and_discards_r
         EventKind::ThreadStarted { thread, .. } if thread.turns.len() == 1
     )));
 
+    let wakeup_done = s3
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let EventKind::TurnCompleted { turn: wakeup_turn } = wakeup_done.last().unwrap() else {
+        unreachable!()
+    };
+    assert!(DerivedTurnMarker::from_item(&wakeup_turn.items[0]).is_some());
+    assert!(wakeup_turn.items.iter().any(|i| matches!(
+        i,
+        Item::Known(KnownItem::AssistantMessage { text, .. }) if text == "Post-load reactive wakeup!"
+    )));
+    assert!(!wakeup_turn.items.iter().any(|i| matches!(
+        i,
+        Item::Known(KnownItem::ToolCall { id, .. }) if id.0 == "old-call"
+    )));
+
     s3.send_text("What was the code?").await;
     s3.until(|e| matches!(e, EventKind::TurnCompleted { .. }))
         .await;
@@ -1382,13 +1127,13 @@ async fn resume_prefers_session_resume_falls_back_to_session_load_and_discards_r
 
     let store = SessionStore::open_read_only(&session_path, &CancellationToken::new()).unwrap();
     let turns = tiechui_runtime::turns(&store).len();
-    assert_eq!(turns, 2);
+    assert_eq!(turns, 3);
 }
 
 #[tokio::test]
 async fn resume_falls_back_to_session_new_on_unknown_session_but_fails_on_auth_timeout_or_exit() {
     let rig = AcpRig::new();
-    rig.write_scenario(&json!({ "newSessionId": "acp-old" }));
+    rig.write_scenario(&json!({ "newSessionId": "9f401bc2-4010-4a00-8000-000000000001" }));
     let session_path = {
         let s1 = LiveSession::start(
             &rig,
@@ -1407,8 +1152,12 @@ async fn resume_falls_back_to_session_new_on_unknown_session_but_fails_on_auth_t
     };
 
     rig.write_scenario(&json!({
-        "resumeError": { "code": -32002, "message": "Session acp-old not found" },
-        "newSessionId": "acp-replacement"
+        "resumeError": {
+            "code": -32002,
+            "message": "Session 9f401bc2-4010-4a00-8000-000000000001 not found",
+            "data": { "cwd": "/tmp/oauth-app/login" }
+        },
+        "newSessionId": "acp-replacement-1"
     }));
     {
         let mut s2 = LiveSession::start(
@@ -1430,6 +1179,35 @@ async fn resume_falls_back_to_session_new_on_unknown_session_but_fails_on_auth_t
             .await;
         assert!(!startup.is_empty());
         s2.close().await;
+    }
+
+    rig.write_scenario(&json!({
+        "resumeError": {
+            "code": -32000,
+            "message": "Session 9f401bc2-4010-4a00-8000-000000000001 does not exist in /tmp/oauth-app/login"
+        },
+        "newSessionId": "acp-replacement-2"
+    }));
+    {
+        let mut s2b = LiveSession::start(
+            &rig,
+            Open::Path(session_path.clone()),
+            acp_capabilities(),
+            rig.config(),
+            None,
+        )
+        .await
+        .unwrap();
+        let startup = s2b
+            .until(|e| {
+                matches!(
+                    e,
+                    EventKind::Error { message } if message.contains("could not resume")
+                )
+            })
+            .await;
+        assert!(!startup.is_empty());
+        s2b.close().await;
     }
 
     rig.write_scenario(&json!({
@@ -1546,12 +1324,23 @@ async fn post_end_turn_updates_open_a_derived_turn_and_close_on_idle_or_next_tur
     let derived_events = session
         .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
         .await;
-    let EventKind::TurnCompleted { turn: derived_turn } = derived_events.last().unwrap() else {
+    let EventKind::TurnCompleted { turn: derived_turn } = derived_events.last().unwrap().clone()
+    else {
         unreachable!()
     };
     let marker = DerivedTurnMarker::from_item(&derived_turn.items[0]).unwrap();
     assert_eq!(marker.derived_from, root_turn.id);
     assert_eq!(marker.reason, DerivedReason::Runtime);
+    assert!(derived_turn.items.iter().any(|item| matches!(
+        item,
+        Item::Known(KnownItem::ToolCall { id, name, .. })
+            if id.0 == "bg-1:wakeup" && name == "bash"
+    )));
+    assert!(derived_turn.items.iter().any(|item| matches!(
+        item,
+        Item::Known(KnownItem::ToolResult { call_id, output, is_error: false, .. })
+            if call_id.0 == "bg-1:wakeup" && output["content"][0]["text"] == "DONE"
+    )));
     assert!(derived_turn.items.iter().any(|item| matches!(
         item,
         Item::Known(KnownItem::AssistantMessage { text, .. })
@@ -1562,7 +1351,7 @@ async fn post_end_turn_updates_open_a_derived_turn_and_close_on_idle_or_next_tur
     let second = session
         .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
         .await;
-    let EventKind::TurnCompleted { turn: second_turn } = second.last().unwrap() else {
+    let EventKind::TurnCompleted { turn: second_turn } = second.last().unwrap().clone() else {
         unreachable!()
     };
     assert_eq!(second_turn.status, TurnStatus::Completed);
@@ -1580,7 +1369,55 @@ async fn post_end_turn_updates_open_a_derived_turn_and_close_on_idle_or_next_tur
         2
     );
 
+    let session_path = session.opened.path.clone();
     session.close().await;
+
+    let store = SessionStore::open_read_only(&session_path, &CancellationToken::new()).unwrap();
+    let reopened_turns = tiechui_runtime::turns(&store);
+    let live_turns = vec![root_turn, derived_turn, second_turn];
+    let normalize_turns = |turns: &[tiechui_protocol::Turn]| {
+        turns
+            .iter()
+            .map(|t| {
+                let items: Vec<Value> = t
+                    .items
+                    .iter()
+                    .map(|item| match item {
+                        Item::Known(KnownItem::UserMessage { id, content }) => {
+                            json!({ "kind": "user", "id": id, "content": content })
+                        }
+                        Item::Known(KnownItem::AssistantMessage { text, .. }) => {
+                            json!({ "kind": "assistant", "text": text })
+                        }
+                        Item::Known(KnownItem::Thinking { text, .. }) => {
+                            json!({ "kind": "thinking", "text": text })
+                        }
+                        Item::Known(KnownItem::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        }) => {
+                            json!({ "kind": "call", "id": id, "name": name, "args": arguments })
+                        }
+                        Item::Known(KnownItem::ToolResult {
+                            call_id,
+                            output,
+                            is_error,
+                            ..
+                        }) => {
+                            json!({ "kind": "result", "call_id": call_id, "output": output, "is_error": is_error })
+                        }
+                        other => serde_json::to_value(other).unwrap(),
+                    })
+                    .collect();
+                (t.id.clone(), t.status, items)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        normalize_turns(&reopened_turns),
+        normalize_turns(&live_turns)
+    );
 }
 
 #[tokio::test]
@@ -1807,4 +1644,215 @@ async fn turns_record_git_snapshots_and_commands_and_set_model_flow_through_sess
     );
 
     session.close().await;
+}
+
+#[tokio::test]
+async fn crash_closes_channel_and_subagents_errors_and_mode_switches_settle_cleanly() {
+    struct GuardedDialect {
+        spec: AcpLaunchSpec,
+    }
+    impl AcpDialect for GuardedDialect {
+        fn provider_id(&self) -> &'static str {
+            "acp-guard"
+        }
+        fn launch(
+            &self,
+            _launch: &Launch,
+            _params: &tiechui_runtime::StartParams,
+        ) -> Result<AcpLaunchSpec, String> {
+            Ok(self.spec.clone())
+        }
+        fn mode_requires_restart(&self, current: Option<&str>, next: &str) -> bool {
+            (current == Some("yolo")) != (next == "yolo")
+        }
+        fn on_text_chunk(&self, _thinking: bool, text: &str) -> TextDisposition {
+            if text.contains("UNAUTHENTICATED (code 401)") {
+                TextDisposition::FailTurn("login required".into())
+            } else {
+                TextDisposition::Keep
+            }
+        }
+        fn tool_subagent(&self, tool: &ToolState) -> Option<AcpSubagent> {
+            (tool.name.as_deref() == Some("invoke_subagent")).then(|| AcpSubagent {
+                agent_id: tool.id.clone(),
+                name: Some("worker".into()),
+                state: match tool.status.as_deref() {
+                    Some("completed") => SubagentState::Completed,
+                    Some("failed") => SubagentState::Failed,
+                    _ => SubagentState::Running,
+                },
+                message: None,
+            })
+        }
+    }
+
+    let rig = AcpRig::new();
+    rig.write_scenario(&json!({
+        "modes": {
+            "currentModeId": "default",
+            "availableModes": [{ "id": "default", "name": "Default" }]
+        },
+        "turns": [
+            {
+                "steps": [
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "sub-int",
+                        "name": "invoke_subagent",
+                        "status": "in_progress"
+                    }}}},
+                    { "waitCancel": true }
+                ]
+            },
+            {
+                "steps": [
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "sub-fail",
+                        "name": "invoke_subagent",
+                        "status": "in_progress"
+                    }}}},
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "⚠ UNAUTHENTICATED (code 401): expired" }
+                    }}}},
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "\n    at Runner.step (/dist/srv.js:9:1)" }
+                    }}}},
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "trailing noise" }
+                    }}}}
+                ],
+                "stopReason": "end_turn"
+            },
+            {
+                "steps": [
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "Root ok." }
+                    }}}}
+                ],
+                "stopReason": "end_turn",
+                "afterEndTurn": [
+                    { "sleepMs": 20 },
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "⚠ UNAUTHENTICATED (code 401): wakeup expired" }
+                    }}}},
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "\n    at Wakeup.run (/dist/srv.js:44:2)" }
+                    }}}}
+                ]
+            },
+            {
+                "steps": [
+                    { "notify": { "params": { "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "Clean turn after wakeup error." }
+                    }}}},
+                    { "crashCode": 1, "crashStderr": "boom" }
+                ]
+            }
+        ]
+    }));
+
+    let mut cfg = rig.config();
+    cfg.dialect = Arc::new(GuardedDialect { spec: rig.spec() });
+    let mut session = LiveSession::start(
+        &rig,
+        Open::New {
+            cwd: rig.cwd.clone(),
+        },
+        acp_capabilities(),
+        cfg,
+        Some("rules"),
+    )
+    .await
+    .unwrap();
+
+    session
+        .submit(Op::RunCommand {
+            name: "permissions".into(),
+            arguments: "auto".into(),
+        })
+        .await;
+    let unsupported_mode = session
+        .until(|e| matches!(e, EventKind::Error { message } if message.contains("does not support permission mode auto")))
+        .await;
+    assert!(!unsupported_mode.is_empty());
+
+    session.send_text("turn 1").await;
+    session
+        .until(|e| matches!(e, EventKind::ItemCompleted { item, .. } if SubagentStatus::from_item(item).is_some_and(|s| s.state == SubagentState::Running)))
+        .await;
+
+    session
+        .submit(Op::RunCommand {
+            name: "permissions".into(),
+            arguments: "yolo".into(),
+        })
+        .await;
+    let active_reject = session
+        .until(|e| matches!(e, EventKind::Error { message } if message.contains("while a turn or approval is active")))
+        .await;
+    assert!(!active_reject.is_empty());
+
+    session
+        .submit(Op::Interrupt {
+            turn_id: TurnId("any".into()),
+        })
+        .await;
+    let t1_done = session
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let EventKind::TurnCompleted { turn: t1 } = t1_done.last().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(t1.status, TurnStatus::Interrupted);
+    let t1_sub = t1.items.iter().find_map(SubagentStatus::from_item).unwrap();
+    assert_eq!(t1_sub.state, SubagentState::Interrupted);
+
+    session.send_text("turn 2").await;
+    let t2_done = session
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let EventKind::TurnCompleted { turn: t2 } = t2_done.last().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(t2.status, TurnStatus::Failed);
+    assert!(
+        !t2.items
+            .iter()
+            .any(|i| matches!(i, Item::Known(KnownItem::AssistantMessage { .. }))),
+        "trailing stack and text chunks must be ignored once turn_failure is armed"
+    );
+    let t2_sub = t2.items.iter().find_map(SubagentStatus::from_item).unwrap();
+    assert_eq!(t2_sub.state, SubagentState::Failed);
+
+    session.send_text("turn 3").await;
+    session
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    let wakeup_err = session
+        .until(|e| matches!(e, EventKind::Error { message } if message == "login required"))
+        .await;
+    assert!(!wakeup_err.is_empty());
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    session.send_text("turn 4").await;
+    let crash_events = session
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    assert!(crash_events.iter().any(|e| matches!(
+        e,
+        EventKind::ItemDelta { delta, .. } if delta.contains("Clean turn after wakeup error.")
+    )));
+    let task_res = tokio::time::timeout(Duration::from_secs(5), session.opened.handle.task)
+        .await
+        .expect("session task must close when ACP child crashes")
+        .unwrap();
+    assert!(task_res.unwrap_err().contains("exited"));
 }

@@ -1,6 +1,3 @@
-//! ACP (Agent Client Protocol) JSON-RPC 2.0 wire payloads. Unknown fields are ignored so
-//! vendor extensions and newer ACP schema releases stay compatible.
-
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tiechui_protocol::InputContent;
@@ -9,35 +6,31 @@ use super::dialect::InitializeInfo;
 
 pub const ACP_PROTOCOL_VERSION: u64 = 1;
 
-pub fn initialize_params(extra_capabilities: Value, client_info: Value) -> Value {
-    let mut capabilities = match extra_capabilities {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
-    capabilities.insert(
-        "fs".into(),
-        json!({
-            "readTextFile": false,
-            "writeTextFile": false,
-        }),
-    );
-    capabilities.insert("terminal".into(), Value::Bool(false));
+pub fn initialize_params() -> Value {
     json!({
         "protocolVersion": ACP_PROTOCOL_VERSION,
-        "clientCapabilities": Value::Object(capabilities),
-        "clientInfo": client_info,
+        "clientCapabilities": {
+            "fs": {
+                "readTextFile": false,
+                "writeTextFile": false,
+            },
+            "terminal": false,
+            "elicitation": { "form": {} },
+        },
+        "clientInfo": {
+            "name": "tiechui",
+            "title": "Tiechui",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
     })
 }
 
-pub fn session_params(cwd: &str, session_id: Option<&str>, meta: Option<Value>) -> Value {
+pub fn session_params(cwd: &str, session_id: Option<&str>) -> Value {
     let mut body = Map::new();
     body.insert("cwd".into(), json!(cwd));
     body.insert("mcpServers".into(), json!([]));
     if let Some(id) = session_id {
         body.insert("sessionId".into(), json!(id));
-    }
-    if let Some(meta) = meta {
-        body.insert("_meta".into(), meta);
     }
     Value::Object(body)
 }
@@ -74,10 +67,9 @@ pub struct InitializeWire {
 }
 
 impl InitializeWire {
-    pub fn into_info(self, raw: Value) -> InitializeInfo {
+    pub fn into_info(self) -> InitializeInfo {
         InitializeInfo {
             protocol_version: self.protocol_version.unwrap_or(ACP_PROTOCOL_VERSION),
-            agent_name: self.agent_info.as_ref().and_then(|i| i.name.clone()),
             agent_version: self.agent_info.and_then(|i| i.version),
             load_session: self.agent_capabilities.load_session,
             resume_session: self
@@ -85,8 +77,6 @@ impl InitializeWire {
                 .session_capabilities
                 .resume
                 .is_some(),
-            image_prompts: self.agent_capabilities.prompt_capabilities.image,
-            raw,
         }
     }
 }
@@ -95,32 +85,18 @@ impl InitializeWire {
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentCapabilitiesWire {
     pub load_session: bool,
-    pub prompt_capabilities: PromptCapabilitiesWire,
     pub session_capabilities: SessionCapabilitiesWire,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct PromptCapabilitiesWire {
-    pub image: bool,
-    pub audio: bool,
-    pub embedded_context: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SessionCapabilitiesWire {
     pub resume: Option<Value>,
-    pub fork: Option<Value>,
-    pub list: Option<Value>,
-    pub close: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ImplementationWire {
-    pub name: Option<String>,
-    pub title: Option<String>,
     pub version: Option<String>,
 }
 
@@ -129,7 +105,6 @@ pub struct ImplementationWire {
 pub struct SessionSetupWire {
     pub session_id: Option<String>,
     pub modes: Option<SessionModeStateWire>,
-    pub config_options: Option<Vec<Value>>,
     pub models: Option<SessionModelStateWire>,
 }
 
@@ -144,7 +119,6 @@ pub struct SessionModeStateWire {
 #[serde(rename_all = "camelCase", default)]
 pub struct SessionModeWire {
     pub id: String,
-    pub name: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -158,7 +132,6 @@ pub struct SessionModelStateWire {
 #[serde(rename_all = "camelCase", default)]
 pub struct AcpModelInfoWire {
     pub model_id: String,
-    pub name: String,
     #[serde(rename = "_meta")]
     pub meta: Option<Value>,
 }
@@ -222,14 +195,11 @@ pub struct PermissionOptionWire {
     pub option_id: String,
     pub name: String,
     pub kind: String,
-    #[serde(rename = "_meta")]
-    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PermissionRequestWire {
-    pub session_id: String,
     pub tool_call: Value,
     pub options: Vec<PermissionOptionWire>,
 }

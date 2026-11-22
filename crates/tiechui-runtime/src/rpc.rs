@@ -11,8 +11,6 @@ use tokio::sync::oneshot;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One JSON-RPC line from a peer: a response (`id` with `result` or `error`), a server request
-/// (`id` with `method`) or a notification (`method` only).
 #[derive(Debug, Deserialize)]
 pub struct Incoming {
     #[serde(default)]
@@ -119,28 +117,39 @@ impl Rpc {
         self.write(&self.envelope(body)).await
     }
 
-    pub async fn send(
+    pub async fn send_with_id(
         &self,
+        id: i64,
         method: &str,
         params: impl Serialize,
-    ) -> Result<(i64, oneshot::Receiver<Result<Value, RpcError>>), CallError> {
-        let id = self.next_id();
+    ) -> Result<oneshot::Receiver<Result<Value, RpcError>>, CallError> {
         let (tx, rx) = oneshot::channel();
         self.pending().insert(id, tx);
         if let Err(error) = self.write_request(id, method, params).await {
             self.pending().remove(&id);
             return Err(CallError::Closed(error));
         }
+        Ok(rx)
+    }
+
+    pub async fn send(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<(i64, oneshot::Receiver<Result<Value, RpcError>>), CallError> {
+        let id = self.next_id();
+        let rx = self.send_with_id(id, method, params).await?;
         Ok((id, rx))
     }
 
-    pub async fn call(
+    pub async fn call_with_id(
         &self,
+        id: i64,
         method: &str,
         params: impl Serialize,
         timeout: Duration,
     ) -> Result<Value, CallError> {
-        let (id, rx) = self.send(method, params).await?;
+        let rx = self.send_with_id(id, method, params).await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(result))) => Ok(result),
             Ok(Ok(Err(error))) => Err(CallError::Rpc(error)),
@@ -150,6 +159,16 @@ impl Rpc {
                 Err(CallError::Timeout)
             }
         }
+    }
+
+    pub async fn call(
+        &self,
+        method: &str,
+        params: impl Serialize,
+        timeout: Duration,
+    ) -> Result<Value, CallError> {
+        let id = self.next_id();
+        self.call_with_id(id, method, params, timeout).await
     }
 
     pub async fn notify(&self, method: &str) -> Result<(), String> {

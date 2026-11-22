@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
-use crate::process::{Process, StderrTail, read_frames, read_stderr};
+use crate::process::{self, Process, StderrTail, overridable, seconds};
 use crate::registry::{
-    Driver, Launch, Probe, parse_version, probe_binary, resolve_in_path, seconds, version_at_least,
+    Driver, Launch, Probe, parse_version, probe_at_least, resolve_in_path, too_old,
 };
 use crate::rpc::{CallError, Rpc};
 use items::Policy;
@@ -38,8 +38,7 @@ const THREAD_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_ID_WAIT: Duration = Duration::from_secs(5);
 
-#[cfg(feature = "fake-runtime")]
-pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CODEX_HANDSHAKE_TIMEOUT_MS";
+const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_CODEX_HANDSHAKE_TIMEOUT_MS";
 
 #[derive(Debug, Clone, Copy)]
 struct Timeouts {
@@ -50,28 +49,16 @@ struct Timeouts {
 
 impl Timeouts {
     fn current() -> Self {
-        #[allow(unused_mut)]
-        let mut timeouts = Self {
-            handshake: HANDSHAKE_TIMEOUT,
-            thread: THREAD_TIMEOUT,
+        Self {
+            handshake: overridable(HANDSHAKE_TIMEOUT, HANDSHAKE_TIMEOUT_ENV),
+            thread: overridable(THREAD_TIMEOUT, HANDSHAKE_TIMEOUT_ENV),
             request: REQUEST_TIMEOUT,
-        };
-        #[cfg(feature = "fake-runtime")]
-        if let Some(ms) = std::env::var(HANDSHAKE_TIMEOUT_ENV)
-            .ok()
-            .and_then(|value| value.parse().ok())
-        {
-            timeouts.handshake = Duration::from_millis(ms);
-            timeouts.thread = Duration::from_millis(ms);
         }
-        timeouts
     }
 }
 
 fn debug(message: &str) {
-    if std::env::var_os("CHUI_CODEX_DEBUG").is_some() {
-        eprintln!("chui codex: {message}");
-    }
+    process::debug("codex", message);
 }
 
 pub struct CodexDriver;
@@ -95,16 +82,7 @@ impl Driver for CodexDriver {
     }
 
     async fn probe(&self, launch: &Launch) -> Probe {
-        let mut probe = probe_binary("codex", "--version", launch).await;
-        if let (true, Some(version)) = (probe.available, &probe.version)
-            && !version_at_least(version, MIN_VERSION)
-        {
-            probe.reason = Some(format!(
-                "codex {version} is older than the minimum supported version {MIN_VERSION}"
-            ));
-            probe.available = false;
-        }
-        probe
+        probe_at_least("codex", MIN_VERSION, launch).await
     }
 
     fn backend(&self, launch: &Launch) -> Result<Box<dyn Backend>, String> {
@@ -215,11 +193,9 @@ impl CodexBackend {
             .map_err(|error| format!("codex initialize: {}", error.message))?;
         let agent = response["userAgent"].as_str().unwrap_or_default();
         if let Some(version) = parse_version(agent)
-            && !version_at_least(&version, MIN_VERSION)
+            && let Some(reason) = too_old("codex", &version, MIN_VERSION)
         {
-            return Err(format!(
-                "codex {version} is older than the minimum supported version {MIN_VERSION}"
-            ));
+            return Err(reason);
         }
         rpc.notify("initialized").await
     }
@@ -288,8 +264,8 @@ impl Backend for CodexBackend {
         let (frames, inbound) = mpsc::channel(256);
         let translator = Translator::new(shared.clone(), rpc.clone(), events, tail.clone());
         let tasks = vec![
-            tokio::spawn(read_frames(stdout, frames)),
-            tokio::spawn(read_stderr(stderr, tail, "CHUI_CODEX_DEBUG", "chui codex")),
+            tokio::spawn(process::read_frames("codex", stdout, frames)),
+            tokio::spawn(process::read_stderr("codex", stderr, tail)),
             tokio::spawn(translator.run(inbound)),
         ];
         self.run = Some(Run {
@@ -425,22 +401,5 @@ impl Backend for CodexBackend {
                 process.close().await;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn versions_compare_as_dotted_numbers() {
-        assert!(version_at_least("0.171.0", "0.156.1"));
-        assert!(version_at_least("0.156.1", "0.156.1"));
-        assert!(version_at_least("1.0.0", "0.156.1"));
-        assert!(version_at_least("0.156.1-alpha.2", "0.156.1"));
-        assert!(version_at_least("0.200", "0.156.1"));
-        assert!(!version_at_least("0.156.0", "0.156.1"));
-        assert!(!version_at_least("0.99.9", "0.156.1"));
-        assert!(!version_at_least("0.156", "0.156.1"));
     }
 }

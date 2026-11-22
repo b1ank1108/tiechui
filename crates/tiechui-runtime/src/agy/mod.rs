@@ -5,14 +5,12 @@ mod tools;
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tiechui_protocol::{CommandInfo, ModelInfo, RuntimeCapabilities, SteeringMode, ThinkingLevel};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::acp::{
@@ -21,21 +19,17 @@ use crate::acp::{
     interaction_permission_as_questions,
 };
 use crate::backend::{Backend, StartParams};
-use crate::process::apply_env;
+use crate::process::{configure_env, overridable};
 use crate::registry::{
-    Driver, Launch, PROBE_TIMEOUT, Probe, parse_version, resolve_in_path, version_at_least,
+    Driver, Launch, PROBE_TIMEOUT, Probe, at_least, parse_version, resolve_in_path, run_bounded_cli,
 };
 use tools::PathRoot;
 
 pub const MIN_VERSION: &str = "1.5.2";
 
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_CLI_OUTPUT: usize = 64 * 1024;
-
-#[cfg(feature = "fake-runtime")]
-pub const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_AGY_HANDSHAKE_TIMEOUT_MS";
-#[cfg(feature = "fake-runtime")]
-pub const WAKEUP_IDLE_ENV: &str = "CHUI_AGY_WAKEUP_IDLE_MS";
+const HANDSHAKE_TIMEOUT_ENV: &str = "CHUI_AGY_HANDSHAKE_TIMEOUT_MS";
+const WAKEUP_IDLE_ENV: &str = "CHUI_AGY_WAKEUP_IDLE_MS";
 
 fn agy_env() -> (Vec<(String, String)>, Vec<String>) {
     (
@@ -44,32 +38,23 @@ fn agy_env() -> (Vec<(String, String)>, Vec<String>) {
     )
 }
 
+fn is_agy_stripped_env(name: &str) -> bool {
+    name.eq_ignore_ascii_case("GEMINI_API_KEY") || name.eq_ignore_ascii_case("GOOGLE_API_KEY")
+}
+
 fn version_too_old_reason(version: &str) -> String {
     format!("agy {version} 版本过低，需要 {MIN_VERSION} 及以上")
 }
 
-#[cfg(not(feature = "fake-runtime"))]
 fn current_timeouts() -> AcpTimeouts {
-    AcpTimeouts::default()
-}
-
-#[cfg(feature = "fake-runtime")]
-fn current_timeouts() -> AcpTimeouts {
-    let mut timeouts = AcpTimeouts::default();
-    if let Some(ms) = std::env::var(HANDSHAKE_TIMEOUT_ENV)
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        timeouts.handshake = Duration::from_millis(ms);
-        timeouts.session = Duration::from_millis(ms);
+    let defaults = AcpTimeouts::default();
+    let handshake = overridable(defaults.handshake, HANDSHAKE_TIMEOUT_ENV);
+    AcpTimeouts {
+        handshake,
+        session: handshake,
+        request: defaults.request,
+        wakeup_idle: overridable(defaults.wakeup_idle, WAKEUP_IDLE_ENV),
     }
-    if let Some(ms) = std::env::var(WAKEUP_IDLE_ENV)
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        timeouts.wakeup_idle = Duration::from_millis(ms);
-    }
-    timeouts
 }
 
 pub struct AgyDriver;
@@ -115,27 +100,14 @@ async fn probe_agy(launch: &Launch) -> Probe {
     let Some(path) = resolve_in_path("agy", launch.path.as_deref()) else {
         return Probe::unavailable("agy is not on PATH");
     };
-    let output = run_agy_cli(&path, &["--version"], launch, PROBE_TIMEOUT).await;
-    let text = match output {
+    let text = match run_agy_cli(&path, &["--version"], launch, PROBE_TIMEOUT).await {
         Ok(text) => text,
-        Err(reason) => {
-            return Probe {
-                available: false,
-                version: None,
-                path: Some(path),
-                reason: Some(reason),
-            };
-        }
+        Err(reason) => return Probe::found_at(path, reason),
     };
     let Some(version) = parse_version(&text) else {
-        return Probe {
-            available: false,
-            version: None,
-            path: Some(path),
-            reason: Some("agy --version printed no version".into()),
-        };
+        return Probe::found_at(path, "agy --version printed no version".into());
     };
-    if !version_at_least(&version, MIN_VERSION) {
+    if !at_least(&version, MIN_VERSION) {
         return Probe {
             available: false,
             version: Some(version.clone()),
@@ -157,42 +129,17 @@ async fn run_agy_cli(
     launch: &Launch,
     timeout: Duration,
 ) -> Result<String, String> {
-    let (env_set, env_remove) = agy_env();
+    let (env_set, _) = agy_env();
     let mut command = Command::new(binary);
-    command
-        .args(args)
-        .current_dir(std::env::temp_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    apply_env(&mut command, launch.path.as_ref(), &env_set, &env_remove);
+    command.args(args).current_dir(std::env::temp_dir());
+    configure_env(
+        &mut command,
+        launch.path.as_ref(),
+        is_agy_stripped_env,
+        &env_set,
+    );
     let label = format!("agy {}", args.join(" "));
-    let (mut child, tree) =
-        tiechui_exec::Tree::spawn(&mut command).map_err(|e| format!("cannot run {label}: {e}"))?;
-    let Some(mut stdout) = child.stdout.take() else {
-        return Err(format!("cannot read {label} output"));
-    };
-    let read_fut = async {
-        let mut text = String::new();
-        let mut buf = vec![0u8; 4096];
-        while text.len() < MAX_CLI_OUTPUT {
-            let n = stdout.read(&mut buf).await.map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            text.push_str(&String::from_utf8_lossy(&buf[..n]));
-        }
-        let status = child.wait().await.map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("{label} exited with {status}"));
-        }
-        Ok(text)
-    };
-    let result = tokio::time::timeout(timeout, read_fut)
-        .await
-        .map_err(|_| format!("{label} did not finish in {} s", timeout.as_secs()))?;
-    drop(tree);
-    result
+    run_bounded_cli(command, "agy", &label, timeout).await
 }
 
 pub fn parse_models_output(text: &str) -> Vec<ModelInfo> {
@@ -270,7 +217,7 @@ impl AcpDialect for AgyDialect {
     fn check_initialize(&self, info: &InitializeInfo) -> Result<(), String> {
         if let Some(raw_version) = &info.agent_version
             && let Some(version) = parse_version(raw_version)
-            && !version_at_least(&version, MIN_VERSION)
+            && !at_least(&version, MIN_VERSION)
         {
             return Err(version_too_old_reason(&version));
         }
@@ -279,6 +226,7 @@ impl AcpDialect for AgyDialect {
 
     fn session_mode(&self, mode: &str, available: &[String]) -> Option<String> {
         let target = match mode {
+            "yolo" => return None,
             "auto" => "accept-edits",
             _ => "default",
         };
@@ -346,6 +294,19 @@ mod tests {
         let models = parse_models_output(sample);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["gemini-4-neon-high", "gemini-3.8-flash-low"]);
+    }
+
+    #[test]
+    fn yolo_session_mode_returns_none_and_missing_mode_returns_none() {
+        let dialect = AgyDialect::default();
+        let modes = vec!["default".to_owned(), "plan".to_owned()];
+        assert_eq!(dialect.session_mode("yolo", &modes), None);
+        assert_eq!(dialect.session_mode("yolo", &[]), None);
+        assert_eq!(dialect.session_mode("auto", &modes), None);
+        assert_eq!(
+            dialect.session_mode("rules", &modes).as_deref(),
+            Some("default")
+        );
     }
 
     #[test]

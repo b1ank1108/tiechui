@@ -1,14 +1,12 @@
-//! ACP interactive server-to-client requests (`session/request_permission` and
-//! `elicitation/create`) mapped onto `ApprovalRequest` and answered from `ApprovalDecision`.
-
 use serde_json::{Map, Value, json};
 use tiechui_protocol::{ApprovalDecision, ApprovalRequest, FilePreview, Question, QuestionOption};
 
 use super::dialect::{AcpDialect, CustomApproval, ToolState};
-use super::items::{first_diff, normalized_call};
+use super::items::{collect_diffs, normalized_call};
 use super::wire::{PermissionOptionWire, PermissionRequestWire};
 
 const OTHER_SUFFIXES: [&str; 3] = ["__other", "_other", "_custom"];
+const RECOMMENDED_TAG: &[u8] = b"(recommended)";
 
 pub enum Responder {
     Permission(Vec<PermissionOptionWire>),
@@ -84,10 +82,10 @@ fn permission_subject(
     }
     if matches!(tool, "write" | "edit") {
         let path = arguments["path"].as_str().unwrap_or_default().to_owned();
-        let preview = first_diff(&state.content).map(|(_, old, new)| {
+        let preview = collect_diffs(&state.content).first().map(|diff| {
             Box::new(FilePreview {
-                before: old.unwrap_or_default().to_owned(),
-                after: new.to_owned(),
+                before: diff.old_text.unwrap_or_default().to_owned(),
+                after: diff.new_text.to_owned(),
             })
         });
         return ("path".into(), vec![path], preview);
@@ -234,16 +232,28 @@ fn resolve_one_of_const(prop: &Value, val: &Value) -> Value {
 }
 
 fn strip_recommended(label: &str) -> String {
-    let trimmed = label.trim();
-    for tag in ["(Recommended)", "(recommended)"] {
-        if let Some(after) = trimmed.strip_prefix(tag) {
-            return after.trim_start().to_owned();
-        }
-        if let Some(before) = trimmed.strip_suffix(tag) {
-            return before.trim_end().to_owned();
-        }
+    let mut current = label.trim().to_owned();
+    while let Some(pos) = find_recommended_tag(&current) {
+        let end = pos + RECOMMENDED_TAG.len();
+        let before = current[..pos].trim_end();
+        let after = current[end..].trim_start();
+        current = join_trimmed_parts(before, after);
     }
-    trimmed.to_owned()
+    current
+}
+
+fn find_recommended_tag(text: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(RECOMMENDED_TAG.len())
+        .position(|window| window.eq_ignore_ascii_case(RECOMMENDED_TAG))
+}
+
+fn join_trimmed_parts(before: &str, after: &str) -> String {
+    match (before.is_empty(), after.is_empty()) {
+        (true, _) => after.to_owned(),
+        (false, true) => before.to_owned(),
+        (false, false) => format!("{before} {after}"),
+    }
 }
 
 fn extract_question_answers(decision: &ApprovalDecision, question_id: &str) -> Option<Vec<String>> {
@@ -543,5 +553,27 @@ fn apply_question_field(out: &mut Map<String, Value>, field: &FormQuestionField,
                 coerce_scalar(&field.prop, &json!(chosen)),
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_recommended_removes_tag_anywhere_case_insensitively_and_collapses_whitespace() {
+        assert_eq!(strip_recommended("(Recommended) Rebase"), "Rebase");
+        assert_eq!(strip_recommended("Rebase (recommended)"), "Rebase");
+        assert_eq!(
+            strip_recommended("Option A   (RECOMMENDED)   - fast"),
+            "Option A - fast"
+        );
+        assert_eq!(
+            strip_recommended("中文选项 (rEcOmMeNdEd) 说明"),
+            "中文选项 说明"
+        );
+        assert_eq!(strip_recommended("  (Recommended)  "), "");
+        assert_eq!(strip_recommended("Plain choice"), "Plain choice");
     }
 }

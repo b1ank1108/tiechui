@@ -7,6 +7,7 @@
 pub mod acp;
 pub mod agy;
 mod backend;
+mod claude;
 mod codex;
 #[cfg(feature = "fake-runtime")]
 pub mod fake;
@@ -21,12 +22,13 @@ pub use backend::{
     Backend, BackendEvent, BackendItem, ChildOf, CommandAction, StartParams, Started, Steered,
     SubagentUpdate,
 };
+pub use claude::ClaudeDriver;
 pub use codex::CodexDriver;
 pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY, external_id, item_id, turns};
 pub use process::{DeltaCoalescer, Frame, FrameReader, MAX_FRAME, Process};
 pub use registry::{
-    Driver, Launch, PROBE_TIMEOUT, Probe, Registry, capabilities_of, parse_version, probe_binary,
-    resolve_in_path, version_at_least,
+    Driver, Launch, PROBE_TIMEOUT, Probe, Registry, at_least, capabilities_of, parse_version,
+    probe_binary, resolve_in_path,
 };
 pub use session::{INTERRUPT_WINDOW, Open, Opened, SessionConfig, open_session};
 

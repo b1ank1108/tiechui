@@ -1,5 +1,3 @@
-//! Antigravity (`agy acp`) error and streamed notice classification.
-
 use serde_json::Value;
 
 use crate::acp::TextDisposition;

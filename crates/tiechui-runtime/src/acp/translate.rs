@@ -1,6 +1,3 @@
-//! Translates ACP stdio JSON-RPC frames (`session/update`, `session/prompt` replies, and
-//! interactive server requests) into `BackendEvent`s in FIFO order.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,12 +20,9 @@ use super::wire::{
     AcpUsageWire, AvailableCommandWire, PromptResponseWire, SessionNotificationWire,
 };
 use crate::backend::{BackendEvent, BackendItem, SubagentUpdate};
-use crate::process::{DeltaCoalescer, Inbound, StderrTail, stderr_detail};
+use crate::process::{Outbox, StderrTail};
 use crate::rpc::{Incoming, Rpc, RpcError};
 use crate::tool_output;
-
-const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
-const FLUSH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PromptFlight {
@@ -36,24 +30,13 @@ pub struct PromptFlight {
     pub cancel_requested: bool,
 }
 
+#[derive(Default)]
 pub struct Shared {
     session: Mutex<Option<String>>,
     prompt: Mutex<Option<PromptFlight>>,
-    replaying_load: AtomicBool,
+    load_rpc_id: Mutex<Option<i64>>,
     saw_frame: AtomicBool,
     approvals: Mutex<HashMap<String, PendingApproval>>,
-}
-
-impl Default for Shared {
-    fn default() -> Self {
-        Self {
-            session: Mutex::new(None),
-            prompt: Mutex::new(None),
-            replaying_load: AtomicBool::new(false),
-            saw_frame: AtomicBool::new(false),
-            approvals: Mutex::default(),
-        }
-    }
 }
 
 impl Shared {
@@ -76,16 +59,25 @@ impl Shared {
             .clone()
     }
 
-    pub fn set_replaying_load(&self, replaying: bool) {
-        self.replaying_load.store(replaying, Ordering::Release);
+    pub fn begin_load(&self, rpc_id: i64) {
+        *self.load_rpc_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(rpc_id);
     }
 
-    pub fn is_replaying_load(&self) -> bool {
-        self.replaying_load.load(Ordering::Acquire)
+    pub fn clear_load_if(&self, rpc_id: i64) {
+        let mut guard = self.load_rpc_id.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard == Some(rpc_id) {
+            *guard = None;
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.load_rpc_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     pub fn begin_prompt(&self, rpc_id: i64) {
-        self.set_replaying_load(false);
         *self.prompt.lock().unwrap_or_else(|e| e.into_inner()) = Some(PromptFlight {
             rpc_id,
             cancel_requested: false,
@@ -107,6 +99,13 @@ impl Shared {
             return true;
         }
         false
+    }
+
+    pub fn is_cancel_requested(&self) -> bool {
+        self.prompt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|flight| flight.cancel_requested)
     }
 
     pub fn has_active_prompt(&self) -> bool {
@@ -157,8 +156,16 @@ struct OpenPlan {
     arguments: Value,
 }
 
+struct ActiveSubagent {
+    parent_call_id: ItemId,
+    name: Option<String>,
+}
+
 pub enum Control {
-    SealDerived(oneshot::Sender<()>),
+    SealDerived {
+        emit_idle: bool,
+        done: oneshot::Sender<()>,
+    },
     CancelDerived,
 }
 
@@ -166,22 +173,21 @@ pub struct AcpTranslator {
     shared: Arc<Shared>,
     rpc: Arc<Rpc>,
     dialect: Arc<dyn AcpDialect>,
-    out: mpsc::Sender<BackendEvent>,
+    out: Outbox,
     stderr: StderrTail,
     wakeup_idle: Duration,
-    coalescer: DeltaCoalescer,
-    buffered: usize,
-    flush_at: Option<Instant>,
     idle_at: Option<Instant>,
     seq: u64,
     segment: Option<StreamSegment>,
     plan: Option<OpenPlan>,
     tools: HashMap<String, ToolState>,
     open_tools: HashSet<String>,
-    active_subagents: HashSet<String>,
+    backgrounded_tools: HashSet<String>,
+    active_subagents: HashMap<String, ActiveSubagent>,
     last_commands: Option<Vec<CommandInfo>>,
     context_window: Option<u64>,
     turn_failure: Option<String>,
+    wakeup_failed: bool,
     outside_turn_active: bool,
 }
 
@@ -193,7 +199,7 @@ async fn sleep_opt(deadline: Option<Instant>) {
 }
 
 enum Step {
-    Inbound(Option<Inbound>),
+    Frame(Option<Vec<u8>>),
     Control(Option<Control>),
     Flush,
     Idle,
@@ -212,37 +218,36 @@ impl AcpTranslator {
             shared,
             rpc,
             dialect,
-            out,
+            out: Outbox::new(out),
             stderr,
             wakeup_idle,
-            coalescer: DeltaCoalescer::default(),
-            buffered: 0,
-            flush_at: None,
             idle_at: None,
             seq: 0,
             segment: None,
             plan: None,
             tools: HashMap::new(),
             open_tools: HashSet::new(),
-            active_subagents: HashSet::new(),
+            backgrounded_tools: HashSet::new(),
+            active_subagents: HashMap::new(),
             last_commands: None,
             context_window: None,
             turn_failure: None,
+            wakeup_failed: false,
             outside_turn_active: false,
         }
     }
 
     pub async fn run(
         mut self,
-        mut inbound: mpsc::Receiver<Inbound>,
+        mut inbound: mpsc::Receiver<Vec<u8>>,
         mut control: mpsc::Receiver<Control>,
     ) {
         loop {
             let step = tokio::select! {
                 biased;
                 ctrl = control.recv() => Step::Control(ctrl),
-                msg = inbound.recv() => Step::Inbound(msg),
-                () = sleep_opt(self.flush_at) => Step::Flush,
+                frame = inbound.recv() => Step::Frame(frame),
+                () = self.out.flush_due() => Step::Flush,
                 () = sleep_opt(self.idle_at) => Step::Idle,
             };
             if !self.handle_step(step).await {
@@ -256,26 +261,27 @@ impl AcpTranslator {
         match step {
             Step::Control(Some(ctrl)) => self.on_control(ctrl).await,
             Step::Control(None) => true,
-            Step::Inbound(Some(Inbound::Frame(frame))) => self.on_frame(&frame).await,
-            Step::Inbound(Some(Inbound::Oversize(size))) => {
-                debug(&format!("dropped an oversize ACP frame of {size} bytes"));
-                true
-            }
-            Step::Inbound(Some(Inbound::Eof) | None) => {
+            Step::Frame(Some(frame)) => self.on_frame(&frame).await,
+            Step::Frame(None) => {
                 self.on_eof().await;
                 false
             }
-            Step::Flush => self.flush().await,
+            Step::Flush => self.out.flush().await,
             Step::Idle => self.on_idle_timer().await,
         }
     }
 
     async fn on_control(&mut self, ctrl: Control) -> bool {
         match ctrl {
-            Control::SealDerived(done) => {
-                let ok = self.seal_wakeup_items().await;
+            Control::SealDerived { emit_idle, done } => {
+                let had_derived = self.outside_turn_active;
                 self.outside_turn_active = false;
                 self.idle_at = None;
+                self.wakeup_failed = false;
+                let mut ok = self.seal_wakeup_items().await;
+                if ok && emit_idle && had_derived {
+                    ok = self.out.emit_after_flush(BackendEvent::Idle).await;
+                }
                 let _ = done.send(());
                 ok
             }
@@ -283,7 +289,12 @@ impl AcpTranslator {
                 if !self.shared.has_active_prompt() && self.outside_turn_active {
                     self.outside_turn_active = false;
                     self.idle_at = None;
-                    return self.seal_wakeup_items().await && self.emit(BackendEvent::Idle).await;
+                    self.wakeup_failed = false;
+                    return self.seal_wakeup_items().await
+                        && self
+                            .finish_active_subagents(SubagentState::Interrupted)
+                            .await
+                        && self.out.emit_after_flush(BackendEvent::Idle).await;
                 }
                 true
             }
@@ -291,11 +302,20 @@ impl AcpTranslator {
     }
 
     async fn on_eof(&mut self) {
-        let _ = self.flush().await;
+        let sub_state = if self.shared.is_cancel_requested() {
+            SubagentState::Interrupted
+        } else {
+            SubagentState::Failed
+        };
+        let _ = self.finish_active_subagents(sub_state).await;
+        self.tools.clear();
+        self.backgrounded_tools.clear();
+        let _ = self.out.flush().await;
         tokio::task::yield_now().await;
-        let detail = stderr_detail(&self.stderr);
+        let detail = self.stderr.detail();
         let _ = self
-            .send_raw(BackendEvent::Error(format!(
+            .out
+            .send_now(BackendEvent::Error(format!(
                 "{} exited{detail}",
                 self.dialect.provider_id()
             )))
@@ -305,36 +325,6 @@ impl AcpTranslator {
     fn next_item_id(&mut self, prefix: &str) -> String {
         self.seq += 1;
         format!("acp-{prefix}-{}", self.seq)
-    }
-
-    async fn send_raw(&self, event: BackendEvent) -> bool {
-        self.out.send(event).await.is_ok()
-    }
-
-    async fn flush(&mut self) -> bool {
-        self.flush_at = None;
-        self.buffered = 0;
-        for (item_id, delta) in self.coalescer.drain() {
-            if !self
-                .send_raw(BackendEvent::ItemDelta { item_id, delta })
-                .await
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    async fn emit(&mut self, event: BackendEvent) -> bool {
-        self.flush().await && self.send_raw(event).await
-    }
-
-    fn push_delta(&mut self, id: &str, delta: &str) {
-        self.coalescer.push(&ItemId(id.to_owned()), delta);
-        self.buffered += delta.len();
-        if self.flush_at.is_none() && !delta.is_empty() {
-            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
-        }
     }
 
     fn note_wakeup_activity(&mut self) {
@@ -367,7 +357,8 @@ impl AcpTranslator {
             return true;
         }
         self.outside_turn_active = false;
-        self.seal_wakeup_items().await && self.emit(BackendEvent::Idle).await
+        self.wakeup_failed = false;
+        self.seal_wakeup_items().await && self.out.emit_after_flush(BackendEvent::Idle).await
     }
 
     async fn seal_wakeup_items(&mut self) -> bool {
@@ -398,10 +389,11 @@ impl AcpTranslator {
         error: Option<RpcError>,
     ) -> bool {
         let numeric_id = id.as_i64().or_else(|| id.as_str()?.parse().ok());
-        if let Some(rpc_id) = numeric_id
-            && let Some(flight) = self.shared.clear_prompt_if(rpc_id)
-        {
-            return self.on_prompt_finished(flight, result, error).await;
+        if let Some(rpc_id) = numeric_id {
+            self.shared.clear_load_if(rpc_id);
+            if let Some(flight) = self.shared.clear_prompt_if(rpc_id) {
+                return self.on_prompt_finished(flight, result, error).await;
+            }
         }
         let outcome = match (result, error) {
             (_, Some(err)) => Err(err),
@@ -421,23 +413,42 @@ impl AcpTranslator {
     ) -> bool {
         self.idle_at = None;
         self.outside_turn_active = false;
+        self.wakeup_failed = false;
         let (status, turn_err, usage) = self.classify_prompt_end(flight, result, error);
+        if !self.settle_prompt_items(status).await {
+            return false;
+        }
+        if let Some(usage) = usage
+            && !self
+                .out
+                .emit_after_flush(BackendEvent::Usage(map_usage(&usage)))
+                .await
+        {
+            return false;
+        }
+        self.out
+            .emit_after_flush(BackendEvent::TurnCompleted {
+                status,
+                error: turn_err,
+            })
+            .await
+    }
+
+    async fn settle_prompt_items(&mut self, status: TurnStatus) -> bool {
         if !self.close_segment().await || !self.close_plan().await {
             return false;
         }
         if !self.finish_turn_tools(status).await || !self.withdraw_all_approvals().await {
             return false;
         }
-        if let Some(usage) = usage
-            && !self.emit(BackendEvent::Usage(map_usage(&usage))).await
-        {
-            return false;
+        match status {
+            TurnStatus::Interrupted => {
+                self.finish_active_subagents(SubagentState::Interrupted)
+                    .await
+            }
+            TurnStatus::Failed => self.finish_active_subagents(SubagentState::Failed).await,
+            TurnStatus::Completed | TurnStatus::InProgress => true,
         }
-        self.emit(BackendEvent::TurnCompleted {
-            status,
-            error: turn_err,
-        })
-        .await
     }
 
     fn classify_prompt_end(
@@ -485,9 +496,16 @@ impl AcpTranslator {
 
     async fn finish_turn_tools(&mut self, status: TurnStatus) -> bool {
         let ids: Vec<String> = self.open_tools.drain().collect();
-        let background = status == TurnStatus::Completed && self.dialect.reactive_wakeups();
+        let background = status == TurnStatus::Completed;
         for id in ids {
-            let Some(state) = self.tools.get(&id).cloned() else {
+            let state = if background {
+                self.backgrounded_tools.insert(id.clone());
+                self.tools.get(&id).cloned()
+            } else {
+                self.backgrounded_tools.remove(&id);
+                self.tools.remove(&id)
+            };
+            let Some(state) = state else {
                 continue;
             };
             let (name, args) = normalized_call(&state);
@@ -499,6 +517,30 @@ impl AcpTranslator {
             let out = tool_output(msg, is_err, Value::Null);
             if !self
                 .emit_completed_tool(&id, &name, args, out, is_err)
+                .await
+            {
+                return false;
+            }
+        }
+        if !background {
+            self.tools.clear();
+            self.backgrounded_tools.clear();
+        }
+        true
+    }
+
+    async fn finish_active_subagents(&mut self, state: SubagentState) -> bool {
+        for (agent_id, info) in std::mem::take(&mut self.active_subagents) {
+            let update = SubagentUpdate {
+                agent_id,
+                parent_call_id: info.parent_call_id,
+                name: info.name,
+                state,
+                message: None,
+            };
+            if !self
+                .out
+                .emit_after_flush(BackendEvent::Subagent(update))
                 .await
             {
                 return false;
@@ -518,7 +560,11 @@ impl AcpTranslator {
                         .into_response(&tiechui_protocol::ApprovalDecision::Cancel),
                 )
                 .await;
-            if !self.emit(BackendEvent::ApprovalWithdrawn { id }).await {
+            if !self
+                .out
+                .emit_after_flush(BackendEvent::ApprovalWithdrawn { id })
+                .await
+            {
                 return false;
             }
         }
@@ -536,7 +582,7 @@ impl AcpTranslator {
             return true;
         }
         let kind = note.update["sessionUpdate"].as_str().unwrap_or_default();
-        if is_replay(&note) || (self.shared.is_replaying_load() && is_timeline_update(kind)) {
+        if is_replay(&note) || (self.shared.is_loading() && is_timeline_update(kind)) {
             return true;
         }
         self.dispatch_session_update(kind, &note.update).await
@@ -568,26 +614,47 @@ impl AcpTranslator {
             return true;
         }
         let delta = update["content"]["text"].as_str().unwrap_or_default();
-        if delta.is_empty() {
+        let in_prompt = self.shared.has_active_prompt();
+        if self.should_drop_text_chunk(in_prompt, thinking, delta) {
             return true;
         }
         match self.dialect.on_text_chunk(thinking, delta) {
-            TextDisposition::Ignore => return true,
-            TextDisposition::FailTurn(reason) => {
-                self.turn_failure = Some(reason);
-                return true;
+            TextDisposition::Ignore => true,
+            TextDisposition::FailTurn(reason) => self.on_fail_chunk(in_prompt, reason).await,
+            TextDisposition::Keep => {
+                self.wakeup_failed = false;
+                self.note_wakeup_activity();
+                let key = update["messageId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                self.append_stream_delta(thinking, key, delta).await
             }
-            TextDisposition::Keep => {}
         }
-        if !self.dialect.reactive_wakeups() && !self.shared.has_active_prompt() {
+    }
+
+    fn should_drop_text_chunk(&mut self, in_prompt: bool, thinking: bool, delta: &str) -> bool {
+        if delta.is_empty() {
             return true;
         }
-        self.note_wakeup_activity();
-        let key = update["messageId"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        self.append_stream_delta(thinking, key, delta).await
+        if in_prompt {
+            self.wakeup_failed = false;
+            return self.turn_failure.is_some();
+        }
+        self.wakeup_failed && !thinking && is_trailing_stack_chunk(delta)
+    }
+
+    async fn on_fail_chunk(&mut self, in_prompt: bool, reason: String) -> bool {
+        if in_prompt {
+            self.turn_failure = Some(reason);
+            return true;
+        }
+        self.wakeup_failed = true;
+        if !self.close_segment().await {
+            return false;
+        }
+        self.refresh_idle_deadline();
+        self.out.emit_after_flush(BackendEvent::Error(reason)).await
     }
 
     async fn append_stream_delta(
@@ -612,7 +679,8 @@ impl AcpTranslator {
                 let id = self.next_item_id(if thinking { "thought" } else { "msg" });
                 let item = make_text_item(&id, thinking, String::new());
                 if !self
-                    .emit(BackendEvent::ItemStarted(BackendItem::root(item)))
+                    .out
+                    .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(item)))
                     .await
                 {
                     return false;
@@ -626,11 +694,7 @@ impl AcpTranslator {
                 id
             }
         };
-        self.push_delta(&id, delta);
-        if self.buffered >= FLUSH_BYTES {
-            return self.flush().await;
-        }
-        true
+        self.out.push_delta(&ItemId(id), delta).await
     }
 
     async fn close_segment(&mut self) -> bool {
@@ -638,14 +702,12 @@ impl AcpTranslator {
             return true;
         };
         let item = make_text_item(&seg.id, seg.thinking, seg.text);
-        self.emit(BackendEvent::ItemCompleted(BackendItem::root(item)))
+        self.out
+            .emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(item)))
             .await
     }
 
     async fn on_tool_update(&mut self, update: &Value) -> bool {
-        if !self.dialect.reactive_wakeups() && !self.shared.has_active_prompt() {
-            return true;
-        }
         let Some(call_id) = update["toolCallId"].as_str().filter(|s| !s.is_empty()) else {
             return true;
         };
@@ -657,26 +719,7 @@ impl AcpTranslator {
         state.merge_from(update);
         self.dialect.normalize_tool(&mut state);
         let subagent = self.dialect.tool_subagent(&state);
-        let terminal = state.is_terminal();
-        let (name, args) = normalized_call(&state);
-        let ok = if terminal {
-            self.open_tools.remove(call_id);
-            let (out, is_err) = normalized_result(&name, &state);
-            self.tools.insert(call_id.to_owned(), state);
-            self.emit_completed_tool(call_id, &name, args, out, is_err)
-                .await
-        } else {
-            self.open_tools.insert(call_id.to_owned());
-            self.tools.insert(call_id.to_owned(), state);
-            self.emit(BackendEvent::ItemStarted(BackendItem::root(
-                KnownItem::ToolCall {
-                    id: ItemId(call_id.to_owned()),
-                    name,
-                    arguments: args,
-                },
-            )))
-            .await
-        };
+        let ok = self.emit_tool_state(call_id, state).await;
         if !ok {
             return false;
         }
@@ -688,20 +731,61 @@ impl AcpTranslator {
         ok
     }
 
+    async fn emit_tool_state(&mut self, call_id: &str, state: ToolState) -> bool {
+        let terminal = state.is_terminal();
+        let (name, args) = normalized_call(&state);
+        if terminal {
+            self.open_tools.remove(call_id);
+            let emit_id = if self.backgrounded_tools.remove(call_id) {
+                format!("{call_id}:wakeup")
+            } else {
+                call_id.to_owned()
+            };
+            let (out, is_err) = normalized_result(&name, &state);
+            return self
+                .emit_completed_tool(&emit_id, &name, args, out, is_err)
+                .await;
+        }
+        let emit_id = if self.backgrounded_tools.contains(call_id) {
+            format!("{call_id}:wakeup")
+        } else {
+            call_id.to_owned()
+        };
+        self.open_tools.insert(call_id.to_owned());
+        self.tools.insert(call_id.to_owned(), state);
+        self.out
+            .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(
+                KnownItem::ToolCall {
+                    id: ItemId(emit_id),
+                    name,
+                    arguments: args,
+                },
+            )))
+            .await
+    }
+
     async fn emit_subagent(&mut self, call_id: &str, sub: AcpSubagent) -> bool {
+        let parent = ItemId(call_id.to_owned());
         if matches!(sub.state, SubagentState::Running | SubagentState::Waiting) {
-            self.active_subagents.insert(sub.agent_id.clone());
+            self.active_subagents.insert(
+                sub.agent_id.clone(),
+                ActiveSubagent {
+                    parent_call_id: parent.clone(),
+                    name: sub.name.clone(),
+                },
+            );
         } else {
             self.active_subagents.remove(&sub.agent_id);
         }
-        self.emit(BackendEvent::Subagent(SubagentUpdate {
-            agent_id: sub.agent_id,
-            parent_call_id: ItemId(call_id.to_owned()),
-            name: sub.name,
-            state: sub.state,
-            message: sub.message,
-        }))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
+                agent_id: sub.agent_id,
+                parent_call_id: parent,
+                name: sub.name,
+                state: sub.state,
+                message: sub.message,
+            }))
+            .await
     }
 
     async fn emit_completed_tool(
@@ -712,25 +796,9 @@ impl AcpTranslator {
         output: Value,
         is_error: bool,
     ) -> bool {
-        let call = ItemId(id.to_owned());
-        self.emit(BackendEvent::ItemCompleted(BackendItem::root(
-            KnownItem::ToolCall {
-                id: call.clone(),
-                name: name.to_owned(),
-                arguments,
-            },
-        )))
-        .await
-            && self
-                .send_raw(BackendEvent::ItemCompleted(BackendItem::root(
-                    KnownItem::ToolResult {
-                        id: ItemId(format!("{id}:result")),
-                        call_id: call,
-                        output,
-                        is_error,
-                    },
-                )))
-                .await
+        self.out
+            .complete_root_tool(id, name, arguments, output, is_error)
+            .await
     }
 
     async fn on_plan_update(&mut self, kind: &str, update: &Value) -> bool {
@@ -753,14 +821,15 @@ impl AcpTranslator {
         if all_done {
             return self.close_plan().await;
         }
-        self.emit(BackendEvent::ItemStarted(BackendItem::root(
-            KnownItem::ToolCall {
-                id: ItemId(id),
-                name: "plan".into(),
-                arguments,
-            },
-        )))
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(
+                KnownItem::ToolCall {
+                    id: ItemId(id),
+                    name: "plan".into(),
+                    arguments,
+                },
+            )))
+            .await
     }
 
     async fn close_plan(&mut self) -> bool {
@@ -783,7 +852,9 @@ impl AcpTranslator {
             return true;
         }
         self.last_commands = Some(commands.clone());
-        self.emit(BackendEvent::Commands(commands)).await
+        self.out
+            .emit_after_flush(BackendEvent::Commands(commands))
+            .await
     }
 
     async fn on_usage_update(&mut self, update: &Value) -> bool {
@@ -794,7 +865,9 @@ impl AcpTranslator {
             return true;
         }
         self.context_window = Some(size);
-        self.emit(BackendEvent::ContextWindow(size)).await
+        self.out
+            .emit_after_flush(BackendEvent::ContextWindow(size))
+            .await
     }
 
     async fn on_server_request(&mut self, id: Value, method: &str, params: Value) -> bool {
@@ -849,7 +922,8 @@ impl AcpTranslator {
             self.open_tools.insert(state.id.clone());
             self.tools.insert(state.id.clone(), state);
             if !self
-                .emit(BackendEvent::ItemStarted(BackendItem::root(started)))
+                .out
+                .emit_after_flush(BackendEvent::ItemStarted(BackendItem::root(started)))
                 .await
             {
                 return false;
@@ -882,12 +956,26 @@ impl AcpTranslator {
         self.shared
             .insert_approval(approval_id.clone(), PendingApproval { rpc_id, responder });
         self.idle_at = None;
-        self.emit(BackendEvent::Approval {
-            id: approval_id,
-            request,
-        })
-        .await
+        self.out
+            .emit_after_flush(BackendEvent::Approval {
+                id: approval_id,
+                request,
+            })
+            .await
     }
+}
+
+fn is_trailing_stack_chunk(delta: &str) -> bool {
+    let mut non_empty = delta.lines().map(str::trim).filter(|l| !l.is_empty());
+    non_empty.all(is_stack_frame_line)
+}
+
+fn is_stack_frame_line(trimmed: &str) -> bool {
+    trimmed.starts_with("at ")
+        && (trimmed.contains('(')
+            || trimmed.contains('/')
+            || trimmed.contains(':')
+            || trimmed.contains('\\'))
 }
 
 fn format_approval_id(rpc_id: &Value) -> String {

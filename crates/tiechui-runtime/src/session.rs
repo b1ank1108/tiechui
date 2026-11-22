@@ -107,8 +107,14 @@ pub async fn open_session(
     let path = store.path().to_owned();
     let cwd = store.header().cwd.clone();
     let resume = history::external_id(&store);
-    let requested_model = config
+    let is_new = matches!(config.open, Open::New { .. });
+    let explicit_model = config
         .model
+        .as_deref()
+        .map(|m| strip_runtime_prefix(runtime, m))
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned);
+    let requested_model = explicit_model
         .clone()
         .or_else(|| history::stored_model(&store, runtime));
     let (started, backend_events) = match backend
@@ -149,6 +155,7 @@ pub async fn open_session(
         models: initial_models,
         commands: Vec::new(),
         model_ref,
+        persist_initial_model: is_new && explicit_model.is_some(),
         events,
         turn: None,
         last_turn: None,
@@ -197,6 +204,16 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
+fn strip_runtime_prefix<'a>(runtime: &str, model: &'a str) -> &'a str {
+    if runtime.is_empty() {
+        return model;
+    }
+    match model.split_once('/') {
+        Some((prefix, rest)) if prefix == runtime && !rest.is_empty() => rest,
+        _ => model,
+    }
+}
+
 struct Session {
     runtime: String,
     capabilities: RuntimeCapabilities,
@@ -210,6 +227,7 @@ struct Session {
     models: Vec<ModelInfo>,
     commands: Vec<CommandInfo>,
     model_ref: ModelRef,
+    persist_initial_model: bool,
     events: broadcast::Sender<Event>,
     turn: Option<OpenTurn>,
     last_turn: Option<TurnId>,
@@ -327,6 +345,12 @@ impl Session {
         if self.resume.as_deref() != Some(self.started.external_id.as_str()) {
             let kind = history::thread_entry(&self.started.external_id);
             self.append(kind).await?;
+        }
+        if std::mem::take(&mut self.persist_initial_model) {
+            self.append(EntryKind::ModelChange {
+                model: self.model_ref.clone(),
+            })
+            .await?;
         }
         let turns = history::turns(self.store()?);
         self.emit(EventKind::ThreadStarted {
@@ -569,7 +593,6 @@ impl Session {
                 Ok(())
             }
             Op::SetModel { provider, model } => self.set_model(&provider, &model).await,
-            Op::SetThinking { level } => self.set_thinking(level).await,
             op => {
                 self.emit(EventKind::Error {
                     message: format!("runtime {} cannot run {op:?}", self.runtime),
@@ -591,16 +614,8 @@ impl Session {
                 self.user_input(submission, content, InputDelivery::FollowUp)
                     .await
             }
-            Ok(CommandAction::Handled {
-                output,
-                permission_mode,
-            }) => {
-                if let Some(mode) = permission_mode {
-                    self.set_permission_mode(mode);
-                }
-                if let Some(text) = output {
-                    self.emit(EventKind::CommandOutput { name, text });
-                }
+            Ok(CommandAction::PermissionMode(mode)) => {
+                self.set_permission_mode(mode);
                 Ok(())
             }
             Err(message) => {
@@ -611,14 +626,14 @@ impl Session {
     }
 
     async fn set_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
-        let prefix = format!("{provider}/");
-        let id = if !provider.is_empty() {
-            model.strip_prefix(&prefix).unwrap_or(model)
+        let scope = if provider.is_empty() {
+            self.runtime.as_str()
         } else {
-            model
+            provider
         };
+        let id = strip_runtime_prefix(scope, model);
         match self.backend.set_model(id).await {
-            Ok(info) => self.apply_model_change(info, true).await,
+            Ok(info) => self.apply_model_change(info).await,
             Err(message) => {
                 self.emit(EventKind::Error { message });
                 Ok(())
@@ -626,32 +641,16 @@ impl Session {
         }
     }
 
-    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<(), String> {
-        match self.backend.set_thinking(level).await {
-            Ok(next) => {
-                self.started.thinking = next;
-                self.emit_session_updated();
-                Ok(())
-            }
-            Err(message) => {
-                self.emit(EventKind::Error { message });
-                Ok(())
-            }
-        }
-    }
-
-    async fn apply_model_change(&mut self, info: ModelInfo, persist: bool) -> Result<(), String> {
+    async fn apply_model_change(&mut self, info: ModelInfo) -> Result<(), String> {
         self.started.model = info.clone();
         self.model_ref = ModelRef {
             provider: self.runtime.clone(),
             model: ModelId(info.id.clone()),
         };
-        if persist {
-            self.append(EntryKind::ModelChange {
-                model: self.model_ref.clone(),
-            })
-            .await?;
-        }
+        self.append(EntryKind::ModelChange {
+            model: self.model_ref.clone(),
+        })
+        .await?;
         self.emit_session_updated();
         match self.models.iter_mut().find(|item| item.id == info.id) {
             Some(existing) => *existing = info,
@@ -837,11 +836,6 @@ impl Session {
             }
             BackendEvent::Models(models) => {
                 self.update_models(models);
-                Ok(())
-            }
-            BackendEvent::ModelChanged(info) => self.apply_model_change(info, false).await,
-            BackendEvent::PermissionMode(mode) => {
-                self.set_permission_mode(mode);
                 Ok(())
             }
             BackendEvent::ItemStarted(_)

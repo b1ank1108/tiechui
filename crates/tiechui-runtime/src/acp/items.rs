@@ -1,6 +1,3 @@
-//! Pure normalization from ACP session updates, tools, plans, usage, commands, and models to
-//! the session shapes Tiechui clients render.
-
 use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
@@ -9,6 +6,12 @@ use tiechui_protocol::{CommandInfo, ModelInfo, ThinkingLevel, TokenUsage};
 use super::dialect::{AcpDialect, ToolLocation, ToolState};
 use super::wire::{AcpUsageWire, AvailableCommandWire, SessionSetupWire};
 use crate::tool_output;
+
+pub struct DiffHunk<'a> {
+    pub path: &'a str,
+    pub old_text: Option<&'a str>,
+    pub new_text: &'a str,
+}
 
 impl ToolState {
     pub fn merge_from(&mut self, raw: &Value) {
@@ -78,8 +81,9 @@ fn parse_locations(items: &[Value]) -> Vec<ToolLocation> {
 }
 
 pub fn normalized_call(state: &ToolState) -> (String, Value) {
-    if let Some(diff) = first_diff(&state.content) {
-        return diff_call(state.kind.as_deref(), diff);
+    let diffs = collect_diffs(&state.content);
+    if !diffs.is_empty() {
+        return diff_call(state.kind.as_deref(), &diffs);
     }
     match state.kind.as_deref() {
         Some("execute") => ("bash".into(), bash_args(state)),
@@ -125,29 +129,40 @@ fn fallback_call(state: &ToolState) -> (String, Value) {
     (name, args)
 }
 
-pub fn first_diff(content: &[Value]) -> Option<(&str, Option<&str>, &str)> {
-    content.iter().find_map(|block| {
-        if block["type"].as_str() != Some("diff") {
-            return None;
-        }
-        let path = block["path"].as_str()?;
-        let new_text = block["newText"].as_str().unwrap_or_default();
-        Some((path, block["oldText"].as_str(), new_text))
-    })
+pub fn collect_diffs(content: &[Value]) -> Vec<DiffHunk<'_>> {
+    content
+        .iter()
+        .filter_map(|block| {
+            if block["type"].as_str() != Some("diff") {
+                return None;
+            }
+            Some(DiffHunk {
+                path: block["path"].as_str()?,
+                old_text: block["oldText"].as_str(),
+                new_text: block["newText"].as_str().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
-fn diff_call(
-    kind: Option<&str>,
-    (path, old_text, new_text): (&str, Option<&str>, &str),
-) -> (String, Value) {
+fn diff_call(kind: Option<&str>, diffs: &[DiffHunk<'_>]) -> (String, Value) {
+    let first = &diffs[0];
     if kind == Some("write") {
-        return ("write".into(), json!({ "path": path, "content": new_text }));
+        return (
+            "write".into(),
+            json!({ "path": first.path, "content": first.new_text }),
+        );
     }
-    let edit = json!({
-        "oldText": old_text.unwrap_or_default(),
-        "newText": new_text,
-    });
-    ("edit".into(), json!({ "path": path, "edits": [edit] }))
+    let edits: Vec<Value> = diffs
+        .iter()
+        .map(|diff| {
+            json!({
+                "oldText": diff.old_text.unwrap_or_default(),
+                "newText": diff.new_text,
+            })
+        })
+        .collect();
+    ("edit".into(), json!({ "path": first.path, "edits": edits }))
 }
 
 fn bash_args(state: &ToolState) -> Value {
@@ -425,4 +440,43 @@ pub fn extract_models(
     }
     let fallback = model_info_of(provider, requested.unwrap_or(provider), 0);
     (fallback.clone(), vec![fallback])
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collects_all_diff_blocks_into_edit_hunks() {
+        let state = ToolState {
+            id: "call-multi".into(),
+            kind: Some("edit".into()),
+            content: vec![
+                json!({
+                    "type": "diff",
+                    "path": "src/lib.rs",
+                    "oldText": "const A: i32 = 1;",
+                    "newText": "const A: i32 = 2;"
+                }),
+                json!({
+                    "type": "diff",
+                    "path": "src/lib.rs",
+                    "oldText": "const B: i32 = 3;",
+                    "newText": "const B: i32 = 4;"
+                }),
+            ],
+            ..ToolState::default()
+        };
+        let (name, args) = normalized_call(&state);
+        assert_eq!(name, "edit");
+        assert_eq!(args["path"], "src/lib.rs");
+        assert_eq!(
+            args["edits"],
+            json!([
+                { "oldText": "const A: i32 = 1;", "newText": "const A: i32 = 2;" },
+                { "oldText": "const B: i32 = 3;", "newText": "const B: i32 = 4;" },
+            ])
+        );
+    }
 }

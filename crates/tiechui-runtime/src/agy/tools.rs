@@ -1,6 +1,3 @@
-//! Normalization of Antigravity (`agy acp`) tool calls, paths, command outputs, and
-//! `invoke_subagent` status updates.
-
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};

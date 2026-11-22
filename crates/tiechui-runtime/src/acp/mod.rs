@@ -13,6 +13,7 @@ mod wire;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -21,22 +22,47 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::backend::{Backend, BackendEvent, CommandAction, StartParams, Started, Steered};
-use crate::process::{Process, StderrTail, read_frames, read_stderr, stderr_detail};
-use crate::registry::{resolve_in_path, seconds};
+use crate::process::{self, Process, StderrTail, seconds};
+use crate::registry::resolve_in_path;
 use crate::rpc::{CallError, Rpc, RpcError};
 
 pub use dialect::{
     AcpConfig, AcpDialect, AcpLaunchSpec, AcpSubagent, AcpTimeouts, CustomApproval,
-    GenericAcpDialect, InitializeInfo, ResumePreference, TextDisposition, ToolLocation, ToolState,
+    GenericAcpDialect, InitializeInfo, TextDisposition, ToolLocation, ToolState,
 };
 pub use requests::{form_elicitation_as_questions, interaction_permission_as_questions};
 use translate::{AcpTranslator, Control, Shared};
 use wire::{ACP_PROTOCOL_VERSION, InitializeWire, SessionSetupWire};
 
+const GENERIC_AUTH_PHRASES: &[&str] = &[
+    "unauthenticated",
+    "unauthorized",
+    "authentication required",
+    "authentication failed",
+    "invalid authentication",
+    "not authenticated",
+    "please sign in",
+    "sign in required",
+    "sign-in required",
+    "not logged in",
+    "login required",
+    "please log in",
+    "code 401",
+    "\"code\":401",
+    "\"code\": 401",
+    "http 401",
+    "status 401",
+    "invalid api key",
+    "api key not valid",
+    "missing api key",
+    "missing credentials",
+    "invalid credentials",
+    "expired credentials",
+    "oauth token",
+];
+
 pub(crate) fn debug(message: &str) {
-    if std::env::var_os("CHUI_ACP_DEBUG").is_some() {
-        eprintln!("chui acp: {message}");
-    }
+    process::debug("acp", message);
 }
 
 struct AcpRun {
@@ -59,7 +85,7 @@ impl Drop for AcpRun {
 pub struct AcpBackend {
     config: AcpConfig,
     run: Option<AcpRun>,
-    events_tx: Option<mpsc::Sender<BackendEvent>>,
+    events_tx: Option<mpsc::WeakSender<BackendEvent>>,
     params: Option<StartParams>,
     available_modes: Vec<String>,
     models: Vec<ModelInfo>,
@@ -113,13 +139,14 @@ impl AcpBackend {
     ) -> Result<AcpRun, String> {
         let spec = self.config.dialect.launch(&self.config.launch, params)?;
         let binary = self.resolve_program(&spec.program)?;
-        let mut process = Process::spawn_with_env(
+        let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
+        let mut process = Process::spawn_env(
             &binary,
-            &spec.args,
+            &args,
             &params.cwd,
             self.config.launch.path.as_ref(),
+            |name| spec.env_remove.iter().any(|k| name.eq_ignore_ascii_case(k)),
             &spec.env_set,
-            &spec.env_remove,
         )
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
         let peer = self.config.dialect.provider_id();
@@ -138,13 +165,8 @@ impl AcpBackend {
             self.config.timeouts.wakeup_idle,
         );
         let tasks = vec![
-            tokio::spawn(read_frames(stdout, frames)),
-            tokio::spawn(read_stderr(
-                stderr,
-                tail.clone(),
-                "CHUI_ACP_DEBUG",
-                "chui acp",
-            )),
+            tokio::spawn(process::read_frames(peer, stdout, frames)),
+            tokio::spawn(process::read_stderr(peer, stderr, tail.clone())),
             tokio::spawn(translator.run(inbound, control_rx)),
         ];
         Ok(AcpRun {
@@ -188,8 +210,8 @@ impl AcpBackend {
             .await?;
         self.models = models.clone();
         self.current_model = Some(final_model.clone());
-        if let Some(tx) = &self.events_tx
-            && models.len() > 1
+        if models.len() > 1
+            && let Some(tx) = self.events_tx.as_ref().and_then(mpsc::WeakSender::upgrade)
         {
             let _ = tx.send(BackendEvent::Models(models)).await;
         }
@@ -205,13 +227,9 @@ impl AcpBackend {
         let run = self.running()?;
         let peer = self.config.dialect.provider_id();
         let timeout = self.config.timeouts.handshake;
-        let init_params = wire::initialize_params(
-            self.config.dialect.client_capabilities(),
-            self.config.dialect.client_info(),
-        );
         let (_, rx) = run
             .rpc
-            .send("initialize", init_params)
+            .send("initialize", wire::initialize_params())
             .await
             .map_err(|e| e.describe(peer, "initialize"))?;
         let reply = tokio::time::timeout(timeout, rx)
@@ -223,13 +241,13 @@ impl AcpBackend {
                 tokio::task::yield_now().await;
                 return Err(format!(
                     "{peer} exited before it answered initialize{}",
-                    stderr_detail(&run.tail)
+                    run.tail.detail()
                 ));
             }
         };
-        let parsed: InitializeWire = serde_json::from_value(raw.clone())
-            .map_err(|e| format!("{peer} initialize response: {e}"))?;
-        let info = parsed.into_info(raw);
+        let parsed: InitializeWire =
+            serde_json::from_value(raw).map_err(|e| format!("{peer} initialize response: {e}"))?;
+        let info = parsed.into_info();
         if info.protocol_version != ACP_PROTOCOL_VERSION {
             return Err(format!(
                 "unsupported ACP protocol version: {}",
@@ -252,7 +270,7 @@ impl AcpBackend {
                 Err(fatal) => return Err(fatal),
             }
         }
-        let (id, setup) = self.call_session_new(init, cwd).await?;
+        let (id, setup) = self.call_session_new(cwd).await?;
         Ok((id, setup, false))
     }
 
@@ -262,35 +280,44 @@ impl AcpBackend {
         cwd: &str,
         session_id: &str,
     ) -> Result<Option<SessionSetupWire>, String> {
-        let methods = reopen_methods(init, self.config.dialect.resume_preference());
+        let methods = reopen_methods(init);
         if methods.is_empty() {
             return Ok(None);
         }
         let run = self.running()?;
         run.shared.set_session(session_id.to_owned());
         for (idx, method) in methods.iter().enumerate() {
-            let is_load = *method == "session/load";
-            run.shared.set_replaying_load(is_load);
-            let meta = self.config.dialect.session_meta(init, true);
-            let params = wire::session_params(cwd, Some(session_id), meta);
-            match run
-                .rpc
-                .call(method, params, self.config.timeouts.session)
-                .await
-            {
+            match self.call_reopen_method(run, method, cwd, session_id).await {
                 Ok(raw) => {
                     return parse_setup(self.config.dialect.provider_id(), method, raw).map(Some);
                 }
-                Err(CallError::Rpc(err)) if err.code == -32601 && idx + 1 < methods.len() => {
-                    run.shared.set_replaying_load(false);
-                }
-                Err(err) => {
-                    run.shared.set_replaying_load(false);
-                    return self.classify_reopen_error(method, err);
-                }
+                Err(CallError::Rpc(err)) if err.code == -32601 && idx + 1 < methods.len() => {}
+                Err(err) => return self.classify_reopen_error(method, err),
             }
         }
         Ok(None)
+    }
+
+    async fn call_reopen_method(
+        &self,
+        run: &AcpRun,
+        method: &str,
+        cwd: &str,
+        session_id: &str,
+    ) -> Result<Value, CallError> {
+        let params = wire::session_params(cwd, Some(session_id));
+        let rpc_id = run.rpc.next_id();
+        if method == "session/load" {
+            run.shared.begin_load(rpc_id);
+        }
+        let result = run
+            .rpc
+            .call_with_id(rpc_id, method, params, self.config.timeouts.session)
+            .await;
+        if result.is_err() {
+            run.shared.clear_load_if(rpc_id);
+        }
+        result
     }
 
     fn classify_reopen_error(
@@ -302,10 +329,11 @@ impl AcpBackend {
         match error {
             CallError::Timeout | CallError::Closed(_) => Err(error.describe(peer, method)),
             CallError::Rpc(err) => {
-                if self.is_auth_failure(&err) {
-                    return Err(self.format_rpc_error(method, &err));
+                if is_session_unusable(&err) && !self.is_auth_failure(&err) {
+                    debug(&format!("{method} rejected saved session: {}", err.message));
+                    return Ok(None);
                 }
-                if is_session_unusable(&err) {
+                if err.code == -32002 {
                     debug(&format!("{method} rejected saved session: {}", err.message));
                     return Ok(None);
                 }
@@ -314,20 +342,14 @@ impl AcpBackend {
         }
     }
 
-    async fn call_session_new(
-        &self,
-        init: &InitializeInfo,
-        cwd: &str,
-    ) -> Result<(String, SessionSetupWire), String> {
+    async fn call_session_new(&self, cwd: &str) -> Result<(String, SessionSetupWire), String> {
         let run = self.running()?;
         let peer = self.config.dialect.provider_id();
-        run.shared.set_replaying_load(false);
-        let meta = self.config.dialect.session_meta(init, false);
         let raw = run
             .rpc
             .call(
                 "session/new",
-                wire::session_params(cwd, None, meta),
+                wire::session_params(cwd, None),
                 self.config.timeouts.session,
             )
             .await
@@ -351,18 +373,28 @@ impl AcpBackend {
         tiechui_mode: &str,
         current_mode: Option<&str>,
     ) -> Result<(), String> {
+        let peer = self.config.dialect.provider_id();
         let Some(target) = self
             .config
             .dialect
             .session_mode(tiechui_mode, &self.available_modes)
         else {
+            if !self.available_modes.is_empty()
+                && !self
+                    .config
+                    .dialect
+                    .mode_requires_restart(None, tiechui_mode)
+            {
+                return Err(format!(
+                    "{peer} does not support permission mode {tiechui_mode}"
+                ));
+            }
             return Ok(());
         };
         if current_mode == Some(target.as_str()) {
             return Ok(());
         }
         let run = self.running()?;
-        let peer = self.config.dialect.provider_id();
         run.rpc
             .call(
                 "session/set_mode",
@@ -446,45 +478,28 @@ impl AcpBackend {
     }
 
     fn is_auth_failure(&self, err: &RpcError) -> bool {
-        if self
-            .config
-            .dialect
-            .is_auth_error(err.code, &err.message, err.data.as_ref())
+        if err.code == 401
+            || self
+                .config
+                .dialect
+                .is_auth_error(err.code, &err.message, err.data.as_ref())
         {
             return true;
         }
-        let combined = format!(
-            "{} {}",
-            err.message.to_ascii_lowercase(),
-            err.data
-                .as_ref()
-                .map(Value::to_string)
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-        );
-        [
-            "auth",
-            "sign in",
-            "sign-in",
-            "login",
-            "not logged in",
-            "unauthenticated",
-            "unauthorized",
-            "401",
-            "credential",
-            "api key",
-        ]
-        .iter()
-        .any(|needle| combined.contains(needle))
+        let combined = combined_lower(err);
+        GENERIC_AUTH_PHRASES
+            .iter()
+            .any(|needle| combined.contains(needle))
     }
 
     /// Restarts the underlying ACP child process with an updated permission `mode` and resumes
     /// the current session in place without replacing the event stream.
     pub async fn restart_and_resume(&mut self, mode: Option<String>) -> Result<(), String> {
         let session_id = self.session_id()?;
-        let events = self
+        let keep_open = self
             .events_tx
-            .clone()
+            .as_ref()
+            .and_then(mpsc::WeakSender::upgrade)
             .ok_or("ACP event channel is closed")?;
         let mut next_params = self.params.clone().ok_or("ACP backend was never started")?;
         next_params.mode = mode;
@@ -493,16 +508,37 @@ impl AcpBackend {
             next_params.model = Some(current.id.clone());
         }
         self.shutdown_run().await;
-        self.run = Some(self.spawn_run(&next_params, events)?);
-        match self.handshake(&next_params).await {
+        self.run = Some(self.spawn_run(&next_params, keep_open.clone())?);
+        let result = self.handshake(&next_params).await;
+        match result {
             Ok(_) => {
+                drop(keep_open);
                 self.params = Some(next_params);
                 Ok(())
             }
             Err(error) => {
                 self.shutdown_run().await;
+                drop(keep_open);
                 Err(error)
             }
+        }
+    }
+
+    async fn seal_derived(&mut self, emit_idle: bool) {
+        let Some(run) = &self.run else {
+            return;
+        };
+        let (tx, rx) = oneshot::channel();
+        if run
+            .control
+            .send(Control::SealDerived {
+                emit_idle,
+                done: tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
         }
     }
 
@@ -511,32 +547,49 @@ impl AcpBackend {
             for task in &run.tasks {
                 task.abort();
             }
+            for task in run.tasks.drain(..) {
+                let _ = task.await;
+            }
             if let Some(process) = run.process.take() {
                 process.close().await;
             }
         }
     }
+
+    async fn switch_permission_mode(&mut self, mode: &str) -> Result<CommandAction, String> {
+        if !matches!(mode, "rules" | "auto" | "yolo") {
+            return Err(format!("unknown permission mode {mode:?}"));
+        }
+        let current = self.params.as_ref().and_then(|p| p.mode.as_deref());
+        if self.config.dialect.mode_requires_restart(current, mode) {
+            self.restart_for_mode(mode).await?;
+        } else {
+            let session_id = self.session_id()?;
+            self.apply_session_mode(&session_id, mode, None).await?;
+            if let Some(params) = &mut self.params {
+                params.mode = Some(mode.to_owned());
+            }
+        }
+        Ok(CommandAction::PermissionMode(mode.to_owned()))
+    }
+
+    async fn restart_for_mode(&mut self, mode: &str) -> Result<(), String> {
+        let run = self.running()?;
+        if run.shared.has_active_prompt() || !run.shared.approvals_empty() {
+            return Err("cannot switch permission mode while a turn or approval is active".into());
+        }
+        self.seal_derived(true).await;
+        self.restart_and_resume(Some(mode.to_owned())).await
+    }
 }
 
-fn reopen_methods(init: &InitializeInfo, pref: ResumePreference) -> Vec<&'static str> {
+fn reopen_methods(init: &InitializeInfo) -> Vec<&'static str> {
     let mut methods = Vec::new();
-    match pref {
-        ResumePreference::PreferResume => {
-            if init.resume_session {
-                methods.push("session/resume");
-            }
-            if init.load_session {
-                methods.push("session/load");
-            }
-        }
-        ResumePreference::PreferLoad => {
-            if init.load_session {
-                methods.push("session/load");
-            }
-            if init.resume_session {
-                methods.push("session/resume");
-            }
-        }
+    if init.resume_session {
+        methods.push("session/resume");
+    }
+    if init.load_session {
+        methods.push("session/load");
     }
     methods
 }
@@ -545,11 +598,8 @@ fn parse_setup(peer: &str, method: &str, raw: Value) -> Result<SessionSetupWire,
     serde_json::from_value(raw).map_err(|e| format!("{peer} {method} response: {e}"))
 }
 
-fn is_session_unusable(err: &RpcError) -> bool {
-    if matches!(err.code, -32002 | -32601) {
-        return true;
-    }
-    let text = format!(
+fn combined_lower(err: &RpcError) -> String {
+    format!(
         "{} {}",
         err.message.to_ascii_lowercase(),
         err.data
@@ -557,18 +607,25 @@ fn is_session_unusable(err: &RpcError) -> bool {
             .map(Value::to_string)
             .unwrap_or_default()
             .to_ascii_lowercase()
-    );
+    )
+}
+
+fn is_session_unusable(err: &RpcError) -> bool {
+    if matches!(err.code, -32002 | -32601) {
+        return true;
+    }
+    let text = combined_lower(err);
     if !text.contains("session") && !text.contains("conversation") {
         return false;
     }
     [
         "not found",
         "no such",
-        "unknown",
         "does not exist",
-        "invalid",
-        "missing",
-        "expired",
+        "unknown session",
+        "unknown conversation",
+        "invalid session",
+        "session expired",
         "corrupt",
         "unusable",
         "cannot load",
@@ -593,7 +650,7 @@ impl Backend for AcpBackend {
             ));
         }
         let (events, received) = mpsc::channel(1024);
-        self.events_tx = Some(events.clone());
+        self.events_tx = Some(events.downgrade());
         self.run = Some(self.spawn_run(&params, events)?);
         match self.handshake(&params).await {
             Ok(started) => {
@@ -646,7 +703,7 @@ impl Backend for AcpBackend {
             (
                 run.rpc.clone(),
                 run.control.clone(),
-                self.events_tx.clone(),
+                self.events_tx.as_ref().and_then(mpsc::WeakSender::upgrade),
                 had_prompt,
                 drained,
             )
@@ -713,13 +770,7 @@ impl Backend for AcpBackend {
     }
 
     async fn finish_derived(&mut self) {
-        let Some(run) = &self.run else {
-            return;
-        };
-        let (tx, rx) = oneshot::channel();
-        if run.control.send(Control::SealDerived(tx)).await.is_ok() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
-        }
+        self.seal_derived(false).await;
     }
 
     async fn shutdown(&mut self) {
@@ -728,29 +779,7 @@ impl Backend for AcpBackend {
     }
 }
 
-impl AcpBackend {
-    async fn switch_permission_mode(&mut self, mode: &str) -> Result<CommandAction, String> {
-        if !matches!(mode, "rules" | "auto" | "yolo") {
-            return Err(format!("unknown permission mode {mode:?}"));
-        }
-        let current = self.params.as_ref().and_then(|p| p.mode.as_deref());
-        if self.config.dialect.mode_requires_restart(current, mode) {
-            self.restart_and_resume(Some(mode.to_owned())).await?;
-        } else {
-            let session_id = self.session_id()?;
-            self.apply_session_mode(&session_id, mode, None).await?;
-            if let Some(params) = &mut self.params {
-                params.mode = Some(mode.to_owned());
-            }
-        }
-        Ok(CommandAction::Handled {
-            output: None,
-            permission_mode: Some(mode.to_owned()),
-        })
-    }
-}
-
-fn init_timeout_error(peer: &str, timeout: std::time::Duration, saw_frame: bool) -> String {
+fn init_timeout_error(peer: &str, timeout: Duration, saw_frame: bool) -> String {
     if saw_frame {
         format!(
             "{peer} timed out: no answer to initialize within {}",

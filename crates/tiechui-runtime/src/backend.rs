@@ -82,11 +82,8 @@ pub struct SubagentUpdate {
 pub enum CommandAction {
     /// Send the text as a normal user turn (or queue it if a turn is already running).
     Prompt(String),
-    /// Handled directly without opening a turn.
-    Handled {
-        output: Option<String>,
-        permission_mode: Option<String>,
-    },
+    /// Updated the session's permission mode without opening a turn.
+    PermissionMode(String),
 }
 
 /// What a backend reports, in order. Root items stream: `ItemStarted`, any number of merged
@@ -105,8 +102,6 @@ pub enum BackendEvent {
     ContextWindow(u64),
     Commands(Vec<CommandInfo>),
     Models(Vec<ModelInfo>),
-    ModelChanged(ModelInfo),
-    PermissionMode(String),
     Approval {
         id: String,
         request: ApprovalRequest,
@@ -169,12 +164,6 @@ pub trait Backend: Send {
     async fn set_model(&mut self, model: &str) -> Result<ModelInfo, String> {
         let _ = model;
         Err("switching models is not supported".into())
-    }
-
-    /// Switches the thinking level when `capabilities.thinking` is enabled.
-    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
-        let _ = level;
-        Err("switching thinking levels is not supported".into())
     }
 
     /// Flushes any buffered output of an open derived turn before a new root turn closes it.

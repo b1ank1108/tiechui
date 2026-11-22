@@ -4,22 +4,49 @@ use std::io;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tiechui_exec::Tree;
-use tiechui_protocol::ItemId;
+use tiechui_protocol::{ItemId, KnownItem};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
+
+use crate::backend::{BackendEvent, BackendItem};
 
 /// The longest frame a driver reads; a longer one is reported and skipped.
 pub const MAX_FRAME: usize = 32 << 20;
+const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+const FLUSH_BYTES: usize = 64 * 1024;
 
-pub type StderrTail = Arc<Mutex<VecDeque<String>>>;
+/// Writes `chui <runtime>: <message>` to stderr when `CHUI_<RUNTIME>_DEBUG` is set.
+pub fn debug(runtime: &str, message: &str) {
+    if std::env::var_os(format!("CHUI_{}_DEBUG", runtime.to_ascii_uppercase())).is_some() {
+        eprintln!("chui {runtime}: {message}");
+    }
+}
 
-pub enum Inbound {
-    Frame(Vec<u8>),
-    Oversize(usize),
-    Eof,
+/// `default`, or in a `fake-runtime` build the milliseconds in the environment variable
+/// `variable`, which tests set to shorten a wait.
+pub fn overridable(default: Duration, variable: &str) -> Duration {
+    if cfg!(feature = "fake-runtime")
+        && let Some(ms) = std::env::var(variable)
+            .ok()
+            .and_then(|value| value.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// A timeout as error messages show it: `60 s`, `1.5 s`.
+pub fn seconds(duration: Duration) -> String {
+    if duration.subsec_millis() == 0 {
+        format!("{} s", duration.as_secs())
+    } else {
+        format!("{:.1} s", duration.as_secs_f64())
+    }
 }
 
 /// A spawned CLI in its own process group (a job object on Windows). Dropping it kills the
@@ -41,27 +68,37 @@ impl Process {
         cwd: &Path,
         path: Option<&OsString>,
     ) -> io::Result<Self> {
-        let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        Self::spawn_with_env(program, &owned, cwd, path, &[], &[])
+        Self::spawn_env(program, args, cwd, path, |_| false, &[])
     }
 
-    /// Starts `program` with piped stdio and explicit environment additions and removals.
-    pub fn spawn_with_env(
+    /// Like `spawn`, but the process does not inherit the variables whose names `strip` accepts.
+    pub fn spawn_filtered(
         program: &Path,
-        args: &[String],
+        args: &[&str],
         cwd: &Path,
         path: Option<&OsString>,
-        env_set: &[(String, String)],
-        env_remove: &[String],
+        strip: impl Fn(&str) -> bool,
+    ) -> io::Result<Self> {
+        Self::spawn_env(program, args, cwd, path, strip, &[])
+    }
+
+    /// Like `spawn_filtered`, and sets `set` in the child's environment.
+    pub fn spawn_env(
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        path: Option<&OsString>,
+        strip: impl Fn(&str) -> bool,
+        set: &[(String, String)],
     ) -> io::Result<Self> {
         let mut command = Command::new(program);
+        configure_env(&mut command, path, strip, set);
         command
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_env(&mut command, path, env_set, env_remove);
         let (mut child, tree) = Tree::spawn(&mut command)?;
         Ok(Self {
             stdin: child.stdin.take(),
@@ -91,101 +128,41 @@ impl Process {
     }
 }
 
-pub(crate) fn apply_env(
+pub(crate) fn configure_env(
     command: &mut Command,
     path: Option<&OsString>,
-    env_set: &[(String, String)],
-    env_remove: &[String],
+    strip: impl Fn(&str) -> bool,
+    set: &[(String, String)],
 ) {
-    for key in env_remove {
-        command.env_remove(key);
+    for (name, _) in std::env::vars_os() {
+        if should_remove_var(name.to_str(), &strip, set) {
+            command.env_remove(name);
+        }
     }
-    #[cfg(windows)]
-    scrub_windows_env(command, env_set, env_remove);
     if let Some(path) = path {
         command.env("PATH", path);
     }
-    for (key, value) in env_set {
+    for (key, value) in set {
         command.env(key, value);
     }
 }
 
-#[cfg(windows)]
-fn scrub_windows_env(command: &mut Command, env_set: &[(String, String)], env_remove: &[String]) {
-    for (existing, _) in std::env::vars_os() {
-        let Some(name) = existing.to_str() else {
-            continue;
-        };
-        let remove_match = env_remove
+fn should_remove_var(
+    name: Option<&str>,
+    strip: &impl Fn(&str) -> bool,
+    set: &[(String, String)],
+) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    strip(name) || is_windows_shadow(name, set)
+}
+
+fn is_windows_shadow(name: &str, set: &[(String, String)]) -> bool {
+    cfg!(windows)
+        && set
             .iter()
-            .any(|target| name.eq_ignore_ascii_case(target));
-        let shadow_match = env_set
-            .iter()
-            .any(|(target, _)| name != target && name.eq_ignore_ascii_case(target));
-        if remove_match || shadow_match {
-            command.env_remove(&existing);
-        }
-    }
-}
-
-pub async fn read_frames(stdout: impl AsyncRead + Unpin, frames: mpsc::Sender<Inbound>) {
-    let mut reader = FrameReader::new(stdout);
-    loop {
-        let message = match reader.next().await {
-            Ok(Some(Frame::Line(line))) if line.is_empty() => continue,
-            Ok(Some(Frame::Line(line))) => Inbound::Frame(line),
-            Ok(Some(Frame::Oversize(size))) => Inbound::Oversize(size),
-            Ok(None) | Err(_) => {
-                let _ = frames.send(Inbound::Eof).await;
-                return;
-            }
-        };
-        if frames.send(message).await.is_err() {
-            return;
-        }
-    }
-}
-
-pub async fn read_stderr(
-    stderr: impl AsyncRead + Unpin,
-    tail: StderrTail,
-    debug_env: &'static str,
-    prefix: &'static str,
-) {
-    let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
-    while let Ok(Some(frame)) = reader.next().await {
-        let Frame::Line(line) = frame else { continue };
-        let line: String = String::from_utf8_lossy(&line)
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
-        if line.is_empty() {
-            continue;
-        }
-        if std::env::var_os(debug_env).is_some() {
-            eprintln!("{prefix}: stderr: {line}");
-        }
-        let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-        if tail.len() == 8 {
-            tail.pop_front();
-        }
-        tail.push_back(line);
-    }
-}
-
-pub fn stderr_detail(tail: &StderrTail) -> String {
-    let lines: Vec<String> = tail
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .cloned()
-        .collect();
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!(": {}", lines.join(" | "))
-    }
+            .any(|(target, _)| name != target && name.eq_ignore_ascii_case(target))
 }
 
 /// One line of a stream.
@@ -258,6 +235,73 @@ fn end_of_stream_frame(line: Vec<u8>, skipped: usize) -> Option<Frame> {
     }
 }
 
+/// Sends the non-empty frames of a CLI's stdout until it ends, then drops `frames`. An oversize
+/// frame is skipped.
+pub async fn read_frames(
+    runtime: &'static str,
+    stdout: impl AsyncRead + Unpin,
+    frames: mpsc::Sender<Vec<u8>>,
+) {
+    let mut reader = FrameReader::new(stdout);
+    while let Ok(Some(frame)) = reader.next().await {
+        let line = match frame {
+            Frame::Line(line) if line.is_empty() => continue,
+            Frame::Line(line) => line,
+            Frame::Oversize(size) => {
+                debug(
+                    runtime,
+                    &format!("dropped a frame of {size} bytes over the limit"),
+                );
+                continue;
+            }
+        };
+        if frames.send(line).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The last lines a CLI wrote to stderr, to say why it exited.
+#[derive(Clone, Default)]
+pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
+
+impl StderrTail {
+    fn push(&self, line: String) {
+        let mut tail = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if tail.len() == 8 {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+
+    /// `: <line> | <line>`, or nothing when the CLI wrote nothing.
+    pub fn detail(&self) -> String {
+        let tail = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if tail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", Vec::from(tail.clone()).join(" | "))
+        }
+    }
+}
+
+pub async fn read_stderr(runtime: &'static str, stderr: impl AsyncRead + Unpin, tail: StderrTail) {
+    let mut reader = FrameReader::with_limit(stderr, 64 * 1024);
+    while let Ok(Some(frame)) = reader.next().await {
+        let Frame::Line(line) = frame else { continue };
+        let line: String = String::from_utf8_lossy(&line)
+            .trim()
+            .chars()
+            .take(300)
+            .collect();
+        if line.is_empty() {
+            continue;
+        }
+        debug(runtime, &format!("stderr: {line}"));
+        tail.push(line);
+    }
+}
+
 /// Merges streamed text per item so a flood of small deltas becomes a few events.
 #[derive(Debug, Default)]
 pub struct DeltaCoalescer {
@@ -289,6 +333,95 @@ impl DeltaCoalescer {
             .into_iter()
             .filter_map(|id| self.text.remove(&id).map(|text| (id, text)))
             .collect()
+    }
+}
+
+/// A translator's events, in order. Streamed text is merged per item and sent after
+/// `FLUSH_INTERVAL`, once `FLUSH_BYTES` are merged, or before any other event. Every send
+/// returns false once the receiver is gone.
+pub struct Outbox {
+    events: mpsc::Sender<BackendEvent>,
+    deltas: DeltaCoalescer,
+    buffered: usize,
+    flush_at: Option<Instant>,
+}
+
+impl Outbox {
+    pub fn new(events: mpsc::Sender<BackendEvent>) -> Self {
+        Self {
+            events,
+            deltas: DeltaCoalescer::default(),
+            buffered: 0,
+            flush_at: None,
+        }
+    }
+
+    /// Resolves when merged text is due to be sent; never while there is none.
+    pub async fn flush_due(&self) {
+        match self.flush_at {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    pub async fn flush(&mut self) -> bool {
+        self.flush_at = None;
+        self.buffered = 0;
+        for (item_id, delta) in self.deltas.drain() {
+            if !self
+                .send_now(BackendEvent::ItemDelta { item_id, delta })
+                .await
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub async fn send_now(&self, event: BackendEvent) -> bool {
+        self.events.send(event).await.is_ok()
+    }
+
+    pub async fn emit_after_flush(&mut self, event: BackendEvent) -> bool {
+        self.flush().await && self.send_now(event).await
+    }
+
+    pub async fn push_delta(&mut self, item: &ItemId, delta: &str) -> bool {
+        self.deltas.push(item, delta);
+        self.buffered += delta.len();
+        if self.flush_at.is_none() && !delta.is_empty() {
+            self.flush_at = Some(Instant::now() + FLUSH_INTERVAL);
+        }
+        self.buffered < FLUSH_BYTES || self.flush().await
+    }
+
+    pub async fn complete_root_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+        output: serde_json::Value,
+        is_error: bool,
+    ) -> bool {
+        let call = ItemId(id.to_owned());
+        self.emit_after_flush(BackendEvent::ItemCompleted(BackendItem::root(
+            KnownItem::ToolCall {
+                id: call.clone(),
+                name: name.to_owned(),
+                arguments,
+            },
+        )))
+        .await
+            && self
+                .send_now(BackendEvent::ItemCompleted(BackendItem::root(
+                    KnownItem::ToolResult {
+                        id: ItemId(format!("{id}:result")),
+                        call_id: call,
+                        output,
+                        is_error,
+                    },
+                )))
+                .await
     }
 }
 

@@ -1,5 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,10 +10,11 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::backend::Backend;
+use crate::process::seconds;
 
 /// How long `<binary> --version` may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_VERSION_OUTPUT: usize = 64 * 1024;
+pub(crate) const MAX_CLI_OUTPUT: usize = 64 * 1024;
 
 /// What a probe found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -31,7 +33,7 @@ impl Probe {
         }
     }
 
-    fn found_at(path: PathBuf, reason: String) -> Self {
+    pub(crate) fn found_at(path: PathBuf, reason: String) -> Self {
         Self {
             path: Some(path),
             reason: Some(reason),
@@ -86,37 +88,13 @@ impl Registry {
             if drivers[..index].iter().any(|other| other.id() == id) {
                 return Err(format!("runtime {id} is registered twice"));
             }
-            let capabilities = driver.capabilities();
-            for (op, feature) in GATED_OPS {
-                let implemented = driver.gated_ops().contains(&op);
-                if implemented != capabilities.allows(feature) {
-                    return Err(format!(
-                        "runtime {id}: capabilities {} {op} but the driver {} it",
-                        if capabilities.allows(feature) {
-                            "allow"
-                        } else {
-                            "forbid"
-                        },
-                        if implemented {
-                            "implements"
-                        } else {
-                            "does not implement"
-                        },
-                    ));
-                }
-            }
-            if let Some(unknown) = driver
-                .gated_ops()
-                .iter()
-                .find(|op| !GATED_OPS.iter().any(|(gated, _)| gated == *op))
-            {
-                return Err(format!("runtime {id}: {unknown} is not a gated op"));
-            }
+            check_driver_capabilities(id, driver.as_ref())?;
         }
         Ok(Self { drivers, launch })
     }
 
-    /// The runtimes this build ships: `codex`, and `fake` with the `fake-runtime` feature.
+    /// The runtimes this build ships: `codex`, `claude`, `agy`, and `fake` with the
+    /// `fake-runtime` feature.
     pub fn builtin(launch: Launch) -> Self {
         Self::new(builtin_drivers(), launch).expect("built-in runtimes are consistent")
     }
@@ -164,10 +142,41 @@ impl Registry {
     }
 }
 
+fn check_driver_capabilities(id: &str, driver: &dyn Driver) -> Result<(), String> {
+    let capabilities = driver.capabilities();
+    for (op, feature) in GATED_OPS {
+        let implemented = driver.gated_ops().contains(&op);
+        if implemented != capabilities.allows(feature) {
+            return Err(format!(
+                "runtime {id}: capabilities {} {op} but the driver {} it",
+                if capabilities.allows(feature) {
+                    "allow"
+                } else {
+                    "forbid"
+                },
+                if implemented {
+                    "implements"
+                } else {
+                    "does not implement"
+                },
+            ));
+        }
+    }
+    if let Some(unknown) = driver
+        .gated_ops()
+        .iter()
+        .find(|op| !GATED_OPS.iter().any(|(gated, _)| gated == *op))
+    {
+        return Err(format!("runtime {id}: {unknown} is not a gated op"));
+    }
+    Ok(())
+}
+
 fn builtin_drivers() -> Vec<Arc<dyn Driver>> {
     #[allow(unused_mut)]
     let mut drivers: Vec<Arc<dyn Driver>> = vec![
         Arc::new(crate::codex::CodexDriver),
+        Arc::new(crate::claude::ClaudeDriver),
         Arc::new(crate::agy::AgyDriver),
     ];
     #[cfg(feature = "fake-runtime")]
@@ -221,6 +230,34 @@ pub fn parse_version(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// `probe_binary` with `--version`, unavailable when the version is older than `minimum`.
+pub async fn probe_at_least(binary: &str, minimum: &str, launch: &Launch) -> Probe {
+    let mut probe = probe_binary(binary, "--version", launch).await;
+    if let (true, Some(version)) = (probe.available, &probe.version)
+        && let Some(reason) = too_old(binary, version, minimum)
+    {
+        probe.reason = Some(reason);
+        probe.available = false;
+    }
+    probe
+}
+
+/// Why `binary` cannot run at `version`: it is older than `minimum` (as dotted numbers).
+pub fn too_old(binary: &str, version: &str, minimum: &str) -> Option<String> {
+    (!at_least(version, minimum)).then(|| {
+        format!("{binary} {version} is older than the minimum supported version {minimum}")
+    })
+}
+
+/// Whether dotted `version` is at least `minimum`.
+pub fn at_least(version: &str, minimum: &str) -> bool {
+    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
+    let len = version.len().max(minimum.len());
+    version.resize(len, 0);
+    minimum.resize(len, 0);
+    version >= minimum
+}
+
 fn version_parts(version: &str) -> Vec<u64> {
     version
         .split('.')
@@ -234,23 +271,6 @@ fn version_parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Whether dotted `version` is at least `minimum`.
-pub fn version_at_least(version: &str, minimum: &str) -> bool {
-    let (mut version, mut minimum) = (version_parts(version), version_parts(minimum));
-    let len = version.len().max(minimum.len());
-    version.resize(len, 0);
-    minimum.resize(len, 0);
-    version >= minimum
-}
-
-pub(crate) fn seconds(duration: Duration) -> String {
-    if duration.subsec_millis() == 0 {
-        format!("{} s", duration.as_secs())
-    } else {
-        format!("{:.1} s", duration.as_secs_f64())
-    }
-}
-
 /// Locates `binary` on `launch.path` and runs `binary <version_arg>`, which must not touch the
 /// runtime's state. A missing binary, a failing or hanging command is unavailable with a reason.
 pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> Probe {
@@ -258,47 +278,14 @@ pub async fn probe_binary(binary: &str, version_arg: &str, launch: &Launch) -> P
         return Probe::unavailable(format!("{binary} is not on PATH"));
     };
     let mut command = Command::new(&path);
-    command
-        .arg(version_arg)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    command.arg(version_arg);
     if let Some(search) = &launch.path {
         command.env("PATH", search);
     }
-    let (mut child, tree) = match tiechui_exec::Tree::spawn(&mut command) {
-        Ok(spawned) => spawned,
-        Err(error) => return Probe::found_at(path, format!("cannot run {binary}: {error}")),
-    };
-    let Some(stdout) = child.stdout.take() else {
-        return Probe::unavailable(format!("cannot read {binary} output"));
-    };
-    let outcome =
-        tokio::time::timeout(PROBE_TIMEOUT, read_version_output(stdout, &mut child)).await;
-    drop(tree);
-    probe_result(outcome, path, &format!("{binary} {version_arg}"))
-}
-
-type VersionOutput = std::io::Result<(std::process::ExitStatus, String)>;
-
-fn probe_result(
-    outcome: Result<VersionOutput, tokio::time::error::Elapsed>,
-    path: PathBuf,
-    command_line: &str,
-) -> Probe {
-    match outcome {
-        Err(_) => Probe::found_at(
-            path,
-            format!(
-                "{command_line} did not finish in {} s",
-                PROBE_TIMEOUT.as_secs()
-            ),
-        ),
-        Ok(Err(error)) => Probe::found_at(path, format!("{command_line}: {error}")),
-        Ok(Ok((status, _))) if !status.success() => {
-            Probe::found_at(path, format!("{command_line} exited with {status}"))
-        }
-        Ok(Ok((_, text))) => match parse_version(&text) {
+    let command_line = format!("{binary} {version_arg}");
+    match run_bounded_cli(command, binary, &command_line, PROBE_TIMEOUT).await {
+        Err(reason) => Probe::found_at(path, reason),
+        Ok(text) => match parse_version(&text) {
             Some(version) => Probe {
                 available: true,
                 version: Some(version),
@@ -310,20 +297,63 @@ fn probe_result(
     }
 }
 
-async fn read_version_output(
+pub(crate) async fn run_bounded_cli(
+    mut command: Command,
+    binary: &str,
+    command_line: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let (mut child, tree) = tiechui_exec::Tree::spawn(&mut command)
+        .map_err(|error| format!("cannot run {binary}: {error}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = tree.terminate(&mut child).await;
+        let _ = child.wait().await;
+        return Err(format!("cannot read {binary} output"));
+    };
+    let outcome = tokio::time::timeout(timeout, read_bounded_stdout(stdout, &mut child)).await;
+    match outcome {
+        Err(_) => {
+            let _ = tree.terminate(&mut child).await;
+            let _ = child.wait().await;
+            Err(format!(
+                "{command_line} did not finish in {}",
+                seconds(timeout)
+            ))
+        }
+        Ok(Err(error)) => {
+            let _ = tree.terminate(&mut child).await;
+            let _ = child.wait().await;
+            Err(format!("{command_line}: {error}"))
+        }
+        Ok(Ok((status, _))) if !status.success() => {
+            Err(format!("{command_line} exited with {status}"))
+        }
+        Ok(Ok((_, text))) => Ok(text),
+    }
+}
+
+async fn read_bounded_stdout(
     mut stdout: tokio::process::ChildStdout,
     child: &mut tokio::process::Child,
-) -> VersionOutput {
-    let mut text = String::new();
-    let mut buffer = vec![0; 4096];
-    while text.len() < MAX_VERSION_OUTPUT {
-        let read = stdout.read(&mut buffer).await?;
+) -> std::io::Result<(std::process::ExitStatus, String)> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while bytes.len() < MAX_CLI_OUTPUT {
+        let limit = (MAX_CLI_OUTPUT - bytes.len()).min(buffer.len());
+        let read = stdout.read(&mut buffer[..limit]).await?;
         if read == 0 {
             break;
         }
-        text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        bytes.extend_from_slice(&buffer[..read]);
     }
-    Ok((child.wait().await?, text))
+    drop(stdout);
+    let status = child.wait().await?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 #[cfg(test)]
@@ -451,6 +481,13 @@ mod tests {
             Some(RuntimeCapabilities::minimal())
         );
         assert_eq!(
+            registry.capabilities("claude"),
+            Some(RuntimeCapabilities {
+                steering: tiechui_protocol::SteeringMode::Inject,
+                ..RuntimeCapabilities::minimal()
+            })
+        );
+        assert_eq!(
             registry.capabilities("agy"),
             Some(RuntimeCapabilities {
                 steering: tiechui_protocol::SteeringMode::Queue,
@@ -485,6 +522,25 @@ mod tests {
     }
 
     #[test]
+    fn versions_compare_as_dotted_numbers() {
+        assert!(at_least("0.171.0", "0.156.1"));
+        assert!(at_least("0.156.1", "0.156.1"));
+        assert!(at_least("1.0.0", "0.156.1"));
+        assert!(at_least("0.156.1-alpha.2", "0.156.1"));
+        assert!(at_least("0.200", "0.156.1"));
+        assert!(!at_least("0.156.0", "0.156.1"));
+        assert!(!at_least("0.99.9", "0.156.1"));
+        assert!(!at_least("0.156", "0.156.1"));
+        assert!(at_least("2.1.322", "2.1.322"));
+        assert!(at_least("2.1.400", "2.1.322"));
+        assert!(at_least("2.2.0", "2.1.322"));
+        assert!(at_least("3.0.0", "2.1.322"));
+        assert!(!at_least("2.1.321", "2.1.322"));
+        assert!(!at_least("2.0.999", "2.1.322"));
+        assert!(!at_least("1.9.9", "2.1.322"));
+    }
+
+    #[test]
     fn a_missing_path_or_binary_resolves_to_nothing() {
         assert_eq!(resolve_in_path("codex", None), None);
         let dir = tempfile::tempdir().unwrap();
@@ -504,5 +560,58 @@ mod tests {
         assert_eq!(list[1].id, "a");
         assert!(!list[1].available);
         assert_eq!(list[1].reason.as_deref(), Some("stub"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_cli_handles_split_utf8_large_output_and_reaps_timed_out_children() {
+        let mut utf8_cmd = Command::new("node");
+        utf8_cmd.args([
+            "-e",
+            "const prefix = 'a'.repeat(4094); process.stdout.write(prefix + '中文字节');",
+        ]);
+        let decoded = run_bounded_cli(utf8_cmd, "node", "node utf8", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(
+            decoded.ends_with("中文字节"),
+            "split UTF-8 must stay intact"
+        );
+        assert!(!decoded.contains('\u{fffd}'));
+
+        let mut flood_cmd = Command::new("node");
+        flood_cmd.args([
+            "-e",
+            "process.stdout.on('error', () => process.exit(0)); process.stdout.write('x'.repeat(512 * 1024));",
+        ]);
+        let truncated = run_bounded_cli(flood_cmd, "node", "node flood", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(truncated.len(), MAX_CLI_OUTPUT);
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("hang.pid");
+        let mut hang_cmd = Command::new("/bin/sh");
+        hang_cmd.args([
+            "-c",
+            &format!("echo $$ > \"{}\"; exec sleep 60", pid_file.display()),
+        ]);
+        let err = run_bounded_cli(hang_cmd, "sh", "sh hang", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(err.contains("did not finish"), "{err}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..40 {
+            // SAFETY: signal 0 only checks whether the process still exists.
+            if unsafe { libc::kill(pid, 0) != 0 } {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed-out CLI child {pid} was not reaped");
     }
 }

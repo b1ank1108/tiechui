@@ -1,24 +1,13 @@
-//! Dialect hooks for customizing ACP handshakes, session modes, tool normalization, subagents,
-//! interactive prompts, command filtering, and vendor error rewriting without altering the
-//! generic ACP client.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tiechui_protocol::{ApprovalDecision, ApprovalRequest, CommandInfo, ModelInfo, SubagentState};
 
 use crate::backend::StartParams;
 use crate::registry::Launch;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ResumePreference {
-    #[default]
-    PreferResume,
-    PreferLoad,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextDisposition {
@@ -63,12 +52,9 @@ pub struct ToolState {
 #[derive(Debug, Clone, Default)]
 pub struct InitializeInfo {
     pub protocol_version: u64,
-    pub agent_name: Option<String>,
     pub agent_version: Option<String>,
     pub load_session: bool,
     pub resume_session: bool,
-    pub image_prompts: bool,
-    pub raw: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -123,32 +109,8 @@ pub trait AcpDialect: Send + Sync {
         Vec::new()
     }
 
-    fn client_info(&self) -> Value {
-        json!({
-            "name": "tiechui",
-            "title": "Tiechui",
-            "version": env!("CARGO_PKG_VERSION"),
-        })
-    }
-
-    fn client_capabilities(&self) -> Value {
-        json!({ "elicitation": { "form": {} } })
-    }
-
     fn check_initialize(&self, _info: &InitializeInfo) -> Result<(), String> {
         Ok(())
-    }
-
-    fn session_meta(&self, _info: &InitializeInfo, _resuming: bool) -> Option<Value> {
-        None
-    }
-
-    fn resume_preference(&self) -> ResumePreference {
-        ResumePreference::PreferResume
-    }
-
-    fn reactive_wakeups(&self) -> bool {
-        true
     }
 
     fn session_mode(&self, mode: &str, available: &[String]) -> Option<String> {
@@ -157,13 +119,16 @@ pub trait AcpDialect: Send + Sync {
             "yolo" => &["yolo", "bypassPermissions"],
             _ => &["default", "ask"],
         };
+        if available.is_empty() {
+            return candidates.first().map(|picked| (*picked).to_owned());
+        }
         candidates
             .iter()
             .find(|candidate| available.iter().any(|item| item == **candidate))
             .map(|picked| (*picked).to_owned())
     }
 
-    /// Whether switching to `mode` mid-session requires restarting the ACP process and resuming.
+    /// Whether switching to `next` mid-session requires restarting the ACP process and resuming.
     fn mode_requires_restart(&self, _current: Option<&str>, _next: &str) -> bool {
         false
     }

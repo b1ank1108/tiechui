@@ -382,10 +382,7 @@ async fn permission_modes_map_to_acp_and_yolo_restarts_process_and_resumes_witho
         .filter(|e| e["kind"] == "inbound" && e["msg"]["method"] == "session/set_mode")
         .map(|e| e["msg"]["params"]["modeId"].as_str().unwrap().to_owned())
         .collect();
-    assert!(
-        set_modes.contains(&"accept-edits".to_owned()),
-        "{set_modes:?}"
-    );
+    assert_eq!(set_modes, vec!["accept-edits".to_owned()]);
 
     let _ = client.finish().await;
 }
@@ -1156,4 +1153,366 @@ async fn normalizes_real_agy_tools_subagent_cards_and_reactive_wakeup_across_reo
     assert_eq!(shape(&reopened_turns), shape(&live_turns));
 
     let _ = client.finish().await;
+}
+
+#[tokio::test]
+async fn session_open_strips_runtime_prefix_from_initial_model_and_persists_across_reopen() {
+    let fixture = AgyFixture::new();
+    fixture.write_scenario(&json!({
+        "sessionId": "agy-sess-initial-model",
+        "resumeModels": {
+            "currentModelId": "gemini-4-neon-high",
+            "availableModels": [
+                { "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" },
+                { "modelId": "claude-opus-5-5-high", "name": "Claude Opus 5.5 (High)" }
+            ]
+        }
+    }));
+
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({
+                    "cwd": fixture.cwd,
+                    "runtime": "agy",
+                    "model": "agy/claude-opus-5-5-high"
+                }),
+            )
+            .await,
+    );
+    let initial_model = opened
+        .events
+        .iter()
+        .find_map(|ev| match &ev.event {
+            EventKind::SessionUpdated { model, .. } => Some(model.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(initial_model, "claude-opus-5-5-high");
+
+    let session_path = opened.path.clone();
+    client
+        .ok("session/close", json!({ "thread_id": opened.thread_id }))
+        .await;
+
+    let reopened = snapshot(
+        client
+            .ok("session/open", json!({ "path": session_path }))
+            .await,
+    );
+    let reopened_model = reopened
+        .events
+        .iter()
+        .find_map(|ev| match &ev.event {
+            EventKind::SessionUpdated { model, .. } => Some(model.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(reopened_model, "claude-opus-5-5-high");
+
+    let set_model_ids: Vec<String> = fixture
+        .logs()
+        .into_iter()
+        .filter(|e| e["kind"] == "inbound" && e["msg"]["method"] == "session/set_model")
+        .map(|e| e["msg"]["params"]["modelId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        set_model_ids,
+        vec![
+            "claude-opus-5-5-high".to_owned(),
+            "claude-opus-5-5-high".to_owned()
+        ]
+    );
+
+    let _ = client.finish().await;
+}
+
+#[tokio::test]
+async fn replays_sanitized_recorded_agy_1_5_14_frames_end_to_end() {
+    let fixture = AgyFixture::new();
+    let raw_fixture = include_str!("fixtures/agy-1.5.14-recorded.json");
+    let cwd_str = fixture.cwd.display().to_string().replace('\\', "/");
+    let hydrated = raw_fixture.replace("__WORKSPACE__", &cwd_str);
+    let parsed: serde_json::Value = serde_json::from_str(&hydrated).unwrap();
+    fixture.write_scenario(&parsed);
+
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({ "cwd": fixture.cwd, "runtime": "agy" }),
+            )
+            .await,
+    );
+    let thread_id = opened.thread_id.0.clone();
+
+    let cmd_ev = client
+        .until(|e| matches!(e, EventKind::CommandsUpdated { commands } if !commands.is_empty()))
+        .await;
+    let cmd_names: Vec<String> = cmd_ev
+        .iter()
+        .filter_map(|e| match &e.event.event {
+            EventKind::CommandsUpdated { commands } if !commands.is_empty() => {
+                Some(commands.iter().map(|c| c.name.clone()).collect::<Vec<_>>())
+            }
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(cmd_names.contains(&"goal".to_owned()));
+    assert!(cmd_names.contains(&"swarm".to_owned()));
+    assert!(!cmd_names.contains(&"logout".to_owned()));
+
+    submit_text(&mut client, &thread_id, "run recorded turn 1").await;
+
+    for _ in 0..2 {
+        let asked = client
+            .until(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+            .await;
+        let aid = asked
+            .iter()
+            .find_map(|e| match &e.event.event {
+                EventKind::ApprovalRequested { approval_id, .. } => Some(approval_id.0.clone()),
+                _ => None,
+            })
+            .unwrap();
+        client
+            .ok(
+                "session/submit",
+                json!({
+                    "thread_id": thread_id,
+                    "op": {
+                        "kind": "approval_response",
+                        "approval_id": aid,
+                        "decision": { "kind": "allow_once" }
+                    }
+                }),
+            )
+            .await;
+    }
+
+    let t1_events = client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    assert!(t1_events.iter().any(|e| matches!(
+        &e.event.event,
+        EventKind::TokenUsageUpdated { last, .. }
+            if last.input == 16061 && last.output == 832 && last.cache_read == 21432 && last.reasoning == 465
+    )));
+
+    submit_text(&mut client, &thread_id, "run recorded subagent turn").await;
+    client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+
+    let snap = snapshot(
+        client
+            .ok("session/snapshot", json!({ "thread_id": thread_id }))
+            .await,
+    );
+    let turns = turns_from_snapshot(&snap);
+    assert_eq!(turns.len(), 3, "{turns:?}");
+    assert!(turns[0].items.iter().any(|i| matches!(
+        i,
+        Item::Known(KnownItem::ToolCall { name, arguments, .. })
+            if name == "read" && arguments["path"] == "src/hello.ts"
+    )));
+    assert!(turns[0].items.iter().any(|i| matches!(
+        i,
+        Item::Known(KnownItem::ToolResult { output, is_error: false, .. })
+            if output["content"][0]["text"] == "AGY_A2_OK"
+    )));
+    assert!(turns[1].items.iter().any(|i| {
+        SubagentStatus::from_item(i).is_some_and(|s| {
+            s.name.as_deref() == Some("Repo Inspector") && s.state == SubagentState::Completed
+        })
+    }));
+    assert!(turns[2].items.iter().any(|i| matches!(
+        i,
+        Item::Known(KnownItem::AssistantMessage { text, .. }) if text.contains("MAGIC_IS_42")
+    )));
+
+    let _ = client.finish().await;
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks process existence without delivering a signal.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+async fn wait_pid_gone(pid: i32) -> bool {
+    for _ in 0..80 {
+        if !pid_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn interrupt_cancels_turn_reaps_grandchild_on_close_and_crash_emits_session_closed() {
+    let fixture = AgyFixture::new();
+    fixture.write_scenario(&json!({
+        "turns": [
+            {
+                "steps": [
+                    { "spawnChild": true },
+                    {
+                        "notify": {
+                            "params": {
+                                "update": {
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": "call_long",
+                                    "name": "run_command",
+                                    "kind": "execute",
+                                    "status": "in_progress",
+                                    "rawInput": { "CommandLine": "node -e 'setInterval(()=>{},1000)'" }
+                                }
+                            }
+                        }
+                    },
+                    { "waitCancel": true }
+                ]
+            }
+        ]
+    }));
+
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({ "cwd": fixture.cwd, "runtime": "agy" }),
+            )
+            .await,
+    );
+    let thread_id = opened.thread_id.0.clone();
+
+    submit_text(&mut client, &thread_id, "run long child").await;
+    let started = client
+        .until(|e| {
+            matches!(
+                e,
+                EventKind::ItemStarted {
+                    item: Item::Known(KnownItem::ToolCall { .. }),
+                    ..
+                }
+            )
+        })
+        .await;
+    let turn_id = started
+        .iter()
+        .find_map(|e| match &e.event.event {
+            EventKind::TurnStarted { turn } => Some(turn.id.0.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread_id,
+                "op": { "kind": "run_command", "name": "permissions", "arguments": "yolo" }
+            }),
+        )
+        .await;
+    let reject_ev = client
+        .until(|e| matches!(e, EventKind::Error { message } if message.contains("while a turn or approval is active")))
+        .await;
+    assert!(!reject_ev.is_empty());
+
+    #[cfg(unix)]
+    let (agy_pid, grandchild_pid) = {
+        let logs = fixture.logs();
+        let agy_pid = logs
+            .iter()
+            .find(|e| e["kind"] == "spawn" && e["argv"][0] == "acp")
+            .and_then(|e| e["pid"].as_i64())
+            .unwrap() as i32;
+        let grandchild_pid = logs
+            .iter()
+            .find(|e| e["kind"] == "grandchild")
+            .and_then(|e| e["pid"].as_i64())
+            .unwrap() as i32;
+        assert!(pid_alive(agy_pid) && pid_alive(grandchild_pid));
+        (agy_pid, grandchild_pid)
+    };
+
+    client
+        .ok(
+            "session/submit",
+            json!({
+                "thread_id": thread_id,
+                "op": { "kind": "interrupt", "turn_id": turn_id }
+            }),
+        )
+        .await;
+    let interrupted = client
+        .until(|e| matches!(e, EventKind::TurnCompleted { .. }))
+        .await;
+    assert_eq!(
+        interrupted.last().and_then(|e| match &e.event.event {
+            EventKind::TurnCompleted { turn } => Some(turn.status),
+            _ => None,
+        }),
+        Some(TurnStatus::Interrupted)
+    );
+
+    client
+        .ok("session/close", json!({ "thread_id": thread_id }))
+        .await;
+    let _ = client.finish().await;
+
+    #[cfg(unix)]
+    {
+        assert!(
+            wait_pid_gone(agy_pid).await,
+            "agy acp process {agy_pid} survived close"
+        );
+        assert!(
+            wait_pid_gone(grandchild_pid).await,
+            "grandchild process {grandchild_pid} survived close"
+        );
+    }
+
+    fixture.write_scenario(&json!({
+        "turns": [
+            {
+                "steps": [
+                    { "crashCode": 1, "crashStderr": "unexpected crash" }
+                ]
+            }
+        ]
+    }));
+    let mut crash_client = fixture.client();
+    let crash_opened = snapshot(
+        crash_client
+            .ok(
+                "session/open",
+                json!({ "cwd": fixture.cwd, "runtime": "agy" }),
+            )
+            .await,
+    );
+    let crash_thread = crash_opened.thread_id.0;
+    submit_text(&mut crash_client, &crash_thread, "trigger crash").await;
+    let closed_note = crash_client.until_notification("session/closed").await;
+    assert_eq!(closed_note["params"]["thread_id"], crash_thread);
+    assert!(
+        closed_note["params"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agy exited"),
+        "{closed_note}"
+    );
+    let _ = crash_client.finish().await;
 }
