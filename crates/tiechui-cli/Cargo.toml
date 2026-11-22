@@ -76,6 +76,7 @@ workspace = ["dep:tiechui-workspace"]
 fake-runtime = ["tiechui-runtime/fake-runtime"]
 
 [dev-dependencies]
+base64.workspace = true
 tempfile.workspace = true
 tiechui-config = { workspace = true, features = ["test-support"] }
 tiechui-providers = { workspace = true, features = ["testing"] }

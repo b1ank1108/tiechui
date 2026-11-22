@@ -30,8 +30,9 @@ rewinding turns that ran commands keeps patch or conversation restore and report
 the un-reverted commands. Statistics describe
 `checkpoint → current`; binary, oversized, and expensive diffs are uncounted.
 
-In managed session worktrees (`$TIECHUI_HOME/worktrees/<bucket>/<name>`), a
-`BeforeRequest` hook also captures a per-turn hidden Git tree snapshot via a
+In managed session worktrees (`<project_root>/.tiechui/worktrees/<name>`, registered in
+`$TIECHUI_HOME/worktrees/registry.json`, with legacy checkouts under `$TIECHUI_HOME/worktrees/`
+still supported), a `BeforeRequest` hook also captures a per-turn hidden Git tree snapshot via a
 temporary index (`GIT_INDEX_FILE`) under `refs/tiechui/checkpoints/<session>/<anchor>`
 without touching user staging or `git log --all`. Snapshot capture timeouts or
 failures are recorded in `manifest.json` without blocking the turn. Whole-directory

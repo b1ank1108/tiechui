@@ -86,16 +86,23 @@ fn creates_lists_and_removes_managed_worktrees_preserving_branches_and_ignoring_
     let wt_alt_path = PathBuf::from(&wt_alt.path);
     assert!(wt_main_path.is_dir());
     assert!(wt_alt_path.is_dir());
-    assert!(wt_main_path.starts_with(home.join("worktrees")));
-    let bucket_name = wt_main_path
-        .parent()
-        .unwrap()
-        .file_name()
-        .unwrap()
-        .to_string_lossy();
-    assert!(
-        bucket_name.starts_with("my-repo-"),
-        "expected <project_dir_name>-<hash>, got {bucket_name}"
+    assert_eq!(
+        wt_main_path,
+        repo.join(".tiechui/worktrees").join(&wt_main.name)
+    );
+    assert_eq!(
+        wt_alt_path,
+        repo.join(".tiechui/worktrees").join(&wt_alt.name)
+    );
+    assert!(!repo.join(".gitignore").exists());
+    let exclude_text = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+    assert_eq!(
+        exclude_text
+            .lines()
+            .filter(|line| line.trim() == "/.tiechui/worktrees/")
+            .count(),
+        1,
+        "expected idempotent /.tiechui/worktrees/ in info/exclude, got:\n{exclude_text}"
     );
 
     assert_eq!(
@@ -445,6 +452,8 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
     assert!(initial.is_empty());
 
     let wt_script = wt_a_path.join("server.js").display().to_string();
+    let main_script = project_a.join("main-server.js").display().to_string();
+    let listener_main = SpawnedListener::start(&project_a, Some(&main_script));
     let listener_cmd = SpawnedListener::start(&outside, Some(&wt_script));
     let listener_cwd = SpawnedListener::start(&wt_a_path, None);
     let listener_manual = SpawnedListener::start(&manual_wt, None);
@@ -452,17 +461,31 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
     let listed = workspace
         .list_ports(&[a_str.clone(), b_str.clone()])
         .unwrap();
+    assert!(listed.iter().any(|e| {
+        e.root == a_str
+            && e.pid == listener_main.pid
+            && e.port == listener_main.port
+            && e.worktree_path.is_none()
+            && e.worktree_branch.is_none()
+    }));
     assert!(
         listed.iter().any(|e| {
-            e.root == a_str && e.pid == listener_cmd.pid && e.port == listener_cmd.port
-        })
+            e.root == a_str
+                && e.pid == listener_cmd.pid
+                && e.port == listener_cmd.port
+                && e.worktree_path.as_deref() == Some(wt_a.path.as_str())
+                && e.worktree_branch.as_deref() == Some(wt_a.branch.as_str())
+        }),
+        "expected worktree metadata on listener_cmd, got: {listed:?}"
     );
     #[cfg(not(windows))]
-    assert!(
-        listed.iter().any(|e| {
-            e.root == a_str && e.pid == listener_cwd.pid && e.port == listener_cwd.port
-        })
-    );
+    assert!(listed.iter().any(|e| {
+        e.root == a_str
+            && e.pid == listener_cwd.pid
+            && e.port == listener_cwd.port
+            && e.worktree_path.as_deref() == Some(wt_a.path.as_str())
+            && e.worktree_branch.as_deref() == Some(wt_a.branch.as_str())
+    }));
     assert!(listed.iter().all(|e| e.pid != listener_manual.pid));
 
     let listed_with_wt_root = workspace
@@ -470,9 +493,13 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
         .unwrap();
     assert!(
         listed_with_wt_root.iter().any(|e| {
-            e.root == a_str && e.pid == listener_cmd.pid && e.port == listener_cmd.port
+            e.root == a_str
+                && e.pid == listener_cmd.pid
+                && e.port == listener_cmd.port
+                && e.worktree_path.as_deref() == Some(wt_a.path.as_str())
+                && e.worktree_branch.as_deref() == Some(wt_a.branch.as_str())
         }),
-        "expected managed worktree listener to remain attributed to project root, got: {listed_with_wt_root:?}"
+        "expected managed worktree listener to remain attributed to project root with worktree metadata, got: {listed_with_wt_root:?}"
     );
 
     assert!(
@@ -500,6 +527,7 @@ fn ports_in_managed_worktree_attribute_to_owning_project_and_stop_cleanly() {
         assert!(Instant::now() < deadline, "listener_cmd did not exit");
         std::thread::sleep(Duration::from_millis(20));
     }
+    let _ = listener_main;
     let _ = listener_cwd;
     workspace.close();
 }
@@ -1271,10 +1299,25 @@ fn worktree_isolation_detects_equal_ancestor_descendant_archived_and_ignores_tra
     std::fs::remove_file(&eq_file).unwrap();
     std::fs::remove_file(eq_file.with_extension("meta.json")).unwrap();
 
-    let anc_file = write_session("sessions", "ancestor-sess", &home, None);
+    let repo_sess = write_session("sessions", "main-repo-sess", &repo, None);
+    let outer_sess = write_session("sessions", "outer-sess", temp.path(), None);
+    assert_eq!(
+        ws::check_worktree_isolation(&home, &wt1_path, "self-sess", &[]).unwrap(),
+        None,
+        "main-repo and outer ancestor sessions across .tiechui/worktrees boundary must not block worktree isolation"
+    );
+    std::fs::remove_file(&repo_sess).unwrap();
+    std::fs::remove_file(&outer_sess).unwrap();
+
+    let anc_file = write_session(
+        "sessions",
+        "ancestor-sess",
+        wt1_path.parent().unwrap(),
+        None,
+    );
     let conflict = ws::check_worktree_isolation(&home, &wt1_path, "self-sess", &[])
         .unwrap()
-        .expect("ancestor session must block isolation");
+        .expect("direct .tiechui/worktrees container session must block isolation");
     assert_eq!(conflict.session_id, "ancestor-sess");
     assert_eq!(conflict.overlap, ws::PathOverlap::ContainsWorktree);
     std::fs::remove_file(&anc_file).unwrap();
@@ -1535,4 +1578,313 @@ fn remove_worktree_preserves_external_junction_or_symlink_target_files() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn in_project_worktree_isolates_main_tree_search_watch_carry_and_preserves_legacy_registry_entries()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("iso-fs-repo");
+    init_repo(&repo);
+    let env = BTreeMap::new();
+
+    let wt1 = ws::create_worktree_with_env(&home, &repo, None, &env).unwrap();
+    let wt1_path = PathBuf::from(&wt1.path);
+    assert_eq!(wt1_path, repo.join(".tiechui/worktrees").join(&wt1.name));
+    std::fs::write(
+        wt1_path.join("src/wt_secret.rs"),
+        "pub const TOKEN: &str = \"WT_ONLY_NEEDLE_99\";\n",
+    )
+    .unwrap();
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+
+    let main_tree = ws::tree(&repo).unwrap();
+    assert!(
+        main_tree
+            .entries
+            .iter()
+            .all(|e| !e.path.starts_with(".tiechui")),
+        "expected zero .tiechui entries when .tiechui holds only worktrees, got: {:?}",
+        main_tree.entries
+    );
+    std::fs::write(repo.join(".tiechui/config.toml"), "thinking = \"low\"\n").unwrap();
+    let main_tree_with_cfg = ws::tree(&repo).unwrap();
+    assert!(
+        main_tree_with_cfg
+            .entries
+            .iter()
+            .any(|e| e.path == ".tiechui/config.toml")
+    );
+    assert!(
+        main_tree_with_cfg
+            .entries
+            .iter()
+            .all(|e| !e.path.starts_with(".tiechui/worktrees")),
+        "expected .tiechui/worktrees hidden even when .tiechui has other files: {:?}",
+        main_tree_with_cfg.entries
+    );
+    std::fs::remove_file(repo.join(".tiechui/config.toml")).unwrap();
+
+    let wt_tree = ws::tree(&wt1_path).unwrap();
+    let wt_paths: Vec<&str> = wt_tree.entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        wt_paths.contains(&"README.md") && wt_paths.contains(&"src/wt_secret.rs"),
+        "expected worktree fs/tree to list files inside worktree, got: {wt_paths:?}"
+    );
+
+    for include in [Vec::new(), vec!["*.rs".to_owned()]] {
+        let res = ws::search(
+            &repo,
+            &tiechui_protocol::workspace::SearchParams {
+                root: repo.display().to_string(),
+                query: "WT_ONLY_NEEDLE_99".into(),
+                include,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            res.total, 0,
+            "main repo search leaked worktree hit: {res:?}"
+        );
+    }
+
+    let wt_search = ws::search(
+        &wt1_path,
+        &tiechui_protocol::workspace::SearchParams {
+            root: wt1.path.clone(),
+            query: "WT_ONLY_NEEDLE_99".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(wt_search.total, 1);
+    assert_eq!(wt_search.groups[0].path, "src/wt_secret.rs");
+
+    let notices = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let sink = notices.clone();
+    let workspace = ws::Workspace::with_home(
+        home.clone(),
+        Arc::new(move |method, params| {
+            sink.lock().unwrap().push((method.to_owned(), params));
+        }),
+    );
+    let canon_repo = repo.canonicalize().unwrap();
+    let canon_wt1 = wt1_path.canonicalize().unwrap();
+    workspace.watch(&canon_repo).unwrap();
+    workspace.watch(&canon_wt1).unwrap();
+
+    std::fs::write(wt1_path.join("src/watched_in_wt.rs"), "// wt watch\n").unwrap();
+    std::fs::write(repo.join("src/watched_in_main.rs"), "// main watch\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let guard = notices.lock().unwrap();
+        let got_wt = guard.iter().any(|(m, p)| {
+            m == "fs/changed"
+                && p["root"] == canon_wt1.display().to_string()
+                && p["paths"]
+                    .as_array()
+                    .is_some_and(|arr| arr.contains(&Value::from("src/watched_in_wt.rs")))
+        });
+        let got_main = guard.iter().any(|(m, p)| {
+            m == "fs/changed"
+                && p["root"] == canon_repo.display().to_string()
+                && p["paths"]
+                    .as_array()
+                    .is_some_and(|arr| arr.contains(&Value::from("src/watched_in_main.rs")))
+        });
+        drop(guard);
+        if got_wt && got_main {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for watch events: {:?}",
+            *notices.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let leaked_main: Vec<_> = notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, p)| {
+            m == "fs/changed"
+                && p["root"] == canon_repo.display().to_string()
+                && p["paths"].as_array().is_some_and(|arr| {
+                    arr.iter()
+                        .any(|v| v.as_str().unwrap_or_default().starts_with(".tiechui"))
+                })
+        })
+        .cloned()
+        .collect();
+    assert!(
+        leaked_main.is_empty(),
+        "main repo watch leaked .tiechui events: {leaked_main:?}"
+    );
+    workspace.unwatch(&canon_repo);
+    workspace.unwatch(&canon_wt1);
+    std::fs::remove_file(repo.join("src/watched_in_main.rs")).unwrap();
+
+    std::fs::write(repo.join("carried.txt"), "carry-me\n").unwrap();
+    let wt2 = ws::create_worktree_with_options(
+        &home,
+        &repo,
+        ws::CreateWorktreeOptions {
+            base_branch: None,
+            carry_changes: true,
+            post_create_timeout: None,
+        },
+        &env,
+    )
+    .unwrap();
+    let wt2_path = PathBuf::from(&wt2.path);
+    assert_eq!(
+        std::fs::read_to_string(wt2_path.join("carried.txt")).unwrap(),
+        "carry-me\n"
+    );
+    assert!(!wt2_path.join(".tiechui/worktrees").exists());
+    std::fs::remove_file(repo.join("carried.txt")).unwrap();
+
+    let legacy_bucket = home.join("worktrees/iso-fs-repo-legacy");
+    std::fs::create_dir_all(&legacy_bucket).unwrap();
+    let legacy_path = legacy_bucket.join("20261101-deadbeef");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "tiechui/20261101-deadbeef",
+            legacy_path.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(legacy_path.join("legacy.txt"), "legacy-committed\n").unwrap();
+    git(&legacy_path, &["add", "legacy.txt"]);
+    git(&legacy_path, &["commit", "-m", "legacy commit"]);
+
+    let reg_path = home.join("worktrees/registry.json");
+    let mut reg: Value = serde_json::from_slice(&std::fs::read(&reg_path).unwrap()).unwrap();
+    reg["worktrees"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "name": "20261101-deadbeef",
+            "path": legacy_path.display().to_string(),
+            "project_root": repo.display().to_string(),
+            "branch": "tiechui/20261101-deadbeef",
+            "base_branch": "main",
+            "created_at": 1_000,
+            "post_create": { "status": "none", "output": "" }
+        }));
+    std::fs::write(&reg_path, serde_json::to_vec_pretty(&reg).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&reg_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    assert_eq!(
+        ws::session_worktree(&home, &legacy_path)
+            .as_ref()
+            .map(|w| w.branch.as_str()),
+        Some("tiechui/20261101-deadbeef")
+    );
+    assert_eq!(
+        ws::worktree_project_root(&home, &legacy_path),
+        Some(repo.canonicalize().unwrap())
+    );
+
+    let legacy_listener = SpawnedListener::start(
+        &outside_dir(&temp),
+        Some(&legacy_path.join("srv.js").display().to_string()),
+    );
+    let legacy_ports = workspace.list_ports(&[repo.display().to_string()]).unwrap();
+    assert!(
+        legacy_ports.iter().any(|p| {
+            p.pid == legacy_listener.pid
+                && p.root == repo.display().to_string()
+                && p.worktree_path.as_deref() == Some(legacy_path.to_str().unwrap())
+                && p.worktree_branch.as_deref() == Some("tiechui/20261101-deadbeef")
+        }),
+        "expected legacy worktree port metadata, got: {legacy_ports:?}"
+    );
+    drop(legacy_listener);
+
+    let snap = ws::capture_worktree_snapshot_with_env(
+        &legacy_path,
+        "legacy-sess",
+        "t1",
+        Duration::from_secs(10),
+        &env,
+    )
+    .unwrap();
+    std::fs::write(legacy_path.join("legacy.txt"), "mutated\n").unwrap();
+    ws::restore_worktree_snapshot_with_env(&legacy_path, &snap.tree, Duration::from_secs(10), &env)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(legacy_path.join("legacy.txt")).unwrap(),
+        "legacy-committed\n"
+    );
+
+    let sess_dir = home.join("sessions/legacy-group");
+    std::fs::create_dir_all(&sess_dir).unwrap();
+    let sess_file = sess_dir.join("legacy-sess.jsonl");
+    std::fs::write(
+        &sess_file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "format_version": 1,
+                "id": "legacy-sess",
+                "cwd": legacy_path,
+                "created_at": 1_000,
+            })
+        ),
+    )
+    .unwrap();
+
+    let cleaned = ws::cleanup_worktrees_with_env(
+        &home,
+        ws::WorktreeCleanupPolicy {
+            auto_clean_idle_days: Some(1),
+            auto_clean_on_session_delete: false,
+        },
+        &[],
+        1_000 + 2 * 86_400_000,
+        &env,
+    )
+    .unwrap();
+    assert!(
+        cleaned
+            .removed
+            .iter()
+            .any(|r| Path::new(&r.path) == legacy_path)
+    );
+    assert!(!legacy_path.exists());
+
+    let restored = ws::ensure_worktree_checkout(&home, &legacy_path, &env)
+        .unwrap()
+        .expect("expected legacy worktree checkout restored");
+    assert_eq!(restored, legacy_path);
+    assert_eq!(
+        std::fs::read_to_string(legacy_path.join("legacy.txt")).unwrap(),
+        "legacy-committed\n"
+    );
+
+    std::fs::remove_file(&sess_file).unwrap();
+    ws::remove_worktree_with_env(&home, &legacy_path, true, &env).unwrap();
+    ws::remove_worktree_with_env(&home, &wt1_path, true, &env).unwrap();
+    ws::remove_worktree_with_env(&home, &wt2_path, true, &env).unwrap();
+    assert!(!repo.join(".tiechui/worktrees").exists());
+    workspace.close();
+}
+
+fn outside_dir(temp: &tempfile::TempDir) -> PathBuf {
+    let dir = temp.path().join("outside-legacy-port");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }

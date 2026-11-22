@@ -175,8 +175,8 @@ icons = []
 # shell = "zsh"
 
 [worktrees]
-# Shell command run once inside each newly created session worktree. Project config only; requires project trust.
-# post_create_script = "ln -sf ../../.env .env"
+# Shell command run once inside each newly created session worktree (<project_root>/.tiechui/worktrees/<name>). Project config only; requires project trust.
+# post_create_script = "ln -sf ../../../.env .env"
 # Days of inactivity before chui app-server removes a clean idle session worktree (0..=3650). User config only.
 # auto_clean_idle_days = 7
 # Remove clean session worktrees whose sessions have all been deleted during cleanup sweeps. User config only.

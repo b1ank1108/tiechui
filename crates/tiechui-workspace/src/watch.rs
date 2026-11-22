@@ -36,8 +36,9 @@ pub(crate) struct Watch {
 }
 
 impl Watch {
-    pub(crate) fn start(root: &Path, sink: Sink) -> Result<Self> {
+    pub(crate) fn start(root: &Path, home: Option<&Path>, sink: Sink) -> Result<Self> {
         let canonical = root.canonicalize()?;
+        let excluded_wt = crate::fs::excluded_managed_worktrees(home, &canonical);
         let mut git_cmd = crate::git::command(
             "git",
             root,
@@ -52,6 +53,14 @@ impl Watch {
             .and_then(|dir| PathBuf::from(dir.trim()).canonicalize().ok());
         let mut ignores = GitignoreBuilder::new(&canonical);
         ignores.add(canonical.join(".gitignore"));
+        if let Some(exclude) = crate::fs::linked_worktree_info_exclude(&canonical) {
+            ignores.add(exclude);
+        } else if let Some(dir) = git_dir.as_ref() {
+            let exclude = dir.join("info/exclude");
+            if exclude.is_file() {
+                ignores.add(exclude);
+            }
+        }
         let ignores = ignores.build().unwrap_or_else(|_| Gitignore::empty());
         let (events, received) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(events)?;
@@ -79,6 +88,9 @@ impl Watch {
                         git |= tracked_git_state(inner);
                     } else if let Ok(relative) = path.strip_prefix(&canonical)
                         && !relative.as_os_str().is_empty()
+                        && !crate::fs::should_skip_workspace_entry(&canonical, &path, &excluded_wt)
+                        && !(relative == Path::new(".tiechui")
+                            && canonical.join(".tiechui/worktrees").exists())
                         && !ignores
                             .matched_path_or_any_parents(relative, path.is_dir())
                             .is_ignore()

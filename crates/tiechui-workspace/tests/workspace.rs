@@ -858,3 +858,454 @@ fn ports_notify_changes_and_stop_verifies_ownership_and_rescans() {
     }
     workspace.close();
 }
+
+fn parse_zip_entries(zip_bytes: &[u8]) -> BTreeMap<String, (bool, Vec<u8>)> {
+    use std::io::Read;
+
+    assert!(zip_bytes.len() >= 22, "zip too short: {}", zip_bytes.len());
+    let eocd_pos = (0..=zip_bytes.len() - 22)
+        .rev()
+        .find(|&i| zip_bytes[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .expect("missing ZIP EOCD signature");
+    let total_entries =
+        u16::from_le_bytes(zip_bytes[eocd_pos + 10..eocd_pos + 12].try_into().unwrap()) as usize;
+    let cd_size =
+        u32::from_le_bytes(zip_bytes[eocd_pos + 12..eocd_pos + 16].try_into().unwrap()) as usize;
+    let cd_offset =
+        u32::from_le_bytes(zip_bytes[eocd_pos + 16..eocd_pos + 20].try_into().unwrap()) as usize;
+    assert_eq!(cd_offset + cd_size, eocd_pos);
+
+    let mut out = BTreeMap::new();
+    let mut cursor = cd_offset;
+    for _ in 0..total_entries {
+        assert_eq!(&zip_bytes[cursor..cursor + 4], &[0x50, 0x4b, 0x01, 0x02]);
+        let method = u16::from_le_bytes(zip_bytes[cursor + 10..cursor + 12].try_into().unwrap());
+        let expected_crc =
+            u32::from_le_bytes(zip_bytes[cursor + 16..cursor + 20].try_into().unwrap());
+        let comp_size =
+            u32::from_le_bytes(zip_bytes[cursor + 20..cursor + 24].try_into().unwrap()) as usize;
+        let uncomp_size =
+            u32::from_le_bytes(zip_bytes[cursor + 24..cursor + 28].try_into().unwrap()) as usize;
+        let name_len =
+            u16::from_le_bytes(zip_bytes[cursor + 28..cursor + 30].try_into().unwrap()) as usize;
+        let extra_len =
+            u16::from_le_bytes(zip_bytes[cursor + 30..cursor + 32].try_into().unwrap()) as usize;
+        let comment_len =
+            u16::from_le_bytes(zip_bytes[cursor + 32..cursor + 34].try_into().unwrap()) as usize;
+        let local_offset =
+            u32::from_le_bytes(zip_bytes[cursor + 42..cursor + 46].try_into().unwrap()) as usize;
+        let name = std::str::from_utf8(&zip_bytes[cursor + 46..cursor + 46 + name_len])
+            .unwrap()
+            .to_owned();
+        cursor += 46 + name_len + extra_len + comment_len;
+
+        assert_eq!(
+            &zip_bytes[local_offset..local_offset + 4],
+            &[0x50, 0x4b, 0x03, 0x04]
+        );
+        let l_name_len = u16::from_le_bytes(
+            zip_bytes[local_offset + 26..local_offset + 28]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let l_extra_len = u16::from_le_bytes(
+            zip_bytes[local_offset + 28..local_offset + 30]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let data_start = local_offset + 30 + l_name_len + l_extra_len;
+        let raw_slice = &zip_bytes[data_start..data_start + comp_size];
+
+        let is_dir = name.ends_with('/');
+        let decoded = match method {
+            0 => raw_slice.to_vec(),
+            8 => {
+                let mut decoder = flate2::read::DeflateDecoder::new(raw_slice);
+                let mut buf = Vec::with_capacity(uncomp_size);
+                decoder.read_to_end(&mut buf).unwrap();
+                buf
+            }
+            other => panic!("unsupported zip method {other} for {name}"),
+        };
+        assert_eq!(decoded.len(), uncomp_size, "size mismatch for {name}");
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&decoded);
+        assert_eq!(hasher.finalize(), expected_crc, "crc32 mismatch for {name}");
+        out.insert(name, (is_dir, decoded));
+    }
+    out
+}
+
+#[test]
+fn chunked_binary_upload_download_zip_archive_conflicts_and_cleanup() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
+
+    let dir = repo();
+    let root = dir.path();
+    let root_str = root.display().to_string();
+    let workspace = ws::Workspace::new(Arc::new(|_, _| {}));
+
+    let total_len = 13 * 1024 * 1024 + 321;
+    let mut big_binary = vec![0_u8; total_len];
+    for (idx, byte) in big_binary.iter_mut().enumerate() {
+        *byte = match idx % 7 {
+            0 => 0x00,
+            1 => 0xff,
+            2 => 0xfe,
+            3 => 0x80,
+            _ => ((idx.wrapping_mul(131) ^ (idx >> 9)) & 0xff) as u8,
+        };
+    }
+    let expected_sha = format!("{:x}", Sha256::digest(&big_binary));
+
+    let stats = ws::stat_many(
+        root,
+        &[
+            "a.txt".into(),
+            "src".into(),
+            "uploads/deep/large.bin".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        stats,
+        vec![
+            FileStat {
+                path: "a.txt".into(),
+                exists: true,
+                dir: false,
+                size: 8,
+            },
+            FileStat {
+                path: "src".into(),
+                exists: true,
+                dir: true,
+                size: 0,
+            },
+            FileStat {
+                path: "uploads/deep/large.bin".into(),
+                exists: false,
+                dir: false,
+                size: 0,
+            },
+        ]
+    );
+    assert!(ws::stat_many(root, &["../escape.txt".into()]).is_err());
+
+    let started = workspace
+        .upload_start(
+            1,
+            &UploadStartParams {
+                root: root_str.clone(),
+                path: "uploads/deep/large.bin".into(),
+                overwrite: false,
+                size: Some(total_len as u64),
+            },
+        )
+        .unwrap();
+    for chunk in big_binary.chunks(512 * 1024) {
+        workspace
+            .upload_write(
+                1,
+                &UploadWriteParams {
+                    transfer_id: started.transfer_id.clone(),
+                    data: STANDARD.encode(chunk),
+                },
+            )
+            .unwrap();
+    }
+    let finished = workspace.upload_finish(1, &started.transfer_id).unwrap();
+    assert_eq!(finished.path, "uploads/deep/large.bin");
+    assert_eq!(finished.size, total_len as u64);
+    assert_eq!(finished.sha256, expected_sha);
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(root.join("uploads/deep/large.bin")).unwrap())
+        ),
+        expected_sha
+    );
+
+    let conflict_err = workspace
+        .upload_start(
+            1,
+            &UploadStartParams {
+                root: root_str.clone(),
+                path: "uploads/deep/large.bin".into(),
+                overwrite: false,
+                size: Some(4),
+            },
+        )
+        .unwrap_err()
+        .0;
+    assert!(
+        conflict_err.contains("exists"),
+        "expected conflict error, got: {conflict_err}"
+    );
+
+    let aborted_overwrite = workspace
+        .upload_start(
+            1,
+            &UploadStartParams {
+                root: root_str.clone(),
+                path: "uploads/deep/large.bin".into(),
+                overwrite: true,
+                size: None,
+            },
+        )
+        .unwrap();
+    workspace
+        .upload_write(
+            1,
+            &UploadWriteParams {
+                transfer_id: aborted_overwrite.transfer_id.clone(),
+                data: STANDARD.encode(b"partial-garbage"),
+            },
+        )
+        .unwrap();
+    workspace
+        .upload_abort(1, &aborted_overwrite.transfer_id)
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(root.join("uploads/deep/large.bin"))
+            .unwrap()
+            .len(),
+        total_len as u64,
+        "aborted overwrite must preserve original file"
+    );
+    let deep_entries: Vec<_> = std::fs::read_dir(root.join("uploads/deep"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(deep_entries, vec!["large.bin".to_owned()]);
+
+    let aborted_fresh = workspace
+        .upload_start(
+            1,
+            &UploadStartParams {
+                root: root_str.clone(),
+                path: "aborted-dir/nested/half.bin".into(),
+                overwrite: false,
+                size: None,
+            },
+        )
+        .unwrap();
+    workspace
+        .upload_write(
+            1,
+            &UploadWriteParams {
+                transfer_id: aborted_fresh.transfer_id.clone(),
+                data: STANDARD.encode(b"half"),
+            },
+        )
+        .unwrap();
+    workspace
+        .upload_abort(1, &aborted_fresh.transfer_id)
+        .unwrap();
+    assert!(
+        !root.join("aborted-dir").exists(),
+        "aborted upload should prune newly created empty parent directories"
+    );
+
+    let dl_file = workspace
+        .download_start(1, &root_str, "uploads/deep/large.bin")
+        .unwrap();
+    assert_eq!(dl_file.name, "large.bin");
+    assert!(!dl_file.archive);
+    assert_eq!(dl_file.total_bytes, total_len as u64);
+    let mut downloaded_bytes = Vec::with_capacity(total_len);
+    loop {
+        let chunk = workspace
+            .download_read(
+                1,
+                &DownloadReadParams {
+                    transfer_id: dl_file.transfer_id.clone(),
+                    chunk_size: Some(600_000),
+                },
+            )
+            .unwrap();
+        let raw = STANDARD.decode(&chunk.data).unwrap();
+        assert_eq!(raw.len(), chunk.bytes_read as usize);
+        downloaded_bytes.extend_from_slice(&raw);
+        if chunk.eof {
+            break;
+        }
+    }
+    assert_eq!(downloaded_bytes.len(), total_len);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&downloaded_bytes)),
+        expected_sha
+    );
+    assert!(
+        workspace
+            .download_read(
+                1,
+                &DownloadReadParams {
+                    transfer_id: dl_file.transfer_id,
+                    chunk_size: None,
+                },
+            )
+            .is_err()
+    );
+
+    std::fs::create_dir_all(root.join("bundle/empty-sub")).unwrap();
+    std::fs::create_dir_all(root.join("bundle/inner")).unwrap();
+    std::fs::write(root.join("bundle/inner/数据.bin"), b"\x00\xffzip-payload\n").unwrap();
+    std::fs::create_dir_all(root.join(".tiechui/worktrees/wt-skip")).unwrap();
+    std::fs::write(
+        root.join(".tiechui/worktrees/wt-skip/secret.txt"),
+        "do-not-zip\n",
+    )
+    .unwrap();
+
+    let dl_dir = workspace.download_start(1, &root_str, "bundle").unwrap();
+    assert_eq!(dl_dir.name, "bundle.zip");
+    assert!(dl_dir.archive);
+    assert!(dl_dir.total_bytes > 22);
+    let mut zip_buf = Vec::new();
+    loop {
+        let chunk = workspace
+            .download_read(
+                1,
+                &DownloadReadParams {
+                    transfer_id: dl_dir.transfer_id.clone(),
+                    chunk_size: Some(4096),
+                },
+            )
+            .unwrap();
+        zip_buf.extend_from_slice(&STANDARD.decode(&chunk.data).unwrap());
+        if chunk.eof {
+            break;
+        }
+    }
+    assert_eq!(zip_buf.len() as u64, dl_dir.total_bytes);
+    let bundle_entries = parse_zip_entries(&zip_buf);
+    assert_eq!(bundle_entries.get("empty-sub/"), Some(&(true, Vec::new())));
+    assert_eq!(
+        bundle_entries.get("inner/数据.bin"),
+        Some(&(false, b"\x00\xffzip-payload\n".to_vec()))
+    );
+
+    let dl_root = workspace.download_start(1, &root_str, "").unwrap();
+    assert!(dl_root.archive);
+    assert!(dl_root.name.ends_with(".zip"));
+    let mut root_zip = Vec::new();
+    loop {
+        let chunk = workspace
+            .download_read(
+                1,
+                &DownloadReadParams {
+                    transfer_id: dl_root.transfer_id.clone(),
+                    chunk_size: Some(1024 * 1024),
+                },
+            )
+            .unwrap();
+        root_zip.extend_from_slice(&STANDARD.decode(&chunk.data).unwrap());
+        if chunk.eof {
+            break;
+        }
+    }
+    let root_entries = parse_zip_entries(&root_zip);
+    assert!(root_entries.contains_key("a.txt"));
+    assert!(root_entries.contains_key("bundle/empty-sub/"));
+    assert!(root_entries.contains_key("bundle/inner/数据.bin"));
+    assert!(root_entries.contains_key(".gitignore"));
+    assert!(
+        root_entries
+            .keys()
+            .all(|k| k != ".git/" && !k.starts_with(".git/") && !k.starts_with(".tiechui")),
+        "unexpected entries in root zip: {:?}",
+        root_entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(&root_entries.get("uploads/deep/large.bin").unwrap().1)
+        ),
+        expected_sha
+    );
+
+    let orphan_up = workspace
+        .upload_start(
+            77,
+            &UploadStartParams {
+                root: root_str.clone(),
+                path: "disconnect-dir/orphan.bin".into(),
+                overwrite: false,
+                size: None,
+            },
+        )
+        .unwrap();
+    let orphan_dl = workspace.download_start(77, &root_str, "bundle").unwrap();
+    workspace.remove_client(77);
+    assert!(!root.join("disconnect-dir").exists());
+    assert!(
+        workspace
+            .upload_write(
+                77,
+                &UploadWriteParams {
+                    transfer_id: orphan_up.transfer_id,
+                    data: STANDARD.encode(b"x"),
+                },
+            )
+            .is_err()
+    );
+    assert!(
+        workspace
+            .download_read(
+                77,
+                &DownloadReadParams {
+                    transfer_id: orphan_dl.transfer_id,
+                    chunk_size: None,
+                },
+            )
+            .is_err()
+    );
+
+    assert!(
+        workspace
+            .upload_start(
+                1,
+                &UploadStartParams {
+                    root: root_str.clone(),
+                    path: "../escape.bin".into(),
+                    overwrite: true,
+                    size: None,
+                },
+            )
+            .is_err()
+    );
+    assert!(
+        workspace
+            .download_start(1, &root_str, "../escape.bin")
+            .is_err()
+    );
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "top-secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("sym-out")).unwrap();
+        assert!(
+            workspace
+                .upload_start(
+                    1,
+                    &UploadStartParams {
+                        root: root_str.clone(),
+                        path: "sym-out/pwn.bin".into(),
+                        overwrite: true,
+                        size: None,
+                    },
+                )
+                .is_err()
+        );
+        assert!(
+            workspace
+                .download_start(1, &root_str, "sym-out/secret.txt")
+                .is_err()
+        );
+    }
+
+    workspace.close();
+}

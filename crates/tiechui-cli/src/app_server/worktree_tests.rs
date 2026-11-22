@@ -677,7 +677,29 @@ async fn worktree_rewind_enforces_directory_isolation_across_equal_ancestor_desc
         .await;
     assert_eq!(check_unblocked.mode, RewindMode::Snapshot);
 
-    for overlapping_cwd in [home.as_path(), subdir.as_path()] {
+    let main_repo_peer: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": repo, "model": "fixture/m1" }),
+        )
+        .await;
+    let check_with_main_repo: RewindCheck = client
+        .call_ok(
+            "turn/rewind_check",
+            json!({ "thread_id": opened.thread_id, "item_id": turn2_item }),
+        )
+        .await;
+    assert_eq!(
+        check_with_main_repo.mode,
+        RewindMode::Snapshot,
+        "main-repo session must not block in-project worktree snapshot rewind"
+    );
+    let _: Value = client
+        .call_ok("session/trash", json!({ "path": main_repo_peer.path }))
+        .await;
+
+    let wt_container = wt_path.parent().unwrap().to_path_buf();
+    for overlapping_cwd in [wt_container.as_path(), subdir.as_path()] {
         let peer: Snapshot = client
             .call_ok(
                 "session/open",
@@ -1879,4 +1901,212 @@ async fn idle_cleanup_retains_session_attribution_reopens_checkout_and_trash_pru
     assert!(trashed.trashed);
     assert!(tiechui_workspace::project_worktree_paths(&home, &repo).is_empty());
     final_client.close().await;
+}
+
+#[tokio::test]
+async fn legacy_worktree_registry_session_and_streaming_fs_rpc_round_trip_and_disconnect_cleanup() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use tiechui_protocol::workspace::{
+        DownloadReadResult, DownloadStartResult, FileStat, FileTree, SearchResult,
+        UploadFinishResult, UploadStartResult, UploadWriteResult,
+    };
+
+    let Some(home) = isolated_home_child(
+        "TC_WT_LEGACY_TRANSFER_HOME",
+        "app_server::worktree_tests::legacy_worktree_registry_session_and_streaming_fs_rpc_round_trip_and_disconnect_cleanup",
+    ) else {
+        return;
+    };
+    tiechui_config::private::create_dir_all(&home).unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let repo = workspace_dir.path().join("rpc-transfer-repo");
+    init_repo(&repo);
+
+    let seed_client = new_configured_client(&home).await;
+    seed_client.close().await;
+
+    let server = Server::new(home.clone());
+    let mut client = TestClient::new(server.clone());
+    let _: Value = client
+        .call_ok("initialize", json!({ "protocol_version": 1 }))
+        .await;
+
+    let created: WorktreeEntry = client
+        .call_ok("worktree/create", json!({ "root": repo }))
+        .await;
+    assert_eq!(
+        Path::new(&created.path),
+        repo.join(".tiechui/worktrees").join(&created.name)
+    );
+    std::fs::write(
+        Path::new(&created.path).join("wt_rpc.txt"),
+        "RPC_WT_MARKER_77\n",
+    )
+    .unwrap();
+
+    let repo_tree: FileTree = client.call_ok("fs/tree", json!({ "root": repo })).await;
+    assert!(
+        repo_tree
+            .entries
+            .iter()
+            .all(|e| !e.path.starts_with(".tiechui"))
+    );
+    let wt_tree: FileTree = client
+        .call_ok("fs/tree", json!({ "root": created.path }))
+        .await;
+    assert!(wt_tree.entries.iter().any(|e| e.path == "wt_rpc.txt"));
+
+    let repo_search: SearchResult = client
+        .call_ok(
+            "fs/search",
+            json!({ "root": repo, "query": "RPC_WT_MARKER_77" }),
+        )
+        .await;
+    assert_eq!(repo_search.total, 0);
+    let wt_search: SearchResult = client
+        .call_ok(
+            "fs/search",
+            json!({ "root": created.path, "query": "RPC_WT_MARKER_77" }),
+        )
+        .await;
+    assert_eq!(wt_search.total, 1);
+
+    let legacy_dir = home.join("worktrees/rpc-transfer-repo-legacy/20261101-abcd1234");
+    std::fs::create_dir_all(legacy_dir.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            legacy_dir.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "tiechui/20261101-abcd1234",
+            legacy_dir.to_str().unwrap(),
+            "release/v1",
+        ],
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&legacy_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let reg_path = home.join("worktrees/registry.json");
+    let mut reg: Value = serde_json::from_slice(&std::fs::read(&reg_path).unwrap()).unwrap();
+    reg["worktrees"].as_array_mut().unwrap().push(json!({
+        "name": "20261101-abcd1234",
+        "path": legacy_dir.display().to_string(),
+        "project_root": repo.display().to_string(),
+        "branch": "tiechui/20261101-abcd1234",
+        "base_branch": "release/v1",
+        "created_at": 1_000,
+        "post_create": { "status": "none", "output": "" }
+    }));
+    std::fs::write(&reg_path, serde_json::to_vec_pretty(&reg).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&reg_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let legacy_snap: Snapshot = client
+        .call_ok(
+            "session/open",
+            json!({ "cwd": legacy_dir, "model": "fixture/m1" }),
+        )
+        .await;
+    assert_eq!(
+        legacy_snap.worktree.as_ref().map(|w| w.branch.as_str()),
+        Some("tiechui/20261101-abcd1234")
+    );
+    let _: Value = client
+        .call_ok(
+            "session/close",
+            json!({ "thread_id": legacy_snap.thread_id }),
+        )
+        .await;
+    append_turn(Path::new(&legacy_snap.path), "legacy session msg");
+
+    let sessions: Vec<SessionSummary> =
+        client.call_ok("session/list", json!({ "cwd": repo })).await;
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.thread_id == legacy_snap.thread_id && s.worktree.is_some())
+    );
+    assert_doctor_ok(&home).await;
+
+    let payload = b"\x00\xff\xfestreamed-over-rpc\x00";
+    let up: UploadStartResult = client
+        .call_ok(
+            "fs/upload_start",
+            json!({ "root": repo, "path": "bin/data.bin", "overwrite": false, "size": payload.len() }),
+        )
+        .await;
+    let wr: UploadWriteResult = client
+        .call_ok(
+            "fs/upload_write",
+            json!({ "transfer_id": up.transfer_id, "data": STANDARD.encode(&payload[..8]) }),
+        )
+        .await;
+    assert_eq!(wr.bytes_written, 8);
+    let _: UploadWriteResult = client
+        .call_ok(
+            "fs/upload_write",
+            json!({ "transfer_id": up.transfer_id, "data": STANDARD.encode(&payload[8..]) }),
+        )
+        .await;
+    let done: UploadFinishResult = client
+        .call_ok("fs/upload_finish", json!({ "transfer_id": up.transfer_id }))
+        .await;
+    assert_eq!(done.size, payload.len() as u64);
+
+    let stats: Vec<FileStat> = client
+        .call_ok(
+            "fs/stat_many",
+            json!({ "root": repo, "paths": ["bin/data.bin", "bin/missing.bin"] }),
+        )
+        .await;
+    assert!(stats[0].exists && !stats[0].dir && stats[0].size == payload.len() as u64);
+    assert!(!stats[1].exists);
+
+    let dl: DownloadStartResult = client
+        .call_ok(
+            "fs/download_start",
+            json!({ "root": repo, "path": "bin/data.bin" }),
+        )
+        .await;
+    let rd: DownloadReadResult = client
+        .call_ok(
+            "fs/download_read",
+            json!({ "transfer_id": dl.transfer_id, "chunk_size": 1024 }),
+        )
+        .await;
+    assert!(rd.eof);
+    assert_eq!(STANDARD.decode(&rd.data).unwrap(), payload);
+
+    let mut transient = TestClient::new(server.clone());
+    let _: Value = transient
+        .call_ok("initialize", json!({ "protocol_version": 1 }))
+        .await;
+    let _: UploadStartResult = transient
+        .call_ok(
+            "fs/upload_start",
+            json!({ "root": repo, "path": "dropped-client/half.bin", "overwrite": false }),
+        )
+        .await;
+    transient.disconnect();
+    assert!(
+        !repo.join("dropped-client").exists(),
+        "client disconnect did not clean up unfinished upload directory"
+    );
+
+    client.close().await;
 }

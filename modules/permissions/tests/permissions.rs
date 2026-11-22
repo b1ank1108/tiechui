@@ -1993,3 +1993,106 @@ async fn auto_passes_read_only_mcp_tools_without_review_but_not_in_rules_mode() 
         assert_eq!(f.asks(), asks, "{mode:?}");
     }
 }
+
+#[tokio::test]
+async fn in_project_worktree_cwd_allows_interior_writes_while_protecting_dot_tiechui_and_dot_git() {
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/permissions-tests");
+    std::fs::create_dir_all(&directory).unwrap();
+    let root = tempfile::tempdir_in(directory).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let project_root = base.join("project");
+    let wt_cwd = project_root.join(".tiechui/worktrees/20261122-abcd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(wt_cwd.join("src")).unwrap();
+    std::fs::write(
+        wt_cwd.join(".git"),
+        "gitdir: ../../../.git/worktrees/20261122-abcd\n",
+    )
+    .unwrap();
+
+    let prompter = Arc::new(Prompter::default());
+    let module = PermissionsModule::with_requester(wt_cwd.clone(), home, prompter.clone())
+        .with_mode(PermissionMode::Auto);
+    let registry = Registry::from_modules(&[&module], &ModuleConfig::default()).unwrap();
+    let entries = Arc::new(Mutex::new(Vec::new()));
+    let make_ctx = || {
+        let entries = entries.clone();
+        ToolContext {
+            invoker: None,
+            branch: Default::default(),
+            parent_session: None,
+            cwd: wt_cwd.clone(),
+            cancel: CancellationToken::new(),
+            updates: Arc::new(|_| {}),
+            append_entry: Arc::new(move |entry| {
+                entries.lock().unwrap().push(entry);
+                Ok(())
+            }),
+            epoch: SessionEpoch(0),
+            scope: ExecutionScope {
+                thread_id: ThreadId("wt-sess".into()),
+                turn_id: TurnId("t1".into()),
+            },
+            origin: Default::default(),
+        }
+    };
+    let interceptor = &registry.interceptors()[0].interceptor;
+
+    for (tool, args) in [
+        ("write", json!({ "path": "src/foo.rs" })),
+        ("edit", json!({ "path": "README.md" })),
+        ("write", json!({ "path": wt_cwd.join("src/bar.rs") })),
+    ] {
+        let verdict = interceptor
+            .before(
+                &ToolCall {
+                    id: "c1".into(),
+                    name: tool.into(),
+                    arguments: args.clone(),
+                    opaque: None,
+                },
+                make_ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verdict, BeforeToolCall::Allow, "{tool} {args}");
+    }
+    assert_eq!(prompter.requests.lock().unwrap().len(), 0);
+
+    for (tool, args) in [
+        ("write", json!({ "path": ".tiechui/config.toml" })),
+        ("write", json!({ "path": ".git/hooks/pre-commit" })),
+        ("write", json!({ "path": ".git" })),
+        ("write", json!({ "path": "../../../.tiechui/config.toml" })),
+        (
+            "write",
+            json!({ "path": project_root.join(".tiechui/config.toml") }),
+        ),
+    ] {
+        prompter.requests.lock().unwrap().clear();
+        let verdict = interceptor
+            .before(
+                &ToolCall {
+                    id: "c1".into(),
+                    name: tool.into(),
+                    arguments: args.clone(),
+                    opaque: None,
+                },
+                make_ctx(),
+            )
+            .await
+            .unwrap();
+        let reason = denied(verdict);
+        assert!(
+            prompter
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.surface == "protected_path"),
+            "expected protected_path prompt for {args}, got reason: {reason}"
+        );
+    }
+}

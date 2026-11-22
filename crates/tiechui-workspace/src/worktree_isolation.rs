@@ -77,6 +77,22 @@ pub(crate) fn normalize_dir(path: &Path) -> PathBuf {
     ports::resolve_existing_prefix(&ports::clean_path(path))
 }
 
+pub(crate) fn crosses_in_project_worktrees_boundary(ancestor: &Path, descendant: &Path) -> bool {
+    let Ok(rel) = descendant.strip_prefix(ancestor) else {
+        return false;
+    };
+    let parts: Vec<_> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy()),
+            _ => None,
+        })
+        .collect();
+    parts
+        .windows(3)
+        .any(|w| w[0].eq_ignore_ascii_case(".tiechui") && w[1].eq_ignore_ascii_case("worktrees"))
+}
+
 pub(crate) fn classify_overlap(worktree_dir: &Path, other_dir: &Path) -> Option<PathOverlap> {
     if crate::win_path::looks_like_windows_root(worktree_dir)
         || crate::win_path::looks_like_windows_root(other_dir)
@@ -89,9 +105,11 @@ pub(crate) fn classify_overlap(worktree_dir: &Path, other_dir: &Path) -> Option<
     if worktree_dir == other_dir {
         Some(PathOverlap::Equal)
     } else if worktree_dir.starts_with(other_dir) {
-        Some(PathOverlap::ContainsWorktree)
+        (!crosses_in_project_worktrees_boundary(other_dir, worktree_dir))
+            .then_some(PathOverlap::ContainsWorktree)
     } else if other_dir.starts_with(worktree_dir) {
-        Some(PathOverlap::InsideWorktree)
+        (!crosses_in_project_worktrees_boundary(worktree_dir, other_dir))
+            .then_some(PathOverlap::InsideWorktree)
     } else {
         None
     }

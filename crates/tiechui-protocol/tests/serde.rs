@@ -459,6 +459,8 @@ fn workspace_port_contracts_round_trip() {
         pid: 4242,
         process: "node".into(),
         address: "127.0.0.1".into(),
+        worktree_path: None,
+        worktree_branch: None,
     };
     assert_eq!(
         round_trip(&PortsChanged { ports: vec![entry] }),
@@ -469,6 +471,32 @@ fn workspace_port_contracts_round_trip() {
                 "pid": 4242,
                 "process": "node",
                 "address": "127.0.0.1"
+            }]
+        })
+    );
+
+    let wt_entry = PortEntry {
+        root: "/repo".into(),
+        port: 5174,
+        pid: 4243,
+        process: "node".into(),
+        address: "127.0.0.1".into(),
+        worktree_path: Some("/repo/.tiechui/worktrees/20261122-abcd".into()),
+        worktree_branch: Some("tiechui/20261122-abcd".into()),
+    };
+    assert_eq!(
+        round_trip(&PortsChanged {
+            ports: vec![wt_entry]
+        }),
+        json!({
+            "ports": [{
+                "root": "/repo",
+                "port": 5174,
+                "pid": 4243,
+                "process": "node",
+                "address": "127.0.0.1",
+                "worktree_path": "/repo/.tiechui/worktrees/20261122-abcd",
+                "worktree_branch": "tiechui/20261122-abcd"
             }]
         })
     );

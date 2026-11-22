@@ -139,6 +139,18 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
                 d.visit::<workspace::WriteParams>();
                 d.visit::<workspace::WriteResult>();
                 d.visit::<workspace::MoveParams>();
+                d.visit::<workspace::StatManyParams>();
+                d.visit::<workspace::FileStat>();
+                d.visit::<workspace::UploadStartParams>();
+                d.visit::<workspace::UploadStartResult>();
+                d.visit::<workspace::UploadWriteParams>();
+                d.visit::<workspace::UploadWriteResult>();
+                d.visit::<workspace::TransferParams>();
+                d.visit::<workspace::UploadFinishResult>();
+                d.visit::<workspace::DownloadStartParams>();
+                d.visit::<workspace::DownloadStartResult>();
+                d.visit::<workspace::DownloadReadParams>();
+                d.visit::<workspace::DownloadReadResult>();
                 d.visit::<workspace::SearchParams>();
                 d.visit::<workspace::SearchResult>();
                 d.visit::<workspace::FsChanged>();

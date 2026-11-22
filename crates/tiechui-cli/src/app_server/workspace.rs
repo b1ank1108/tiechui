@@ -180,7 +180,9 @@ fn handle(
     params: Value,
 ) -> Reply {
     match method {
-        "fs/tree" => call(params, |p: RootParams| ws::tree(&ws::root(&p.root)?)),
+        "fs/tree" => call(params, |p: RootParams| {
+            ws::tree_with_home(Some(home), &ws::root(&p.root)?)
+        }),
         "fs/list" => call(params, |p: FileParams| {
             ws::list(&ws::root(&p.root)?, &p.path)
         }),
@@ -202,8 +204,32 @@ fn handle(
         "fs/rename" => call(params, |p: MoveParams| {
             ws::rename(&ws::root(&p.root)?, &p.from, &p.to)
         }),
+        "fs/stat_many" => call(params, |p: StatManyParams| {
+            ws::stat_many(&ws::root(&p.root)?, &p.paths)
+        }),
+        "fs/upload_start" => call(params, |p: UploadStartParams| {
+            workspace.upload_start(client_id, &p)
+        }),
+        "fs/upload_write" => call(params, |p: UploadWriteParams| {
+            workspace.upload_write(client_id, &p)
+        }),
+        "fs/upload_finish" => call(params, |p: TransferParams| {
+            workspace.upload_finish(client_id, &p.transfer_id)
+        }),
+        "fs/upload_abort" => call(params, |p: TransferParams| {
+            workspace.upload_abort(client_id, &p.transfer_id)
+        }),
+        "fs/download_start" => call(params, |p: DownloadStartParams| {
+            workspace.download_start(client_id, &p.root, &p.path)
+        }),
+        "fs/download_read" => call(params, |p: DownloadReadParams| {
+            workspace.download_read(client_id, &p)
+        }),
+        "fs/download_abort" => call(params, |p: TransferParams| {
+            workspace.download_abort(client_id, &p.transfer_id)
+        }),
         "fs/search" => call(params, |p: SearchParams| {
-            ws::search(&ws::root(&p.root)?, &p)
+            ws::search_with_home(Some(home), &ws::root(&p.root)?, &p)
         }),
         "fs/watch" => call(params, |p: RootParams| workspace.watch(&ws::root(&p.root)?)),
         "fs/unwatch" => call(params, |p: RootParams| {

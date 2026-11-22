@@ -17,6 +17,7 @@ use crate::{Result, fail, git, lock, worktree_carry, worktree_script};
 const LOCK_FILENAME: &str = "tiechui-worktree.lock";
 const REGISTRY_FILENAME: &str = "registry.json";
 const REGISTRY_LOCK_FILENAME: &str = "registry.lock";
+const GIT_INFO_EXCLUDE_ENTRY: &str = "/.tiechui/worktrees/";
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateWorktreeOptions {
@@ -100,10 +101,16 @@ pub fn create_worktree_with_options(
 ) -> Result<WorktreeEntry> {
     let clean_project = validate_project_dir(project_root)?;
     let common_dir = git_common_dir(&clean_project, env)?;
-    let canonical_project = clean_project.canonicalize()?;
-    let bucket_dir = worktrees_dir(home).join(bucket_name(&clean_project, &canonical_project));
+    let wt_parent_dir = in_project_worktrees_dir(&clean_project);
     let mut record = with_file_lock(&common_dir.join(LOCK_FILENAME), || {
-        create_locked(home, &clean_project, &bucket_dir, &options, env)
+        create_locked(
+            home,
+            &clean_project,
+            &common_dir,
+            &wt_parent_dir,
+            &options,
+            env,
+        )
     })?;
     let wt_path = PathBuf::from(&record.path);
     let post_create = worktree_script::run_project_post_create(
@@ -134,16 +141,19 @@ pub fn create_worktree_with_options(
 fn create_locked(
     home: &Path,
     clean_project: &Path,
-    bucket_dir: &Path,
+    common_dir: &Path,
+    wt_parent_dir: &Path,
     options: &CreateWorktreeOptions,
     env: &BTreeMap<String, String>,
 ) -> Result<Record> {
     let (base_label, start_point) =
         resolve_base(clean_project, options.base_branch.as_deref(), env)?;
     let carried = capture_optional_changes(clean_project, options.carry_changes, env)?;
-    ensure_private_dirs(home, bucket_dir)?;
+    ensure_git_info_exclude(common_dir)?;
+    ensure_private_dirs(home, wt_parent_dir)?;
     let created_at = now_ms();
-    let (name, branch, wt_path) = pick_worktree_slot(clean_project, bucket_dir, created_at, env)?;
+    let (name, branch, wt_path) =
+        pick_worktree_slot(clean_project, wt_parent_dir, created_at, env)?;
     let record = Record {
         name,
         path: path_str(&wt_path)?.to_owned(),
@@ -193,9 +203,7 @@ fn checkout_and_register(
         finish_checkout(wt_path, carried, env).and_then(|()| register_record(home, record.clone()));
     if result.is_err() {
         rollback_checkout(clean_project, wt_path, &record.branch, env);
-        if let Some(bucket_dir) = wt_path.parent() {
-            let _ = fs::remove_dir(bucket_dir);
-        }
+        prune_empty_worktree_container(wt_path, clean_project);
     }
     result
 }
@@ -303,9 +311,7 @@ fn remove_locked(
         }
         delete_checkout(wt_path, project_path, env)?;
     }
-    if let Some(bucket) = wt_path.parent() {
-        let _ = fs::remove_dir(bucket);
-    }
+    prune_empty_worktree_container(wt_path, project_path);
     if !has_referencing_disk_session(home, wt_path) {
         unregister_record(home, target_key)?;
     }
@@ -347,12 +353,39 @@ pub fn prune_orphan_worktree_records(home: &Path) -> Result<()> {
 }
 
 pub fn worktree_project_root(home: &Path, cwd: &Path) -> Option<PathBuf> {
+    find_worktree_metadata(home, cwd).map(|(owner, _, _)| owner)
+}
+
+pub(crate) fn find_worktree_metadata(home: &Path, cwd: &Path) -> Option<(PathBuf, String, String)> {
     let candidate = resolve_existing_prefix(&clean_path(cwd));
     read_registry_unlocked(home).into_iter().find_map(|item| {
         let wt_key = resolve_existing_prefix(Path::new(&item.path));
-        crate::win_path::path_starts_with(&candidate, &wt_key)
-            .then(|| resolve_existing_prefix(Path::new(&item.project_root)))
+        crate::win_path::path_starts_with(&candidate, &wt_key).then(|| {
+            let owner = resolve_existing_prefix(Path::new(&item.project_root));
+            let branch = item.live_branch();
+            (owner, item.path, branch)
+        })
     })
+}
+
+pub(crate) fn project_worktree_records(
+    home: &Path,
+    project_root: &Path,
+) -> Vec<(PathBuf, String, String)> {
+    let expected = resolve_existing_prefix(project_root);
+    read_registry_unlocked(home)
+        .into_iter()
+        .filter(|item| {
+            crate::win_path::paths_equal(
+                &resolve_existing_prefix(Path::new(&item.project_root)),
+                &expected,
+            )
+        })
+        .map(|item| {
+            let branch = item.live_branch();
+            (PathBuf::from(&item.path), item.path, branch)
+        })
+        .collect()
 }
 
 pub fn ensure_worktree_checkout(
@@ -399,6 +432,13 @@ fn recheckout_locked(
     }
     if !branch_exists(project_root, &record.branch, env) {
         return Ok(Some(project_root.to_path_buf()));
+    }
+    let proj_resolved = resolve_existing_prefix(project_root);
+    let wt_resolved = resolve_existing_prefix(wt_path);
+    if crate::win_path::path_starts_with(&wt_resolved, &proj_resolved)
+        && let Ok(common_dir) = git_common_dir(project_root, env)
+    {
+        ensure_git_info_exclude(&common_dir)?;
     }
     if let Some(bucket) = wt_path.parent() {
         ensure_private_dirs(home, bucket)?;
@@ -585,31 +625,51 @@ fn worktrees_dir(home: &Path) -> PathBuf {
     clean_path(home).join("worktrees")
 }
 
-fn bucket_name(clean_project: &Path, canonical_project: &Path) -> String {
-    let raw_name = clean_project
-        .file_name()
-        .or_else(|| canonical_project.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-    let sanitized: String = raw_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
-            }
+fn in_project_worktrees_dir(clean_project: &Path) -> PathBuf {
+    clean_project.join(".tiechui").join("worktrees")
+}
+
+fn ensure_git_info_exclude(common_dir: &Path) -> Result<()> {
+    let info_dir = common_dir.join("info");
+    fs::create_dir_all(&info_dir)?;
+    let exclude_path = info_dir.join("exclude");
+    let existing = match fs::read_to_string(&exclude_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    if existing
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == GIT_INFO_EXCLUDE_ENTRY)
+    {
+        return Ok(());
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(GIT_INFO_EXCLUDE_ENTRY);
+    updated.push('\n');
+    fs::write(&exclude_path, updated)?;
+    Ok(())
+}
+
+fn prune_empty_worktree_container(wt_path: &Path, project_path: &Path) {
+    let Some(parent) = wt_path.parent() else {
+        return;
+    };
+    let _ = fs::remove_dir(parent);
+    if let Some(dot_tiechui) = parent.parent()
+        && dot_tiechui.file_name().is_some_and(|n| n == ".tiechui")
+        && dot_tiechui.parent().is_some_and(|p| {
+            crate::win_path::paths_equal(
+                &resolve_existing_prefix(p),
+                &resolve_existing_prefix(project_path),
+            )
         })
-        .collect();
-    let trimmed = sanitized.trim_matches(|c| c == '-' || c == '.');
-    let prefix = if trimmed.is_empty() { "repo" } else { trimmed };
-    let mut hasher = Sha256::new();
-    hasher.update(canonical_project.as_os_str().as_encoded_bytes());
-    let digest = hasher.finalize();
-    format!(
-        "{prefix}-{:02x}{:02x}{:02x}{:02x}",
-        digest[0], digest[1], digest[2], digest[3]
-    )
+    {
+        let _ = fs::remove_dir(dot_tiechui);
+    }
 }
 
 pub(crate) fn random_short_id(attempt: u32) -> String {
@@ -737,7 +797,7 @@ fn delete_checkout(
     }
 }
 
-fn remove_worktree_dir_safely(wt_path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_worktree_dir_safely(wt_path: &Path) -> std::io::Result<()> {
     remove_tree_entry(wt_path, true)
 }
 
@@ -771,7 +831,7 @@ fn unlink_dir_children(dir: &Path, defer_dot_git: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -823,7 +883,7 @@ fn remove_with_readonly_retry(path: &Path, is_dir: bool) -> std::io::Result<()> 
     }
 }
 
-fn clear_readonly(path: &Path, meta: &fs::Metadata) {
+pub(crate) fn clear_readonly(path: &Path, meta: &fs::Metadata) {
     #[cfg(windows)]
     if !is_link_or_reparse(meta) {
         use std::os::windows::ffi::OsStrExt;

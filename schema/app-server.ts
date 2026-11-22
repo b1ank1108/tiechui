@@ -168,6 +168,18 @@ export type DerivedReason = "subagent" | "approval" | "runtime";
 
 export type DerivedTurnMarker = { id: ItemId, derived_from: TurnId, reason: DerivedReason, };
 
+export type DownloadReadParams = { transfer_id: string, chunk_size?: number, };
+
+export type DownloadReadResult = { 
+/**
+ * Base64-encoded chunk bytes.
+ */
+data: string, bytes_read: number, eof: boolean, };
+
+export type DownloadStartParams = { root: string, path: string, };
+
+export type DownloadStartResult = { transfer_id: string, name: string, archive: boolean, total_bytes: number, };
+
 export type Error = { code: number, message: string, data?: JsonValue | null, };
 
 export type Event = { submission_id?: SubmissionId | null, thread_id: ThreadId, epoch: SessionEpoch, event: EventKind, };
@@ -221,6 +233,8 @@ ignored: boolean, };
 export type FileParams = { root: string, path: string, };
 
 export type FilePreview = { before: string, after: string, };
+
+export type FileStat = { path: string, exists: boolean, dir: boolean, size: number, };
 
 export type FileTree = { entries: Array<FileEntry>, 
 /**
@@ -462,7 +476,15 @@ export type PluginPanel = { title: string, nodes: Array<PanelNode>, };
 
 export type PluginPrompt = { "kind": "select", title: string, text: string, options: Array<string>, } | { "kind": "confirm", title: string, text: string, } | { "kind": "input", title: string, text: string, } | { "kind": "panel", panel: PluginPanel, };
 
-export type PortEntry = { root: string, port: number, pid: number, process: string, address: string, };
+export type PortEntry = { root: string, port: number, pid: number, process: string, address: string, 
+/**
+ * Managed session worktree path when the listener runs in one under `root`.
+ */
+worktree_path?: string, 
+/**
+ * Branch of the managed session worktree when `worktree_path` is set.
+ */
+worktree_branch?: string, };
 
 export type PortStopParams = { root: string, pid: number, port?: number, };
 
@@ -829,6 +851,8 @@ runtime?: string,
  */
 capabilities?: RuntimeCapabilities, };
 
+export type StatManyParams = { root: string, paths: Array<string>, };
+
 export type SteeringMode = "inject" | "queue";
 
 export type SubagentItem = { id: ItemId, 
@@ -913,6 +937,8 @@ reasoning?: number, cache_write_1h?: number,
  */
 cost_nano_usd?: number | null, };
 
+export type TransferParams = { transfer_id: string, };
+
 export type TrashParams = { path: string, worktree_policy?: TrashWorktreePolicy, };
 
 export type TrashResult = { path: string, trashed: boolean, needs_worktree_confirm: boolean, worktree?: WorktreeEntry | null, worktree_removed: boolean, };
@@ -954,6 +980,20 @@ export type TurnParams = { thread_id: ThreadId, item_id: string, };
 export type TurnStatus = "in_progress" | "completed" | "interrupted" | "failed";
 
 export type UndoCheck = { safe: Array<string>, unsafe: Array<string>, ignored: Array<string>, };
+
+export type UploadFinishResult = { path: string, size: number, sha256: string, };
+
+export type UploadStartParams = { root: string, path: string, overwrite?: boolean, size?: number, };
+
+export type UploadStartResult = { transfer_id: string, };
+
+export type UploadWriteParams = { transfer_id: string, 
+/**
+ * Base64-encoded chunk bytes.
+ */
+data: string, };
+
+export type UploadWriteResult = { bytes_written: number, };
 
 export type Version = "2.0";
 

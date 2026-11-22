@@ -18,6 +18,8 @@ struct RegisteredRoot {
     raw: String,
     forms: Vec<PathBuf>,
     score: (usize, usize),
+    worktree_path: Option<String>,
+    worktree_branch: Option<String>,
 }
 
 impl RegisteredRoot {
@@ -33,7 +35,13 @@ impl RegisteredRoot {
         {
             forms.push(lexical);
         }
-        Ok(Self { raw, forms, score })
+        Ok(Self {
+            raw,
+            forms,
+            score,
+            worktree_path: None,
+            worktree_branch: None,
+        })
     }
 
     fn matches_path(&self, candidate: &Path) -> bool {
@@ -398,9 +406,18 @@ fn expand_worktree_roots(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<R
         let Ok(project_path) = root(&item.raw) else {
             continue;
         };
-        for wt_path in crate::worktree::project_worktree_paths(home, &project_path) {
+        for (wt_path, wt_raw, wt_branch) in
+            crate::worktree::project_worktree_records(home, &project_path)
+        {
             if wt_path.is_dir() {
-                push_worktree_root(&mut expanded, &mut seen, &item.raw, &wt_path);
+                push_worktree_root(
+                    &mut expanded,
+                    &mut seen,
+                    &item.raw,
+                    &wt_path,
+                    wt_raw,
+                    wt_branch,
+                );
             }
         }
     }
@@ -423,14 +440,17 @@ fn remap_managed_root(
     home: &Path,
     owner_raws: &BTreeMap<PathBuf, String>,
 ) -> RegisteredRoot {
-    let Some(owner) = crate::worktree::worktree_project_root(home, Path::new(&item.raw)) else {
-        return item.clone();
-    };
-    let Some(owner_raw) = owner_raws.get(&crate::win_path::path_key(&owner)) else {
+    let Some((owner, wt_raw, wt_branch)) =
+        crate::worktree::find_worktree_metadata(home, Path::new(&item.raw))
+    else {
         return item.clone();
     };
     let mut remapped = item.clone();
-    remapped.raw = owner_raw.clone();
+    remapped.worktree_path = Some(wt_raw);
+    remapped.worktree_branch = Some(wt_branch);
+    if let Some(owner_raw) = owner_raws.get(&crate::win_path::path_key(&owner)) {
+        remapped.raw = owner_raw.clone();
+    }
     remapped
 }
 
@@ -439,6 +459,8 @@ fn push_worktree_root(
     seen: &mut BTreeSet<PathBuf>,
     owner_raw: &str,
     wt_path: &Path,
+    wt_raw: String,
+    wt_branch: String,
 ) {
     let lexical = clean_path(wt_path);
     let resolved = resolve_existing_prefix(&lexical);
@@ -458,6 +480,8 @@ fn push_worktree_root(
         raw: owner_raw.to_owned(),
         forms,
         score,
+        worktree_path: Some(wt_raw),
+        worktree_branch: Some(wt_branch),
     });
 }
 
@@ -473,7 +497,7 @@ fn scan_attributed(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<PortEnt
         let Some(root_idx) = attribute_process(&proc_info, &roots) else {
             continue;
         };
-        let root = &roots[root_idx].raw;
+        let matched = &roots[root_idx];
         for (port, address) in proc_info.sockets {
             if port == 0 {
                 continue;
@@ -486,11 +510,13 @@ fn scan_attributed(roots: &[RegisteredRoot], home: Option<&Path>) -> Vec<PortEnt
                     }
                 })
                 .or_insert_with(|| PortEntry {
-                    root: root.clone(),
+                    root: matched.raw.clone(),
                     port,
                     pid: proc_info.pid,
                     process: proc_info.process.clone(),
                     address,
+                    worktree_path: matched.worktree_path.clone(),
+                    worktree_branch: matched.worktree_branch.clone(),
                 });
         }
     }
@@ -1499,6 +1525,8 @@ mod tests {
             raw: raw.to_owned(),
             forms: vec![PathBuf::from(raw)],
             score: (depth, norm.len()),
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 

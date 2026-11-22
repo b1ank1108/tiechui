@@ -3063,6 +3063,7 @@ dependencies = [
 name = "tiechui-cli"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "futures",
  "libc",
@@ -3559,6 +3560,9 @@ dependencies = [
 name = "tiechui-workspace"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
+ "crc32fast",
+ "flate2",
  "ignore",
  "notify",
  "portable-pty",

@@ -2276,6 +2276,10 @@ pub(super) mod tests {
             self.server.drain_title_tasks().await;
         }
 
+        pub(in crate::app_server) fn disconnect(self) {
+            self.server.remove_client(self.client_id);
+        }
+
         pub(in crate::app_server) async fn close(self) {
             self.server.remove_client(self.client_id);
             self.server.shutdown_all().await;

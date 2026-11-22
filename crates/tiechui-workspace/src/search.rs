@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use ignore::WalkState;
 use ignore::overrides::OverrideBuilder;
-use ignore::{WalkBuilder, WalkState};
 use regex::{Regex, RegexBuilder};
 use tiechui_protocol::workspace::{SearchGroup, SearchHit, SearchParams, SearchResult};
 
@@ -15,6 +15,14 @@ const MAX_LINE: usize = 1000;
 
 /// Content search over files outside `.gitignore`, in parallel.
 pub fn search(root: &Path, params: &SearchParams) -> Result<SearchResult> {
+    search_with_home(None, root, params)
+}
+
+pub fn search_with_home(
+    home: Option<&Path>,
+    root: &Path,
+    params: &SearchParams,
+) -> Result<SearchResult> {
     if params.query.is_empty() {
         return Ok(SearchResult {
             groups: vec![],
@@ -57,12 +65,16 @@ pub fn search(root: &Path, params: &SearchParams) -> Result<SearchResult> {
         }
     }
     let overrides = overrides.build()?;
+    let excluded_wt = fs::excluded_managed_worktrees(home, root);
+    let filter_root = root.to_owned();
     let groups = Mutex::new(Vec::new());
     let total = AtomicU32::new(0);
-    WalkBuilder::new(root)
-        .hidden(false)
+    fs::configured_walk_builder(root)
         .overrides(overrides)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !fs::should_skip_workspace_entry(&filter_root, entry.path(), &excluded_wt)
+        })
         .build_parallel()
         .run(|| {
             Box::new(|entry| {

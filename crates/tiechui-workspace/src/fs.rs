@@ -39,15 +39,127 @@ pub(crate) fn text(bytes: Vec<u8>) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+pub(crate) fn is_upload_temp_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|s| s.starts_with(".tiechui-upload-"))
+}
+
+pub(crate) fn is_excluded_rel_path(rel: &Path) -> bool {
+    if rel
+        .file_name()
+        .is_some_and(|name| name == ".git" || is_upload_temp_name(name))
+    {
+        return true;
+    }
+    let mut comps = rel.components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(first)), Some(Component::Normal(second)))
+            if first.to_string_lossy().eq_ignore_ascii_case(".tiechui")
+                && second.to_string_lossy().eq_ignore_ascii_case("worktrees")
+    )
+}
+
+pub(crate) fn excluded_managed_worktrees(home: Option<&Path>, root: &Path) -> Vec<PathBuf> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let root_res = crate::ports::resolve_existing_prefix(root);
+    crate::worktree::project_worktree_paths(home, root)
+        .into_iter()
+        .map(|p| crate::ports::resolve_existing_prefix(&p))
+        .filter(|wt_res| {
+            !crate::win_path::paths_equal(wt_res, &root_res)
+                && crate::win_path::path_starts_with(wt_res, &root_res)
+        })
+        .collect()
+}
+
+pub(crate) fn should_skip_workspace_entry(
+    root: &Path,
+    entry_path: &Path,
+    excluded_worktrees: &[PathBuf],
+) -> bool {
+    if entry_path
+        .file_name()
+        .is_some_and(|name| name == ".git" || is_upload_temp_name(name))
+    {
+        return true;
+    }
+    if let Ok(rel) = entry_path.strip_prefix(root)
+        && is_excluded_rel_path(rel)
+    {
+        return true;
+    }
+    if !excluded_worktrees.is_empty() {
+        let candidate = crate::ports::resolve_existing_prefix(entry_path);
+        if excluded_worktrees
+            .iter()
+            .any(|wt| crate::win_path::path_starts_with(&candidate, wt))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn linked_worktree_info_exclude(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let raw_gitdir = text.trim().strip_prefix("gitdir:")?.trim();
+    let git_dir = if Path::new(raw_gitdir).is_absolute() {
+        PathBuf::from(raw_gitdir)
+    } else {
+        root.join(raw_gitdir)
+    };
+    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(raw_common) => {
+            let trimmed = raw_common.trim();
+            if Path::new(trimmed).is_absolute() {
+                PathBuf::from(trimmed)
+            } else {
+                git_dir.join(trimmed)
+            }
+        }
+        Err(_) => git_dir,
+    };
+    let exclude = common_dir.join("info/exclude");
+    exclude.is_file().then_some(exclude)
+}
+
+pub(crate) fn configured_walk_builder(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder.hidden(false);
+    if root.join(".git").is_file() {
+        builder.parents(false).require_git(false);
+        if let Some(exclude) = linked_worktree_info_exclude(root) {
+            let _ = builder.add_ignore(exclude);
+        }
+    }
+    builder
+}
+
 /// Entries outside `.gitignore`, plus each listed directory's ignored entries, which are not
-/// descended into. `.git` is left out.
+/// descended into. `.git` and managed `.tiechui/worktrees` checkouts are left out.
 pub fn tree(root: &Path) -> Result<FileTree> {
+    tree_with_home(None, root)
+}
+
+pub fn tree_with_home(home: Option<&Path>, root: &Path) -> Result<FileTree> {
     let mut entries = Vec::new();
     let mut listed = HashSet::new();
     let mut dirs = vec![root.to_owned()];
-    let walk = WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+    let excluded_wt = excluded_managed_worktrees(home, root);
+    let filter_root = root.to_owned();
+    let filter_wt = excluded_wt.clone();
+    let walk = configured_walk_builder(root)
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !should_skip_workspace_entry(&filter_root, entry.path(), &filter_wt)
+        })
         .build();
     for entry in walk {
         let entry = entry?;
@@ -72,7 +184,7 @@ pub fn tree(root: &Path) -> Result<FileTree> {
         for child in std::fs::read_dir(&dir)? {
             let child = child?;
             let path = child.path();
-            if child.file_name() == ".git" || listed.contains(&path) {
+            if should_skip_workspace_entry(root, &path, &excluded_wt) || listed.contains(&path) {
                 continue;
             }
             if let Some(relative) = relative(root, &path) {
@@ -83,6 +195,11 @@ pub fn tree(root: &Path) -> Result<FileTree> {
                 });
             }
         }
+    }
+    if root.join(".tiechui/worktrees").exists()
+        && !entries.iter().any(|e| e.path.starts_with(".tiechui/"))
+    {
+        entries.retain(|e| e.path != ".tiechui");
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     let truncated = entries.len() >= MAX_ENTRIES;

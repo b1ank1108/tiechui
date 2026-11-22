@@ -8,6 +8,7 @@ mod scratch;
 mod search;
 mod shell;
 mod terminal;
+mod transfer;
 mod watch;
 mod win_path;
 mod worktree;
@@ -21,17 +22,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-pub use fs::{create, delete, list, mkdir, read, rename, tree, write};
+pub use fs::{create, delete, list, mkdir, read, rename, tree, tree_with_home, write};
 pub use git::{
     branches_with_env, commit_diff_with_env, compare_with_env, log_with_env, pull_request_with_env,
     run_with_env, show_with_env, status_with_env,
 };
 pub use scratch::{default_scratch_dir, is_scratch_dir, list_scratch_dirs};
-pub use search::search;
+pub use search::{search, search_with_home};
 use tiechui_protocol::workspace::{
-    PortEntry, PortStopParams, TerminalAttached, TerminalCreateParams, TerminalResizeParams,
-    TerminalShellsResult,
+    DownloadReadParams, DownloadReadResult, DownloadStartResult, PortEntry, PortStopParams,
+    TerminalAttached, TerminalCreateParams, TerminalResizeParams, TerminalShellsResult,
+    UploadFinishResult, UploadStartParams, UploadStartResult, UploadWriteParams, UploadWriteResult,
 };
+pub use transfer::stat_many;
 pub use worktree::{
     CreateWorktreeOptions, create_worktree_with_env, create_worktree_with_options,
     ensure_worktree_checkout, list_worktrees_with_env, managed_worktree_with_env,
@@ -90,6 +93,7 @@ pub struct Workspace {
     watches: Mutex<HashMap<PathBuf, watch::Watch>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Terminal>>>,
     ports: Arc<ports::PortMonitor>,
+    transfers: Arc<transfer::TransferManager>,
 }
 
 impl Workspace {
@@ -103,12 +107,14 @@ impl Workspace {
 
     fn new_inner(home: Option<PathBuf>, sink: Sink) -> Self {
         let ports = ports::PortMonitor::new(home.clone(), sink.clone());
+        let transfers = Arc::new(transfer::TransferManager::new(home.clone()));
         Self {
             home,
             sink,
             watches: Mutex::default(),
             terminals: Mutex::default(),
             ports,
+            transfers,
         }
     }
 
@@ -129,7 +135,7 @@ impl Workspace {
         if !watches.contains_key(root) {
             watches.insert(
                 root.to_owned(),
-                watch::Watch::start(root, self.sink.clone())?,
+                watch::Watch::start(root, self.home.as_deref(), self.sink.clone())?,
             );
         }
         Ok(())
@@ -201,15 +207,64 @@ impl Workspace {
 
     pub fn remove_client(&self, client_id: u64) {
         self.ports.remove_client(client_id);
+        self.transfers.remove_client(client_id);
     }
 
     pub fn stop_port(&self, params: &PortStopParams) -> Result<()> {
         self.ports.stop(params)
     }
 
-    /// Ends every terminal and watcher.
+    pub fn upload_start(
+        &self,
+        client_id: u64,
+        params: &UploadStartParams,
+    ) -> Result<UploadStartResult> {
+        self.transfers
+            .upload_start(client_id, &root(&params.root)?, params)
+    }
+
+    pub fn upload_write(
+        &self,
+        client_id: u64,
+        params: &UploadWriteParams,
+    ) -> Result<UploadWriteResult> {
+        self.transfers.upload_write(client_id, params)
+    }
+
+    pub fn upload_finish(&self, client_id: u64, transfer_id: &str) -> Result<UploadFinishResult> {
+        self.transfers.upload_finish(client_id, transfer_id)
+    }
+
+    pub fn upload_abort(&self, client_id: u64, transfer_id: &str) -> Result<()> {
+        self.transfers.upload_abort(client_id, transfer_id)
+    }
+
+    pub fn download_start(
+        &self,
+        client_id: u64,
+        root_str: &str,
+        path: &str,
+    ) -> Result<DownloadStartResult> {
+        self.transfers
+            .download_start(client_id, &root(root_str)?, path)
+    }
+
+    pub fn download_read(
+        &self,
+        client_id: u64,
+        params: &DownloadReadParams,
+    ) -> Result<DownloadReadResult> {
+        self.transfers.download_read(client_id, params)
+    }
+
+    pub fn download_abort(&self, client_id: u64, transfer_id: &str) -> Result<()> {
+        self.transfers.download_abort(client_id, transfer_id)
+    }
+
+    /// Ends every terminal, transfer and watcher.
     pub fn close(&self) {
         self.ports.close();
+        self.transfers.close();
         lock(&self.watches).clear();
         for (_, terminal) in lock(&self.terminals).drain() {
             terminal.kill();

@@ -198,6 +198,27 @@ pub(crate) fn collect_status_paths(
     Ok((deleted, non_deleted))
 }
 
+fn is_internal_ephemeral_rel(rel: &str) -> bool {
+    let path = Path::new(rel);
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(".tiechui-upload-"))
+    {
+        return true;
+    }
+    let parts: Vec<_> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy()),
+            _ => None,
+        })
+        .collect();
+    parts
+        .windows(2)
+        .any(|w| w[0].eq_ignore_ascii_case(".tiechui") && w[1].eq_ignore_ascii_case("worktrees"))
+}
+
 fn record_status_entry(
     toplevel: &Path,
     status: &str,
@@ -207,6 +228,9 @@ fn record_status_entry(
     deleted: &mut Vec<String>,
     non_deleted: &mut Vec<String>,
 ) -> Result<()> {
+    if is_internal_ephemeral_rel(rel) {
+        return Ok(());
+    }
     match classify_entry(toplevel, status, rel)? {
         EntryState::Skip => {}
         EntryState::Deleted => {

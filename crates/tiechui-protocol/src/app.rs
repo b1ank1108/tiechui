@@ -73,7 +73,8 @@ pub enum LiveState {
     Failed,
 }
 
-/// Managed worktree metadata for a session running inside `$TIECHUI_HOME/worktrees/`.
+/// Managed worktree metadata for a session running inside `<project_root>/.tiechui/worktrees/`
+/// (or a legacy registered checkout under `$TIECHUI_HOME/worktrees/`).
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionWorktree {

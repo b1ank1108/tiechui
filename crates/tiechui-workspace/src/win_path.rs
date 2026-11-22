@@ -126,15 +126,32 @@ pub(crate) fn windows_path_starts_with(candidate_norm: &str, base_norm: &str) ->
     }
 }
 
+fn windows_crosses_worktrees_boundary(ancestor_norm: &str, descendant_norm: &str) -> bool {
+    let rest = if ancestor_norm.ends_with('\\') {
+        descendant_norm.strip_prefix(ancestor_norm)
+    } else {
+        descendant_norm
+            .strip_prefix(ancestor_norm)
+            .and_then(|r| r.strip_prefix('\\'))
+    };
+    let Some(rest) = rest else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('\\').filter(|s| !s.is_empty()).collect();
+    parts
+        .windows(3)
+        .any(|w| w[0] == ".tiechui" && w[1] == "worktrees")
+}
+
 pub(crate) fn classify_windows_overlap(worktree_raw: &str, other_raw: &str) -> Option<PathOverlap> {
     let wt = normalize_windows_path_key(worktree_raw);
     let other = normalize_windows_path_key(other_raw);
     if wt == other {
         Some(PathOverlap::Equal)
     } else if windows_path_starts_with(&wt, &other) {
-        Some(PathOverlap::ContainsWorktree)
+        (!windows_crosses_worktrees_boundary(&other, &wt)).then_some(PathOverlap::ContainsWorktree)
     } else if windows_path_starts_with(&other, &wt) {
-        Some(PathOverlap::InsideWorktree)
+        (!windows_crosses_worktrees_boundary(&wt, &other)).then_some(PathOverlap::InsideWorktree)
     } else {
         None
     }

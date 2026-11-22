@@ -30,7 +30,12 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
 pub(crate) fn canonical(path: &Path) -> Result<PathBuf, ToolError> {
     match path.canonicalize() {
         Ok(path) => Ok(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
             let parent = path.parent().ok_or_else(|| ToolError(error.to_string()))?;
             let name = path
                 .file_name()
