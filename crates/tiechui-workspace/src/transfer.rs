@@ -27,41 +27,31 @@ const UTF8_FILENAME_FLAG: u16 = 0x0800;
 
 pub fn stat_many(root: &Path, paths: &[String]) -> Result<Vec<FileStat>> {
     let canonical_root = canonical_root_dir(root)?;
-    let mut out = Vec::with_capacity(paths.len());
-    for raw in paths {
-        if raw.is_empty() || raw == "." {
-            out.push(FileStat {
-                path: raw.clone(),
-                exists: true,
-                dir: true,
-                size: 0,
-            });
-            continue;
-        }
-        let parts = parse_relative_parts(raw)?;
-        let (parent, leaf) = resolve_parent_no_symlinks(&canonical_root, &parts)?;
-        let target = parent.join(leaf);
-        match fs::symlink_metadata(&target) {
-            Ok(meta) => out.push(FileStat {
-                path: raw.clone(),
-                exists: true,
-                dir: meta.is_dir() && !is_link_or_reparse(&meta),
-                size: if meta.is_file() && !is_link_or_reparse(&meta) {
-                    meta.len()
-                } else {
-                    0
-                },
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => out.push(FileStat {
-                path: raw.clone(),
-                exists: false,
-                dir: false,
-                size: 0,
-            }),
-            Err(err) => return Err(err.into()),
-        }
+    paths
+        .iter()
+        .map(|raw| stat_one(&canonical_root, raw))
+        .collect()
+}
+
+fn stat_one(canonical_root: &Path, raw: &str) -> Result<FileStat> {
+    let mut stat = FileStat {
+        path: raw.to_owned(),
+        exists: true,
+        dir: true,
+        size: 0,
+    };
+    if raw.is_empty() || raw == "." {
+        return Ok(stat);
     }
-    Ok(out)
+    let (parent, leaf) = resolve_parent_no_symlinks(canonical_root, &parse_relative_parts(raw)?)?;
+    let meta = metadata_if_exists(&parent.join(leaf))?;
+    let real = meta.as_ref().filter(|meta| !is_link_or_reparse(meta));
+    stat.exists = meta.is_some();
+    stat.dir = real.is_some_and(|meta| meta.is_dir());
+    stat.size = real
+        .filter(|meta| meta.is_file())
+        .map_or(0, |meta| meta.len());
+    Ok(stat)
 }
 
 struct ActiveUpload {
@@ -83,10 +73,67 @@ impl Drop for ActiveUpload {
     fn drop(&mut self) {
         let _ = self.writer.take();
         if !self.committed {
-            for dir in self.created_dirs.iter().rev() {
-                let _ = fs::remove_dir(dir);
-            }
+            remove_dirs(&self.created_dirs);
         }
+    }
+}
+
+impl ActiveUpload {
+    fn append(&mut self, chunk: &[u8]) -> Result<u64> {
+        let next = self
+            .bytes_written
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| Error("upload size overflow".into()))?;
+        if let Some(expected) = self.expected_size
+            && next > expected
+        {
+            return fail(format!(
+                "upload exceeds declared size ({next} > {expected})"
+            ));
+        }
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| Error("upload stream is closed".into()))?;
+        writer.write_all(chunk)?;
+        self.hasher.update(chunk);
+        self.bytes_written = next;
+        Ok(next)
+    }
+
+    /// Checks the declared size and parent chain, then syncs the temp file to disk.
+    fn seal(&mut self) -> Result<NamedTempFile> {
+        if let Some(expected) = self.expected_size
+            && self.bytes_written != expected
+        {
+            return fail(format!(
+                "upload size mismatch: expected {expected} bytes, received {}",
+                self.bytes_written
+            ));
+        }
+        verify_existing_parents_no_symlinks(&self.canonical_root, &self.parts)?;
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| Error("upload stream is closed".into()))?;
+        let temp_file = writer.into_inner().map_err(|err| err.into_error())?;
+        temp_file.as_file().sync_data()?;
+        Ok(temp_file)
+    }
+
+    fn persist(&mut self, temp_file: NamedTempFile) -> Result<()> {
+        if self.overwrite {
+            clear_overwrite_target(&self.target)?;
+            temp_file
+                .persist(&self.target)
+                .map_err(|err| Error(err.error.to_string()))?;
+        } else {
+            temp_file
+                .persist_noclobber(&self.target)
+                .map_err(|err| Error(format!("{}: {}", self.rel_path, err.error)))?;
+        }
+        self.committed = true;
+        Ok(())
     }
 }
 
@@ -96,6 +143,9 @@ struct ActiveDownload {
     // Declared after `reader` so `reader` closes before `NamedTempFile` unlinks on Windows.
     _temp_archive: Option<NamedTempFile>,
 }
+
+/// Download name, the stream to read from, and the temp archive backing it, if any.
+type DownloadSource = (String, File, Option<NamedTempFile>);
 
 pub(crate) struct TransferManager {
     home: Option<PathBuf>,
@@ -135,41 +185,30 @@ impl TransferManager {
         let parts = parse_relative_parts(&params.path)?;
         let rel_path = normalize_rel_display(&parts)?;
         let (parent, leaf, created_dirs) = ensure_parent_dirs_no_symlinks(&canonical_root, &parts)?;
-        let target = parent.join(&leaf);
-        if !params.overwrite && fs::symlink_metadata(&target).is_ok() {
-            for dir in created_dirs.iter().rev() {
-                let _ = fs::remove_dir(dir);
-            }
-            return fail(format!("{rel_path} already exists"));
-        }
-        let temp_file = match tempfile::Builder::new()
-            .prefix(".tiechui-upload-")
-            .suffix(".part")
-            .tempfile_in(&parent)
-        {
-            Ok(file) => file,
-            Err(err) => {
-                for dir in created_dirs.iter().rev() {
-                    let _ = fs::remove_dir(dir);
-                }
-                return Err(err.into());
-            }
-        };
-        let transfer_id = self.alloc_id("up");
-        let active = ActiveUpload {
+        // Dropping `active` on an early return removes the directories created above.
+        let mut active = ActiveUpload {
             client_id,
             canonical_root,
             parts,
             rel_path,
-            target,
+            target: parent.join(&leaf),
             overwrite: params.overwrite,
             expected_size: params.size,
             bytes_written: 0,
             hasher: Sha256::new(),
-            writer: Some(BufWriter::with_capacity(STREAM_BUF_BYTES, temp_file)),
+            writer: None,
             created_dirs,
             committed: false,
         };
+        if !params.overwrite && fs::symlink_metadata(&active.target).is_ok() {
+            return fail(format!("{} already exists", active.rel_path));
+        }
+        let temp_file = tempfile::Builder::new()
+            .prefix(".tiechui-upload-")
+            .suffix(".part")
+            .tempfile_in(&parent)?;
+        active.writer = Some(BufWriter::with_capacity(STREAM_BUF_BYTES, temp_file));
+        let transfer_id = self.alloc_id("up");
         lock(&self.uploads).insert(transfer_id.clone(), active);
         Ok(UploadStartResult { transfer_id })
     }
@@ -186,33 +225,13 @@ impl TransferManager {
         let Some(entry) = uploads.get_mut(&params.transfer_id) else {
             return fail(format!("unknown upload transfer {}", params.transfer_id));
         };
-        if client_id != 0 && entry.client_id != client_id {
-            return fail("transfer belongs to another client");
-        }
-        let next_bytes = entry
-            .bytes_written
-            .checked_add(chunk.len() as u64)
-            .ok_or_else(|| Error("upload size overflow".into()))?;
-        if let Some(expected) = entry.expected_size
-            && next_bytes > expected
-        {
+        check_owner(entry.client_id, client_id)?;
+        let written = entry.append(&chunk);
+        if written.is_err() {
             uploads.remove(&params.transfer_id);
-            return fail(format!(
-                "upload exceeds declared size ({next_bytes} > {expected})"
-            ));
         }
-        let Some(writer) = entry.writer.as_mut() else {
-            uploads.remove(&params.transfer_id);
-            return fail("upload stream is closed");
-        };
-        if let Err(err) = writer.write_all(&chunk) {
-            uploads.remove(&params.transfer_id);
-            return Err(err.into());
-        }
-        entry.hasher.update(&chunk);
-        entry.bytes_written = next_bytes;
         Ok(UploadWriteResult {
-            bytes_written: next_bytes,
+            bytes_written: written?,
         })
     }
 
@@ -226,61 +245,24 @@ impl TransferManager {
             let Some(entry) = uploads.get(transfer_id) else {
                 return fail(format!("unknown upload transfer {transfer_id}"));
             };
-            if client_id != 0 && entry.client_id != client_id {
-                return fail("transfer belongs to another client");
-            }
+            check_owner(entry.client_id, client_id)?;
             uploads
                 .remove(transfer_id)
                 .ok_or_else(|| Error(format!("unknown upload transfer {transfer_id}")))?
         };
-        if let Some(expected) = active.expected_size
-            && active.bytes_written != expected
-        {
-            return fail(format!(
-                "upload size mismatch: expected {expected} bytes, received {}",
-                active.bytes_written
-            ));
-        }
-        verify_existing_parents_no_symlinks(&active.canonical_root, &active.parts)?;
-        let mut writer = active
-            .writer
-            .take()
-            .ok_or_else(|| Error("upload stream is closed".into()))?;
-        writer.flush()?;
-        let temp_file = writer.into_inner().map_err(|err| err.into_error())?;
-        temp_file.as_file().sync_data()?;
-
-        if active.overwrite {
-            if let Ok(meta) = fs::symlink_metadata(&active.target) {
-                if meta.is_dir() && !is_link_or_reparse(&meta) {
-                    remove_worktree_dir_safely(&active.target)?;
-                } else {
-                    clear_readonly(&active.target, &meta);
-                }
-            }
-            temp_file
-                .persist(&active.target)
-                .map_err(|err| Error(err.error.to_string()))?;
-        } else {
-            temp_file
-                .persist_noclobber(&active.target)
-                .map_err(|err| Error(format!("{}: {}", active.rel_path, err.error)))?;
-        }
-        active.committed = true;
-        let sha256 = format!("{:x}", active.hasher.clone().finalize());
+        let temp_file = active.seal()?;
+        active.persist(temp_file)?;
         Ok(UploadFinishResult {
             path: active.rel_path.clone(),
             size: active.bytes_written,
-            sha256,
+            sha256: format!("{:x}", active.hasher.clone().finalize()),
         })
     }
 
     pub(crate) fn upload_abort(&self, client_id: u64, transfer_id: &str) -> Result<()> {
         let mut uploads = lock(&self.uploads);
         if let Some(entry) = uploads.get(transfer_id) {
-            if client_id != 0 && entry.client_id != client_id {
-                return fail("transfer belongs to another client");
-            }
+            check_owner(entry.client_id, client_id)?;
             uploads.remove(transfer_id);
         }
         Ok(())
@@ -293,74 +275,55 @@ impl TransferManager {
         path: &str,
     ) -> Result<DownloadStartResult> {
         let canonical_root = canonical_root_dir(root)?;
-        let target = if path.is_empty() || path == "." {
-            canonical_root.clone()
-        } else {
-            let parts = parse_relative_parts(path)?;
-            resolve_existing_no_symlinks(&canonical_root, &parts)?
-        };
-        let meta = fs::symlink_metadata(&target)?;
-        if is_link_or_reparse(&meta) {
-            return fail("symlink download is not allowed");
-        }
+        let (target, meta) = resolve_download_target(&canonical_root, path)?;
         let transfer_id = self.alloc_id("dl");
-        if meta.is_file() {
-            let name = target
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| Error("invalid file name".into()))?
-                .to_owned();
-            let file = File::open(&target)?;
-            let total_bytes = file.metadata()?.len();
-            lock(&self.downloads).insert(
-                transfer_id.clone(),
-                ActiveDownload {
-                    client_id,
-                    reader: BufReader::with_capacity(STREAM_BUF_BYTES, file),
-                    _temp_archive: None,
-                },
-            );
-            return Ok(DownloadStartResult {
-                transfer_id,
-                name,
-                archive: false,
-                total_bytes,
-            });
-        }
-        if !meta.is_dir() {
-            return fail(format!("{} is not a regular file or directory", path));
-        }
-
-        let dir_label = target
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("workspace");
-        let archive_name = format!("{dir_label}.zip");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        lock(&self.inflight_zips).insert(transfer_id.clone(), (client_id, cancelled.clone()));
-        let built = build_directory_zip(self.home.as_deref(), &canonical_root, &target, &cancelled);
-        lock(&self.inflight_zips).remove(&transfer_id);
-        let (temp_archive, total_bytes) = built?;
-        if cancelled.load(Ordering::Relaxed) {
-            return fail("download cancelled");
-        }
-        let mut reader_file = temp_archive.as_file().try_clone()?;
-        reader_file.seek(SeekFrom::Start(0))?;
+        let (name, file, temp_archive) = if meta.is_file() {
+            open_file_download(&target)?
+        } else if meta.is_dir() {
+            self.zip_for_download(client_id, &transfer_id, &canonical_root, &target)?
+        } else {
+            return fail(format!("{path} is not a regular file or directory"));
+        };
+        let total_bytes = file.metadata()?.len();
+        let archive = temp_archive.is_some();
         lock(&self.downloads).insert(
             transfer_id.clone(),
             ActiveDownload {
                 client_id,
-                reader: BufReader::with_capacity(STREAM_BUF_BYTES, reader_file),
-                _temp_archive: Some(temp_archive),
+                reader: BufReader::with_capacity(STREAM_BUF_BYTES, file),
+                _temp_archive: temp_archive,
             },
         );
         Ok(DownloadStartResult {
             transfer_id,
-            name: archive_name,
-            archive: true,
+            name,
+            archive,
             total_bytes,
         })
+    }
+
+    /// Builds the archive while `download_abort` can still cancel it through `inflight_zips`.
+    fn zip_for_download(
+        &self,
+        client_id: u64,
+        transfer_id: &str,
+        canonical_root: &Path,
+        target: &Path,
+    ) -> Result<DownloadSource> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        lock(&self.inflight_zips).insert(transfer_id.to_owned(), (client_id, cancelled.clone()));
+        let built = build_directory_zip(self.home.as_deref(), canonical_root, target, &cancelled);
+        lock(&self.inflight_zips).remove(transfer_id);
+        let temp_archive = built?;
+        ensure_not_cancelled(&cancelled)?;
+        let mut file = temp_archive.as_file().try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let label = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("workspace");
+        Ok((format!("{label}.zip"), file, Some(temp_archive)))
     }
 
     pub(crate) fn download_read(
@@ -376,38 +339,15 @@ impl TransferManager {
         let Some(entry) = downloads.get_mut(&params.transfer_id) else {
             return fail(format!("unknown download transfer {}", params.transfer_id));
         };
-        if client_id != 0 && entry.client_id != client_id {
-            return fail("transfer belongs to another client");
-        }
-        let mut buf = vec![0_u8; chunk_cap];
-        let mut filled = 0_usize;
-        while filled < chunk_cap {
-            match entry.reader.read(&mut buf[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(err) => {
-                    downloads.remove(&params.transfer_id);
-                    return Err(err.into());
-                }
-            }
-        }
-        buf.truncate(filled);
-        let eof = if filled < chunk_cap {
-            true
-        } else {
-            entry
-                .reader
-                .fill_buf()
-                .map(|b| b.is_empty())
-                .unwrap_or(false)
-        };
-        if eof {
+        check_owner(entry.client_id, client_id)?;
+        let read = read_chunk(&mut entry.reader, chunk_cap);
+        if !matches!(read, Ok((_, false))) {
             downloads.remove(&params.transfer_id);
         }
+        let (data, eof) = read?;
         Ok(DownloadReadResult {
-            data: STANDARD.encode(&buf),
-            bytes_read: filled as u32,
+            bytes_read: data.len() as u32,
+            data: STANDARD.encode(&data),
             eof,
         })
     }
@@ -420,9 +360,7 @@ impl TransferManager {
         }
         let mut downloads = lock(&self.downloads);
         if let Some(entry) = downloads.get(transfer_id) {
-            if client_id != 0 && entry.client_id != client_id {
-                return fail("transfer belongs to another client");
-            }
+            check_owner(entry.client_id, client_id)?;
             downloads.remove(transfer_id);
         }
         Ok(())
@@ -450,6 +388,60 @@ impl TransferManager {
     }
 }
 
+fn check_owner(owner: u64, client_id: u64) -> Result<()> {
+    if client_id != 0 && owner != client_id {
+        return fail("transfer belongs to another client");
+    }
+    Ok(())
+}
+
+fn ensure_not_cancelled(cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        return fail("download cancelled");
+    }
+    Ok(())
+}
+
+/// Reads up to `cap` bytes; the flag is set once the reader has nothing left.
+fn read_chunk(reader: &mut BufReader<File>, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::with_capacity(cap);
+    reader.by_ref().take(cap as u64).read_to_end(&mut buf)?;
+    let eof = buf.len() < cap || reader.fill_buf().map(|b| b.is_empty()).unwrap_or(false);
+    Ok((buf, eof))
+}
+
+fn resolve_download_target(canonical_root: &Path, path: &str) -> Result<(PathBuf, fs::Metadata)> {
+    let target = if path.is_empty() || path == "." {
+        canonical_root.to_path_buf()
+    } else {
+        resolve_existing_no_symlinks(canonical_root, &parse_relative_parts(path)?)?
+    };
+    let meta = fs::symlink_metadata(&target)?;
+    if is_link_or_reparse(&meta) {
+        return fail("symlink download is not allowed");
+    }
+    Ok((target, meta))
+}
+
+fn open_file_download(target: &Path) -> Result<DownloadSource> {
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error("invalid file name".into()))?;
+    Ok((name.to_owned(), File::open(target)?, None))
+}
+
+fn clear_overwrite_target(target: &Path) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(target) {
+        if meta.is_dir() && !is_link_or_reparse(&meta) {
+            remove_worktree_dir_safely(target)?;
+        } else {
+            clear_readonly(target, &meta);
+        }
+    }
+    Ok(())
+}
+
 fn canonical_root_dir(root: &Path) -> Result<PathBuf> {
     if !root.is_absolute() {
         return fail(format!("{} is not an absolute path", root.display()));
@@ -462,23 +454,18 @@ fn canonical_root_dir(root: &Path) -> Result<PathBuf> {
 }
 
 fn parse_relative_parts(raw: &str) -> Result<Vec<OsString>> {
-    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('\\') {
-        return fail(format!("{raw} is not a relative path inside the project"));
-    }
     let normalized = raw.replace('\\', "/");
-    let mut parts = Vec::new();
-    for comp in Path::new(&normalized).components() {
-        match comp {
-            Component::Normal(part) if part != "." && part != ".." && !part.is_empty() => {
-                parts.push(part.to_owned());
-            }
-            _ => return fail(format!("{raw} is not a relative path inside the project")),
-        }
+    let parts: Option<Vec<OsString>> = Path::new(&normalized)
+        .components()
+        .map(|comp| match comp {
+            Component::Normal(part) => Some(part.to_owned()),
+            _ => None,
+        })
+        .collect();
+    match parts {
+        Some(parts) if !parts.is_empty() => Ok(parts),
+        _ => fail(format!("{raw} is not a relative path inside the project")),
     }
-    if parts.is_empty() {
-        return fail(format!("{raw} is not a relative path inside the project"));
-    }
-    Ok(parts)
 }
 
 fn normalize_rel_display(parts: &[OsString]) -> Result<String> {
@@ -502,18 +489,7 @@ fn resolve_parent_no_symlinks(
     let mut cur = canonical_root.to_path_buf();
     for part in parents {
         cur.push(part);
-        match fs::symlink_metadata(&cur) {
-            Ok(meta) => {
-                if is_link_or_reparse(&meta) {
-                    return fail("symlink traversal is not allowed");
-                }
-                if !meta.is_dir() {
-                    return fail(format!("{} is not a directory", cur.display()));
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
+        existing_real_dir(&cur)?;
     }
     Ok((cur, leaf.clone()))
 }
@@ -529,39 +505,48 @@ fn ensure_parent_dirs_no_symlinks(
     let mut created = Vec::new();
     for part in parents {
         cur.push(part);
-        match fs::symlink_metadata(&cur) {
-            Ok(meta) => {
-                if is_link_or_reparse(&meta) {
-                    for dir in created.iter().rev() {
-                        let _ = fs::remove_dir(dir);
-                    }
-                    return fail("symlink traversal is not allowed");
-                }
-                if !meta.is_dir() {
-                    for dir in created.iter().rev() {
-                        let _ = fs::remove_dir(dir);
-                    }
-                    return fail(format!("{} is not a directory", cur.display()));
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                if let Err(create_err) = fs::create_dir(&cur) {
-                    for dir in created.iter().rev() {
-                        let _ = fs::remove_dir(dir);
-                    }
-                    return Err(create_err.into());
-                }
-                created.push(cur.clone());
-            }
-            Err(err) => {
-                for dir in created.iter().rev() {
-                    let _ = fs::remove_dir(dir);
-                }
-                return Err(err.into());
-            }
+        if let Err(err) = create_missing_dir(&cur, &mut created) {
+            remove_dirs(&created);
+            return Err(err);
         }
     }
     Ok((cur, leaf.clone(), created))
+}
+
+fn create_missing_dir(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    if !existing_real_dir(dir)? {
+        fs::create_dir(dir)?;
+        created.push(dir.to_path_buf());
+    }
+    Ok(())
+}
+
+fn remove_dirs(dirs: &[PathBuf]) {
+    for dir in dirs.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
+/// Whether `dir` exists; an existing entry must be a real directory.
+fn existing_real_dir(dir: &Path) -> Result<bool> {
+    let Some(meta) = metadata_if_exists(dir)? else {
+        return Ok(false);
+    };
+    if is_link_or_reparse(&meta) {
+        return fail("symlink traversal is not allowed");
+    }
+    if !meta.is_dir() {
+        return fail(format!("{} is not a directory", dir.display()));
+    }
+    Ok(true)
+}
+
+fn metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn verify_existing_parents_no_symlinks(canonical_root: &Path, parts: &[OsString]) -> Result<()> {
@@ -611,23 +596,21 @@ fn build_directory_zip(
     canonical_root: &Path,
     target_dir: &Path,
     cancelled: &AtomicBool,
-) -> Result<(NamedTempFile, u64)> {
+) -> Result<NamedTempFile> {
     let excluded_wt = crate::fs::excluded_managed_worktrees(home, canonical_root);
     let mut temp = create_zip_tempfile(home)?;
-    let mut entries = Vec::new();
-    collect_and_write_zip_dir(
+    let mut zip = ZipBuilder {
         canonical_root,
-        target_dir,
-        target_dir,
-        &excluded_wt,
+        base: target_dir,
+        excluded_wt: &excluded_wt,
         cancelled,
-        temp.as_file_mut(),
-        &mut entries,
-    )?;
-    write_central_directory(temp.as_file_mut(), &entries)?;
+        out: temp.as_file_mut(),
+        entries: Vec::new(),
+    };
+    zip.add_dir(target_dir)?;
+    write_central_directory(zip.out, &zip.entries)?;
     temp.as_file_mut().flush()?;
-    let total_bytes = temp.as_file().metadata()?.len();
-    Ok((temp, total_bytes))
+    Ok(temp)
 }
 
 fn create_zip_tempfile(home: Option<&Path>) -> Result<NamedTempFile> {
@@ -649,70 +632,111 @@ fn create_zip_tempfile(home: Option<&Path>) -> Result<NamedTempFile> {
     fail("failed to create temporary archive file")
 }
 
-fn collect_and_write_zip_dir(
-    canonical_root: &Path,
-    archive_base: &Path,
-    current_dir: &Path,
-    excluded_wt: &[PathBuf],
-    cancelled: &AtomicBool,
-    out: &mut File,
-    entries: &mut Vec<ZipEntryMeta>,
-) -> Result<bool> {
-    if cancelled.load(Ordering::Relaxed) {
-        return fail("download cancelled");
+struct ZipBuilder<'a> {
+    canonical_root: &'a Path,
+    base: &'a Path,
+    excluded_wt: &'a [PathBuf],
+    cancelled: &'a AtomicBool,
+    out: &'a mut File,
+    entries: Vec<ZipEntryMeta>,
+}
+
+impl ZipBuilder<'_> {
+    /// Writes the entries under `dir`; returns whether any were written.
+    fn add_dir(&mut self, dir: &Path) -> Result<bool> {
+        ensure_not_cancelled(self.cancelled)?;
+        let mut emitted = false;
+        for (path, meta) in list_zip_children(self.canonical_root, dir, self.excluded_wt)? {
+            ensure_not_cancelled(self.cancelled)?;
+            emitted |= self.add_child(&path, &meta)?;
+        }
+        Ok(emitted)
     }
+
+    fn add_child(&mut self, path: &Path, meta: &fs::Metadata) -> Result<bool> {
+        if meta.is_file() {
+            let name = zip_rel_name(self.base, path, false)?;
+            self.add_file(path, &name, meta)?;
+            return Ok(true);
+        }
+        Ok(meta.is_dir() && self.add_subdir(path, meta)?)
+    }
+
+    /// Empty directories keep an entry, except a `.tiechui` that only held managed worktrees.
+    fn add_subdir(&mut self, path: &Path, meta: &fs::Metadata) -> Result<bool> {
+        if self.add_dir(path)? {
+            return Ok(true);
+        }
+        if crate::fs::is_worktrees_holder(self.canonical_root, path) {
+            return Ok(false);
+        }
+        let name = zip_rel_name(self.base, path, true)?;
+        let local_header_offset = archive_offset(self.out)?;
+        let (dos_time, dos_date) = dos_datetime(meta);
+        self.out
+            .write_all(&local_header(&name, 0, dos_time, dos_date))?;
+        self.entries.push(ZipEntryMeta {
+            name,
+            method: 0,
+            dos_time,
+            dos_date,
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            local_header_offset,
+            external_attrs: (0o040755_u32 << 16) | 0x10,
+        });
+        Ok(true)
+    }
+
+    fn add_file(&mut self, path: &Path, name: &str, meta: &fs::Metadata) -> Result<()> {
+        let local_header_offset = archive_offset(self.out)?;
+        let (dos_time, dos_date) = dos_datetime(meta);
+        let method: u16 = if meta.len() == 0 { 0 } else { 8 };
+        self.out
+            .write_all(&local_header(name, method, dos_time, dos_date))?;
+        let (crc32, uncompressed, compressed) =
+            write_entry_data(self.out, path, method == 8, self.cancelled)?;
+        let too_large = || Error(format!("{name} exceeds 4 GiB ZIP entry limit"));
+        let compressed_size = u32::try_from(compressed).map_err(|_| too_large())?;
+        let uncompressed_size = u32::try_from(uncompressed).map_err(|_| too_large())?;
+        backfill_local_header(
+            self.out,
+            local_header_offset,
+            [crc32, compressed_size, uncompressed_size],
+        )?;
+        self.entries.push(ZipEntryMeta {
+            name: name.to_owned(),
+            method,
+            dos_time,
+            dos_date,
+            crc32,
+            compressed_size,
+            uncompressed_size,
+            local_header_offset,
+            external_attrs: file_external_attrs(meta),
+        });
+        Ok(())
+    }
+}
+
+fn list_zip_children(
+    canonical_root: &Path,
+    dir: &Path,
+    excluded_wt: &[PathBuf],
+) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     let mut children = Vec::new();
-    for item in fs::read_dir(current_dir)? {
-        let item = item?;
-        let path = item.path();
+    for item in fs::read_dir(dir)? {
+        let path = item?.path();
         if crate::fs::should_skip_workspace_entry(canonical_root, &path, excluded_wt) {
             continue;
         }
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if is_link_or_reparse(&meta) {
-            continue;
+        if let Some(meta) = metadata_if_exists(&path)?.filter(|meta| !is_link_or_reparse(meta)) {
+            children.push((path, meta));
         }
-        children.push((path, meta));
     }
     children.sort_by(|(a, _), (b, _)| a.file_name().cmp(&b.file_name()));
-
-    let mut emitted_any = false;
-    for (path, meta) in children {
-        if cancelled.load(Ordering::Relaxed) {
-            return fail("download cancelled");
-        }
-        if meta.is_dir() {
-            let child_emitted = collect_and_write_zip_dir(
-                canonical_root,
-                archive_base,
-                &path,
-                excluded_wt,
-                cancelled,
-                out,
-                entries,
-            )?;
-            if child_emitted {
-                emitted_any = true;
-            } else if !is_worktrees_only_dot_tiechui(canonical_root, &path) {
-                let rel = zip_rel_name(archive_base, &path, true)?;
-                write_zip_dir_entry(out, &rel, &meta, entries)?;
-                emitted_any = true;
-            }
-        } else if meta.is_file() {
-            let rel = zip_rel_name(archive_base, &path, false)?;
-            write_zip_file_entry(out, &path, &rel, &meta, cancelled, entries)?;
-            emitted_any = true;
-        }
-    }
-    Ok(emitted_any)
-}
-
-fn is_worktrees_only_dot_tiechui(canonical_root: &Path, dir: &Path) -> bool {
-    dir == canonical_root.join(".tiechui") && dir.join("worktrees").exists()
+    Ok(children)
 }
 
 fn zip_rel_name(base: &Path, path: &Path, is_dir: bool) -> Result<String> {
@@ -741,168 +765,117 @@ fn zip_rel_name(base: &Path, path: &Path, is_dir: bool) -> Result<String> {
     Ok(joined)
 }
 
-fn write_zip_dir_entry(
-    out: &mut File,
-    name: &str,
-    meta: &fs::Metadata,
-    entries: &mut Vec<ZipEntryMeta>,
-) -> Result<()> {
-    let local_offset = u32::try_from(out.stream_position()?)
-        .map_err(|_| Error("archive exceeds 4 GiB ZIP limit".into()))?;
-    let (dos_time, dos_date) = dos_datetime(meta);
-    write_local_header(out, name, 0, dos_time, dos_date)?;
-    entries.push(ZipEntryMeta {
-        name: name.to_owned(),
-        method: 0,
-        dos_time,
-        dos_date,
-        crc32: 0,
-        compressed_size: 0,
-        uncompressed_size: 0,
-        local_header_offset: local_offset,
-        external_attrs: (0o040755_u32 << 16) | 0x10,
-    });
-    Ok(())
+fn archive_offset(out: &mut File) -> Result<u32> {
+    u32::try_from(out.stream_position()?)
+        .map_err(|_| Error("archive exceeds 4 GiB ZIP limit".into()))
 }
 
-fn write_zip_file_entry(
+/// Streams `path` into `out`, deflated or stored; returns its CRC-32, source size and written size.
+fn write_entry_data(
     out: &mut File,
     path: &Path,
-    name: &str,
-    meta: &fs::Metadata,
+    deflate: bool,
     cancelled: &AtomicBool,
-    entries: &mut Vec<ZipEntryMeta>,
-) -> Result<()> {
-    let local_offset = u32::try_from(out.stream_position()?)
-        .map_err(|_| Error("archive exceeds 4 GiB ZIP limit".into()))?;
-    let (dos_time, dos_date) = dos_datetime(meta);
-    let method: u16 = if meta.len() == 0 { 0 } else { 8 };
-    write_local_header(out, name, method, dos_time, dos_date)?;
-
-    let data_start = out.stream_position()?;
+) -> Result<(u32, u64, u64)> {
+    let start = out.stream_position()?;
     let mut src = File::open(path)?;
-    let mut crc_hasher = crc32fast::Hasher::new();
-    let mut uncompressed: u64 = 0;
-    let mut buf = [0_u8; STREAM_BUF_BYTES];
-
-    if method == 8 {
+    let (crc32, size) = if deflate {
         let mut encoder = DeflateEncoder::new(&mut *out, Compression::fast());
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                return fail("download cancelled");
-            }
-            let n = src.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            crc_hasher.update(&buf[..n]);
-            encoder.write_all(&buf[..n])?;
-            uncompressed = uncompressed
-                .checked_add(n as u64)
-                .ok_or_else(|| Error("file size overflow".into()))?;
-        }
+        let sums = copy_with_crc(&mut src, &mut encoder, cancelled)?;
         encoder.finish()?;
+        sums
     } else {
+        copy_with_crc(&mut src, out, cancelled)?
+    };
+    Ok((crc32, size, out.stream_position()?.saturating_sub(start)))
+}
+
+fn copy_with_crc(
+    src: &mut File,
+    dst: &mut impl Write,
+    cancelled: &AtomicBool,
+) -> Result<(u32, u64)> {
+    let mut crc = crc32fast::Hasher::new();
+    let mut size: u64 = 0;
+    let mut buf = [0_u8; STREAM_BUF_BYTES];
+    loop {
+        ensure_not_cancelled(cancelled)?;
         let n = src.read(&mut buf)?;
-        if n > 0 {
-            crc_hasher.update(&buf[..n]);
-            out.write_all(&buf[..n])?;
-            uncompressed = n as u64;
+        if n == 0 {
+            return Ok((crc.finalize(), size));
         }
+        crc.update(&buf[..n]);
+        dst.write_all(&buf[..n])?;
+        size = size
+            .checked_add(n as u64)
+            .ok_or_else(|| Error("file size overflow".into()))?;
     }
+}
 
-    let data_end = out.stream_position()?;
-    let compressed_u64 = data_end.saturating_sub(data_start);
-    let crc32 = crc_hasher.finalize();
-    let compressed_size = u32::try_from(compressed_u64)
-        .map_err(|_| Error(format!("{name} exceeds 4 GiB ZIP entry limit")))?;
-    let uncompressed_size = u32::try_from(uncompressed)
-        .map_err(|_| Error(format!("{name} exceeds 4 GiB ZIP entry limit")))?;
-
-    out.seek(SeekFrom::Start(u64::from(local_offset) + 14))?;
-    out.write_all(&crc32.to_le_bytes())?;
-    out.write_all(&compressed_size.to_le_bytes())?;
-    out.write_all(&uncompressed_size.to_le_bytes())?;
-    out.seek(SeekFrom::Start(data_end))?;
-
-    entries.push(ZipEntryMeta {
-        name: name.to_owned(),
-        method,
-        dos_time,
-        dos_date,
-        crc32,
-        compressed_size,
-        uncompressed_size,
-        local_header_offset: local_offset,
-        external_attrs: file_external_attrs(meta),
-    });
+/// Fills CRC-32, compressed and uncompressed sizes into the local header at `offset`.
+fn backfill_local_header(out: &mut File, offset: u32, fields: [u32; 3]) -> Result<()> {
+    let end = out.stream_position()?;
+    out.seek(SeekFrom::Start(u64::from(offset) + 14))?;
+    out.write_all(&fields.map(u32::to_le_bytes).concat())?;
+    out.seek(SeekFrom::Start(end))?;
     Ok(())
 }
 
-fn write_local_header(
-    out: &mut File,
-    name: &str,
-    method: u16,
-    dos_time: u16,
-    dos_date: u16,
-) -> Result<()> {
-    let name_bytes = name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    out.write_all(&0x04034b50_u32.to_le_bytes())?;
-    out.write_all(&20_u16.to_le_bytes())?;
-    out.write_all(&UTF8_FILENAME_FLAG.to_le_bytes())?;
-    out.write_all(&method.to_le_bytes())?;
-    out.write_all(&dos_time.to_le_bytes())?;
-    out.write_all(&dos_date.to_le_bytes())?;
-    out.write_all(&[0_u8; 12])?;
-    out.write_all(&name_len.to_le_bytes())?;
-    out.write_all(&0_u16.to_le_bytes())?;
-    out.write_all(name_bytes)?;
-    Ok(())
+fn local_header(name: &str, method: u16, dos_time: u16, dos_date: u16) -> Vec<u8> {
+    let mut header = Vec::with_capacity(30 + name.len());
+    let mut put = |bytes: &[u8]| header.extend_from_slice(bytes);
+    put(&0x04034b50_u32.to_le_bytes());
+    put(&20_u16.to_le_bytes());
+    put(&UTF8_FILENAME_FLAG.to_le_bytes());
+    put(&method.to_le_bytes());
+    put(&dos_time.to_le_bytes());
+    put(&dos_date.to_le_bytes());
+    put(&[0_u8; 12]);
+    put(&(name.len() as u16).to_le_bytes());
+    put(&0_u16.to_le_bytes());
+    put(name.as_bytes());
+    header
+}
+
+fn central_record(item: &ZipEntryMeta) -> Vec<u8> {
+    let mut record = Vec::with_capacity(46 + item.name.len());
+    let mut put = |bytes: &[u8]| record.extend_from_slice(bytes);
+    put(&0x02014b50_u32.to_le_bytes());
+    put(&((3_u16 << 8) | 20).to_le_bytes());
+    put(&20_u16.to_le_bytes());
+    put(&UTF8_FILENAME_FLAG.to_le_bytes());
+    put(&item.method.to_le_bytes());
+    put(&item.dos_time.to_le_bytes());
+    put(&item.dos_date.to_le_bytes());
+    put(&item.crc32.to_le_bytes());
+    put(&item.compressed_size.to_le_bytes());
+    put(&item.uncompressed_size.to_le_bytes());
+    put(&(item.name.len() as u16).to_le_bytes());
+    put(&[0_u8; 8]);
+    put(&item.external_attrs.to_le_bytes());
+    put(&item.local_header_offset.to_le_bytes());
+    put(item.name.as_bytes());
+    record
 }
 
 fn write_central_directory(out: &mut File, entries: &[ZipEntryMeta]) -> Result<()> {
     let count = u16::try_from(entries.len())
         .map_err(|_| Error("directory exceeds 65535 ZIP entries limit".into()))?;
-    let cd_offset_u64 = out.stream_position()?;
-    let cd_offset = u32::try_from(cd_offset_u64)
-        .map_err(|_| Error("archive exceeds 4 GiB ZIP limit".into()))?;
-
-    for item in entries {
-        let name_bytes = item.name.as_bytes();
-        let name_len = name_bytes.len() as u16;
-        out.write_all(&0x02014b50_u32.to_le_bytes())?;
-        out.write_all(&((3_u16 << 8) | 20).to_le_bytes())?;
-        out.write_all(&20_u16.to_le_bytes())?;
-        out.write_all(&UTF8_FILENAME_FLAG.to_le_bytes())?;
-        out.write_all(&item.method.to_le_bytes())?;
-        out.write_all(&item.dos_time.to_le_bytes())?;
-        out.write_all(&item.dos_date.to_le_bytes())?;
-        out.write_all(&item.crc32.to_le_bytes())?;
-        out.write_all(&item.compressed_size.to_le_bytes())?;
-        out.write_all(&item.uncompressed_size.to_le_bytes())?;
-        out.write_all(&name_len.to_le_bytes())?;
-        out.write_all(&0_u16.to_le_bytes())?;
-        out.write_all(&0_u16.to_le_bytes())?;
-        out.write_all(&0_u16.to_le_bytes())?;
-        out.write_all(&0_u16.to_le_bytes())?;
-        out.write_all(&item.external_attrs.to_le_bytes())?;
-        out.write_all(&item.local_header_offset.to_le_bytes())?;
-        out.write_all(name_bytes)?;
-    }
-
-    let cd_end = out.stream_position()?;
-    let cd_size = u32::try_from(cd_end.saturating_sub(cd_offset_u64))
+    let cd_offset = archive_offset(out)?;
+    let central: Vec<u8> = entries.iter().flat_map(central_record).collect();
+    let cd_size = u32::try_from(central.len())
         .map_err(|_| Error("central directory exceeds 4 GiB ZIP limit".into()))?;
-
-    out.write_all(&0x06054b50_u32.to_le_bytes())?;
-    out.write_all(&0_u16.to_le_bytes())?;
-    out.write_all(&0_u16.to_le_bytes())?;
-    out.write_all(&count.to_le_bytes())?;
-    out.write_all(&count.to_le_bytes())?;
-    out.write_all(&cd_size.to_le_bytes())?;
-    out.write_all(&cd_offset.to_le_bytes())?;
-    out.write_all(&0_u16.to_le_bytes())?;
+    let mut end = Vec::with_capacity(22);
+    let mut put = |bytes: &[u8]| end.extend_from_slice(bytes);
+    put(&0x06054b50_u32.to_le_bytes());
+    put(&[0_u8; 4]);
+    put(&count.to_le_bytes());
+    put(&count.to_le_bytes());
+    put(&cd_size.to_le_bytes());
+    put(&cd_offset.to_le_bytes());
+    put(&0_u16.to_le_bytes());
+    out.write_all(&central)?;
+    out.write_all(&end)?;
     Ok(())
 }
 

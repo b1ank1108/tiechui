@@ -130,7 +130,12 @@ pub(crate) fn linked_worktree_info_exclude(root: &Path) -> Option<PathBuf> {
     exclude.is_file().then_some(exclude)
 }
 
-pub(crate) fn configured_walk_builder(root: &Path) -> WalkBuilder {
+pub(crate) fn is_worktrees_holder(root: &Path, path: &Path) -> bool {
+    path == root.join(".tiechui") && path.join("worktrees").exists()
+}
+
+/// Walks `root` without the entries `should_skip_workspace_entry` hides.
+pub(crate) fn workspace_walk(root: &Path, excluded_wt: &[PathBuf]) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
     builder.hidden(false);
     if root.join(".git").is_file() {
@@ -139,6 +144,11 @@ pub(crate) fn configured_walk_builder(root: &Path) -> WalkBuilder {
             let _ = builder.add_ignore(exclude);
         }
     }
+    let filter_root = root.to_owned();
+    let filter_wt = excluded_wt.to_vec();
+    builder.filter_entry(move |entry| {
+        entry.depth() == 0 || !should_skip_workspace_entry(&filter_root, entry.path(), &filter_wt)
+    });
     builder
 }
 
@@ -153,14 +163,7 @@ pub fn tree_with_home(home: Option<&Path>, root: &Path) -> Result<FileTree> {
     let mut listed = HashSet::new();
     let mut dirs = vec![root.to_owned()];
     let excluded_wt = excluded_managed_worktrees(home, root);
-    let filter_root = root.to_owned();
-    let filter_wt = excluded_wt.clone();
-    let walk = configured_walk_builder(root)
-        .filter_entry(move |entry| {
-            entry.depth() == 0
-                || !should_skip_workspace_entry(&filter_root, entry.path(), &filter_wt)
-        })
-        .build();
+    let walk = workspace_walk(root, &excluded_wt).build();
     for entry in walk {
         let entry = entry?;
         let Some(path) = relative(root, entry.path()) else {
@@ -196,15 +199,19 @@ pub fn tree_with_home(home: Option<&Path>, root: &Path) -> Result<FileTree> {
             }
         }
     }
-    if root.join(".tiechui/worktrees").exists()
-        && !entries.iter().any(|e| e.path.starts_with(".tiechui/"))
-    {
-        entries.retain(|e| e.path != ".tiechui");
-    }
+    hide_worktrees_holder(root, &mut entries);
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     let truncated = entries.len() >= MAX_ENTRIES;
     entries.truncate(MAX_ENTRIES);
     Ok(FileTree { entries, truncated })
+}
+
+fn hide_worktrees_holder(root: &Path, entries: &mut Vec<FileEntry>) {
+    if is_worktrees_holder(root, &root.join(".tiechui"))
+        && !entries.iter().any(|e| e.path.starts_with(".tiechui/"))
+    {
+        entries.retain(|e| e.path != ".tiechui");
+    }
 }
 
 /// The entries of a directory inside an ignored one, all ignored.

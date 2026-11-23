@@ -433,13 +433,7 @@ fn recheckout_locked(
     if !branch_exists(project_root, &record.branch, env) {
         return Ok(Some(project_root.to_path_buf()));
     }
-    let proj_resolved = resolve_existing_prefix(project_root);
-    let wt_resolved = resolve_existing_prefix(wt_path);
-    if crate::win_path::path_starts_with(&wt_resolved, &proj_resolved)
-        && let Ok(common_dir) = git_common_dir(project_root, env)
-    {
-        ensure_git_info_exclude(&common_dir)?;
-    }
+    exclude_in_project_worktree(project_root, wt_path, env)?;
     if let Some(bucket) = wt_path.parent() {
         ensure_private_dirs(home, bucket)?;
     }
@@ -451,6 +445,21 @@ fn recheckout_locked(
     )?;
     tighten_dirs_recursive(wt_path)?;
     Ok(Some(resolve_restored_subdir(wt_path, requested)))
+}
+
+fn exclude_in_project_worktree(
+    project_root: &Path,
+    wt_path: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    let inside = crate::win_path::path_starts_with(
+        &resolve_existing_prefix(wt_path),
+        &resolve_existing_prefix(project_root),
+    );
+    if inside && let Ok(common_dir) = git_common_dir(project_root, env) {
+        ensure_git_info_exclude(&common_dir)?;
+    }
+    Ok(())
 }
 
 fn resolve_restored_subdir(wt_path: &Path, requested: &Path) -> PathBuf {

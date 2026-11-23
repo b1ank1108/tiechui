@@ -204,30 +204,6 @@ fn handle(
         "fs/rename" => call(params, |p: MoveParams| {
             ws::rename(&ws::root(&p.root)?, &p.from, &p.to)
         }),
-        "fs/stat_many" => call(params, |p: StatManyParams| {
-            ws::stat_many(&ws::root(&p.root)?, &p.paths)
-        }),
-        "fs/upload_start" => call(params, |p: UploadStartParams| {
-            workspace.upload_start(client_id, &p)
-        }),
-        "fs/upload_write" => call(params, |p: UploadWriteParams| {
-            workspace.upload_write(client_id, &p)
-        }),
-        "fs/upload_finish" => call(params, |p: TransferParams| {
-            workspace.upload_finish(client_id, &p.transfer_id)
-        }),
-        "fs/upload_abort" => call(params, |p: TransferParams| {
-            workspace.upload_abort(client_id, &p.transfer_id)
-        }),
-        "fs/download_start" => call(params, |p: DownloadStartParams| {
-            workspace.download_start(client_id, &p.root, &p.path)
-        }),
-        "fs/download_read" => call(params, |p: DownloadReadParams| {
-            workspace.download_read(client_id, &p)
-        }),
-        "fs/download_abort" => call(params, |p: TransferParams| {
-            workspace.download_abort(client_id, &p.transfer_id)
-        }),
         "fs/search" => call(params, |p: SearchParams| {
             ws::search_with_home(Some(home), &ws::root(&p.root)?, &p)
         }),
@@ -278,6 +254,36 @@ fn handle(
             workspace.list_ports_for_client(client_id, &p.roots)
         }),
         "ports/stop" => call(params, |p: PortStopParams| workspace.stop_port(&p)),
+        _ => handle_transfer(workspace, client_id, method, params),
+    }
+}
+
+fn handle_transfer(workspace: &Workspace, client_id: u64, method: &str, params: Value) -> Reply {
+    match method {
+        "fs/stat_many" => call(params, |p: StatManyParams| {
+            ws::stat_many(Path::new(&p.root), &p.paths)
+        }),
+        "fs/upload_start" => call(params, |p: UploadStartParams| {
+            workspace.upload_start(client_id, &p)
+        }),
+        "fs/upload_write" => call(params, |p: UploadWriteParams| {
+            workspace.upload_write(client_id, &p)
+        }),
+        "fs/upload_finish" => call(params, |p: TransferParams| {
+            workspace.upload_finish(client_id, &p.transfer_id)
+        }),
+        "fs/upload_abort" => call(params, |p: TransferParams| {
+            workspace.upload_abort(client_id, &p.transfer_id)
+        }),
+        "fs/download_start" => call(params, |p: DownloadStartParams| {
+            workspace.download_start(client_id, &p.root, &p.path)
+        }),
+        "fs/download_read" => call(params, |p: DownloadReadParams| {
+            workspace.download_read(client_id, &p)
+        }),
+        "fs/download_abort" => call(params, |p: TransferParams| {
+            workspace.download_abort(client_id, &p.transfer_id)
+        }),
         _ => Err(super::failure(-32601, format!("unknown method {method}"))),
     }
 }

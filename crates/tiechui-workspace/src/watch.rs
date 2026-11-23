@@ -31,6 +31,36 @@ fn tracked_git_state(path: &Path) -> bool {
             .any(|dir| path.starts_with(dir))
 }
 
+fn workspace_ignores(canonical: &Path, git_dir: Option<&Path>) -> Gitignore {
+    let mut ignores = GitignoreBuilder::new(canonical);
+    ignores.add(canonical.join(".gitignore"));
+    let exclude = crate::fs::linked_worktree_info_exclude(canonical).or_else(|| {
+        git_dir
+            .map(|dir| dir.join("info/exclude"))
+            .filter(|exclude| exclude.is_file())
+    });
+    if let Some(exclude) = exclude {
+        ignores.add(exclude);
+    }
+    ignores.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+fn reported_path(
+    canonical: &Path,
+    path: &Path,
+    excluded_wt: &[PathBuf],
+    ignores: &Gitignore,
+) -> Option<String> {
+    let relative = path.strip_prefix(canonical).ok()?;
+    let hidden = relative.as_os_str().is_empty()
+        || crate::fs::should_skip_workspace_entry(canonical, path, excluded_wt)
+        || crate::fs::is_worktrees_holder(canonical, path)
+        || ignores
+            .matched_path_or_any_parents(relative, path.is_dir())
+            .is_ignore();
+    (!hidden).then(|| relative.to_string_lossy().replace('\\', "/"))
+}
+
 pub(crate) struct Watch {
     _watcher: RecommendedWatcher,
 }
@@ -51,17 +81,7 @@ impl Watch {
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .and_then(|dir| PathBuf::from(dir.trim()).canonicalize().ok());
-        let mut ignores = GitignoreBuilder::new(&canonical);
-        ignores.add(canonical.join(".gitignore"));
-        if let Some(exclude) = crate::fs::linked_worktree_info_exclude(&canonical) {
-            ignores.add(exclude);
-        } else if let Some(dir) = git_dir.as_ref() {
-            let exclude = dir.join("info/exclude");
-            if exclude.is_file() {
-                ignores.add(exclude);
-            }
-        }
-        let ignores = ignores.build().unwrap_or_else(|_| Gitignore::empty());
+        let ignores = workspace_ignores(&canonical, git_dir.as_deref());
         let (events, received) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(events)?;
         watcher.watch(&canonical, RecursiveMode::Recursive)?;
@@ -86,16 +106,10 @@ impl Watch {
                         git_dir.as_ref().and_then(|dir| path.strip_prefix(dir).ok())
                     {
                         git |= tracked_git_state(inner);
-                    } else if let Ok(relative) = path.strip_prefix(&canonical)
-                        && !relative.as_os_str().is_empty()
-                        && !crate::fs::should_skip_workspace_entry(&canonical, &path, &excluded_wt)
-                        && !(relative == Path::new(".tiechui")
-                            && canonical.join(".tiechui/worktrees").exists())
-                        && !ignores
-                            .matched_path_or_any_parents(relative, path.is_dir())
-                            .is_ignore()
+                    } else if let Some(relative) =
+                        reported_path(&canonical, &path, &excluded_wt, &ignores)
                     {
-                        paths.insert(relative.to_string_lossy().replace('\\', "/"));
+                        paths.insert(relative);
                     }
                 }
                 if !paths.is_empty() {

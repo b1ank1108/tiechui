@@ -66,15 +66,10 @@ pub fn search_with_home(
     }
     let overrides = overrides.build()?;
     let excluded_wt = fs::excluded_managed_worktrees(home, root);
-    let filter_root = root.to_owned();
     let groups = Mutex::new(Vec::new());
     let total = AtomicU32::new(0);
-    fs::configured_walk_builder(root)
+    fs::workspace_walk(root, &excluded_wt)
         .overrides(overrides)
-        .filter_entry(move |entry| {
-            entry.depth() == 0
-                || !fs::should_skip_workspace_entry(&filter_root, entry.path(), &excluded_wt)
-        })
         .build_parallel()
         .run(|| {
             Box::new(|entry| {
