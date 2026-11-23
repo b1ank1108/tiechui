@@ -269,7 +269,7 @@ async fn event(host: &dyn CommandHost, name: &str, data: Value) -> Result<(), To
 #[async_trait]
 impl Command for Rewind {
     fn info(&self) -> CommandInfo {
-        CommandInfo { name: "rewind".into(), description: "Restore conversation, tracked code, or both; confirm recovery of any interrupted restore".into(), argument_hint: Some("[detach]".into()) }
+        CommandInfo { name: "rewind".into(), description: "Restore conversation, tracked code, or both; confirm recovery of any interrupted restore".into(), argument_hint: Some("[detach]".into()), kind: Default::default() }
     }
     fn interactive(&self) -> bool {
         true

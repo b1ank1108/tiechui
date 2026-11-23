@@ -207,6 +207,7 @@ fn acp_capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
         steering: SteeringMode::Queue,
         commands: true,
+        permissions: true,
         model: true,
         ..RuntimeCapabilities::minimal()
     }
@@ -336,12 +337,12 @@ async fn streaming_text_thinking_tools_plan_commands_and_usage_map_to_session_ev
                         name: "plan".into(),
                         description: "Create an execution plan".into(),
                         argument_hint: Some("[goal]".into()),
-                    },
+                     kind: Default::default(), },
                     CommandInfo {
                         name: "review".into(),
                         description: "Review changes".into(),
                         argument_hint: None,
-                    },
+                     kind: Default::default(), },
                 ]
     )));
 

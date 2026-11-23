@@ -41,6 +41,7 @@ fn builtin(name: &str, description: &str, hint: Option<&str>, which: Builtin) ->
             name: name.into(),
             description: description.into(),
             argument_hint: hint.map(str::to_owned),
+            kind: Default::default(),
         },
         action: Action::Builtin(which),
     }
@@ -221,6 +222,7 @@ mod tests {
             name: name.into(),
             description: String::new(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
 

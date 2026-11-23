@@ -337,6 +337,7 @@ impl Command for ListCommand {
             name: "skills".into(),
             description: "Select a skill to insert into the draft".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
 

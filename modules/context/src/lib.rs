@@ -25,6 +25,7 @@ impl Command for ContextCommand {
             name: "context".into(),
             description: "Inspect a read-only context snapshot".into(),
             argument_hint: Some("[system|tools|injections|messages|cache]".into()),
+            kind: Default::default(),
         }
     }
     fn needs_session_view(&self) -> bool {

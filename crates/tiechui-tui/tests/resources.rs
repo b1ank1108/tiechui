@@ -514,6 +514,7 @@ fn command_arguments_survive_caret_movement_and_no_match_stays_literal() {
             name: "custom".into(),
             description: "Custom action".into(),
             argument_hint: Some("input".into()),
+            kind: Default::default(),
         }],
     }));
     app.paste("  /custom  \"two words\"  tail ");

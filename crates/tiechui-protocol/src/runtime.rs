@@ -21,6 +21,9 @@ pub const SUBAGENT_STATUS_KIND: &str = "runtime.subagent_status";
 /// `Item::Custom` kind of the first item of a derived turn; payload `DerivedTurnMarker`.
 pub const DERIVED_TURN_KIND: &str = "runtime.derived_turn";
 
+/// The `Op::RunCommand` name that switches the permission mode.
+pub const PERMISSIONS_COMMAND: &str = "permissions";
+
 /// What a user input does while a turn runs.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -50,8 +53,10 @@ pub struct RuntimeCapabilities {
     pub compact: bool,
     /// `btw/*`: the side conversation.
     pub side_chat: bool,
-    /// Module commands: `Op::RunCommand` and `Op::CommandInput`.
+    /// Commands and skills: `Op::RunCommand` (but for `permissions`) and `Op::CommandInput`.
     pub commands: bool,
+    /// `Op::RunCommand` named `permissions`: switching the permission mode.
+    pub permissions: bool,
     /// `Op::SetThinking`.
     pub thinking: bool,
     /// `Op::SetModel`, which switches among the native providers' models.
@@ -70,18 +75,20 @@ pub enum Feature {
     Compact,
     SideChat,
     Commands,
+    Permissions,
     Thinking,
     Model,
     Shell,
 }
 
 /// The ops `RuntimeCapabilities` gates, by the name `RuntimeUnsupported::feature` reports.
-pub const GATED_OPS: [(&str, Feature); 8] = [
+pub const GATED_OPS: [(&str, Feature); 9] = [
     ("branch", Feature::Branch),
     ("retry", Feature::Retry),
     ("compact", Feature::Compact),
     ("run_command", Feature::Commands),
     ("command_input", Feature::Commands),
+    ("permissions", Feature::Permissions),
     ("set_thinking", Feature::Thinking),
     ("set_model", Feature::Model),
     ("run_shell", Feature::Shell),
@@ -92,6 +99,7 @@ fn gated_op_name(op: &Op) -> Option<&'static str> {
         Op::Branch { .. } => "branch",
         Op::Retry => "retry",
         Op::Compact { .. } => "compact",
+        Op::RunCommand { name, .. } if name == PERMISSIONS_COMMAND => "permissions",
         Op::RunCommand { .. } => "run_command",
         Op::CommandInput { .. } => "command_input",
         Op::SetThinking { .. } => "set_thinking",
@@ -113,6 +121,7 @@ impl RuntimeCapabilities {
             compact: true,
             side_chat: true,
             commands: true,
+            permissions: true,
             thinking: true,
             model: true,
             shell: true,
@@ -130,6 +139,7 @@ impl RuntimeCapabilities {
             compact: false,
             side_chat: false,
             commands: false,
+            permissions: false,
             thinking: false,
             model: false,
             shell: false,
@@ -145,6 +155,7 @@ impl RuntimeCapabilities {
             Feature::Compact => self.compact,
             Feature::SideChat => self.side_chat,
             Feature::Commands => self.commands,
+            Feature::Permissions => self.permissions,
             Feature::Thinking => self.thinking,
             Feature::Model => self.model,
             Feature::Shell => self.shell,

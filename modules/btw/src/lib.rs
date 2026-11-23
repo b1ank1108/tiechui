@@ -242,7 +242,7 @@ impl TurnObserver for Btw {
 #[async_trait]
 impl Command for Btw {
     fn info(&self) -> CommandInfo {
-        CommandInfo { name: "btw".into(), description: "Ask a side question with tools without interrupting the main task; /btw model switches its model".into(), argument_hint: Some("[question | model [provider/id]]".into()) }
+        CommandInfo { name: "btw".into(), description: "Ask a side question with tools without interrupting the main task; /btw model switches its model".into(), argument_hint: Some("[question | model [provider/id]]".into()), kind: Default::default() }
     }
     fn background(&self) -> bool {
         true

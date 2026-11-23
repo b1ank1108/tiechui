@@ -73,13 +73,14 @@ impl Driver for AgyDriver {
         RuntimeCapabilities {
             steering: SteeringMode::Queue,
             commands: true,
+            permissions: true,
             model: true,
             ..RuntimeCapabilities::minimal()
         }
     }
 
     fn gated_ops(&self) -> &'static [&'static str] {
-        &["run_command", "command_input", "set_model"]
+        &["run_command", "command_input", "permissions", "set_model"]
     }
 
     async fn probe(&self, launch: &Launch) -> Probe {

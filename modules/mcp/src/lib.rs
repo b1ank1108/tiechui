@@ -339,6 +339,7 @@ impl Command for StatusCommand {
             name: "mcp".into(),
             description: "Show MCP servers and their tools".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
 

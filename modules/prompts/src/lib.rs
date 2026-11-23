@@ -113,6 +113,7 @@ impl Command for PromptCommand {
             name: self.0.name.clone(),
             description: self.0.description.clone(),
             argument_hint: self.0.argument_hint.clone(),
+            kind: Default::default(),
         }
     }
     fn allows_busy(&self, _: &str) -> bool {

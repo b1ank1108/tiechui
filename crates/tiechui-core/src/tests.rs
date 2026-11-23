@@ -2132,6 +2132,7 @@ impl tiechui_plugin_api::Command for Echo {
             name: "echo".into(),
             description: "Echo arguments".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
     async fn run(&self, arguments: &str, _: CancellationToken) -> Result<String, ToolError> {
@@ -2148,6 +2149,7 @@ impl tiechui_plugin_api::Command for Template {
             name: "template".into(),
             description: "Send a prompt".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
     fn allows_busy(&self, _: &str) -> bool {

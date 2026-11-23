@@ -532,6 +532,7 @@ impl Command for ShellsCommand {
             description: "View shell tasks; move a running command to the background or stop it"
                 .into(),
             argument_hint: Some("[output|background|stop <id>]".into()),
+            kind: Default::default(),
         }
     }
     fn allows_busy(&self, _: &str) -> bool {

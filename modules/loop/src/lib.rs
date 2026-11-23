@@ -745,6 +745,7 @@ impl Command for LoopCommand {
             name: self.name.into(),
             description: description.into(),
             argument_hint: hint.map(Into::into),
+            kind: Default::default(),
         }
     }
 

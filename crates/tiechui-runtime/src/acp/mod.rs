@@ -612,6 +612,7 @@ impl AcpBackend {
             name: name.to_owned(),
             description: String::new(),
             argument_hint: None,
+            kind: Default::default(),
         })
     }
 }

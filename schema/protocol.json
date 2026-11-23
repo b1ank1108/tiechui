@@ -439,10 +439,21 @@
         "description": {
           "type": "string"
         },
+        "kind": {
+          "$ref": "#/definitions/CommandKind"
+        },
         "name": {
           "type": "string"
         }
       }
+    },
+    "CommandKind": {
+      "description": "What a `/` menu entry is.",
+      "type": "string",
+      "enum": [
+        "command",
+        "skill"
+      ]
     },
     "CompactionPhase": {
       "type": "string",

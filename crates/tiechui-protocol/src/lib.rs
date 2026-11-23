@@ -293,6 +293,25 @@ pub struct CommandInfo {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "CommandKind::is_command")]
+    #[cfg_attr(feature = "typescript", ts(optional, as = "Option<CommandKind>"))]
+    pub kind: CommandKind,
+}
+
+/// What a `/` menu entry is.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    #[default]
+    Command,
+    Skill,
+}
+
+impl CommandKind {
+    fn is_command(&self) -> bool {
+        *self == Self::Command
+    }
 }
 
 /// A user input waiting in the steering or follow-up queue.

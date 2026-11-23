@@ -318,6 +318,7 @@ impl Command for Service {
                 "View the main session and child tasks; move a foreground subagent to the background or stop it"
                     .into(),
             argument_hint: Some("[background|stop <id>]".into()),
+            kind: Default::default(),
         }
     }
     fn background(&self) -> bool {

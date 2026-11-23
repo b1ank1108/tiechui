@@ -54,13 +54,67 @@ fn a_runtime_lacking_a_capability_refuses_exactly_its_entries() {
 }
 
 #[test]
+fn the_permissions_command_is_gated_by_permissions_and_every_other_command_by_commands() {
+    let run = |name: &str| Op::RunCommand {
+        name: name.into(),
+        arguments: String::new(),
+    };
+    let commands_only = RuntimeCapabilities {
+        commands: true,
+        ..RuntimeCapabilities::minimal()
+    };
+    assert_eq!(
+        commands_only.unsupported_op(&run("permissions")),
+        Some("permissions")
+    );
+    assert_eq!(commands_only.unsupported_op(&run("review")), None);
+
+    let permissions_only = RuntimeCapabilities {
+        permissions: true,
+        ..RuntimeCapabilities::minimal()
+    };
+    assert_eq!(permissions_only.unsupported_op(&run("permissions")), None);
+    assert_eq!(
+        permissions_only.unsupported_op(&run("review")),
+        Some("run_command")
+    );
+    assert_eq!(
+        permissions_only.unsupported_op(&Op::CommandInput {
+            name: "permissions".into(),
+            data: serde_json::Value::Null,
+        }),
+        Some("command_input")
+    );
+    assert_eq!(
+        RuntimeCapabilities::native().unsupported_op(&run("permissions")),
+        None
+    );
+}
+
+#[test]
+fn command_info_kind_defaults_to_command_and_is_omitted_then() {
+    let command: CommandInfo =
+        serde_json::from_value(json!({"name": "review", "description": "d"})).unwrap();
+    assert_eq!(command.kind, CommandKind::Command);
+    let wire = serde_json::to_value(&command).unwrap();
+    assert!(wire.get("kind").is_none(), "{wire}");
+
+    let skill: CommandInfo =
+        serde_json::from_value(json!({"name": "pdf", "description": "d", "kind": "skill"}))
+            .unwrap();
+    assert_eq!(skill.kind, CommandKind::Skill);
+    assert_eq!(serde_json::to_value(&skill).unwrap()["kind"], "skill");
+}
+
+#[test]
 fn capabilities_serialize_with_a_lowercase_steering_mode() {
     let value = serde_json::to_value(RuntimeCapabilities::minimal()).unwrap();
     assert_eq!(value["steering"], "inject");
     assert_eq!(value["branch"], false);
     let queue: RuntimeCapabilities = serde_json::from_value(json!({
         "steering": "queue", "branch": false, "fork": false, "rewind": false, "retry": false,
-        "compact": false, "side_chat": false, "commands": false, "thinking": false,
+        "compact": false, "side_chat": false, "commands": false, "permissions": false,
+        "thinking": false,
         "model": false, "shell": false,
     }))
     .unwrap();

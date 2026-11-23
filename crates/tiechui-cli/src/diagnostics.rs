@@ -15,6 +15,7 @@ impl Command for Status {
             name: "status".into(),
             description: "Show module states and configuration paths".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
     fn allows_busy(&self, _: &str) -> bool {

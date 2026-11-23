@@ -171,6 +171,7 @@ impl Command for ListCommand {
             name: "hooks".into(),
             description: "List command hooks".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
 

@@ -453,6 +453,49 @@ mod tests {
     }
 
     #[test]
+    fn each_capability_requires_exactly_its_own_ops() {
+        let stub = |capabilities, ops| Stub {
+            id: "a",
+            capabilities,
+            ops,
+        };
+        let with =
+            |capabilities: RuntimeCapabilities, ops| registry(vec![stub(capabilities, ops)]).err();
+        let permissions = RuntimeCapabilities {
+            permissions: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        assert_eq!(with(permissions, &["permissions"]), None);
+        let error = with(permissions, &[]).unwrap();
+        assert!(error.contains("allow permissions"), "{error}");
+        let error = with(RuntimeCapabilities::minimal(), &["permissions"]).unwrap();
+        assert!(error.contains("forbid permissions"), "{error}");
+        let error = with(permissions, &["run_command", "permissions"]).unwrap();
+        assert!(error.contains("forbid run_command"), "{error}");
+
+        let commands = RuntimeCapabilities {
+            commands: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        let error = with(commands, &["run_command", "command_input", "permissions"]).unwrap();
+        assert!(error.contains("forbid permissions"), "{error}");
+        assert_eq!(with(commands, &["run_command", "command_input"]), None);
+
+        let thinking = RuntimeCapabilities {
+            thinking: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        assert_eq!(with(thinking, &["set_thinking"]), None);
+        assert!(with(thinking, &[]).unwrap().contains("allow set_thinking"));
+        let model = RuntimeCapabilities {
+            model: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        assert_eq!(with(model, &["set_model"]), None);
+        assert!(with(model, &[]).unwrap().contains("allow set_model"));
+    }
+
+    #[test]
     fn ids_are_unique_and_never_the_native_one() {
         let stub = |id| Stub {
             id,
@@ -492,6 +535,7 @@ mod tests {
             Some(RuntimeCapabilities {
                 steering: tiechui_protocol::SteeringMode::Queue,
                 commands: true,
+                permissions: true,
                 model: true,
                 ..RuntimeCapabilities::minimal()
             })

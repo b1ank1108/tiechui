@@ -743,6 +743,7 @@ fn viewer_defers_parent_approval_and_empty_composer_shortcut_respects_drafts() {
             name: "subagents".into(),
             description: "Viewer".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     app.paste("MAIN_DRAFT");

@@ -781,6 +781,7 @@ fn ctrl_enter_idle_submits_literally_and_skips_popups() {
             name: "status".into(),
             description: "Show status".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     app.event(event(EventKind::ResourcesUpdated {
@@ -894,6 +895,7 @@ fn ctrl_enter_running_empty_queue_interrupts_first_or_ignores_blank() {
             name: "mcp".into(),
             description: "Show MCP servers".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     typed(&mut app, "/mcp");
@@ -1274,6 +1276,7 @@ fn module_commands_go_to_the_session_and_paths_stay_messages() {
             name: "mcp".into(),
             description: "Show MCP servers".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     typed(&mut app, "/mcp");
@@ -1441,6 +1444,7 @@ fn permissions_offers_the_modes_and_picks_by_digit() {
             name: "permissions".into(),
             description: "Switch the mode".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     typed(&mut app, "/permissions");
@@ -3232,6 +3236,7 @@ fn main_selection_scrolls_on_page_keys_with_menu_open_and_clears_on_modified_pag
             name: "status".into(),
             description: "Show status".into(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     let body: String = (0..30).map(|n| format!("OVERLAY_ROW_{n:02}\n")).collect();

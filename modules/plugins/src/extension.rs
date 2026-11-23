@@ -592,6 +592,7 @@ impl Command for ExtensionCommand {
             name: name(self.0.id(), &self.1.name),
             description: self.1.description.clone(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
     async fn run(&self, arguments: &str, cancel: CancellationToken) -> Result<String, ToolError> {

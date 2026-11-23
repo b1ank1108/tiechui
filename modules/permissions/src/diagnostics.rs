@@ -90,6 +90,7 @@ impl Command for Diagnostics {
             name: "permissions".into(),
             description: "Switch the mode, or show effective rules and recent decisions".into(),
             argument_hint: Some("[rules|auto|yolo|show]".into()),
+            kind: Default::default(),
         }
     }
     fn interactive(&self) -> bool {

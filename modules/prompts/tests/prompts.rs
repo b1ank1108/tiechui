@@ -103,6 +103,7 @@ impl Command for Builtin {
             name: "status".into(),
             description: "Built in".into(),
             argument_hint: None,
+            kind: Default::default(),
         }
     }
     async fn run(&self, _: &str, _: CancellationToken) -> Result<String, ToolError> {
@@ -132,6 +133,7 @@ async fn registered_commands_keep_their_names_and_prompts_expand_without_a_sessi
             name: "fix".into(),
             description: "Fix $ARGUMENTS".into(),
             argument_hint: Some("<issue>".into()),
+            kind: Default::default(),
         }
     );
     assert_eq!(infos.len(), 2);

@@ -124,7 +124,9 @@ export type CancelCommitMessageParams = { request_id: string, };
 
 export type CheckpointStats = { files: { [key in string]: LineStats | null }, error: string | null, };
 
-export type CommandInfo = { name: string, description: string, argument_hint?: string | null, };
+export type CommandInfo = { name: string, description: string, argument_hint?: string | null, kind?: CommandKind, };
+
+export type CommandKind = "command" | "skill";
 
 export type CommitFile = { path: string, status: GitFileStatus, added: number, removed: number, };
 
@@ -644,9 +646,13 @@ compact: boolean,
  */
 side_chat: boolean, 
 /**
- * Module commands: `Op::RunCommand` and `Op::CommandInput`.
+ * Commands and skills: `Op::RunCommand` (but for `permissions`) and `Op::CommandInput`.
  */
 commands: boolean, 
+/**
+ * `Op::RunCommand` named `permissions`: switching the permission mode.
+ */
+permissions: boolean, 
 /**
  * `Op::SetThinking`.
  */

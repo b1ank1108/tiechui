@@ -385,6 +385,7 @@ pub fn map_commands(raw: &[AvailableCommandWire], dialect: &dyn AcpDialect) -> V
             name,
             description: item.description.clone(),
             argument_hint: hint,
+            kind: Default::default(),
         };
         if dialect.filter_command(&info) {
             out.push(info);

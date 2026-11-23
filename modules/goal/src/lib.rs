@@ -360,6 +360,7 @@ impl Command for GoalRuntime {
             name: "goal".into(),
             description: "Set or inspect a persistent goal; edit, pause, resume, clear".into(),
             argument_hint: Some("[objective | edit [objective] | pause | resume | clear]".into()),
+            kind: Default::default(),
         }
     }
     fn interactive(&self) -> bool {

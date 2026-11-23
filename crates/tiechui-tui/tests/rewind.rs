@@ -119,6 +119,7 @@ fn ready() -> App {
             name: "rewind".into(),
             description: String::new(),
             argument_hint: None,
+            kind: Default::default(),
         }],
     }));
     app.take_submissions();
