@@ -119,7 +119,7 @@ pub async fn open_session(
         .start(StartParams {
             cwd: cwd.clone(),
             model: requested_model.clone(),
-            thinking: config.thinking,
+            thinking: config.thinking.or_else(|| history::stored_thinking(&store)),
             mode: config.mode.clone(),
             resume: resume.clone(),
         })
@@ -592,6 +592,7 @@ impl Session {
                 Ok(())
             }
             Op::SetModel { provider, model } => self.set_model(&provider, &model).await,
+            Op::SetThinking { level } => self.set_thinking(level).await,
             op => {
                 self.emit(EventKind::Error {
                     message: format!("runtime {} cannot run {op:?}", self.runtime),
@@ -638,6 +639,18 @@ impl Session {
                 Ok(())
             }
         }
+    }
+
+    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<(), String> {
+        match self.backend.set_thinking(level).await {
+            Ok(applied) => {
+                self.started.thinking = applied;
+                self.append(history::thinking_entry(applied)).await?;
+                self.emit_session_updated();
+            }
+            Err(message) => self.emit(EventKind::Error { message }),
+        }
+        Ok(())
     }
 
     async fn apply_model_change(&mut self, info: ModelInfo) -> Result<(), String> {

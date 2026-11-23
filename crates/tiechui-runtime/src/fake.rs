@@ -1,6 +1,8 @@
 //! A scripted backend registered as runtime `fake`, for tests. `CHUI_FAKE_RUNTIME_SCRIPT` names
 //! a JSON file with the turns to play and `CHUI_FAKE_RUNTIME_LOG`, when set, a file that gets one
-//! line for each approval answer and steer the backend receives.
+//! line for each start, approval answer, steer, interrupt, model or thinking switch and command
+//! the backend receives. The `start` line shows the model and thinking level it was started with.
+//! The runtime reports a fixed model catalogue and command list (one of them a skill).
 //!
 //! ```json
 //! { "steer": "accept", "turns": [ { "steps": [
@@ -35,13 +37,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tiechui_protocol::{
-    ApprovalDecision, ApprovalRequest, InputContent, ItemId, KnownItem, ModelInfo,
-    RuntimeCapabilities, SubagentState, ThinkingLevel, TokenUsage, TurnStatus,
+    ApprovalDecision, ApprovalRequest, CommandInfo, CommandKind, InputContent, ItemId, KnownItem,
+    ModelInfo, PERMISSIONS_COMMAND, RuntimeCapabilities, SubagentState, ThinkingLevel, TokenUsage,
+    TurnStatus,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::backend::{
-    Backend, BackendEvent, BackendItem, ChildOf, StartParams, Started, Steered, SubagentUpdate,
+    Backend, BackendEvent, BackendItem, ChildOf, CommandAction, StartParams, Started, Steered,
+    SubagentUpdate,
 };
 use crate::registry::{Driver, Launch, Probe};
 use crate::tool_output;
@@ -62,11 +66,23 @@ impl Driver for FakeDriver {
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::minimal()
+        RuntimeCapabilities {
+            model: true,
+            thinking: true,
+            commands: true,
+            permissions: true,
+            ..RuntimeCapabilities::minimal()
+        }
     }
 
     fn gated_ops(&self) -> &'static [&'static str] {
-        &[]
+        &[
+            "run_command",
+            "command_input",
+            "permissions",
+            "set_thinking",
+            "set_model",
+        ]
     }
 
     async fn probe(&self, _: &Launch) -> Probe {
@@ -93,6 +109,7 @@ impl Driver for FakeDriver {
             events: None,
             next_turn: 0,
             shared: Arc::default(),
+            model: catalogue().remove(0),
         }))
     }
 }
@@ -109,6 +126,48 @@ struct FakeBackend {
     events: Option<mpsc::Sender<BackendEvent>>,
     next_turn: usize,
     shared: Arc<Shared>,
+    model: ModelInfo,
+}
+
+const LEVELS: [ThinkingLevel; 4] = [
+    ThinkingLevel::Off,
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+];
+
+fn catalogue() -> Vec<ModelInfo> {
+    let model = |id: &str, reasoning: bool, levels: &[ThinkingLevel]| ModelInfo {
+        provider: "fake".into(),
+        id: id.into(),
+        context_window: 1000,
+        reasoning,
+        thinking_levels: levels.to_vec(),
+    };
+    vec![
+        model("fake-model", true, &LEVELS),
+        model("fake-small", false, &[ThinkingLevel::Off]),
+    ]
+}
+
+fn commands() -> Vec<CommandInfo> {
+    let info = |name: &str, kind| CommandInfo {
+        name: name.into(),
+        description: format!("fake {name}"),
+        argument_hint: None,
+        kind,
+    };
+    vec![
+        info("review", CommandKind::Command),
+        info("fake-skill", CommandKind::Skill),
+    ]
+}
+
+fn level_name(level: ThinkingLevel) -> String {
+    serde_json::to_value(level)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 impl FakeBackend {
@@ -131,27 +190,32 @@ impl Backend for FakeBackend {
         params: StartParams,
     ) -> Result<(Started, mpsc::Receiver<BackendEvent>), String> {
         let (tx, rx) = mpsc::channel(256);
-        self.events = Some(tx);
         let external_id = params
             .resume
             .clone()
             .unwrap_or_else(|| format!("fake-thread-{}", std::process::id()));
+        let thinking = params.thinking.unwrap_or(ThinkingLevel::Off);
         self.log(&format!(
-            "start resume={} id={external_id}",
-            params.resume.as_deref().unwrap_or("none")
+            "start resume={} model={} thinking={} id={external_id}",
+            params.resume.as_deref().unwrap_or("none"),
+            params.model.as_deref().unwrap_or("none"),
+            params.thinking.map_or_else(|| "none".into(), level_name),
         ));
+        if let Some(model) = catalogue()
+            .into_iter()
+            .find(|model| Some(&model.id) == params.model.as_ref())
+        {
+            self.model = model;
+        }
+        let _ = tx.send(BackendEvent::Models(catalogue())).await;
+        let _ = tx.send(BackendEvent::Commands(commands())).await;
+        self.events = Some(tx);
         Ok((
             Started {
                 resumed: params.resume.is_some(),
                 external_id,
-                model: ModelInfo {
-                    provider: "fake".into(),
-                    id: "fake-model".into(),
-                    context_window: 1000,
-                    reasoning: false,
-                    thinking_levels: vec![ThinkingLevel::Off],
-                },
-                thinking: ThinkingLevel::Off,
+                model: self.model.clone(),
+                thinking,
             },
             rx,
         ))
@@ -213,6 +277,34 @@ impl Backend for FakeBackend {
             let _ = waiting.send(decision);
         }
         Ok(())
+    }
+
+    async fn run_command(&mut self, name: &str, arguments: &str) -> Result<CommandAction, String> {
+        self.log(&format!("run_command {name} {arguments}"));
+        Ok(if name == PERMISSIONS_COMMAND {
+            CommandAction::PermissionMode(arguments.trim().to_owned())
+        } else {
+            CommandAction::Prompt(format!("/{name} {arguments}"))
+        })
+    }
+
+    async fn command_input(&mut self, name: &str, _: Value) -> Result<(), String> {
+        self.log(&format!("command_input {name}"));
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<ModelInfo, String> {
+        self.log(&format!("set_model {model}"));
+        self.model = catalogue()
+            .into_iter()
+            .find(|candidate| candidate.id == model)
+            .ok_or_else(|| format!("unknown fake model {model}"))?;
+        Ok(self.model.clone())
+    }
+
+    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
+        self.log(&format!("set_thinking {}", level_name(level)));
+        Ok(level)
     }
 
     async fn shutdown(&mut self) {

@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionSummary, Snapshot};
 use tiechui_protocol::{
-    ApprovalRequest, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem,
-    RUNTIME_UNSUPPORTED_CODE, SteeringMode, SubagentItem, SubagentState, SubagentStatus,
-    TurnStatus,
+    ApprovalRequest, CommandKind, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem,
+    PERMISSION_MODE_EVENT, RUNTIME_UNSUPPORTED_CODE, SteeringMode, SubagentItem, SubagentState,
+    SubagentStatus, ThinkingLevel, TurnStatus,
 };
 
 struct Fixture {
@@ -215,7 +215,8 @@ async fn gated_entries_fail_with_runtime_unsupported_on_a_fake_session_but_work_
     assert_eq!(fake.runtime.as_deref(), Some("fake"));
     let caps = fake.capabilities.unwrap();
     assert_eq!(caps.steering, SteeringMode::Inject);
-    assert!(!caps.branch && !caps.commands);
+    assert!(!caps.branch && !caps.shell);
+    assert!(caps.commands && caps.permissions && caps.thinking && caps.model);
     let thread = fake.thread_id.0.clone();
 
     let refused = [
@@ -243,22 +244,6 @@ async fn gated_entries_fail_with_runtime_unsupported_on_a_fake_session_but_work_
     let ops = [
         (json!({"kind": "retry"}), "retry"),
         (json!({"kind": "compact", "instructions": null}), "compact"),
-        (
-            json!({"kind": "run_command", "name": "x", "arguments": ""}),
-            "run_command",
-        ),
-        (
-            json!({"kind": "command_input", "name": "x", "data": null}),
-            "command_input",
-        ),
-        (
-            json!({"kind": "set_thinking", "level": "high"}),
-            "set_thinking",
-        ),
-        (
-            json!({"kind": "set_model", "provider": "p", "model": "m"}),
-            "set_model",
-        ),
         (json!({"kind": "run_shell", "command": "ls"}), "run_shell"),
         (json!({"kind": "branch", "entry_id": "x"}), "branch"),
     ];
@@ -273,12 +258,17 @@ async fn gated_entries_fail_with_runtime_unsupported_on_a_fake_session_but_work_
             json!({"runtime": "fake", "feature": feature})
         );
     }
-    client
-        .ok(
-            "session/submit",
-            json!({"thread_id": thread, "op": {"kind": "input_state", "blocked": false}}),
-        )
-        .await;
+    for op in [
+        json!({"kind": "input_state", "blocked": false}),
+        json!({"kind": "run_command", "name": "x", "arguments": ""}),
+        json!({"kind": "command_input", "name": "x", "data": null}),
+        json!({"kind": "set_thinking", "level": "high"}),
+        json!({"kind": "set_model", "provider": "fake", "model": "fake-model"}),
+    ] {
+        client
+            .ok("session/submit", json!({"thread_id": thread, "op": op}))
+            .await;
+    }
 
     let native = snapshot(client.ok("session/open", json!({"cwd": fixture.cwd})).await);
     assert_eq!(native.runtime.as_deref(), Some("chui"));
@@ -622,5 +612,218 @@ async fn reopening_by_path_restores_history_runtime_and_the_external_thread() {
         .into_iter()
         .filter(|line| line.starts_with("start "))
         .collect();
-    assert_eq!(starts[1], format!("start resume={external} id={external}"));
+    assert_eq!(
+        starts[1],
+        format!("start resume={external} model=none thinking=none id={external}")
+    );
+}
+
+fn thinking_entries(path: &str) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["kind"] == "thinking_change")
+        .collect()
+}
+
+fn session_thinking(events: &[tiechui_protocol::Event]) -> Option<ThinkingLevel> {
+    events.iter().rev().find_map(|e| match &e.event {
+        EventKind::SessionUpdated { thinking, .. } => Some(*thinking),
+        _ => None,
+    })
+}
+
+fn start_lines(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .log_lines()
+        .into_iter()
+        .filter(|line| line.starts_with("start "))
+        .collect()
+}
+
+#[tokio::test]
+async fn set_thinking_is_persisted_and_restored_when_the_session_is_reopened_by_path() {
+    let fixture = Fixture::new();
+    fixture.script(json!({"turns": []}));
+    let (path, thread) = {
+        let mut client = fixture.client().await;
+        let opened = open_fake(&mut client, &fixture).await;
+        assert_eq!(session_thinking(&opened.events), Some(ThinkingLevel::Off));
+        assert!(thinking_entries(&opened.path).is_empty());
+        client
+            .ok(
+                "session/submit",
+                json!({"thread_id": opened.thread_id, "op": {"kind": "set_thinking", "level": "high"}}),
+            )
+            .await;
+        client
+            .until(|kind| {
+                matches!(
+                    kind,
+                    EventKind::SessionUpdated {
+                        thinking: ThinkingLevel::High,
+                        ..
+                    }
+                )
+            })
+            .await;
+        let entries = thinking_entries(&opened.path);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["level"], "high");
+        assert!(
+            fixture
+                .log_lines()
+                .contains(&"set_thinking high".to_owned())
+        );
+        client
+            .ok("session/close", json!({"thread_id": opened.thread_id}))
+            .await;
+        (opened.path, opened.thread_id)
+    };
+
+    let mut client = fixture.client().await;
+    let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
+    assert_eq!(reopened.thread_id, thread);
+    assert_eq!(
+        session_thinking(&reopened.events),
+        Some(ThinkingLevel::High)
+    );
+    let starts = start_lines(&fixture);
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert!(starts[1].contains("thinking=high"), "{}", starts[1]);
+    client
+        .ok("session/close", json!({"thread_id": thread}))
+        .await;
+
+    client
+        .ok("session/open", json!({"path": path, "thinking": "low"}))
+        .await;
+    let starts = start_lines(&fixture);
+    assert!(starts[2].contains("thinking=high"), "{}", starts[2]);
+    assert!(fixture.log_lines().contains(&"set_thinking low".to_owned()));
+    let entries = thinking_entries(&path);
+    assert_eq!(entries.last().unwrap()["level"], "low");
+}
+
+#[tokio::test]
+async fn set_thinking_off_is_recorded_as_an_empty_level_and_restored() {
+    let fixture = Fixture::new();
+    fixture.script(json!({"turns": []}));
+    let mut client = fixture.client().await;
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({"cwd": fixture.cwd, "runtime": "fake", "thinking": "medium"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        session_thinking(&opened.events),
+        Some(ThinkingLevel::Medium)
+    );
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id": opened.thread_id, "op": {"kind": "set_thinking", "level": "off"}}),
+        )
+        .await;
+    client
+        .until(|kind| {
+            matches!(
+                kind,
+                EventKind::SessionUpdated {
+                    thinking: ThinkingLevel::Off,
+                    ..
+                }
+            )
+        })
+        .await;
+    let entries = thinking_entries(&opened.path);
+    assert_eq!(entries.last().unwrap()["level"], Value::Null, "{entries:?}");
+    client
+        .ok("session/close", json!({"thread_id": opened.thread_id}))
+        .await;
+    client
+        .ok("session/open", json!({"path": opened.path}))
+        .await;
+    let starts = start_lines(&fixture);
+    assert!(starts[1].contains("thinking=off"), "{}", starts[1]);
+}
+
+#[tokio::test]
+async fn the_permissions_command_switches_the_mode_and_other_commands_reach_the_backend() {
+    let fixture = Fixture::new();
+    fixture.script(json!({"turns": []}));
+    let mut client = fixture.client().await;
+    let opened = open_fake(&mut client, &fixture).await;
+    let commands = opened
+        .events
+        .iter()
+        .find_map(|e| match &e.event {
+            EventKind::CommandsUpdated { commands } => Some(commands.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let kinds: Vec<_> = commands.iter().map(|command| command.kind).collect();
+    assert!(kinds.contains(&CommandKind::Skill), "{commands:?}");
+    assert!(kinds.contains(&CommandKind::Command), "{commands:?}");
+
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id": opened.thread_id, "op": {"kind": "run_command", "name": "permissions", "arguments": "auto"}}),
+        )
+        .await;
+    let events = client
+        .until(|kind| {
+            matches!(kind, EventKind::Extension { name, data }
+                if name == PERMISSION_MODE_EVENT && *data == "auto")
+        })
+        .await;
+    assert!(!events.is_empty());
+    assert!(
+        fixture
+            .log_lines()
+            .contains(&"run_command permissions auto".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_scratch_session_may_run_on_an_external_runtime_in_the_shared_scratch_dir() {
+    let fixture = Fixture::new();
+    fixture.script(json!({"turns": []}));
+    let mut client = fixture.client().await;
+    let opened = snapshot(
+        client
+            .ok("session/open", json!({"scratch": {}, "runtime": "fake"}))
+            .await,
+    );
+    assert_eq!(opened.runtime.as_deref(), Some("fake"));
+    let scratch = fixture.home.join("scratch").join("default");
+    assert_eq!(
+        std::fs::canonicalize(&opened.cwd).unwrap(),
+        std::fs::canonicalize(&scratch).unwrap()
+    );
+    let listed: Vec<SessionSummary> =
+        serde_json::from_value(client.ok("scratch/list", json!({})).await).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].thread_id, opened.thread_id);
+    assert_eq!(listed[0].runtime.as_deref(), Some("fake"));
+
+    let native = snapshot(client.ok("session/open", json!({"scratch": {}})).await);
+    assert_eq!(native.runtime.as_deref(), Some("chui"));
+    assert_eq!(native.cwd, opened.cwd);
+    let error = client
+        .call("session/open", json!({"scratch": {}, "runtime": "nope"}))
+        .await
+        .unwrap_err();
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown runtime nope"),
+        "{error}"
+    );
 }

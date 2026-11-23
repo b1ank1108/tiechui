@@ -8,18 +8,18 @@ use std::sync::Arc;
 
 use serde_json::Value;
 #[cfg(feature = "workspace")]
+use tiechui_protocol::ThreadId;
+#[cfg(feature = "workspace")]
 use tiechui_protocol::app::{LiveState, ScratchListParams, SessionSummary};
 use tiechui_protocol::rpc;
-#[cfg(feature = "workspace")]
-use tiechui_protocol::{SessionEpoch, ThreadId};
 #[cfg(feature = "workspace")]
 use tiechui_session::{SessionStore, Summary};
 #[cfg(feature = "workspace")]
 use tokio_util::sync::CancellationToken;
 
-use super::{Live, Options, Reply, Server};
+use super::{Live, Reply, Server};
 #[cfg(feature = "workspace")]
-use super::{Open, blocking, lock, parse, value};
+use super::{blocking, lock, parse, value};
 
 pub(super) fn handles(method: &str) -> bool {
     method == "scratch/list"
@@ -27,11 +27,14 @@ pub(super) fn handles(method: &str) -> bool {
 
 pub(super) async fn open_scratch(
     server: &Arc<Server>,
-    options: Options,
+    runtime: Option<&str>,
+    model: Option<String>,
+    thinking: Option<tiechui_protocol::ThinkingLevel>,
+    mode: Option<String>,
 ) -> Result<Arc<Live>, rpc::Error> {
     #[cfg(not(feature = "workspace"))]
     {
-        let _ = (server, options);
+        let _ = (server, runtime, model, thinking, mode);
         Err(super::internal("workspace feature is disabled"))
     }
     #[cfg(feature = "workspace")]
@@ -39,10 +42,7 @@ pub(super) async fn open_scratch(
         let home = server.home.clone();
         let cwd = blocking(move |_| tiechui_workspace::default_scratch_dir(&home).map_err(|e| e.0))
             .await?;
-        let (_, live) = server
-            .start(options, Open::New(cwd), SessionEpoch(0), None)
-            .await?;
-        Ok(live)
+        server.open_new(runtime, cwd, model, thinking, mode).await
     }
 }
 

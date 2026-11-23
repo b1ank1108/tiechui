@@ -1046,11 +1046,15 @@ impl Server {
                 Ok((live, false))
             }
             (None, None, Some(_)) => {
-                if requested_runtime(params.runtime.as_deref()).is_some() {
-                    return Err(invalid("scratch sessions run on the chui runtime"));
-                }
-                let options = chui_options(params.model, params.thinking, params.mode);
-                let live = scratch::open_scratch(self, options).await?;
+                let runtime = requested_runtime(params.runtime.as_deref());
+                let live = scratch::open_scratch(
+                    self,
+                    runtime,
+                    params.model,
+                    params.thinking,
+                    params.mode,
+                )
+                .await?;
                 Ok((live, true))
             }
             _ => Err(invalid("give exactly one of path, cwd and scratch")),
@@ -2324,6 +2328,63 @@ pub(super) mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         None
+    }
+
+    fn live_with(capabilities: RuntimeCapabilities) -> Arc<Live> {
+        let (submissions, _) = mpsc::channel(1);
+        let (_, started) = watch::channel(None);
+        Arc::new(Live {
+            path: PathBuf::new(),
+            cwd: PathBuf::new(),
+            runtime: "stub".into(),
+            capabilities,
+            submissions,
+            shutdown: CancellationToken::new(),
+            projection: Default::default(),
+            applied: Arc::new(Notify::new()),
+            started,
+            pump: Mutex::new(None),
+            stale: AtomicBool::new(false),
+        })
+    }
+
+    #[tokio::test]
+    async fn run_command_is_gated_by_permissions_for_that_name_and_by_commands_otherwise() {
+        let home = tempfile::tempdir().unwrap();
+        let server = Server::new(home.path().to_owned());
+        let commands_only = RuntimeCapabilities {
+            commands: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        let permissions_only = RuntimeCapabilities {
+            permissions: true,
+            ..RuntimeCapabilities::minimal()
+        };
+        lock(&server.sessions).insert(ThreadId("commands".into()), live_with(commands_only));
+        lock(&server.sessions).insert(ThreadId("permissions".into()), live_with(permissions_only));
+        let run = |thread: &str, name: &str| {
+            let params = json!({
+                "thread_id": thread,
+                "op": {"kind": "run_command", "name": name, "arguments": "auto"},
+            });
+            server.gate("session/submit", &params)
+        };
+
+        let error = run("commands", "permissions").unwrap_err();
+        assert_eq!(error.code, RUNTIME_UNSUPPORTED_CODE);
+        assert_eq!(
+            error.data,
+            Some(json!({"runtime": "stub", "feature": "permissions"}))
+        );
+        assert!(run("commands", "review").is_ok());
+
+        assert!(run("permissions", "permissions").is_ok());
+        let error = run("permissions", "review").unwrap_err();
+        assert_eq!(error.code, RUNTIME_UNSUPPORTED_CODE);
+        assert_eq!(
+            error.data,
+            Some(json!({"runtime": "stub", "feature": "run_command"}))
+        );
     }
 
     #[tokio::test]

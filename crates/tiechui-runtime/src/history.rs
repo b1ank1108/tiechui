@@ -11,10 +11,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiechui_model::{Content, Message, Role, Usage};
+use tiechui_model::{Content, Message, ReasoningLevel, Role, Usage};
 use tiechui_protocol::{
-    DerivedReason, DerivedTurnMarker, InputContent, Item, ItemId, KnownItem, TokenUsage, Turn,
-    TurnId, TurnStatus,
+    DerivedReason, DerivedTurnMarker, InputContent, Item, ItemId, KnownItem, ThinkingLevel,
+    TokenUsage, Turn, TurnId, TurnStatus,
 };
 use tiechui_session::{Entry, EntryKind, SessionStore};
 
@@ -215,6 +215,38 @@ pub fn stored_model(store: &SessionStore, runtime: &str) -> Option<String> {
             EntryKind::ModelChange { model } if model.provider == runtime => {
                 Some(model.model.0.clone())
             }
+            _ => None,
+        })
+}
+
+pub fn thinking_entry(level: ThinkingLevel) -> EntryKind {
+    EntryKind::ThinkingChange {
+        level: match level {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Minimal => Some(ReasoningLevel::Minimal),
+            ThinkingLevel::Low => Some(ReasoningLevel::Low),
+            ThinkingLevel::Medium => Some(ReasoningLevel::Medium),
+            ThinkingLevel::High => Some(ReasoningLevel::High),
+            ThinkingLevel::Xhigh => Some(ReasoningLevel::Xhigh),
+            ThinkingLevel::Max => Some(ReasoningLevel::Max),
+        },
+    }
+}
+
+pub fn stored_thinking(store: &SessionStore) -> Option<ThinkingLevel> {
+    on_branch(store)
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            EntryKind::ThinkingChange { level } => Some(match level {
+                None => ThinkingLevel::Off,
+                Some(ReasoningLevel::Minimal) => ThinkingLevel::Minimal,
+                Some(ReasoningLevel::Low) => ThinkingLevel::Low,
+                Some(ReasoningLevel::Medium) => ThinkingLevel::Medium,
+                Some(ReasoningLevel::High) => ThinkingLevel::High,
+                Some(ReasoningLevel::Xhigh) => ThinkingLevel::Xhigh,
+                Some(ReasoningLevel::Max) => ThinkingLevel::Max,
+            }),
             _ => None,
         })
 }

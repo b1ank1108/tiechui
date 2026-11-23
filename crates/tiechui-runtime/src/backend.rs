@@ -166,6 +166,13 @@ pub trait Backend: Send {
         Err("switching models is not supported".into())
     }
 
+    /// Switches the thinking level when `capabilities.thinking` is enabled and returns the level
+    /// now in effect.
+    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
+        let _ = level;
+        Err("switching thinking levels is not supported".into())
+    }
+
     /// Flushes any buffered output of an open derived turn before a new root turn closes it.
     async fn finish_derived(&mut self) {}
 
