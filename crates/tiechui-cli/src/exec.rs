@@ -766,6 +766,136 @@ async fn execute(
     Ok(code)
 }
 
+#[derive(Default)]
+struct DriveState {
+    thread: Option<(ThreadId, SessionEpoch)>,
+    turn: Option<TurnId>,
+    in_turn: bool,
+    subagents_pending: bool,
+    was_interrupted: bool,
+    status: Option<TurnStatus>,
+}
+
+impl DriveState {
+    fn exit_code(&self) -> i32 {
+        if self.was_interrupted || self.status == Some(TurnStatus::Interrupted) {
+            130
+        } else if self.status == Some(TurnStatus::Completed) {
+            0
+        } else {
+            1
+        }
+    }
+
+    fn should_finish(&self, turn_status: TurnStatus) -> bool {
+        self.was_interrupted || turn_status != TurnStatus::Completed || !self.subagents_pending
+    }
+
+    fn update_extension(&mut self, name: &str, data: &serde_json::Value) {
+        if name == SUBAGENTS_EVENT
+            && let Ok(view) = serde_json::from_value::<SubagentsView>(data.clone())
+        {
+            self.subagents_pending = view.has_pending_work();
+        }
+    }
+
+    async fn on_signal(
+        &mut self,
+        signal: Option<io::Result<()>>,
+        handle: &SessionHandle,
+    ) -> Result<bool, Failure> {
+        signal
+            .ok_or_else(|| runtime_error("signal listener stopped"))?
+            .map_err(runtime_error)?;
+        self.was_interrupted = true;
+        eprintln!("interrupting; press Ctrl-C again to force quit");
+        if self.in_turn {
+            if let (Some((id, epoch)), Some(turn_id)) = (&self.thread, &self.turn) {
+                submit(
+                    handle,
+                    id,
+                    *epoch,
+                    Op::Interrupt {
+                        turn_id: turn_id.clone(),
+                    },
+                )
+                .await?;
+            }
+            return Ok(false);
+        }
+        if let Some((id, epoch)) = &self.thread {
+            submit(handle, id, *epoch, Op::InterruptIdle).await?;
+        }
+        Ok(true)
+    }
+
+    async fn start_thread(
+        &mut self,
+        args: &ArgMatches,
+        handle: &SessionHandle,
+        thread_id: ThreadId,
+        epoch: SessionEpoch,
+    ) -> Result<(), Failure> {
+        self.thread = Some((thread_id.clone(), epoch));
+        for op in startup(args)? {
+            submit(handle, &thread_id, epoch, op).await?;
+        }
+        let text = args
+            .get_one::<String>("prompt")
+            .cloned()
+            .unwrap_or_default();
+        submit(
+            handle,
+            &thread_id,
+            epoch,
+            Op::UserInput {
+                content: vec![InputContent::Text { text }],
+                delivery: InputDelivery::FollowUp,
+            },
+        )
+        .await
+    }
+
+    async fn on_event(
+        &mut self,
+        args: &ArgMatches,
+        handle: &SessionHandle,
+        event: Event,
+    ) -> Result<bool, Failure> {
+        match event.event {
+            EventKind::ThreadStarted { .. } => {
+                self.start_thread(args, handle, event.thread_id, event.epoch)
+                    .await?;
+            }
+            EventKind::TurnStarted { turn } => {
+                self.in_turn = true;
+                if self.was_interrupted {
+                    submit(
+                        handle,
+                        &event.thread_id,
+                        event.epoch,
+                        Op::Interrupt {
+                            turn_id: turn.id.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                self.turn = Some(turn.id);
+            }
+            EventKind::Extension { name, data } => self.update_extension(&name, &data),
+            EventKind::TurnCompleted { turn } => {
+                self.in_turn = false;
+                self.turn = None;
+                self.status = Some(turn.status);
+                return Ok(self.should_finish(turn.status));
+            }
+            EventKind::Error { .. } => self.status = Some(TurnStatus::Failed),
+            _ => {}
+        }
+        Ok(false)
+    }
+}
+
 async fn drive(
     args: &ArgMatches,
     signals: &mut mpsc::UnboundedReceiver<io::Result<()>>,
@@ -776,58 +906,25 @@ async fn drive(
         assistants: HashMap::new(),
         line_open: false,
     };
-    let mut thread: Option<(ThreadId, SessionEpoch)> = None;
-    let mut turn: Option<TurnId> = None;
-    let mut was_interrupted = false;
-    let mut status = None;
-    let result = loop {
+    let mut state = DriveState::default();
+    loop {
         tokio::select! {
             biased;
             signal = signals.recv() => {
-                signal.ok_or_else(|| runtime_error("signal listener stopped"))?.map_err(runtime_error)?;
-                was_interrupted = true;
-                eprintln!("interrupting; press Ctrl-C again to force quit");
-                if let (Some((id, epoch)), Some(turn_id)) = (&thread, &turn) {
-                    submit(handle, id, *epoch, Op::Interrupt { turn_id: turn_id.clone() }).await?;
+                if state.on_signal(signal, handle).await? {
+                    break;
                 }
             }
-            event = handle.events.recv() => {
-                let event = match event { Ok(event) => event, Err(error) => break Err(runtime_error(error)) };
-                if let Err(error) = output.event(&event) { break Err(runtime_error(error)); }
-                match event.event {
-                    EventKind::ThreadStarted { .. } => {
-                        thread = Some((event.thread_id.clone(), event.epoch));
-                        for op in startup(args)? {
-                            submit(handle, &event.thread_id, event.epoch, op).await?;
-                        }
-                        submit(handle, &event.thread_id, event.epoch, Op::UserInput {
-                            content: vec![InputContent::Text { text: args.get_one::<String>("prompt").cloned().unwrap_or_default() }],
-                            delivery: InputDelivery::FollowUp,
-                        }).await?;
-                    }
-                    EventKind::TurnStarted { turn: started } => {
-                        if was_interrupted {
-                            submit(handle, &event.thread_id, event.epoch, Op::Interrupt { turn_id: started.id.clone() }).await?;
-                        }
-                        turn = Some(started.id);
-                    }
-                    EventKind::TurnCompleted { turn } => { status = Some(turn.status); break Ok(()); }
-                    EventKind::Error { .. } => { status = Some(TurnStatus::Failed); }
-                    _ => {}
+            received = handle.events.recv() => {
+                let event = received.map_err(runtime_error)?;
+                output.event(&event).map_err(runtime_error)?;
+                if state.on_event(args, handle, event).await? {
+                    break;
                 }
             }
         }
-    };
-    result?;
-    Ok(
-        if was_interrupted || status == Some(TurnStatus::Interrupted) {
-            130
-        } else if status == Some(TurnStatus::Completed) {
-            0
-        } else {
-            1
-        },
-    )
+    }
+    Ok(state.exit_code())
 }
 
 async fn submit(

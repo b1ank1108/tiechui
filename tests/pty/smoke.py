@@ -1689,10 +1689,14 @@ def subagents(f):
     s.check((f.cwd / "child.txt").read_text() == "child edit", "Approved child edit did not execute")
     s.send(ESC + "[1;3C")
     s.wait("Subagents")
-    s.send(ESC + "[C")  # Any member selects the same dispatch for Ctrl+X.
-    s.wait("default · fixture/alpha")
+    s.send(ESC + "[C")
+    s.wait("ag1 · default · fixture/alpha")
+    if "· Running" not in s.screen.text():
+        s.send(ESC + "[C")
+        s.wait("ag2 · default · fixture/alpha")
+    s.wait("x/ctrl+x stop")
     s.send("\x18")
-    s.wait("− default · fixture/alpha")
+    s.wait("· Cancelled")
     s.send(ESC)
     s.wait("PARENT_DONE", absent="esc to interrupt")
     s.wait("· cancelled")
@@ -1701,10 +1705,70 @@ def subagents(f):
     s.wait("· fixture/alpha")
     s.send(ESC)
     s.wait("›", absent="esc back")
-    s.command("/subagents", "✓ default · fixture/alpha")
+    s.command("/subagents", "Subagents")
+    s.wait("ag1 · default")
+    s.wait("ag2 · default")
+    s.send(ESC + "[C")
+    s.wait("default · fixture/alpha · foreground")
     s.send(ESC)
-    s.wait("›", absent="ctrl+x stop")
+    s.wait("›", absent="esc back")
     s.check(len(f.mock.requests) == 5, "Cancellation started an unexpected child or request")
+
+    s.draft("promote foreground subagent")
+    s.send("\r")
+    s.wait("Delegating")
+    s.wait("ctrl+b background")
+    s.draft("ab")
+    s.wait("› ab")
+    s.send("\x02X")
+    s.wait("› aXb")
+    s.check("Delegated in background" not in s.screen.text(), "Non-empty composer Ctrl+B promoted subagent")
+    s.send("\x03")
+    s.wait("›", absent="aXb")
+    s.send("\x02")
+    s.wait("• Delegated in background")
+    s.wait("1 agent")
+    s.wait("PROMOTED_TURN_RELEASED", absent="esc to interrupt")
+    s.check(len(f.mock.requests) == 8, "In-place background promotion restarted child or skipped parent turn")
+    f.mock.replies[6].release.set()
+    s.wait("BG_CONTINUATION_SUMMARY", absent="1 agent")
+    s.wait("BG_CONTINUATION_SUMMARY", absent="esc to interrupt")
+    s.check("<task-notification>" not in s.screen.text(), "Hidden continuation leaked user bubble to transcript")
+    s.check("<task-notification>" in json.dumps(f.mock.requests[8]), "Continuation request missed <task-notification>")
+    s.check(len(f.mock.requests) == 9, "Unexpected provider request count after continuation")
+    s.exit()
+
+
+def shells(f):
+    (f.cwd / "run.sh").write_text(
+        "printf 'SHELL_STREAMING\\n' && until [ -f release_sh ]; do sleep 0.05; done && printf 'SHELL_FINISHED\\n'\n"
+    )
+    f.config.write_text(f.config.read_text() + '\n[[permissions.rules]]\nsurface="*"\npattern="*"\naction="allow"\n')
+    s = f.start()
+    s.draft("run slow shell")
+    s.send("\r")
+    s.wait("Running sh run.sh")
+    s.wait("ctrl+b background")
+    s.draft("xy")
+    s.wait("› xy")
+    s.send("\x02Z")
+    s.wait("› xZy")
+    s.send("\x03")
+    s.wait("›", absent="xZy")
+    s.send("\x02")
+    s.wait("1 shell")
+    s.wait("SHELL_TURN_RELEASED", absent="esc to interrupt")
+    s.command("/shells", "── Shells ")
+    s.wait("sh1")
+    s.wait("SHELL_STREAMING")
+    s.send(ESC)
+    s.wait("›", absent="── Shells ")
+    (f.cwd / "release_sh").write_text("go")
+    s.wait("SHELL_CONT_SUMMARY", absent="1 shell")
+    s.wait("SHELL_CONT_SUMMARY", absent="esc to interrupt")
+    s.check("A background shell task finished:" in json.dumps(f.mock.requests[2]),
+            "Shell completion notification missing from continuation request")
+    s.check(len(f.mock.requests) == 3, "Unexpected provider request count in shells case")
     s.exit()
 
 
@@ -1954,7 +2018,22 @@ CASES = {
     "t2-plugins": (t2_plugins, lambda: [Reply(tools=[("plugin_fixture_echo", {})]), Reply("T2_TOOL_DONE"), Reply(tools=[("plugin_fixture_echo", {"action": "deny"})]), Reply("T2_DENY_DONE")]),
     "composer-resources": (composer_resources, lambda: [Reply("RESOURCES_DONE")]),
     "diagnostics-disabled": (diagnostics_disabled, lambda: []),
-    "subagents": (subagents, lambda: [Reply(tools=[("subagent", {"tasks": [{"task": "edit a file"}, {"task": "inspect"}]})]), Reply(tools=[("write", {"path": "child.txt", "content": "child edit"})]), Reply("FINISHED_RESULT"), Reply("EDITED_WAIT", hold=True), Reply("PARENT_DONE")]),
+    "subagents": (subagents, lambda: [
+        Reply(tools=[("subagent", {"tasks": [{"task": "edit a file"}, {"task": "inspect"}]})]),
+        Reply(tools=[("write", {"path": "child.txt", "content": "child edit"})]),
+        Reply("FINISHED_RESULT"),
+        Reply("EDITED_WAIT", hold=True),
+        Reply("PARENT_DONE"),
+        Reply(tools=[("subagent", {"task": "slow foreground task"})]),
+        Reply("BG_PROMOTED_CHILD_OUT", hold=True),
+        Reply("PROMOTED_TURN_RELEASED"),
+        Reply("BG_CONTINUATION_SUMMARY"),
+    ]),
+    "shells": (shells, lambda: [
+        Reply(tools=[("bash", {"command": "sh run.sh"})]),
+        Reply("SHELL_TURN_RELEASED"),
+        Reply("SHELL_CONT_SUMMARY"),
+    ]),
     "range-compaction": (range_compaction, lambda: [Reply("OLD_RANGE_EVIDENCE " * 600 + "REPORT_END"), Reply(tools=[("context_status", {})]), Reply(tools=[("compact_history", lambda request: {"ranges": [{"candidate_id": first_candidate(request), "summary": RANGE_SUMMARY}]})]), Reply(tools=[("context_status", {})]), Reply("RANGE_COMPACTED"), Reply("RANGE_RELOADED")]),
     "compaction": (compaction, lambda: [Reply("FIRST_COMPACTION_TURN"), Reply("SECOND_COMPACTION_TURN", usage=9500), Reply("AUTO_CHECKPOINT", hold=True), Reply("AFTER_AUTO_COMPACTION"), Reply("MANUAL_CHECKPOINT", hold=True), Reply("COMPACTION_RESUMED")]),
     "btw": (btw, lambda: [Reply("MAIN_RUNNING", hold=True, tail=" MAIN_DONE"), Reply("SIDE_PARTIAL", hold=True, tail=" SIDE_DONE"), Reply("NEXT_MAIN_DONE")]),
