@@ -92,6 +92,19 @@ fn the_permissions_command_is_gated_by_permissions_and_every_other_command_by_co
 }
 
 #[test]
+fn clamping_prefers_the_nearest_higher_level() {
+    use ThinkingLevel::*;
+    let supported = [Low, High, Max];
+    assert_eq!(Off.clamp(&supported), Low);
+    assert_eq!(Medium.clamp(&supported), High);
+    assert_eq!(Xhigh.clamp(&supported), Max);
+    assert_eq!(High.clamp(&supported), High);
+    assert_eq!(Max.clamp(&[Off, Low]), Low);
+    assert_eq!(High.clamp(&[Off]), Off);
+    assert_eq!(Medium.clamp(&[]), Medium);
+}
+
+#[test]
 fn command_info_kind_defaults_to_command_and_is_omitted_then() {
     let command: CommandInfo =
         serde_json::from_value(json!({"name": "review", "description": "d"})).unwrap();

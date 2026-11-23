@@ -100,6 +100,16 @@ pub enum ThinkingLevel {
     Max,
 }
 
+impl ThinkingLevel {
+    /// This level when `levels` lists it, else the nearest listed one above it, else the nearest
+    /// below. An empty list leaves it as it is.
+    pub fn clamp(self, levels: &[ThinkingLevel]) -> ThinkingLevel {
+        let above = levels.iter().filter(|level| **level >= self).min();
+        let below = levels.iter().filter(|level| **level < self).max();
+        above.or(below).copied().unwrap_or(self)
+    }
+}
+
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

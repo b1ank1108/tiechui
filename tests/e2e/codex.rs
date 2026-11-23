@@ -971,10 +971,14 @@ async fn until_error(client: &mut Client, needle: &str) -> String {
     }
 }
 
-async fn until_model(client: &mut Client, id: &str) {
-    client
+async fn until_model(client: &mut Client, id: &str) -> ThinkingLevel {
+    let events = client
         .until(|kind| matches!(kind, EventKind::SessionUpdated { model, .. } if model.id == id))
         .await;
+    match &events.last().unwrap().event.event {
+        EventKind::SessionUpdated { thinking, .. } => *thinking,
+        other => panic!("{other:?}"),
+    }
 }
 
 async fn until_thinking(client: &mut Client, level: ThinkingLevel) {
@@ -1156,7 +1160,7 @@ async fn model_and_effort_switches_go_out_with_the_next_turn_and_are_recorded() 
     until_error(&mut client, "gpt-none").await;
     submit_op(&mut client, &thread, thinking("high")).await;
     until_thinking(&mut client, ThinkingLevel::High).await;
-    // gpt-lite has no `high`, so the effort falls back to its default, `low`.
+    // gpt-lite has no `high`, so the effort clamps to the nearest level it has, `medium`.
     submit_op(&mut client, &thread, model("gpt-lite")).await;
     until_model(&mut client, "gpt-lite").await;
 
@@ -1183,7 +1187,7 @@ async fn model_and_effort_switches_go_out_with_the_next_turn_and_are_recorded() 
     assert_eq!(
         sent,
         [
-            (json!("gpt-lite"), json!("low")),
+            (json!("gpt-lite"), json!("medium")),
             (json!("gpt-fake"), json!("medium"))
         ]
     );
@@ -1203,6 +1207,66 @@ async fn model_and_effort_switches_go_out_with_the_next_turn_and_are_recorded() 
         .map(|entry| entry["level"].clone())
         .collect();
     assert_eq!(levels, [json!("high"), json!("medium")]);
+}
+
+#[tokio::test]
+async fn an_effort_the_new_model_lacks_is_clamped_for_the_next_turn_and_comes_back_later() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("untrusted", "read-only"));
+    for (text, turn) in [("one", TURN), ("two", "turn-2")] {
+        steps.extend(turn_start(text, turn));
+        steps.push(turn_done(turn, "completed"));
+    }
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let model = |id: &str| json!({"kind": "set_model", "provider": "codex", "model": id});
+
+    submit_op(
+        &mut client,
+        &thread,
+        json!({"kind": "set_thinking", "level": "high"}),
+    )
+    .await;
+    until_thinking(&mut client, ThinkingLevel::High).await;
+    submit_op(&mut client, &thread, model("gpt-lite")).await;
+    assert_eq!(
+        until_model(&mut client, "gpt-lite").await,
+        ThinkingLevel::Medium,
+        "gpt-lite takes low and medium; medium is the nearest to high"
+    );
+    submit(&mut client, &thread, "one", "follow_up").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, model("gpt-fake")).await;
+    assert_eq!(
+        until_model(&mut client, "gpt-fake").await,
+        ThinkingLevel::High
+    );
+    submit(&mut client, &thread, "two", "follow_up").await;
+    client.until(is_completed).await;
+
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+    let sent: Vec<_> = turn_starts(&fixture)
+        .iter()
+        .map(|params| (params["model"].clone(), params["effort"].clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (json!("gpt-lite"), json!("medium")),
+            (json!("gpt-fake"), json!("high"))
+        ]
+    );
+    let levels: Vec<_> = entries(&opened.path, "thinking_change")
+        .iter()
+        .map(|entry| entry["level"].clone())
+        .collect();
+    assert_eq!(levels, [json!("high")], "the clamp is not recorded");
 }
 
 #[tokio::test]

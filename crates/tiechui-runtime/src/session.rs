@@ -115,11 +115,12 @@ pub async fn open_session(
         .filter(|m| !m.is_empty())
         .map(str::to_owned)
         .or_else(|| history::stored_model(&store, runtime));
+    let requested_thinking = config.thinking.or_else(|| history::stored_thinking(&store));
     let (started, backend_events) = match backend
         .start(StartParams {
             cwd: cwd.clone(),
             model: requested_model.clone(),
-            thinking: config.thinking.or_else(|| history::stored_thinking(&store)),
+            thinking: requested_thinking,
             mode: config.mode.clone(),
             resume: resume.clone(),
         })
@@ -150,6 +151,7 @@ pub async fn open_session(
         thread: ThreadId(id.clone()),
         epoch: config.epoch,
         mode: config.mode.clone(),
+        requested_thinking: requested_thinking.unwrap_or(started.thinking),
         started,
         models: initial_models,
         commands: Vec::new(),
@@ -222,6 +224,7 @@ struct Session {
     thread: ThreadId,
     epoch: SessionEpoch,
     mode: Option<String>,
+    requested_thinking: ThinkingLevel,
     started: Started,
     models: Vec<ModelInfo>,
     commands: Vec<CommandInfo>,
@@ -644,6 +647,7 @@ impl Session {
     async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<(), String> {
         match self.backend.set_thinking(level).await {
             Ok(applied) => {
+                self.requested_thinking = level;
                 self.started.thinking = applied;
                 self.append(history::thinking_entry(applied)).await?;
                 self.emit_session_updated();
@@ -654,6 +658,9 @@ impl Session {
     }
 
     async fn apply_model_change(&mut self, info: ModelInfo) -> Result<(), String> {
+        if !info.thinking_levels.is_empty() {
+            self.started.thinking = self.requested_thinking.clamp(&info.thinking_levels);
+        }
         self.started.model = info.clone();
         self.model_ref = ModelRef {
             provider: self.runtime.clone(),

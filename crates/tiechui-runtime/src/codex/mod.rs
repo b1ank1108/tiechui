@@ -110,7 +110,7 @@ impl Driver for CodexDriver {
             cwd: String::new(),
             model: None,
             thread_model: String::new(),
-            effort: None,
+            requested_thinking: ThinkingLevel::Off,
             catalogue: Vec::new(),
             skills: Vec::new(),
         }))
@@ -141,7 +141,7 @@ struct CodexBackend {
     cwd: String,
     model: Option<String>,
     thread_model: String,
-    effort: Option<String>,
+    requested_thinking: ThinkingLevel,
     catalogue: Vec<wire::Model>,
     skills: Vec<CommandInfo>,
 }
@@ -179,16 +179,18 @@ impl CodexBackend {
             thread.model
         };
         self.catalogue = self.list_models(&rpc).await;
-        self.effort = match params.thinking.map(|level| self.effort_for(level)) {
-            Some(Ok(effort)) => Some(effort.to_owned()),
-            Some(Err(error)) => {
-                debug(&format!(
-                    "the recorded thinking level stays unused: {error}"
-                ));
-                thread.reasoning_effort
-            }
-            None => thread.reasoning_effort,
-        };
+        let default = self
+            .find_model(&self.thread_model)
+            .and_then(|model| model.default_reasoning_effort.as_deref());
+        let thread_level = [thread.reasoning_effort.as_deref(), default]
+            .into_iter()
+            .flatten()
+            .find_map(items::effort_level)
+            .unwrap_or(ThinkingLevel::Off);
+        // The session takes the level shown as the one asked for; start from the same.
+        self.requested_thinking = params
+            .thinking
+            .unwrap_or_else(|| thread_level.clamp(&self.model_info().thinking_levels));
         self.skills = self.list_skills(&rpc).await;
         let models: Vec<ModelInfo> = self
             .catalogue
@@ -210,7 +212,7 @@ impl CodexBackend {
             external_id: thread.thread.id,
             resumed,
             model: self.model_info(),
-            thinking: self.thinking(),
+            thinking: self.shown_thinking(),
         })
     }
 
@@ -287,18 +289,12 @@ impl CodexBackend {
         }
     }
 
-    fn thinking(&self) -> ThinkingLevel {
-        let default = self
-            .find_model(&self.thread_model)
-            .and_then(|model| model.default_reasoning_effort.as_deref());
-        [self.effort.as_deref(), default]
-            .into_iter()
-            .flatten()
-            .find_map(items::effort_level)
-            .unwrap_or(ThinkingLevel::Off)
+    fn shown_thinking(&self) -> ThinkingLevel {
+        self.requested_thinking
+            .clamp(&self.model_info().thinking_levels)
     }
 
-    fn effort_for(&self, level: ThinkingLevel) -> Result<&'static str, String> {
+    fn check_thinking(&self, level: ThinkingLevel) -> Result<(), String> {
         let model = self
             .find_model(&self.thread_model)
             .ok_or_else(|| format!("codex lists no reasoning efforts for {}", self.thread_model))?;
@@ -320,7 +316,7 @@ impl CodexBackend {
                 model.id
             ));
         }
-        Ok(effort)
+        Ok(())
     }
 
     fn input(&self, content: &[InputContent]) -> Vec<Value> {
@@ -475,7 +471,7 @@ impl Backend for CodexBackend {
                     approval_policy: self.policy.approval,
                     approvals_reviewer: self.policy.reviewer,
                     sandbox_policy: self.policy.sandbox_policy(),
-                    effort: self.effort.as_deref(),
+                    effort: items::level_effort(self.shown_thinking()),
                     summary: "auto",
                 },
                 self.timeouts.request,
@@ -589,21 +585,14 @@ impl Backend for CodexBackend {
             .find_model(model)
             .cloned()
             .ok_or_else(|| format!("codex does not list model {model}"))?;
-        // Codex keeps an effort for later turns; one the new model lacks becomes its default.
-        if self
-            .effort
-            .as_deref()
-            .is_some_and(|effort| !items::supports(&chosen, effort))
-        {
-            self.effort = chosen.default_reasoning_effort.clone();
-        }
         self.model = Some(chosen.model.clone());
         self.thread_model = chosen.model.clone();
         Ok(items::model_info(&chosen))
     }
 
     async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
-        self.effort = Some(self.effort_for(level)?.to_owned());
+        self.check_thinking(level)?;
+        self.requested_thinking = level;
         Ok(level)
     }
 

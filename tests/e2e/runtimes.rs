@@ -752,6 +752,64 @@ async fn set_thinking_off_is_recorded_as_an_empty_level_and_restored() {
     assert!(starts[1].contains("thinking=off"), "{}", starts[1]);
 }
 
+async fn thinking_on(client: &mut Client, id: &str) -> ThinkingLevel {
+    let events = client
+        .until(|kind| matches!(kind, EventKind::SessionUpdated { model, .. } if model.id == id))
+        .await;
+    match &events.last().unwrap().event.event {
+        EventKind::SessionUpdated { thinking, .. } => *thinking,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_model_switch_shows_the_requested_level_clamped_to_the_new_model_without_recording_it() {
+    let fixture = Fixture::new();
+    fixture.script(json!({"turns": []}));
+    let mut client = fixture.client().await;
+    let opened = open_fake(&mut client, &fixture).await;
+    let submit = |op: Value| json!({"thread_id": opened.thread_id, "op": op});
+    let model = |id: &str| json!({"kind": "set_model", "provider": "fake", "model": id});
+
+    client
+        .ok(
+            "session/submit",
+            submit(json!({"kind": "set_thinking", "level": "high"})),
+        )
+        .await;
+    client
+        .until(|kind| {
+            matches!(
+                kind,
+                EventKind::SessionUpdated {
+                    thinking: ThinkingLevel::High,
+                    ..
+                }
+            )
+        })
+        .await;
+    client
+        .ok("session/submit", submit(model("fake-small")))
+        .await;
+    assert_eq!(
+        thinking_on(&mut client, "fake-small").await,
+        ThinkingLevel::Off,
+        "fake-small lists only off"
+    );
+    let entries = thinking_entries(&opened.path);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["level"], "high");
+    client
+        .ok("session/submit", submit(model("fake-model")))
+        .await;
+    assert_eq!(
+        thinking_on(&mut client, "fake-model").await,
+        ThinkingLevel::High,
+        "the requested level comes back with a model that lists it"
+    );
+    assert_eq!(thinking_entries(&opened.path).len(), 1);
+}
+
 #[tokio::test]
 async fn the_permissions_command_switches_the_mode_and_other_commands_reach_the_backend() {
     let fixture = Fixture::new();

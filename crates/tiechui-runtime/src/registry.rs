@@ -521,7 +521,13 @@ mod tests {
         let registry = Registry::builtin(Launch::default());
         assert_eq!(
             registry.capabilities("codex"),
-            Some(RuntimeCapabilities::minimal())
+            Some(RuntimeCapabilities {
+                commands: true,
+                permissions: true,
+                thinking: true,
+                model: true,
+                ..RuntimeCapabilities::minimal()
+            })
         );
         assert_eq!(
             registry.capabilities("claude"),
