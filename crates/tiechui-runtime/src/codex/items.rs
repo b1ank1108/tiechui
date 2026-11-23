@@ -1,12 +1,16 @@
 //! Codex items and decisions in the shapes the session protocol and its clients know: the
 //! native bash output text, the `write` and `edit` tool arguments the desktop renders, usage per
-//! model request, and the permission modes as Codex policy.
+//! model request, the permission modes as Codex policy, reasoning efforts as thinking levels, and
+//! skills as `/` menu entries.
 
 use serde_json::{Value, json};
-use tiechui_protocol::{ApprovalDecision, TokenUsage};
+use tiechui_protocol::{
+    ApprovalDecision, CommandInfo, CommandKind, ModelInfo, ThinkingLevel, TokenUsage,
+};
 
 use super::wire::{
-    Breakdown, ChangeKind, CommandAction, CommandItem, FileChange, McpItem, OtherItem,
+    Breakdown, ChangeKind, CommandAction, CommandItem, FileChange, McpItem, Model, OtherItem,
+    SkillRoot,
 };
 use crate::tool_output;
 
@@ -251,6 +255,7 @@ pub fn usage(last: &Breakdown) -> TokenUsage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
+    pub mode: &'static str,
     pub approval: &'static str,
     pub reviewer: &'static str,
     pub sandbox: &'static str,
@@ -263,18 +268,21 @@ impl Policy {
     pub fn of(mode: Option<&str>) -> Self {
         match mode {
             Some("auto") => Self {
+                mode: "auto",
                 approval: "on-request",
                 reviewer: "auto_review",
                 sandbox: "workspace-write",
                 sandbox_type: "workspaceWrite",
             },
             Some("yolo") => Self {
+                mode: "yolo",
                 approval: "never",
                 reviewer: "user",
                 sandbox: "danger-full-access",
                 sandbox_type: "dangerFullAccess",
             },
             _ => Self {
+                mode: "rules",
                 approval: "untrusted",
                 reviewer: "user",
                 sandbox: "read-only",
@@ -286,6 +294,118 @@ impl Policy {
     pub fn sandbox_policy(&self) -> Value {
         json!({"type": self.sandbox_type})
     }
+}
+
+/// A Codex reasoning effort as a thinking level. `none` and `ultra` have no level, and no
+/// effort is `off`: Codex cannot turn reasoning off.
+pub fn effort_level(effort: &str) -> Option<ThinkingLevel> {
+    Some(match effort {
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::Xhigh,
+        "max" => ThinkingLevel::Max,
+        _ => return None,
+    })
+}
+
+pub fn level_effort(level: ThinkingLevel) -> Option<&'static str> {
+    Some(match level {
+        ThinkingLevel::Off => return None,
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Max => "max",
+    })
+}
+
+pub fn model_info(model: &Model) -> ModelInfo {
+    ModelInfo {
+        provider: "codex".into(),
+        id: model.id.clone(),
+        context_window: 0,
+        reasoning: true,
+        thinking_levels: model
+            .supported_reasoning_efforts
+            .iter()
+            .filter_map(|option| effort_level(&option.reasoning_effort))
+            .collect(),
+    }
+}
+
+pub fn supports(model: &Model, effort: &str) -> bool {
+    model
+        .supported_reasoning_efforts
+        .iter()
+        .any(|option| option.reasoning_effort == effort)
+}
+
+/// The enabled skills as `/` menu entries, each name once. The description falls back to the
+/// short one when a skill has none.
+pub fn skill_commands(roots: Vec<SkillRoot>) -> Vec<CommandInfo> {
+    let mut commands: Vec<CommandInfo> = Vec::new();
+    for skill in roots.into_iter().flat_map(|root| root.skills) {
+        if !skill.enabled || commands.iter().any(|known| known.name == skill.name) {
+            continue;
+        }
+        let description = [
+            Some(skill.description),
+            skill.short_description,
+            skill.interface.and_then(|face| face.short_description),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.is_empty())
+        .unwrap_or_default();
+        commands.push(CommandInfo {
+            name: skill.name,
+            description,
+            argument_hint: None,
+            kind: CommandKind::Skill,
+        });
+    }
+    commands
+}
+
+/// Rewrites a mention of a listed skill, `/<name>` or `$<name>` starting a word, to `$<name>`,
+/// the only form Codex expands. Everything else stays, `/<name>` of no skill included.
+pub fn skill_mentions(text: &str, skills: &[CommandInfo]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut word_start = true;
+    while let Some(c) = rest.chars().next() {
+        if word_start
+            && matches!(c, '/' | '$')
+            && let Some(name) = mentioned(&rest[1..], skills)
+        {
+            out.push('$');
+            out.push_str(name);
+            rest = &rest[1 + name.len()..];
+            word_start = false;
+            continue;
+        }
+        out.push(c);
+        word_start = c.is_whitespace();
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The longest skill name `text` starts with as a whole word: not followed by a character that
+/// would continue a name or a path.
+fn mentioned<'a>(text: &str, skills: &'a [CommandInfo]) -> Option<&'a str> {
+    skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .filter(|name| {
+            text.strip_prefix(name).is_some_and(|after| {
+                !after.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/'))
+            })
+        })
+        .max_by_key(|name| name.len())
 }
 
 pub fn review_decision(decision: &ApprovalDecision) -> &'static str {
@@ -461,12 +581,92 @@ mod tests {
     fn modes_map_to_policy_and_a_missing_or_unknown_mode_asks() {
         assert_eq!(Policy::of(None), Policy::of(Some("rules")));
         assert_eq!(Policy::of(Some("bogus")), Policy::of(Some("rules")));
+        assert_eq!(Policy::of(Some("bogus")).mode, "rules");
         assert_eq!(Policy::of(Some("rules")).approval, "untrusted");
         assert_eq!(Policy::of(Some("auto")).reviewer, "auto_review");
         assert_eq!(
             Policy::of(Some("yolo")).sandbox_policy(),
             json!({"type": "dangerFullAccess"})
         );
+    }
+
+    #[test]
+    fn efforts_map_onto_thinking_levels_by_name_and_ultra_has_none() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "m", "model": "m", "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": [{"reasoningEffort": "none"},
+                {"reasoningEffort": "minimal"}, {"reasoningEffort": "xhigh"},
+                {"reasoningEffort": "max"}, {"reasoningEffort": "ultra"}]}))
+        .unwrap();
+        let info = model_info(&model);
+        assert_eq!(
+            info.thinking_levels,
+            [
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Max
+            ]
+        );
+        assert!(info.reasoning);
+        assert!(supports(&model, "ultra") && !supports(&model, "low"));
+        for level in info.thinking_levels {
+            assert_eq!(effort_level(level_effort(level).unwrap()), Some(level));
+        }
+        assert_eq!(level_effort(ThinkingLevel::Off), None);
+    }
+
+    #[test]
+    fn only_enabled_skills_are_listed_once_each() {
+        let roots: Vec<SkillRoot> = serde_json::from_value(json!([
+            {"skills": [
+                {"name": "a", "description": "first", "enabled": true},
+                {"name": "off", "description": "x", "enabled": false}]},
+            {"skills": [
+                {"name": "b", "description": "", "shortDescription": "legacy", "enabled": true},
+                {"name": "c", "description": "", "enabled": true,
+                    "interface": {"shortDescription": "short"}},
+                {"name": "a", "description": "again", "enabled": true}]},
+        ]))
+        .unwrap();
+        let listed: Vec<_> = skill_commands(roots)
+            .into_iter()
+            .map(|command| (command.name, command.description, command.kind))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a".into(), "first".into(), CommandKind::Skill),
+                ("b".into(), "legacy".into(), CommandKind::Skill),
+                ("c".into(), "short".into(), CommandKind::Skill),
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_mentions_become_dollar_names_and_nothing_else_changes() {
+        let skills: Vec<CommandInfo> = ["fix", "fix-all", "ns:tool"]
+            .into_iter()
+            .map(|name| CommandInfo {
+                name: name.into(),
+                description: String::new(),
+                argument_hint: None,
+                kind: CommandKind::Skill,
+            })
+            .collect();
+        let cases = [
+            ("/fix it", "$fix it"),
+            ("$fix", "$fix"),
+            ("run /fix-all, then /fix.", "run $fix-all, then $fix."),
+            ("/ns:tool now", "$ns:tool now"),
+            (
+                "keep /foo, src/fix, /fixer, /fix/a.txt",
+                "keep /foo, src/fix, /fixer, /fix/a.txt",
+            ),
+            ("price$fix ünï /fix", "price$fix ünï $fix"),
+        ];
+        for (typed, sent) in cases {
+            assert_eq!(skill_mentions(typed, &skills), sent, "{typed}");
+        }
     }
 
     #[test]

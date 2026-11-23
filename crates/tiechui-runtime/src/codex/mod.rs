@@ -2,6 +2,9 @@
 //!
 //! One `codex app-server` process serves one thread. Threads of Codex's own sub-agents share the
 //! connection; their frames never touch the root thread's turn (see `translate`).
+//!
+//! The model, reasoning effort and permission mode the session switches to are only remembered;
+//! the next `turn/start` carries them, and Codex keeps them for the turns after it.
 
 mod items;
 mod translate;
@@ -11,14 +14,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use tiechui_protocol::{
-    ApprovalDecision, InputContent, ModelInfo, RuntimeCapabilities, ThinkingLevel,
+    ApprovalDecision, CommandInfo, InputContent, ModelInfo, PERMISSIONS_COMMAND,
+    RuntimeCapabilities, ThinkingLevel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
+use crate::backend::{Backend, BackendEvent, CommandAction, StartParams, Started, Steered};
 use crate::process::{self, Process, StderrTail, overridable, seconds};
 use crate::registry::{
     Driver, Launch, Probe, parse_version, probe_at_least, resolve_in_path, too_old,
@@ -74,11 +78,23 @@ impl Driver for CodexDriver {
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::minimal()
+        RuntimeCapabilities {
+            model: true,
+            thinking: true,
+            commands: true,
+            permissions: true,
+            ..RuntimeCapabilities::minimal()
+        }
     }
 
     fn gated_ops(&self) -> &'static [&'static str] {
-        &[]
+        &[
+            "run_command",
+            "command_input",
+            "permissions",
+            "set_thinking",
+            "set_model",
+        ]
     }
 
     async fn probe(&self, launch: &Launch) -> Probe {
@@ -93,6 +109,10 @@ impl Driver for CodexDriver {
             policy: Policy::of(None),
             cwd: String::new(),
             model: None,
+            thread_model: String::new(),
+            effort: None,
+            catalogue: Vec::new(),
+            skills: Vec::new(),
         }))
     }
 }
@@ -101,6 +121,7 @@ struct Run {
     process: Option<Process>,
     rpc: Arc<Rpc>,
     shared: Arc<Shared>,
+    events: mpsc::WeakSender<BackendEvent>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -119,6 +140,10 @@ struct CodexBackend {
     policy: Policy,
     cwd: String,
     model: Option<String>,
+    thread_model: String,
+    effort: Option<String>,
+    catalogue: Vec<wire::Model>,
+    skills: Vec<CommandInfo>,
 }
 
 impl CodexBackend {
@@ -140,31 +165,175 @@ impl CodexBackend {
         }
     }
 
-    async fn handshake(&self, resume: Option<&str>) -> Result<Started, String> {
+    async fn handshake(&mut self, params: &StartParams) -> Result<Started, String> {
         let run = self.running()?;
-        let (rpc, shared) = (&run.rpc, &run.shared);
-        self.initialize(rpc, shared).await?;
-        let (value, resumed) = self.open_thread(rpc, resume).await?;
+        let (rpc, shared, events) = (run.rpc.clone(), run.shared.clone(), run.events.clone());
+        self.initialize(&rpc, &shared).await?;
+        let (value, resumed) = self.open_thread(&rpc, params.resume.as_deref()).await?;
         let thread: wire::ThreadResponse = serde_json::from_value(value)
             .map_err(|error| format!("codex thread response: {error}"))?;
         *shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread.thread.id.clone());
-        let model = if thread.model.is_empty() {
+        self.thread_model = if thread.model.is_empty() {
             self.model.clone().unwrap_or_else(|| "codex".into())
         } else {
             thread.model
         };
+        self.catalogue = self.list_models(&rpc).await;
+        self.effort = match params.thinking.map(|level| self.effort_for(level)) {
+            Some(Ok(effort)) => Some(effort.to_owned()),
+            Some(Err(error)) => {
+                debug(&format!(
+                    "the recorded thinking level stays unused: {error}"
+                ));
+                thread.reasoning_effort
+            }
+            None => thread.reasoning_effort,
+        };
+        self.skills = self.list_skills(&rpc).await;
+        let models: Vec<ModelInfo> = self
+            .catalogue
+            .iter()
+            .filter(|model| !model.hidden)
+            .map(items::model_info)
+            .collect();
+        if let Some(events) = events.upgrade() {
+            if !models.is_empty() {
+                let _ = events.send(BackendEvent::Models(models)).await;
+            }
+            if !self.skills.is_empty() {
+                let _ = events
+                    .send(BackendEvent::Commands(self.skills.clone()))
+                    .await;
+            }
+        }
         Ok(Started {
             external_id: thread.thread.id,
             resumed,
-            model: ModelInfo {
+            model: self.model_info(),
+            thinking: self.thinking(),
+        })
+    }
+
+    async fn list_models(&self, rpc: &Rpc) -> Vec<wire::Model> {
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let page = rpc
+                .call("model/list", params, self.timeouts.request)
+                .await
+                .map_err(|error| error.describe("codex", "model/list"))
+                .and_then(|value| {
+                    serde_json::from_value::<wire::ModelPage>(value)
+                        .map_err(|error| format!("codex model/list response: {error}"))
+                });
+            match page {
+                Ok(page) => {
+                    models.extend(page.data);
+                    match page.next_cursor {
+                        Some(next) => cursor = Some(next),
+                        None => return models,
+                    }
+                }
+                Err(error) => {
+                    debug(&error);
+                    return models;
+                }
+            }
+        }
+    }
+
+    async fn list_skills(&self, rpc: &Rpc) -> Vec<CommandInfo> {
+        let listed = rpc
+            .call(
+                "skills/list",
+                json!({"cwds": [self.cwd]}),
+                self.timeouts.request,
+            )
+            .await
+            .map_err(|error| error.describe("codex", "skills/list"))
+            .and_then(|value| {
+                serde_json::from_value::<wire::SkillList>(value)
+                    .map_err(|error| format!("codex skills/list response: {error}"))
+            });
+        match listed {
+            Ok(list) => items::skill_commands(list.data),
+            Err(error) => {
+                debug(&error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn find_model(&self, name: &str) -> Option<&wire::Model> {
+        self.catalogue
+            .iter()
+            .find(|model| model.id == name || model.model == name)
+    }
+
+    fn model_info(&self) -> ModelInfo {
+        match self.find_model(&self.thread_model) {
+            Some(model) => items::model_info(model),
+            None => ModelInfo {
                 provider: "codex".into(),
-                id: model,
+                id: self.thread_model.clone(),
                 context_window: 0,
                 reasoning: false,
                 thinking_levels: vec![ThinkingLevel::Off],
             },
-            thinking: ThinkingLevel::Off,
-        })
+        }
+    }
+
+    fn thinking(&self) -> ThinkingLevel {
+        let default = self
+            .find_model(&self.thread_model)
+            .and_then(|model| model.default_reasoning_effort.as_deref());
+        [self.effort.as_deref(), default]
+            .into_iter()
+            .flatten()
+            .find_map(items::effort_level)
+            .unwrap_or(ThinkingLevel::Off)
+    }
+
+    fn effort_for(&self, level: ThinkingLevel) -> Result<&'static str, String> {
+        let model = self
+            .find_model(&self.thread_model)
+            .ok_or_else(|| format!("codex lists no reasoning efforts for {}", self.thread_model))?;
+        let takes = items::model_info(model)
+            .thinking_levels
+            .into_iter()
+            .filter_map(items::level_effort)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(effort) = items::level_effort(level) else {
+            return Err(format!(
+                "codex cannot turn reasoning off; {} takes {takes}",
+                model.id
+            ));
+        };
+        if !items::supports(model, effort) {
+            return Err(format!(
+                "{} does not support reasoning effort {effort}; it takes {takes}",
+                model.id
+            ));
+        }
+        Ok(effort)
+    }
+
+    fn input(&self, content: &[InputContent]) -> Vec<Value> {
+        let content: Vec<InputContent> = content
+            .iter()
+            .map(|part| match part {
+                InputContent::Text { text } => InputContent::Text {
+                    text: items::skill_mentions(text, &self.skills),
+                },
+                image => image.clone(),
+            })
+            .collect();
+        wire::user_input(&content)
     }
 
     async fn initialize(&self, rpc: &Rpc, shared: &Shared) -> Result<(), String> {
@@ -261,6 +430,7 @@ impl Backend for CodexBackend {
         let shared = Arc::new(Shared::default());
         let tail = StderrTail::default();
         let (events, received) = mpsc::channel(1024);
+        let weak = events.downgrade();
         let (frames, inbound) = mpsc::channel(256);
         let translator = Translator::new(shared.clone(), rpc.clone(), events, tail.clone());
         let tasks = vec![
@@ -272,12 +442,13 @@ impl Backend for CodexBackend {
             process: Some(process),
             rpc,
             shared,
+            events: weak,
             tasks,
         });
         self.policy = Policy::of(params.mode.as_deref());
         self.cwd = params.cwd.display().to_string();
         self.model = params.model.clone();
-        match self.handshake(params.resume.as_deref()).await {
+        match self.handshake(&params).await {
             Ok(started) => Ok((started, received)),
             Err(error) => {
                 self.shutdown().await;
@@ -298,12 +469,13 @@ impl Backend for CodexBackend {
                 "turn/start",
                 wire::TurnStartParams {
                     thread_id: &thread,
-                    input: wire::user_input(input),
+                    input: self.input(input),
                     cwd: &self.cwd,
                     model: self.model.as_deref(),
                     approval_policy: self.policy.approval,
                     approvals_reviewer: self.policy.reviewer,
                     sandbox_policy: self.policy.sandbox_policy(),
+                    effort: self.effort.as_deref(),
                     summary: "auto",
                 },
                 self.timeouts.request,
@@ -341,7 +513,7 @@ impl Backend for CodexBackend {
             .rpc
             .call(
                 "turn/steer",
-                json!({"threadId": thread, "expectedTurnId": turn, "input": wire::user_input(input)}),
+                json!({"threadId": thread, "expectedTurnId": turn, "input": self.input(input)}),
                 self.timeouts.request,
             )
             .await;
@@ -390,6 +562,49 @@ impl Backend for CodexBackend {
         run.rpc
             .respond(pending.rpc_id(), pending.response(&decision))
             .await
+    }
+
+    async fn run_command(&mut self, name: &str, arguments: &str) -> Result<CommandAction, String> {
+        if name == PERMISSIONS_COMMAND {
+            self.policy = Policy::of(Some(arguments.trim()));
+            return Ok(CommandAction::PermissionMode(self.policy.mode.into()));
+        }
+        if !self.skills.iter().any(|skill| skill.name == name) {
+            return Err(format!("codex has no skill {name}"));
+        }
+        let arguments = arguments.trim();
+        Ok(CommandAction::Prompt(if arguments.is_empty() {
+            format!("${name}")
+        } else {
+            format!("${name} {arguments}")
+        }))
+    }
+
+    async fn command_input(&mut self, name: &str, _: Value) -> Result<(), String> {
+        Err(format!("codex takes no command input (for {name})"))
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<ModelInfo, String> {
+        let chosen = self
+            .find_model(model)
+            .cloned()
+            .ok_or_else(|| format!("codex does not list model {model}"))?;
+        // Codex keeps an effort for later turns; one the new model lacks becomes its default.
+        if self
+            .effort
+            .as_deref()
+            .is_some_and(|effort| !items::supports(&chosen, effort))
+        {
+            self.effort = chosen.default_reasoning_effort.clone();
+        }
+        self.model = Some(chosen.model.clone());
+        self.thread_model = chosen.model.clone();
+        Ok(items::model_info(&chosen))
+    }
+
+    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
+        self.effort = Some(self.effort_for(level)?.to_owned());
+        Ok(level)
     }
 
     async fn shutdown(&mut self) {

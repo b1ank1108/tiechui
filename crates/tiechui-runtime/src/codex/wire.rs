@@ -47,6 +47,8 @@ pub struct TurnStartParams<'a> {
     pub approval_policy: &'static str,
     pub approvals_reviewer: &'static str,
     pub sandbox_policy: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<&'a str>,
     pub summary: &'static str,
 }
 
@@ -70,11 +72,74 @@ pub struct ThreadResponse {
     pub thread: ThreadId,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ThreadId {
     pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPage {
+    #[serde(default)]
+    pub data: Vec<Model>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub id: String,
+    /// The slug `turn/start` takes; the same as `id` in every catalogue seen so far.
+    pub model: String,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub supported_reasoning_efforts: Vec<EffortOption>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortOption {
+    pub reasoning_effort: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillList {
+    #[serde(default)]
+    pub data: Vec<SkillRoot>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillRoot {
+    #[serde(default)]
+    pub skills: Vec<Skill>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub short_description: Option<String>,
+    #[serde(default)]
+    pub interface: Option<SkillInterface>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInterface {
+    #[serde(default)]
+    pub short_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

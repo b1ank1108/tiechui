@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, Snapshot};
 use tiechui_protocol::{
-    ApprovalRequest, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem, SubagentItem,
-    SubagentState, SubagentStatus, TokenUsage, TurnId, TurnStatus,
+    ApprovalRequest, CommandInfo, CommandKind, DerivedReason, DerivedTurnMarker, EventKind, Item,
+    KnownItem, ModelInfo, PERMISSION_MODE_EVENT, SubagentItem, SubagentState, SubagentStatus,
+    ThinkingLevel, TokenUsage, TurnId, TurnStatus,
 };
 
 const THREAD: &str = "thr-root";
@@ -46,12 +47,72 @@ fn handshake(mode: (&str, &str)) -> Vec<Value> {
             "approvalPolicy": mode.0, "sandbox": mode.1}})),
         answer(thread_response()),
     ]
+    .into_iter()
+    .chain(listings())
+    .collect()
+}
+
+fn resume_handshake(params: Value, response: Value) -> Vec<Value> {
+    let mut steps = vec![
+        expect(json!({"method": "initialize"})),
+        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
+        expect(json!({"method": "initialized"})),
+        expect(json!({"method": "thread/resume", "params": params})),
+        answer(response),
+    ];
+    steps.extend(listings());
+    steps
+}
+
+fn resumed() -> Vec<Value> {
+    resume_handshake(json!({"threadId": THREAD}), thread_response())
 }
 
 fn thread_response() -> Value {
     json!({"thread": {"id": THREAD, "turns": []}, "model": "gpt-fake",
         "modelProvider": "openai", "approvalPolicy": "untrusted", "sandbox": {"type": "readOnly"},
         "cwd": "/x"})
+}
+
+fn model_entry(id: &str, hidden: bool, efforts: &[&str], default: &str) -> Value {
+    let efforts: Vec<Value> = efforts
+        .iter()
+        .map(|effort| json!({"reasoningEffort": effort, "description": effort}))
+        .collect();
+    json!({"id": id, "model": id, "displayName": id.to_uppercase(), "description": "",
+        "hidden": hidden, "supportedReasoningEfforts": efforts,
+        "defaultReasoningEffort": default, "isDefault": id == "gpt-fake"})
+}
+
+fn skill(name: &str, description: &str, enabled: bool) -> Value {
+    json!({"name": name, "description": description, "path": format!("/s/{name}/SKILL.md"),
+        "scope": "user", "enabled": enabled, "pluginId": null})
+}
+
+/// What Codex lists once the thread is open: a model catalogue over two pages (with a hidden
+/// model and the unmapped `ultra` effort) and the skills of two roots (a disabled one, a
+/// duplicate name, one described only by its interface).
+fn listings() -> Vec<Value> {
+    let mut review = skill("review", "", true);
+    review["interface"] = json!({"displayName": "Review", "shortDescription": "look it over"});
+    vec![
+        expect(json!({"method": "model/list"})),
+        answer(json!({"data": [
+            model_entry("gpt-fake", false, &["low", "medium", "high", "ultra"], "medium"),
+            model_entry("gpt-secret", true, &["low"], "low"),
+        ], "nextCursor": "page-2"})),
+        expect(json!({"method": "model/list", "params": {"cursor": "page-2"}})),
+        answer(
+            json!({"data": [model_entry("gpt-lite", false, &["low", "medium"], "low")],
+            "nextCursor": null}),
+        ),
+        expect(json!({"method": "skills/list"})),
+        answer(json!({"data": [
+            {"cwd": "/x", "errors": [], "skills": [
+                skill("fix", "fix things", true), skill("parked", "not now", false)]},
+            {"cwd": "/y", "errors": [], "skills": [review, skill("fix", "again", true)]},
+        ]})),
+    ]
 }
 
 fn turn_start(text: &str, turn: &str) -> Vec<Value> {
@@ -769,13 +830,7 @@ async fn reopening_by_path_resumes_the_saved_thread() {
             .await;
         opened.path
     };
-    fixture.script(vec![
-        expect(json!({"method": "initialize"})),
-        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
-        expect(json!({"method": "initialized"})),
-        expect(json!({"method": "thread/resume", "params": {"threadId": THREAD}})),
-        answer(thread_response()),
-    ]);
+    fixture.script(resumed());
     let mut client = fixture.client();
     let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
     let text = serde_json::to_string(&reopened.events[0].event).unwrap();
@@ -825,6 +880,7 @@ async fn a_failed_resume_starts_a_new_thread_and_says_so() {
     steps.push(answer(
         json!({"thread": {"id": "thr-new", "turns": []}, "model": "gpt-fake"}),
     ));
+    steps.extend(listings());
     steps.extend([
         expect(json!({"method": "turn/start", "params": {"threadId": "thr-new"}})),
         answer(json!({"turn": {"id": "turn-9", "items": [], "status": "inProgress"}})),
@@ -897,6 +953,430 @@ async fn permission_modes_map_to_codex_approval_policy_and_sandbox() {
             assert_eq!(start["params"]["approvalsReviewer"], "auto_review");
         }
     }
+}
+
+async fn submit_op(client: &mut Client, thread: &str, op: Value) {
+    client
+        .ok("session/submit", json!({"thread_id": thread, "op": op}))
+        .await;
+}
+
+async fn until_error(client: &mut Client, needle: &str) -> String {
+    let events = client
+        .until(|kind| matches!(kind, EventKind::Error { message } if message.contains(needle)))
+        .await;
+    match &events.last().unwrap().event.event {
+        EventKind::Error { message } => message.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn until_model(client: &mut Client, id: &str) {
+    client
+        .until(|kind| matches!(kind, EventKind::SessionUpdated { model, .. } if model.id == id))
+        .await;
+}
+
+async fn until_thinking(client: &mut Client, level: ThinkingLevel) {
+    client
+        .until(
+            |kind| matches!(kind, EventKind::SessionUpdated { thinking, .. } if *thinking == level),
+        )
+        .await;
+}
+
+async fn until_turn_started(client: &mut Client) {
+    client
+        .until(|kind| matches!(kind, EventKind::TurnStarted { .. }))
+        .await;
+}
+
+fn steered(turn: &str, text: &str) -> Vec<Value> {
+    vec![
+        expect(
+            json!({"method": "turn/steer", "params": {"threadId": THREAD,
+            "expectedTurnId": turn, "input": [{"type": "text", "text": text}]}}),
+        ),
+        answer(json!({"turnId": turn})),
+    ]
+}
+
+fn turn_starts(fixture: &Fixture) -> Vec<Value> {
+    fixture
+        .received()
+        .into_iter()
+        .filter(|frame| frame["method"] == "turn/start")
+        .map(|frame| frame["params"].clone())
+        .collect()
+}
+
+fn entries(path: &str, kind: &str) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["kind"] == kind)
+        .collect()
+}
+
+fn session_state(events: &[tiechui_protocol::Event]) -> (ModelInfo, ThinkingLevel) {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.event {
+            EventKind::SessionUpdated {
+                model, thinking, ..
+            } => Some((model.clone(), *thinking)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// The catalogue and the commands the driver listed, from the snapshot when they arrived before
+/// it and from the events after it otherwise.
+async fn listed(client: &mut Client, opened: &Snapshot) -> (Vec<ModelInfo>, Vec<CommandInfo>) {
+    fn note(
+        kind: &EventKind,
+        models: &mut Option<Vec<ModelInfo>>,
+        commands: &mut Option<Vec<CommandInfo>>,
+    ) {
+        match kind {
+            EventKind::ModelsUpdated { models: listed } if listed.len() > 1 => {
+                *models = Some(listed.clone());
+            }
+            EventKind::CommandsUpdated { commands: listed } if !listed.is_empty() => {
+                *commands = Some(listed.clone());
+            }
+            _ => {}
+        }
+    }
+    let (mut models, mut commands) = (None, None);
+    for event in &opened.events {
+        note(&event.event, &mut models, &mut commands);
+    }
+    while models.is_none() || commands.is_none() {
+        let events = client
+            .until(|kind| {
+                matches!(
+                    kind,
+                    EventKind::ModelsUpdated { .. } | EventKind::CommandsUpdated { .. }
+                )
+            })
+            .await;
+        note(
+            &events.last().unwrap().event.event,
+            &mut models,
+            &mut commands,
+        );
+    }
+    (models.unwrap(), commands.unwrap())
+}
+
+fn codex_model(id: &str, levels: &[ThinkingLevel]) -> ModelInfo {
+    ModelInfo {
+        provider: "codex".into(),
+        id: id.into(),
+        context_window: 0,
+        reasoning: true,
+        thinking_levels: levels.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn the_model_catalogue_and_the_enabled_skills_are_listed_once_the_thread_opens() {
+    use ThinkingLevel::{High, Low, Medium};
+    let fixture = Fixture::new();
+    fixture.script(handshake(("untrusted", "read-only")));
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let (models, commands) = listed(&mut client, &opened).await;
+    assert_eq!(
+        models,
+        [
+            codex_model("gpt-fake", &[Low, Medium, High]),
+            codex_model("gpt-lite", &[Low, Medium])
+        ]
+    );
+    let skill = |name: &str, description: &str| CommandInfo {
+        name: name.into(),
+        description: description.into(),
+        argument_hint: None,
+        kind: CommandKind::Skill,
+    };
+    assert_eq!(
+        commands,
+        [skill("fix", "fix things"), skill("review", "look it over")]
+    );
+    assert_eq!(
+        session_state(&opened.events),
+        (codex_model("gpt-fake", &[Low, Medium, High]), Medium),
+        "the thread runs on the listed model at its default effort"
+    );
+    let frames = fixture.received();
+    let method = |name: &str| {
+        frames
+            .iter()
+            .find(|frame| frame["method"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        method("skills/list")["params"],
+        json!({"cwds": [method("thread/start")["params"]["cwd"]]})
+    );
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+}
+
+#[tokio::test]
+async fn model_and_effort_switches_go_out_with_the_next_turn_and_are_recorded() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("untrusted", "read-only"));
+    steps.extend(turn_start("one", TURN));
+    steps.extend(steered(TURN, "and then"));
+    steps.push(turn_done(TURN, "completed"));
+    steps.extend(turn_start("two", "turn-2"));
+    steps.push(turn_done("turn-2", "completed"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let thinking = |level: &str| json!({"kind": "set_thinking", "level": level});
+    let model = |id: &str| json!({"kind": "set_model", "provider": "codex", "model": id});
+
+    submit_op(&mut client, &thread, thinking("off")).await;
+    let refused = until_error(&mut client, "off").await;
+    assert!(refused.contains("low, medium, high"), "{refused}");
+    submit_op(&mut client, &thread, thinking("xhigh")).await;
+    until_error(&mut client, "xhigh").await;
+    submit_op(&mut client, &thread, model("gpt-none")).await;
+    until_error(&mut client, "gpt-none").await;
+    submit_op(&mut client, &thread, thinking("high")).await;
+    until_thinking(&mut client, ThinkingLevel::High).await;
+    // gpt-lite has no `high`, so the effort falls back to its default, `low`.
+    submit_op(&mut client, &thread, model("gpt-lite")).await;
+    until_model(&mut client, "gpt-lite").await;
+
+    submit(&mut client, &thread, "one", "follow_up").await;
+    until_turn_started(&mut client).await;
+    submit_op(&mut client, &thread, model("gpt-fake")).await;
+    until_model(&mut client, "gpt-fake").await;
+    submit_op(&mut client, &thread, thinking("medium")).await;
+    until_thinking(&mut client, ThinkingLevel::Medium).await;
+    submit(&mut client, &thread, "and then", "steer").await;
+    client.until(is_completed).await;
+    submit(&mut client, &thread, "two", "follow_up").await;
+    client.until(is_completed).await;
+
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+    let sent: Vec<_> = turn_starts(&fixture)
+        .iter()
+        .map(|params| (params["model"].clone(), params["effort"].clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (json!("gpt-lite"), json!("low")),
+            (json!("gpt-fake"), json!("medium"))
+        ]
+    );
+    let models: Vec<_> = entries(&opened.path, "model_change")
+        .iter()
+        .map(|entry| entry["model"].clone())
+        .collect();
+    assert_eq!(
+        models,
+        [
+            json!({"provider": "codex", "model": "gpt-lite"}),
+            json!({"provider": "codex", "model": "gpt-fake"})
+        ]
+    );
+    let levels: Vec<_> = entries(&opened.path, "thinking_change")
+        .iter()
+        .map(|entry| entry["level"].clone())
+        .collect();
+    assert_eq!(levels, [json!("high"), json!("medium")]);
+}
+
+#[tokio::test]
+async fn a_permission_switch_goes_out_with_the_next_turn_even_when_made_during_one() {
+    let fixture = Fixture::new();
+    let mut steps = handshake(("untrusted", "read-only"));
+    steps.extend(turn_start("one", TURN));
+    steps.extend(steered(TURN, "go on"));
+    steps.push(turn_done(TURN, "completed"));
+    for (text, turn) in [("two", "turn-2"), ("three", "turn-3")] {
+        steps.extend(turn_start(text, turn));
+        steps.push(turn_done(turn, "completed"));
+    }
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let switch =
+        |mode: &str| json!({"kind": "run_command", "name": "permissions", "arguments": mode});
+    let switched = |mode: &'static str| {
+        move |kind: &EventKind| {
+            matches!(kind, EventKind::Extension { name, data }
+                if name == PERMISSION_MODE_EVENT && *data == mode)
+        }
+    };
+
+    submit(&mut client, &thread, "one", "follow_up").await;
+    until_turn_started(&mut client).await;
+    submit_op(&mut client, &thread, switch("auto")).await;
+    client.until(switched("auto")).await;
+    submit(&mut client, &thread, "go on", "steer").await;
+    client.until(is_completed).await;
+    submit(&mut client, &thread, "two", "follow_up").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, switch("yolo")).await;
+    client.until(switched("yolo")).await;
+    submit(&mut client, &thread, "three", "follow_up").await;
+    client.until(is_completed).await;
+
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+    let policies: Vec<_> = turn_starts(&fixture)
+        .iter()
+        .map(|params| {
+            (
+                params["approvalPolicy"].clone(),
+                params["approvalsReviewer"].clone(),
+                params["sandboxPolicy"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        policies,
+        [
+            (
+                json!("untrusted"),
+                json!("user"),
+                json!({"type": "readOnly"})
+            ),
+            (
+                json!("on-request"),
+                json!("auto_review"),
+                json!({"type": "workspaceWrite"})
+            ),
+            (
+                json!("never"),
+                json!("user"),
+                json!({"type": "dangerFullAccess"})
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn skill_mentions_reach_codex_as_dollar_names_and_a_skill_command_starts_a_turn() {
+    let typed = "/fix the bug, then $review it; not /foo, src/fix or /fixer";
+    let sent = "$fix the bug, then $review it; not /foo, src/fix or /fixer";
+    let fixture = Fixture::new();
+    let mut steps = handshake(("untrusted", "read-only"));
+    steps.extend(turn_start(sent, TURN));
+    steps.extend(steered(TURN, "and $review"));
+    steps.push(turn_done(TURN, "completed"));
+    for (text, turn) in [("$fix the tests", "turn-2"), ("$review", "turn-3")] {
+        steps.extend(turn_start(text, turn));
+        steps.push(turn_done(turn, "completed"));
+    }
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let command = |name: &str, arguments: &str| json!({"kind": "run_command", "name": name, "arguments": arguments});
+
+    submit(&mut client, &thread, typed, "follow_up").await;
+    until_turn_started(&mut client).await;
+    submit(&mut client, &thread, "and /review", "steer").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, command("nope", "")).await;
+    until_error(&mut client, "nope").await;
+    submit_op(
+        &mut client,
+        &thread,
+        json!({"kind": "command_input", "name": "fix", "data": {}}),
+    )
+    .await;
+    until_error(&mut client, "command input").await;
+    submit_op(&mut client, &thread, command("fix", " the tests ")).await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, command("review", "")).await;
+    client.until(is_completed).await;
+
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+}
+
+#[tokio::test]
+async fn reopening_restores_the_recorded_model_on_resume_and_the_effort_on_the_next_turn() {
+    let fixture = Fixture::new();
+    fixture.script(handshake(("untrusted", "read-only")));
+    let path = {
+        let mut client = fixture.client();
+        let opened = open(&mut client, &fixture, None).await;
+        let thread = opened.thread_id.0.clone();
+        submit_op(
+            &mut client,
+            &thread,
+            json!({"kind": "set_model", "provider": "codex", "model": "gpt-lite"}),
+        )
+        .await;
+        until_model(&mut client, "gpt-lite").await;
+        submit_op(
+            &mut client,
+            &thread,
+            json!({"kind": "set_thinking", "level": "medium"}),
+        )
+        .await;
+        until_thinking(&mut client, ThinkingLevel::Medium).await;
+        client
+            .ok("session/close", json!({"thread_id": thread}))
+            .await;
+        opened.path
+    };
+    let mut response = thread_response();
+    response["model"] = json!("gpt-lite");
+    let mut steps = resume_handshake(json!({"threadId": THREAD, "model": "gpt-lite"}), response);
+    steps.extend(turn_start("again", TURN));
+    steps.push(turn_done(TURN, "completed"));
+    fixture.script(steps);
+
+    let mut client = fixture.client();
+    let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
+    let (model, thinking) = session_state(&reopened.events);
+    assert_eq!(
+        (model.id.as_str(), thinking),
+        ("gpt-lite", ThinkingLevel::Medium),
+        "gpt-lite defaults to low; medium is the recorded effort"
+    );
+    submit(&mut client, &reopened.thread_id.0, "again", "follow_up").await;
+    client.until(is_completed).await;
+    assert!(
+        fixture.mismatches().is_empty(),
+        "{:?}",
+        fixture.mismatches()
+    );
+    let sent = &turn_starts(&fixture)[0];
+    assert_eq!(
+        (&sent["model"], &sent["effort"]),
+        (&json!("gpt-lite"), &json!("medium"))
+    );
 }
 
 #[tokio::test]
@@ -1543,13 +2023,7 @@ async fn output_and_an_approval_of_a_subagent_after_the_root_turn_open_one_deriv
     client
         .ok("session/close", json!({"thread_id": thread}))
         .await;
-    fixture.script(vec![
-        expect(json!({"method": "initialize"})),
-        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
-        expect(json!({"method": "initialized"})),
-        expect(json!({"method": "thread/resume", "params": {"threadId": THREAD}})),
-        answer(thread_response()),
-    ]);
+    fixture.script(resumed());
     let mut again = fixture.client();
     let reopened = snapshot(again.ok("session/open", json!({"path": opened.path})).await);
     let keep = |turns: Vec<(String, String, Vec<String>)>| -> Vec<(String, String, Vec<String>)> {
@@ -2092,13 +2566,7 @@ async fn undo_twice_reapplies_the_turn_and_the_reverted_state_survives_reopening
             .await;
         (opened.path, thread, item)
     };
-    fixture.script(vec![
-        expect(json!({"method": "initialize"})),
-        answer(json!({"userAgent": "fake/0.171.0 (test)"})),
-        expect(json!({"method": "initialized"})),
-        expect(json!({"method": "thread/resume", "params": {"threadId": THREAD}})),
-        answer(thread_response()),
-    ]);
+    fixture.script(resumed());
     let mut client = fixture.client();
     let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
     assert_eq!(reopened.thread_id.0, thread);
