@@ -1,0 +1,107 @@
+---
+source: crates/tiechui-tui/tests/subagents.rs
+expression: "snapshots.join(\"\\n\\n\")"
+---
+40 / light=false / live_2s
+[b,fg#d0d0d0]•[-] [b]Delegating[fg#666c77] · 2 tasks · 2 running · ct[fg#666c77]…
+[fg#666c77]  └ [fg#8fa8c9]● [-]ag1 (audit) · d…  [fg#666c77]Audit…[fg#8fa8c9] · running
+[-]      Checking lexer...
+[fg#666c77]    ○ [-]ag2 · fork        [fg#666c77]Verif… · waiting
+
+40 / light=false / background
+[b,fg#8fa8c9]•[-] [b]Delegated in background[fg#666c77] · 2 tasks
+[fg#666c77]  └ [fg#8fa8c9]● [-]ag1 (audit) · d…  [fg#666c77]Audit…[fg#8fa8c9] · running
+[-]      Checking lexer...
+[fg#666c77]    ○ [-]ag2 · fork        [fg#666c77]Verif… · waiting
+
+40 / light=false / active_viewer
+[b]Subagents
+
+[b,fg#8fa8c9]  [-]Main session
+[b,fg#8fa8c9]› [fg#8fa8c9]● [b,fg#8fa8c9]ag1 (audit) · default[fg#666c77] · alpha/fast
+[b,fg#8fa8c9]  [fg#666c77]○ [-]ag2 · fork[fg#666c77] · beta/judge
+
+
+
+
+
+
+[-]↑/↓[d] select · [-]enter[d] open · [-]esc[d] back
+
+80 / light=false / live_2s
+[b,fg#d0d0d0]•[-] [b]Delegating[fg#666c77] · 2 tasks · 2 running · ctrl+b background
+[fg#666c77]  └ [fg#8fa8c9]● [-]ag1 (audit) · default  [fg#666c77]Audit parser edge cases 👩‍💻 中文[fg#8fa8c9] · running
+[-]      Checking lexer...
+[fg#666c77]    ○ [-]ag2 · fork             [fg#666c77]Verify cache prefix · waiting
+
+80 / light=false / background
+[b,fg#8fa8c9]•[-] [b]Delegated in background[fg#666c77] · 2 tasks
+[fg#666c77]  └ [fg#8fa8c9]● [-]ag1 (audit) · default  [fg#666c77]Audit parser edge cases 👩‍💻 中文[fg#8fa8c9] · running
+[-]      Checking lexer...
+[fg#666c77]    ○ [-]ag2 · fork             [fg#666c77]Verify cache prefix · waiting
+
+80 / light=false / active_viewer
+[b]Subagents
+
+[b,fg#8fa8c9]  [-]Main session[-]              [fg#666c77] │ [fg#8fa8c9]● [b]ag1 (audit) · default[fg#666c77] · alpha/fast · foreground
+[b,fg#8fa8c9]› [fg#8fa8c9]● [b,fg#8fa8c9]ag1 (audit) · default[fg#666c77] ·[fg#666c77]…[-][fg#666c77] │ [-]  [fg#8fa8c9]· Running
+[b,fg#8fa8c9]  [fg#666c77]○ [-]ag2 · fork[fg#666c77] · beta/judge[-] [fg#666c77] │ [fg#666c77]Audit parser edge cases 👩‍💻 中文
+[-]                            [fg#666c77] │ 
+[-]                            [fg#666c77] │ [-]Checking lexer...
+[-]                            [fg#666c77] │ 
+[-]                            [fg#666c77] │ [fg#666c77]1 turn · 0 in · 0 out · alpha/fast
+[-]                            [fg#666c77] │ 
+
+[-]↑/↓[d] select · [-]enter[d] open · [-]b[d] background · [-]x/ctrl+x[d] stop · [-]esc[d] back
+
+40 / light=true / live_2s
+[b,fg#1f2328]•[-] [b]Delegating[fg#9aa1ac] · 2 tasks · 2 running · ct[fg#9aa1ac]…
+[fg#9aa1ac]  └ [fg#4f6f9a]● [-]ag1 (audit) · d…  [fg#9aa1ac]Audit…[fg#4f6f9a] · running
+[-]      Checking lexer...
+[fg#9aa1ac]    ○ [-]ag2 · fork        [fg#9aa1ac]Verif… · waiting
+
+40 / light=true / background
+[b,fg#4f6f9a]•[-] [b]Delegated in background[fg#9aa1ac] · 2 tasks
+[fg#9aa1ac]  └ [fg#4f6f9a]● [-]ag1 (audit) · d…  [fg#9aa1ac]Audit…[fg#4f6f9a] · running
+[-]      Checking lexer...
+[fg#9aa1ac]    ○ [-]ag2 · fork        [fg#9aa1ac]Verif… · waiting
+
+40 / light=true / active_viewer
+[b]Subagents
+
+[b,fg#4f6f9a]  [-]Main session
+[b,fg#4f6f9a]› [fg#4f6f9a]● [b,fg#4f6f9a]ag1 (audit) · default[fg#9aa1ac] · alpha/fast
+[b,fg#4f6f9a]  [fg#9aa1ac]○ [-]ag2 · fork[fg#9aa1ac] · beta/judge
+
+
+
+
+
+
+[fg@0]↑/↓[fg@8] select · [fg@0]enter[fg@8] open · [fg@0]esc[fg@8] back
+
+80 / light=true / live_2s
+[b,fg#1f2328]•[-] [b]Delegating[fg#9aa1ac] · 2 tasks · 2 running · ctrl+b background
+[fg#9aa1ac]  └ [fg#4f6f9a]● [-]ag1 (audit) · default  [fg#9aa1ac]Audit parser edge cases 👩‍💻 中文[fg#4f6f9a] · running
+[-]      Checking lexer...
+[fg#9aa1ac]    ○ [-]ag2 · fork             [fg#9aa1ac]Verify cache prefix · waiting
+
+80 / light=true / background
+[b,fg#4f6f9a]•[-] [b]Delegated in background[fg#9aa1ac] · 2 tasks
+[fg#9aa1ac]  └ [fg#4f6f9a]● [-]ag1 (audit) · default  [fg#9aa1ac]Audit parser edge cases 👩‍💻 中文[fg#4f6f9a] · running
+[-]      Checking lexer...
+[fg#9aa1ac]    ○ [-]ag2 · fork             [fg#9aa1ac]Verify cache prefix · waiting
+
+80 / light=true / active_viewer
+[b]Subagents
+
+[b,fg#4f6f9a]  [-]Main session[-]              [fg#9aa1ac] │ [fg#4f6f9a]● [b]ag1 (audit) · default[fg#9aa1ac] · alpha/fast · foreground
+[b,fg#4f6f9a]› [fg#4f6f9a]● [b,fg#4f6f9a]ag1 (audit) · default[fg#9aa1ac] ·[fg#9aa1ac]…[-][fg#9aa1ac] │ [-]  [fg#4f6f9a]· Running
+[b,fg#4f6f9a]  [fg#9aa1ac]○ [-]ag2 · fork[fg#9aa1ac] · beta/judge[-] [fg#9aa1ac] │ [fg#9aa1ac]Audit parser edge cases 👩‍💻 中文
+[-]                            [fg#9aa1ac] │ 
+[-]                            [fg#9aa1ac] │ [-]Checking lexer...
+[-]                            [fg#9aa1ac] │ 
+[-]                            [fg#9aa1ac] │ [fg#9aa1ac]1 turn · 0 in · 0 out · alpha/fast
+[-]                            [fg#9aa1ac] │ 
+
+[fg@0]↑/↓[fg@8] select · [fg@0]enter[fg@8] open · [fg@0]b[fg@8] background · [fg@0]x/ctrl+x[fg@8] stop · [fg@0]esc[fg@8] back

@@ -7,6 +7,15 @@ use tiechui_plugin_api::{
     CancellationToken, ChildThinking, ToolError, parse_child_thinking, serde_json,
 };
 
+const MANAGED_KEYS: [&str; 6] = [
+    "name",
+    "description",
+    "tools",
+    "model",
+    "thinking",
+    "background",
+];
+
 #[derive(Clone)]
 pub struct Definition {
     pub name: String,
@@ -15,6 +24,7 @@ pub struct Definition {
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
     pub thinking: Option<ChildThinking>,
+    pub background: Option<bool>,
     pub project: bool,
     pub path: PathBuf,
 }
@@ -42,6 +52,16 @@ fn parse_thinking(value: Option<&YamlOwned>) -> Result<Option<ChildThinking>, St
         .map_err(|error| format!("invalid `thinking`: {}", error.0))
 }
 
+fn parse_background(value: Option<&YamlOwned>) -> Result<Option<bool>, String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| "invalid `background`: expected a boolean".into())
+}
+
 fn parse_optional_string(doc: &YamlOwned, key: &str) -> Result<Option<String>, String> {
     let Some(value) = doc.as_mapping_get(key).filter(|value| !value.is_null()) else {
         return Ok(None);
@@ -50,6 +70,13 @@ fn parse_optional_string(doc: &YamlOwned, key: &str) -> Result<Option<String>, S
         .as_str()
         .map(|raw| Some(raw.to_owned()))
         .ok_or_else(|| format!("invalid `{key}`: expected a string"))
+}
+
+fn parse_required_string(doc: &YamlOwned, key: &str) -> Result<String, String> {
+    doc.as_mapping_get(key)
+        .and_then(YamlOwned::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing or invalid `{key}`"))
 }
 
 fn parse_tools(value: Option<&YamlOwned>) -> Option<Vec<String>> {
@@ -73,53 +100,46 @@ fn parse_tools(value: Option<&YamlOwned>) -> Option<Vec<String>> {
     (!items.is_empty()).then_some(items)
 }
 
-fn parse(text: &str, project: bool, path: PathBuf) -> Result<Definition, ParseFailure> {
-    let fail = |name: Option<String>, reason: &str| ParseFailure {
-        name,
+fn extract_frontmatter(text: &str) -> Result<(YamlOwned, String), ParseFailure> {
+    let fail = |reason: &str| ParseFailure {
+        name: None,
         reason: reason.into(),
     };
-    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    let Some((header, prompt)) = text
+    let normalized = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let Some((header, prompt)) = normalized
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---"))
     else {
-        return Err(fail(None, "missing YAML frontmatter"));
+        return Err(fail("missing YAML frontmatter"));
     };
-    let docs =
-        YamlOwned::load_from_str(header).map_err(|_| fail(None, "invalid YAML frontmatter"))?;
-    let Some(doc) = docs.first() else {
-        return Err(fail(None, "empty YAML frontmatter"));
-    };
-    let Some(name) = doc
-        .as_mapping_get("name")
-        .and_then(YamlOwned::as_str)
-        .map(str::to_owned)
-    else {
-        return Err(fail(None, "missing or invalid `name`"));
-    };
-    let Some(description) = doc
-        .as_mapping_get("description")
-        .and_then(YamlOwned::as_str)
-        .map(str::to_owned)
-    else {
-        return Err(fail(Some(name), "missing or invalid `description`"));
-    };
-    let model = parse_optional_string(doc, "model").map_err(|reason| ParseFailure {
+    let docs = YamlOwned::load_from_str(header).map_err(|_| fail("invalid YAML frontmatter"))?;
+    let doc = docs
+        .into_iter()
+        .next()
+        .ok_or_else(|| fail("empty YAML frontmatter"))?;
+    Ok((doc, prompt.trim().to_owned()))
+}
+
+fn parse(text: &str, project: bool, path: PathBuf) -> Result<Definition, ParseFailure> {
+    let (doc, prompt) = extract_frontmatter(text)?;
+    let name = parse_required_string(&doc, "name")
+        .map_err(|reason| ParseFailure { name: None, reason })?;
+    let with_name = |reason: String| ParseFailure {
         name: Some(name.clone()),
         reason,
-    })?;
-    let thinking =
-        parse_thinking(doc.as_mapping_get("thinking")).map_err(|reason| ParseFailure {
-            name: Some(name.clone()),
-            reason,
-        })?;
+    };
+    let description = parse_required_string(&doc, "description").map_err(with_name)?;
+    let model = parse_optional_string(&doc, "model").map_err(with_name)?;
+    let thinking = parse_thinking(doc.as_mapping_get("thinking")).map_err(with_name)?;
+    let background = parse_background(doc.as_mapping_get("background")).map_err(with_name)?;
     Ok(Definition {
         name,
         description,
-        prompt: prompt.trim().into(),
+        prompt,
         tools: parse_tools(doc.as_mapping_get("tools")),
         model,
         thinking,
+        background,
         project,
         path,
     })
@@ -226,8 +246,38 @@ pub fn directories(home: &Path, cwd: &Path) -> Vec<(PathBuf, bool)> {
     directories
 }
 
+fn top_level_frontmatter_key(line: &str) -> Option<&str> {
+    if line.starts_with([' ', '\t', '-', '#']) {
+        return None;
+    }
+    line.split_once(':').map(|(key, _)| key.trim())
+}
+
+fn retained_frontmatter(existing: &str) -> String {
+    let normalized = existing
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n");
+    let header = normalized
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .map_or("", |(header, _)| header);
+    let mut out = String::new();
+    let mut kept = true;
+    for line in header.lines() {
+        let is_comment = line.starts_with('#');
+        if let Some(key) = top_level_frontmatter_key(line) {
+            kept = !MANAGED_KEYS.contains(&key);
+        }
+        if kept || is_comment {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// A definition file with these fields; frontmatter keys other than `name`, `description`,
-/// `tools`, `model` and `thinking` in `existing` are kept.
+/// `tools`, `model`, `thinking` and `background` in `existing` are kept.
 pub fn render(existing: &str, definition: &Definition) -> String {
     let quote = |value: &str| serde_json::Value::from(value.replace('\n', " ")).to_string();
     let mut text = format!(
@@ -249,26 +299,10 @@ pub fn render(existing: &str, definition: &Definition) -> String {
             text.push_str(&format!("{key}: {}\n", quote(value)));
         }
     }
-    let existing = existing
-        .trim_start_matches('\u{feff}')
-        .replace("\r\n", "\n");
-    let header = existing
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---"))
-        .map_or("", |(header, _)| header);
-    let mut kept = true;
-    for line in header.lines() {
-        // Indented lines and block sequence items continue the key above; comments stay.
-        if !line.starts_with([' ', '\t', '-', '#'])
-            && let Some((key, _)) = line.split_once(':')
-        {
-            kept = !["name", "description", "tools", "model", "thinking"].contains(&key.trim());
-        }
-        if kept || line.starts_with('#') {
-            text.push_str(line);
-            text.push('\n');
-        }
+    if let Some(background) = definition.background {
+        text.push_str(&format!("background: {background}\n"));
     }
+    text.push_str(&retained_frontmatter(existing));
     text.push_str("---\n\n");
     text.push_str(definition.prompt.trim());
     text.push('\n');

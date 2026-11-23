@@ -1993,3 +1993,25 @@ async fn auto_passes_read_only_mcp_tools_without_review_but_not_in_rules_mode() 
         assert_eq!(f.asks(), asks, "{mode:?}");
     }
 }
+
+#[tokio::test]
+async fn default_rules_allow_subagent_list_and_stop_while_subagent_and_send_ask() {
+    let f = Fixture::new(None);
+    assert_eq!(
+        f.call("subagent_list", json!({})).await,
+        BeforeToolCall::Allow
+    );
+    assert_eq!(
+        f.call("subagent_stop", json!({"id": "ag1"})).await,
+        BeforeToolCall::Allow
+    );
+    assert_eq!(f.asks(), 0);
+
+    denied(f.call("subagent", json!({"task": "audit"})).await);
+    assert_eq!(f.asks(), 1);
+    denied(
+        f.call("subagent_send", json!({"to": "ag1", "message": "continue"}))
+            .await,
+    );
+    assert_eq!(f.asks(), 2);
+}

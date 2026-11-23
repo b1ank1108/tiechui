@@ -188,6 +188,17 @@ pub(crate) fn summary(task: &ShellTask) -> String {
     format!("{status} · {}", elapsed(task))
 }
 
+fn promote_foreground(task: &mut Task) -> bool {
+    if task.view.mode == ShellMode::Foreground
+        && matches!(task.view.state, ShellState::Starting | ShellState::Running)
+    {
+        task.view.mode = ShellMode::Background;
+        task.forward = None;
+        return true;
+    }
+    false
+}
+
 impl Shells {
     pub fn with_env(env: BTreeMap<String, String>) -> Self {
         Self {
@@ -354,15 +365,29 @@ impl Shells {
                 task.view.state.label()
             )));
         }
-        if task.view.mode == ShellMode::Background {
+        if !promote_foreground(task) {
             return Ok(());
         }
-        task.view.mode = ShellMode::Background;
-        task.forward = None;
         state.revision += 1;
         drop(state);
         self.changed();
         Ok(())
+    }
+
+    pub fn background_all(&self) -> Result<usize, ToolError> {
+        let mut state = self.lock()?;
+        let mut moved = 0;
+        for task in &mut state.tasks {
+            moved += usize::from(promote_foreground(task));
+        }
+        if moved > 0 {
+            state.revision += 1;
+        }
+        drop(state);
+        if moved > 0 {
+            self.changed();
+        }
+        Ok(moved)
     }
 
     /// Requests a stop; repeated requests and settled tasks report the current state.

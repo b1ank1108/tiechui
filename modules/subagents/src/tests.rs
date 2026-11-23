@@ -25,6 +25,8 @@ struct RecordedRequest {
     model: Option<String>,
     thinking: Option<ThinkingLevel>,
     tools: Option<Vec<String>>,
+    mode: ChildMode,
+    store_path: Option<PathBuf>,
 }
 
 struct Runner {
@@ -33,6 +35,7 @@ struct Runner {
     started: AtomicUsize,
     cleaned: AtomicUsize,
     tasks: Mutex<Vec<String>>,
+    steered: Mutex<Vec<String>>,
     requests: Mutex<Vec<RecordedRequest>>,
     catalog: Mutex<ModelCatalog>,
     hold_until_eight: Option<Arc<tokio::sync::Barrier>>,
@@ -46,6 +49,7 @@ impl Default for Runner {
             started: AtomicUsize::new(0),
             cleaned: AtomicUsize::new(0),
             tasks: Mutex::new(Vec::new()),
+            steered: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
             catalog: Mutex::new(sample_catalog(false)),
             hold_until_eight: None,
@@ -79,11 +83,26 @@ impl ChildRunner for Runner {
     }
     async fn run(
         &self,
-        request: ChildRequest,
+        mut request: ChildRequest,
         _: Registry,
         cancel: CancellationToken,
         events: Arc<dyn Fn(Event) + Send + Sync>,
     ) -> Result<(), ToolError> {
+        let mut steer = request.steer.take();
+        if let Some(path) = &request.store_path
+            && !path.exists()
+        {
+            if let Some(parent) = path.parent() {
+                tiechui_plugin_api::private::create_dir_all(parent)?;
+            }
+            let header = json!({
+                "format_version": 1,
+                "id": "mock-child",
+                "cwd": request.cwd,
+                "created_at": 0
+            });
+            std::fs::write(path, format!("{header}\n"))?;
+        }
         self.tasks.lock().unwrap().push(request.task.clone());
         self.requests.lock().unwrap().push(RecordedRequest {
             task: request.task.clone(),
@@ -91,6 +110,8 @@ impl ChildRunner for Runner {
             model: request.model.clone(),
             thinking: request.thinking,
             tools: request.tools.clone(),
+            mode: request.mode,
+            store_path: request.store_path.clone(),
         });
         if request.task == "panic" {
             panic!("isolated fixture");
@@ -120,10 +141,25 @@ impl ChildRunner for Runner {
             context: None,
             total: TokenUsage::default(),
         }));
+        let mut output_text = request.task.clone();
         if request.task == "wait" {
             cancel.cancelled().await;
+        } else if request.task == "wait-steer" {
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                msg = async { steer.as_mut().unwrap().recv().await } => {
+                    if let Some(msg) = msg {
+                        self.steered.lock().unwrap().push(msg.clone());
+                        output_text = format!("{} + {msg}", request.task);
+                    }
+                }
+            }
         } else {
             tokio::time::sleep(Duration::from_millis(10)).await;
+            while let Some(msg) = steer.as_mut().and_then(|rx| rx.try_recv().ok()) {
+                self.steered.lock().unwrap().push(msg.clone());
+                output_text.push_str(&format!(" + {msg}"));
+            }
         }
         let turn_id = TurnId("child-turn".into());
         let id = ItemId("text".into());
@@ -137,7 +173,7 @@ impl ChildRunner for Runner {
         events(event(EventKind::ItemDelta {
             turn_id: turn_id.clone(),
             item_id: id,
-            delta: request.task.clone(),
+            delta: output_text,
         }));
         events(event(EventKind::TokenUsageUpdated {
             turn_id: turn_id.clone(),
@@ -176,6 +212,28 @@ impl ChildRunner for Runner {
         Ok(())
     }
 }
+fn build_ctx(
+    cwd: PathBuf,
+    session: &str,
+    append: Arc<dyn Fn(tools::CustomSessionEntry) -> Result<(), ToolError> + Send + Sync>,
+) -> ToolContext {
+    ToolContext {
+        invoker: None,
+        cwd,
+        branch: Arc::new(vec![]),
+        parent_session: None,
+        cancel: CancellationToken::new(),
+        updates: Arc::new(|_| {}),
+        append_entry: append,
+        epoch: SessionEpoch(1),
+        scope: tools::ExecutionScope {
+            thread_id: ThreadId(session.into()),
+            turn_id: TurnId("turn".into()),
+        },
+        origin: Default::default(),
+    }
+}
+
 struct Harness {
     root: tempfile::TempDir,
     service: Arc<Service>,
@@ -200,27 +258,18 @@ impl Harness {
                 session: "parent".into(),
                 ..Default::default()
             }),
+            changes: watch::Sender::default(),
         });
         let entries = Arc::new(Mutex::new(vec![]));
         let output = entries.clone();
-        let ctx = ToolContext {
-            invoker: None,
-            cwd: root.path().into(),
-            branch: Arc::new(vec![]),
-            parent_session: None,
-            cancel: CancellationToken::new(),
-            updates: Arc::new(|_| {}),
-            append_entry: Arc::new(move |entry| {
+        let ctx = build_ctx(
+            root.path().into(),
+            "parent",
+            Arc::new(move |entry| {
                 output.lock().unwrap().push(entry);
                 Ok(())
             }),
-            epoch: SessionEpoch(1),
-            scope: tools::ExecutionScope {
-                thread_id: ThreadId("parent".into()),
-                turn_id: TurnId("turn".into()),
-            },
-            origin: Default::default(),
-        };
+        );
         Self {
             root,
             service,
@@ -305,10 +354,13 @@ async fn modes_limits_chain_substitution_and_real_failure_skip() {
         unreachable!()
     };
     assert!(
-        chain_text.contains("### [default · alpha/fast] Completed"),
+        chain_text.contains("### [ag2 · default · alpha/fast] Completed"),
         "{chain_text}"
     );
-    assert!(chain_text.contains("### [default] Skipped"), "{chain_text}");
+    assert!(
+        chain_text.contains("### [ag5 · default] Skipped"),
+        "{chain_text}"
+    );
     assert!(!h.runner.tasks.lock().unwrap().iter().any(|t| t == "never"));
     for value in [
         json!({}),
@@ -470,11 +522,11 @@ async fn model_and_thinking_priority_inherit_preflight_and_attribution() {
         unreachable!()
     };
     assert!(
-        text.contains("### [default · beta/judge] Completed"),
+        text.contains("### [ag1 · default · beta/judge] Completed"),
         "{text}"
     );
     assert!(
-        text.contains("### [critic · alpha/fast] Completed"),
+        text.contains("### [ag2 · critic · alpha/fast] Completed"),
         "{text}"
     );
 
@@ -697,6 +749,7 @@ async fn rendered_definitions_read_back_and_keep_other_frontmatter() {
         tools: Some(vec!["read".into(), "grep".into()]),
         model: Some("fake/b".into()),
         thinking: Some(ChildThinking::Level(ThinkingLevel::Medium)),
+        background: Some(true),
         project: false,
         path: PathBuf::new(),
     };
@@ -873,7 +926,7 @@ async fn spill_is_private_bounded_retrievable_and_chain_gets_full_text() {
     let Content::Text { text: summary, .. } = &summary.content[0] else {
         unreachable!()
     };
-    assert!(summary.contains("### [default · alpha/fast] Completed"));
+    assert!(summary.contains("### [ag1 · default · alpha/fast] Completed"));
     assert!(summary.len() < 2 * (output::PREVIEW_BYTES + 1024));
     let path = result.tasks[0].output_path.as_ref().unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap(), text);
@@ -922,4 +975,773 @@ async fn live_memory_and_block_limits_fail_with_diagnostics_after_cleanup() {
         });
         assert_eq!(result.is_err(), i == 256);
     }
+}
+
+#[derive(Default)]
+struct ViewSink(Mutex<Vec<SubagentsView>>);
+
+#[async_trait]
+impl CommandHost for ViewSink {
+    async fn ask(
+        &self,
+        _: ApprovalRequest,
+        _: CancellationToken,
+    ) -> Result<ApprovalDecision, ToolError> {
+        Ok(ApprovalDecision::Cancel)
+    }
+    async fn update(&self, _: ApprovalRequest) -> Result<(), ToolError> {
+        Ok(())
+    }
+    async fn apply(&self, effect: SessionEffect) -> Result<(), ToolError> {
+        if let SessionEffect::Emit { kind, data } = effect {
+            assert_eq!(kind, SUBAGENTS_EVENT);
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::from_value(data).unwrap());
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn definition_background_parses_renders_and_rejects_non_booleans() {
+    let h = Harness::new();
+    let directory = h.service.home.join("agents");
+    std::fs::create_dir_all(&directory).unwrap();
+
+    let existing = "---\nname: worker\ndescription: old\nbackground: true\npermission:\n  mode: rules\n# comment\n---\nOld";
+    let mut def = definitions::Definition {
+        name: "worker".into(),
+        description: "Async worker".into(),
+        prompt: "Run async".into(),
+        tools: None,
+        model: None,
+        thinking: None,
+        background: Some(true),
+        project: false,
+        path: PathBuf::new(),
+    };
+    let rendered = definitions::render(existing, &def);
+    assert!(rendered.contains("background: true\n"), "{rendered}");
+    assert_eq!(rendered.matches("background:").count(), 1, "{rendered}");
+    std::fs::write(directory.join("worker.md"), &rendered).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["worker"].background, Some(true));
+
+    def.background = None;
+    let cleared = definitions::render(&rendered, &def);
+    assert!(!cleared.contains("background:"), "{cleared}");
+    assert!(cleared.contains("# comment\n"), "{cleared}");
+    std::fs::write(directory.join("worker.md"), &cleared).unwrap();
+    let agents = definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+    assert_eq!(agents["worker"].background, None);
+
+    for bad in ["\"true\"", "42", "[true]", "bogus"] {
+        let path = directory.join("bad_bg.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: bad_bg\ndescription: bad\nbackground: {bad}\n---\nBody"),
+        )
+        .unwrap();
+        let agents =
+            definitions::discover(&h.service.home, &h.ctx.cwd, "user", &h.ctx.cancel).unwrap();
+        assert!(!agents.contains_key("bad_bg"), "accepted {bad}");
+        let err = h
+            .run_id("bad-bg", json!({"agent": "bad_bg", "task": "check"}))
+            .await
+            .unwrap_err()
+            .0;
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("background"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn agent_ids_names_restore_cursor_and_background_precedence() {
+    let h = Harness::new();
+    let directory = h.service.home.join("agents");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("bg_agent.md"),
+        "---\nname: bg_agent\ndescription: bg\nbackground: true\n---\nBG",
+    )
+    .unwrap();
+
+    for bad in [
+        json!({"task": "work", "name": ""}),
+        json!({"task": "work", "name": "   "}),
+        json!({"tasks": [{"task": "a", "name": "dup"}, {"task": "b", "name": "dup"}]}),
+        json!({"chain": [{"task": "a", "background": true}, {"task": "b", "background": false}]}),
+    ] {
+        assert!(h.run(bad).await.is_err());
+    }
+
+    let first_out = h
+        .service
+        .dispatch(
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "done-1", "name": "reusable"}),
+                opaque: None,
+            },
+            h.ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text, .. } = &first_out.content[0] else {
+        unreachable!()
+    };
+    assert!(text.contains("[agent_id: ag1]"), "{text}");
+
+    let bg_out = h
+        .service
+        .dispatch(
+            ToolCall {
+                id: "c2".into(),
+                name: "subagent".into(),
+                arguments: json!({"agent": "bg_agent", "task": "wait", "name": "reusable"}),
+                opaque: None,
+            },
+            h.ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bg_out.structured_content.as_ref().unwrap()["status"],
+        "async_launched"
+    );
+    let bg_record: AgentDispatch = serde_json::from_value(bg_out.details.unwrap()).unwrap();
+    assert!(bg_record.background);
+    assert_eq!(bg_record.tasks[0].id, "ag2");
+    assert!(bg_record.tasks[0].background);
+
+    let conflict = h
+        .run_id("c3", json!({"task": "clash", "name": "reusable"}))
+        .await
+        .unwrap_err()
+        .0;
+    assert!(conflict.contains("reusable"), "{conflict}");
+
+    let override_fg = h
+        .run_id(
+            "c4",
+            json!({"agent": "bg_agent", "task": "sync-override", "background": false}),
+        )
+        .await
+        .unwrap();
+    assert!(!override_fg.background);
+    assert_eq!(override_fg.tasks[0].id, "ag3");
+    assert!(!override_fg.tasks[0].background);
+
+    h.service.quiesce().await;
+    assert_eq!(h.runner.current.load(Ordering::SeqCst), 0);
+
+    let historical = AgentDispatch {
+        id: "old".into(),
+        session_id: "resumed".into(),
+        mode: "single".into(),
+        background: false,
+        started_at: 1,
+        tasks: vec![AgentTask {
+            id: "ag9".into(),
+            name: Some("old-name".into()),
+            background: false,
+            fork: false,
+            started_at: 1,
+            agent: "default".into(),
+            task: "past".into(),
+            state: AgentState::Completed,
+            output: "past".into(),
+            thinking: String::new(),
+            diagnostic: None,
+            output_path: None,
+            thinking_path: None,
+            usage: TokenUsage::default(),
+            turns: 1,
+            model: "alpha/fast".into(),
+        }],
+    };
+    h.service
+        .event(
+            &RuntimeEvent::Restore { navigation: false },
+            &BranchView {
+                session_id: "parent".into(),
+                leaf: "leaf".into(),
+                cwd: h.ctx.cwd.clone(),
+                parent_session: None,
+                entries: vec![BranchEntry {
+                    id: "e1".into(),
+                    parent_id: None,
+                    timestamp: 0,
+                    content: None,
+                    custom: Some((ENTRY.into(), json!(historical))),
+                }],
+            },
+        )
+        .unwrap();
+    let abandoned = h.service.home.join("state/subagents/sessions/parent");
+    std::fs::create_dir_all(&abandoned).unwrap();
+    std::fs::write(abandoned.join("ag10.jsonl"), "").unwrap();
+    let after_restore = h.run_id("c5", json!({"task": "after"})).await.unwrap();
+    assert_eq!(after_restore.tasks[0].id, "ag11");
+}
+
+fn setup_bound_module(
+    root: &std::path::Path,
+    session_id: &str,
+    runner: Arc<Runner>,
+) -> (Registry, BranchView, ToolContext) {
+    let mut registry = Registry::default();
+    SubagentsModule {
+        home: root.join("home"),
+        trusted: true,
+        confirmation: None,
+        children: Arc::new(RegistryProbe::default()),
+    }
+    .register(&mut registry, &ModuleConfig::default())
+    .unwrap();
+    for client in registry.actor_clients() {
+        client.bind(runner.clone());
+    }
+    let branch = BranchView {
+        session_id: session_id.into(),
+        leaf: "l1".into(),
+        cwd: root.into(),
+        parent_session: None,
+        entries: vec![],
+    };
+    registry.runtime_extensions()[0]
+        .event(&RuntimeEvent::Restore { navigation: false }, &branch)
+        .unwrap();
+    let ctx = build_ctx(root.into(), session_id, Arc::new(|_| Ok(())));
+    (registry, branch, ctx)
+}
+
+#[tokio::test]
+async fn background_lifecycle_promotion_interrupt_isolation_notifications_and_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let runner = Arc::new(Runner::default());
+    let (registry, branch, ctx) = setup_bound_module(root.path(), "s1", runner.clone());
+    let ext = &registry.runtime_extensions()[0];
+    let bg_work = &registry.background_work()[0];
+    let cmd = &registry.commands()[0];
+    assert_eq!(
+        cmd.info().argument_hint.as_deref(),
+        Some("[background|stop <id>]")
+    );
+    let subagent_tool = registry.tools().get("subagent").unwrap();
+    let stop_tool = registry.tools().get("subagent_stop").unwrap();
+    let list_tool = registry.tools().get("subagent_list").unwrap();
+    assert_eq!(stop_tool.concurrency(&json!({})), Concurrency::Shared);
+    assert_eq!(list_tool.concurrency(&json!({})), Concurrency::Shared);
+
+    let launched = subagent_tool
+        .run(
+            ToolCall {
+                id: "bg-1".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "bg-done", "name": "alpha", "background": true}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        launched.structured_content.as_ref().unwrap()["status"],
+        "async_launched"
+    );
+
+    let fg_tool = subagent_tool.clone();
+    let fg_ctx = ctx.clone();
+    let fg_waiter = tokio::spawn(async move {
+        fg_tool
+            .run(
+                ToolCall {
+                    id: "fg-promote".into(),
+                    name: "subagent".into(),
+                    arguments: json!({"task": "wait", "name": "beta"}),
+                    opaque: None,
+                },
+                fg_ctx,
+            )
+            .await
+    });
+    while runner.current.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let host = Arc::new(ViewSink::default());
+    cmd.input(
+        json!({"background_all": true}),
+        CommandSession {
+            branch: branch.clone(),
+            host: host.clone(),
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let promoted = tokio::time::timeout(Duration::from_secs(2), fg_waiter)
+        .await
+        .expect("promoted dispatch must return immediately")
+        .unwrap()
+        .unwrap();
+    let promoted_record: AgentDispatch = serde_json::from_value(promoted.details.unwrap()).unwrap();
+    assert!(promoted_record.background);
+    assert!(promoted_record.tasks[0].background);
+
+    ext.event(&RuntimeEvent::Interrupt, &branch).unwrap();
+    assert!(
+        runner.current.load(Ordering::SeqCst) >= 1,
+        "Interrupt must not cancel background subagents"
+    );
+
+    for _ in 0..200 {
+        if ext.continuation().is_some() && runner.cleaned.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runner.current.load(Ordering::SeqCst),
+        1,
+        "promoted subagent beta must remain running after Interrupt"
+    );
+    let cont = ext.continuation().expect("expected <task-notification>");
+    assert_eq!(cont.kind, "tiechui.subagents.completed");
+    assert!(!cont.visible);
+    assert!(
+        cont.text.contains("<task-id>ag1</task-id>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<tool-use-id>bg-1</tool-use-id>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<status>completed</status>"),
+        "{}",
+        cont.text
+    );
+    assert!(
+        cont.text.contains("<result>bg-done</result>"),
+        "{}",
+        cont.text
+    );
+    assert!(ext.accepts(&cont));
+
+    let out = ext
+        .event(
+            &RuntimeEvent::Input {
+                continuation: Some(cont),
+                retry: false,
+            },
+            &branch,
+        )
+        .unwrap();
+    assert!(
+        out.events
+            .iter()
+            .any(|(name, data)| { name == SUBAGENTS_EVENT && data["pending_notifications"] == 0 })
+    );
+    assert!(ext.continuation().is_none());
+
+    let listed = list_tool
+        .run(
+            ToolCall {
+                id: "list-1".into(),
+                name: "subagent_list".into(),
+                arguments: json!({}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let stopped = stop_tool
+        .run(
+            ToolCall {
+                id: "stop-1".into(),
+                name: "subagent_stop".into(),
+                arguments: json!({"id": "beta"}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!stopped.is_error);
+    assert_eq!(runner.current.load(Ordering::SeqCst), 0);
+    assert!(
+        ext.continuation().is_none(),
+        "explicit subagent_stop must not queue <task-notification>"
+    );
+
+    assert!(
+        stop_tool
+            .run(
+                ToolCall {
+                    id: "stop-missing".into(),
+                    name: "subagent_stop".into(),
+                    arguments: json!({"id": "unknown"}),
+                    opaque: None,
+                },
+                ctx,
+            )
+            .await
+            .is_err()
+    );
+    bg_work.quiesce().await;
+}
+
+#[tokio::test]
+async fn fork_mode_validates_exclusions_defaults_background_and_wraps_initial_directive_only() {
+    let h = Harness::new();
+    let agents_dir = h.service.home.join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("helper.md"),
+        "---\nname: helper\ndescription: custom\n---\nHelper prompt",
+    )
+    .unwrap();
+
+    let spec = params::dispatch_spec();
+    assert_eq!(spec.input_schema["properties"]["fork"]["type"], "boolean");
+    assert_eq!(
+        spec.input_schema["properties"]["tasks"]["items"]["properties"]["fork"]["type"],
+        "boolean"
+    );
+    assert!(
+        spec.input_schema["properties"]["chain"]["items"]["properties"]
+            .get("fork")
+            .is_none()
+    );
+    assert!(spec.description.contains("fork"));
+    assert!(spec.description.contains("subagent_send"));
+
+    for bad in [
+        json!({"chain": [{"task": "step", "fork": true}]}),
+        json!({"fork": true, "chain": [{"task": "step"}]}),
+        json!({"task": "x", "fork": true, "agent": "helper"}),
+        json!({"task": "x", "fork": true, "model": "beta/judge"}),
+        json!({"task": "x", "fork": true, "model": "inherit"}),
+        json!({"task": "x", "fork": true, "thinking": "low"}),
+        json!({"task": "x", "fork": true, "thinking": "inherit"}),
+    ] {
+        assert!(h.run(bad.clone()).await.is_err(), "accepted {bad}");
+    }
+    assert_eq!(h.runner.started.load(Ordering::SeqCst), 0);
+
+    let bg_fork = h
+        .service
+        .dispatch(
+            ToolCall {
+                id: "fork-bg".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "Check cache", "fork": true, "name": "f1"}),
+                opaque: None,
+            },
+            h.ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bg_fork.structured_content.as_ref().unwrap()["status"],
+        "async_launched"
+    );
+    let bg_rec: AgentDispatch = serde_json::from_value(bg_fork.details.unwrap()).unwrap();
+    assert!(bg_rec.background);
+    assert!(bg_rec.tasks[0].background);
+    assert!(bg_rec.tasks[0].fork);
+    assert_eq!(bg_rec.tasks[0].agent, "fork");
+    assert_eq!(bg_rec.tasks[0].task, "Check cache");
+
+    while h.runner.cleaned.load(Ordering::SeqCst) < 1 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let fg_fork = h
+        .run_id(
+            "fork-fg",
+            json!({"task": "Sync fork", "fork": true, "background": false}),
+        )
+        .await
+        .unwrap();
+    assert!(!fg_fork.background);
+    assert!(!fg_fork.tasks[0].background);
+    assert!(fg_fork.tasks[0].fork);
+    assert_eq!(fg_fork.tasks[0].agent, "fork");
+    assert_eq!(fg_fork.tasks[0].task, "Sync fork");
+
+    let recorded = h.runner.requests.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0].mode, ChildMode::Fork);
+    assert_eq!(
+        recorded[0].store_path,
+        Some(
+            h.service
+                .home
+                .join("state/subagents/sessions/parent/ag1.jsonl")
+        )
+    );
+    assert!(
+        recorded[0].task.contains("<fork_boilerplate>"),
+        "{}",
+        recorded[0].task
+    );
+    assert!(
+        recorded[0].task.ends_with("\n\nDirective: Check cache"),
+        "{}",
+        recorded[0].task
+    );
+
+    let mut bad_ctx = h.ctx.clone();
+    bad_ctx.scope.thread_id = ThreadId("../escape".into());
+    h.service.state.lock().unwrap().session = "../escape".into();
+    assert!(
+        h.service
+            .dispatch(
+                ToolCall {
+                    id: "bad-session".into(),
+                    name: "subagent".into(),
+                    arguments: json!({"task": "blocked"}),
+                    opaque: None,
+                },
+                bad_ctx,
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn subagent_send_validates_targets_steers_active_resumes_terminal_and_deduplicates_list() {
+    let root = tempfile::tempdir().unwrap();
+    let runner = Arc::new(Runner::default());
+    let home = root.path().join("home");
+    let (registry, _, ctx) = setup_bound_module(root.path(), "s-send", runner.clone());
+    let subagent_tool = registry.tools().get("subagent").unwrap();
+    let send_tool = registry
+        .tools()
+        .get("subagent_send")
+        .expect("subagent_send must be registered");
+    let list_tool = registry.tools().get("subagent_list").unwrap();
+    assert_eq!(send_tool.concurrency(&json!({})), Concurrency::Shared);
+
+    let chain_res = subagent_tool
+        .run(
+            ToolCall {
+                id: "chain-disp".into(),
+                name: "subagent".into(),
+                arguments: json!({"chain": [{"task": "fail"}, {"task": "skipped-step"}]}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let chain_rec: AgentDispatch = serde_json::from_value(chain_res.details.unwrap()).unwrap();
+    assert_eq!(chain_rec.tasks[1].id, "ag2");
+    assert_eq!(chain_rec.tasks[1].state, AgentState::Skipped);
+
+    for bad_args in [
+        json!({"to": "", "message": "hi"}),
+        json!({"to": "ag1", "message": "   "}),
+        json!({"to": "unknown", "message": "hi"}),
+        json!({"to": "chain-disp", "message": "hi"}),
+        json!({"to": "ag2", "message": "hi"}),
+    ] {
+        assert!(
+            send_tool
+                .run(
+                    ToolCall {
+                        id: "bad-send".into(),
+                        name: "subagent_send".into(),
+                        arguments: bad_args.clone(),
+                        opaque: None,
+                    },
+                    ctx.clone(),
+                )
+                .await
+                .is_err(),
+            "accepted invalid subagent_send {bad_args}"
+        );
+    }
+
+    let _ = subagent_tool
+        .run(
+            ToolCall {
+                id: "live-bg".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "wait-steer", "name": "live-worker", "background": true}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    while runner.current.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let queued = send_tool
+        .run(
+            ToolCall {
+                id: "send-live".into(),
+                name: "subagent_send".into(),
+                arguments: json!({"to": "live-worker", "message": "extra instruction"}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!queued.is_error);
+    assert!(
+        queued.details.is_none(),
+        "live steer ack must not emit a duplicate dispatch card"
+    );
+    assert_eq!(
+        queued.structured_content.as_ref().unwrap()["status"],
+        "queued"
+    );
+    assert_eq!(
+        queued.structured_content.as_ref().unwrap()["agent_id"],
+        "ag3"
+    );
+
+    while runner.current.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        *runner.steered.lock().unwrap(),
+        vec!["extra instruction".to_owned()]
+    );
+
+    let fork_done = subagent_tool
+        .run(
+            ToolCall {
+                id: "fork-1".into(),
+                name: "subagent".into(),
+                arguments: json!({"task": "initial fork", "name": "forker", "fork": true, "background": false}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let fork_rec: AgentDispatch = serde_json::from_value(fork_done.details.unwrap()).unwrap();
+    assert_eq!(fork_rec.tasks[0].id, "ag4");
+
+    let resumed_fork = send_tool
+        .run(
+            ToolCall {
+                id: "send-fork-resume".into(),
+                name: "subagent_send".into(),
+                arguments: json!({"to": "forker", "message": "plain follow-up", "background": false}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let resumed_rec: AgentDispatch = serde_json::from_value(resumed_fork.details.unwrap()).unwrap();
+    assert_eq!(resumed_rec.tasks[0].id, "ag4");
+    assert!(resumed_rec.tasks[0].fork);
+    let last_req = runner.requests.lock().unwrap().last().unwrap().clone();
+    assert_eq!(last_req.mode, ChildMode::Fork);
+    assert_eq!(last_req.task, "plain follow-up");
+
+    let listed = list_tool
+        .run(
+            ToolCall {
+                id: "list-dedup".into(),
+                name: "subagent_list".into(),
+                arguments: json!({}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let agents = listed.structured_content.as_ref().unwrap()["agents"]
+        .as_array()
+        .unwrap();
+    let ag4_entries: Vec<_> = agents.iter().filter(|a| a["agent_id"] == "ag4").collect();
+    assert_eq!(
+        ag4_entries.len(),
+        1,
+        "ag4 must appear once in subagent_list"
+    );
+    assert_eq!(ag4_entries[0]["turns"], 2);
+
+    std::fs::remove_file(home.join("state/subagents/sessions/s-send/ag4.jsonl")).unwrap();
+    let missing_err = send_tool
+        .run(
+            ToolCall {
+                id: "send-missing-file".into(),
+                name: "subagent_send".into(),
+                arguments: json!({"to": "ag4", "message": "after delete"}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(
+        missing_err.contains("No persisted session found for subagent 'ag4'"),
+        "{missing_err}"
+    );
+
+    let agents_dir = home.join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("ephemeral.md"),
+        "---\nname: ephemeral\ndescription: temp\n---\nEphemeral prompt",
+    )
+    .unwrap();
+    let _ = subagent_tool
+        .run(
+            ToolCall {
+                id: "custom-1".into(),
+                name: "subagent".into(),
+                arguments: json!({"agent": "ephemeral", "task": "first custom", "name": "eph"}),
+                opaque: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    std::fs::remove_file(agents_dir.join("ephemeral.md")).unwrap();
+    let resumed_removed = send_tool
+        .run(
+            ToolCall {
+                id: "send-removed-def".into(),
+                name: "subagent_send".into(),
+                arguments: json!({"to": "eph", "message": "fallback resume", "background": false}),
+                opaque: None,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+    let removed_rec: AgentDispatch =
+        serde_json::from_value(resumed_removed.details.unwrap()).unwrap();
+    assert_eq!(removed_rec.tasks[0].agent, "ephemeral");
+    assert_eq!(removed_rec.tasks[0].state, AgentState::Completed);
 }

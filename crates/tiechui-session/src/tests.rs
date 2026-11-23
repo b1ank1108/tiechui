@@ -1198,3 +1198,98 @@ fn meta_survives_a_held_writer_reaches_summaries_and_moves_to_trash() {
     save_meta(&moved, &Meta::default()).unwrap();
     assert!(!moved.with_extension("meta.json").exists());
 }
+
+#[test]
+fn explicit_path_store_creates_private_parents_resumes_and_rejects_symlinks() {
+    #[cfg(unix)]
+    if std::env::var_os("TIECHUI_SESSION_UMASK_CHILD").is_none() {
+        let result = std::process::Command::new("/bin/sh")
+            .args(["-c", "umask 000; exec \"$@\"", "test"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::explicit_path_store_creates_private_parents_resumes_and_rejects_symlinks",
+                "--nocapture",
+            ])
+            .env("TIECHUI_SESSION_UMASK_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+    }
+
+    let fixture = Fixture::new();
+    let base = fixture.home.join("state/subagents/sessions/parent-1");
+    let store_path = base.join("ag1.jsonl");
+    assert!(SessionStore::create_at(&base.join("ag1.txt"), &fixture.cwd, &fixture.cancel).is_err());
+
+    let mut store = SessionStore::create_at(&store_path, &fixture.cwd, &fixture.cancel).unwrap();
+    add(&mut store, "first turn", &fixture.cancel);
+    assert_eq!(store.header().cwd, fixture.cwd);
+    drop(store);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in base.ancestors().take(4) {
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                dir.display()
+            );
+        }
+        assert_eq!(
+            fs::metadata(&store_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let mut reopened = SessionStore::open(&store_path, &fixture.cancel).unwrap();
+    assert_eq!(reopened.entries().len(), 1);
+    add(&mut reopened, "second turn", &fixture.cancel);
+    drop(reopened);
+
+    let resumed = SessionStore::open_or_create(&store_path, &fixture.cwd, &fixture.cancel).unwrap();
+    assert_eq!(resumed.entries().len(), 2);
+    drop(resumed);
+
+    let fresh_path = base.join("ag2.jsonl");
+    let created = SessionStore::open_or_create(&fresh_path, &fixture.cwd, &fixture.cancel).unwrap();
+    assert!(created.entries().is_empty());
+    drop(created);
+
+    assert!(
+        list(&fixture.home, &fixture.cwd, &fixture.cancel)
+            .unwrap()
+            .sessions
+            .is_empty(),
+        "subagent stores outside <home>/sessions must not appear in session lists"
+    );
+
+    #[cfg(unix)]
+    {
+        let live_link = base.join("live-link.jsonl");
+        std::os::unix::fs::symlink(&store_path, &live_link).unwrap();
+        assert!(SessionStore::create_at(&live_link, &fixture.cwd, &fixture.cancel).is_err());
+        assert!(SessionStore::open_or_create(&live_link, &fixture.cwd, &fixture.cancel).is_err());
+
+        let dangling_target = fixture._root.path().join("escaped.jsonl");
+        let dangling_link = base.join("dangling-link.jsonl");
+        std::os::unix::fs::symlink(&dangling_target, &dangling_link).unwrap();
+        assert!(SessionStore::create_at(&dangling_link, &fixture.cwd, &fixture.cancel).is_err());
+        assert!(
+            SessionStore::open_or_create(&dangling_link, &fixture.cwd, &fixture.cancel).is_err()
+        );
+        assert!(!dangling_target.exists());
+
+        let real_dir = fixture._root.path().join("outside-dir");
+        fs::create_dir_all(&real_dir).unwrap();
+        let dir_link = fixture.home.join("state/subagents/sessions/link-parent");
+        std::os::unix::fs::symlink(&real_dir, &dir_link).unwrap();
+        let via_dir_link = dir_link.join("ag3.jsonl");
+        assert!(SessionStore::create_at(&via_dir_link, &fixture.cwd, &fixture.cancel).is_err());
+        assert!(
+            SessionStore::open_or_create(&via_dir_link, &fixture.cwd, &fixture.cancel).is_err()
+        );
+    }
+}

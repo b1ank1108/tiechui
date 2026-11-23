@@ -35,7 +35,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[-]enter[d] open · [-]esc[d] back
+[-]↑/↓[d] select · [-]enter[d] open · [-]esc[d] back
 
 40 / light=false / output
 [b]Subagents
@@ -84,7 +84,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 [-]                            [fg#666c77] │ 
 [-]                            [fg#666c77] │ 
 
-[-]↑/↓[d] select · [-]enter[d] open · [-]ctrl+x[d] stop · [-]ctrl+f[d] search · [-]ctrl+t[d] thinking
+[-]↑/↓[d] select · [-]enter[d] open · [-]ctrl+f[d] search · [-]ctrl+s[d] group · [-]esc[d] back
 
 80 / light=false / output
 [b]Subagents
@@ -100,7 +100,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 [fg#666c77]2 turns · 120 in · 30 out · alpha/fast
 
-[-]↑/↓[d] scroll · [-]esc[d] back · [-]ctrl+x[d] stop · [-]ctrl+t[d] hide thinking
+[-]↑/↓[d] scroll · [-]ctrl+t[d] hide thinking · [-]esc[d] back
 
 40 / light=true / waiting
 [fg#9aa1ac]•[-] [b]Delegating[fg#9aa1ac] · 2 tasks
@@ -135,7 +135,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 
 
-[fg@0]enter[fg@8] open · [fg@0]esc[fg@8] back
+[fg@0]↑/↓[fg@8] select · [fg@0]enter[fg@8] open · [fg@0]esc[fg@8] back
 
 40 / light=true / output
 [b]Subagents
@@ -184,7 +184,7 @@ expression: "snapshots.join(\"\\n\\n\")"
 [-]                            [fg#9aa1ac] │ 
 [-]                            [fg#9aa1ac] │ 
 
-[fg@0]↑/↓[fg@8] select · [fg@0]enter[fg@8] open · [fg@0]ctrl+x[fg@8] stop · [fg@0]ctrl+f[fg@8] search · [fg@0]ctrl+t[fg@8] thinking
+[fg@0]↑/↓[fg@8] select · [fg@0]enter[fg@8] open · [fg@0]ctrl+f[fg@8] search · [fg@0]ctrl+s[fg@8] group · [fg@0]esc[fg@8] back
 
 80 / light=true / output
 [b]Subagents
@@ -200,4 +200,4 @@ expression: "snapshots.join(\"\\n\\n\")"
 
 [fg#9aa1ac]2 turns · 120 in · 30 out · alpha/fast
 
-[fg@0]↑/↓[fg@8] scroll · [fg@0]esc[fg@8] back · [fg@0]ctrl+x[fg@8] stop · [fg@0]ctrl+t[fg@8] hide thinking
+[fg@0]↑/↓[fg@8] scroll · [fg@0]ctrl+t[fg@8] hide thinking · [fg@0]esc[fg@8] back

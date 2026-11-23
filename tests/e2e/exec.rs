@@ -826,13 +826,12 @@ mod dual_subagents {
             .is_some_and(|msg| msg["role"] == "tool")
     }
 
-    fn last_user_text(body: &Value) -> String {
+    fn all_user_texts(body: &Value) -> Vec<String> {
         body["messages"]
             .as_array()
             .into_iter()
             .flatten()
-            .rev()
-            .find(|msg| msg["role"] == "user")
+            .filter(|msg| msg["role"] == "user")
             .map(|msg| match &msg["content"] {
                 Value::String(text) => text.clone(),
                 Value::Array(parts) => parts
@@ -842,7 +841,11 @@ mod dual_subagents {
                     .join(""),
                 _ => String::new(),
             })
-            .unwrap_or_default()
+            .collect()
+    }
+
+    fn last_user_text(body: &Value) -> String {
+        all_user_texts(body).pop().unwrap_or_default()
     }
 
     fn encode_sse(reply: GatewayReply) -> (String, Duration) {
@@ -991,6 +994,15 @@ mod dual_subagents {
         tracker: Arc<ConcurrencyTracker>,
     }
 
+    fn create_home_dir(home: &Path) {
+        std::fs::create_dir_all(home).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
     impl DualFixture {
         async fn new(
             alpha_handler: impl Fn(&Value) -> GatewayReply + Send + Sync + 'static,
@@ -999,7 +1011,7 @@ mod dual_subagents {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
             let cwd = root.path().join("work");
-            std::fs::create_dir_all(&home).unwrap();
+            create_home_dir(&home);
             std::fs::create_dir_all(&cwd).unwrap();
             let tracker = ConcurrencyTracker::new();
             let alpha = MockGateway::start(tracker.clone(), alpha_handler).await;
@@ -1156,7 +1168,7 @@ mod dual_subagents {
         let single_results = tool_results(&events(&single));
         assert_eq!(
             single_results,
-            vec![("SINGLE_CHILD_DONE".to_owned(), false)]
+            vec![("SINGLE_CHILD_DONE\n\n[agent_id: ag1]".to_owned(), false)]
         );
         let single_records = settled_dispatches(&fixture.latest_store());
         assert_eq!(single_records.len(), 1);
@@ -1166,7 +1178,10 @@ mod dual_subagents {
         let chain = fixture.exec_json("run-chain").await;
         assert_eq!(chain.status.code(), Some(0), "{chain:?}");
         let chain_results = tool_results(&events(&chain));
-        assert_eq!(chain_results, vec![("CHAIN_FINAL_DONE".to_owned(), false)]);
+        assert_eq!(
+            chain_results,
+            vec![("CHAIN_FINAL_DONE\n\n[agent_id: ag2]".to_owned(), false)]
+        );
         let chain_records = settled_dispatches(&fixture.latest_store());
         assert_eq!(chain_records.len(), 1);
         assert!(
@@ -1317,9 +1332,10 @@ mod dual_subagents {
         assert!(!results[0].1, "{results:?}");
         let summary = &results[0].0;
         for expected in [
-            "### [default · beta/judge] Completed",
-            "### [custom · alpha/fast] Completed",
-            "### [judge_preset · alpha/fast] Completed",
+            "### [ag1 · default · beta/judge] Completed",
+            "### [ag2 · custom · alpha/fast] Completed",
+            "### [ag3 · judge_preset · alpha/fast] Completed",
+            "### [ag4 · default · beta/judge] Completed",
             "BETA_HIGH_OK",
             "ALPHA_CUSTOM_OK",
             "ALPHA_PRESET_OK",
@@ -1423,7 +1439,10 @@ mod dual_subagents {
             .await;
         assert_eq!(turn_two.status.code(), Some(0), "{turn_two:?}");
         let results = tool_results(&events(&turn_two));
-        assert_eq!(results, vec![("RESUMED_BETA_HIGH_OK".to_owned(), false)]);
+        assert_eq!(
+            results,
+            vec![("RESUMED_BETA_HIGH_OK\n\n[agent_id: ag1]".to_owned(), false)]
+        );
 
         for parent_req in fixture.alpha.requests() {
             assert_eq!(parent_req["model"], "fast");
@@ -1470,10 +1489,19 @@ mod dual_subagents {
 
         let results = tool_results(&events(&output));
         assert_eq!(results.len(), 10);
+        let mut assigned_ids = std::collections::BTreeSet::new();
         for (index, (text, is_error)) in results.iter().enumerate() {
             assert!(!is_error, "call {index} failed: {text}");
-            assert_eq!(text, &format!("ACK:slot-job-{index}"));
+            let prefix = format!("ACK:slot-job-{index}\n\n[agent_id: ");
+            let id = text
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or_else(|| panic!("unexpected output for call {index}: {text}"));
+            assigned_ids.insert(id.to_owned());
         }
+        let expected_ids: std::collections::BTreeSet<String> =
+            (1..=10).map(|n| format!("ag{n}")).collect();
+        assert_eq!(assigned_ids, expected_ids);
 
         assert_eq!(fixture.alpha.child_requests().len(), 10);
         let peak = fixture.tracker.peak();
@@ -1491,5 +1519,662 @@ mod dual_subagents {
                 && d.tasks[0].state == AgentState::Completed
         }));
         fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn background_subagent_settles_and_runs_continuation_before_exec_exits() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    assert_eq!(last_user_text(body), "slow-bg-job");
+                    return GatewayReply::DelayedText(
+                        "BG_CHILD_RESULT".into(),
+                        Duration::from_millis(350),
+                    );
+                }
+                let user = last_user_text(body);
+                if user.contains("<task-notification>") {
+                    assert!(user.contains("BG_CHILD_RESULT"), "{user}");
+                    return GatewayReply::Text("TURN_2_SYNTHESIS".into());
+                }
+                if has_tool_result(body) {
+                    return GatewayReply::Text("TURN_1_ACK".into());
+                }
+                GatewayReply::Tools(vec![(
+                    "call-bg-1".into(),
+                    "subagent".into(),
+                    json!({"task": "slow-bg-job", "background": true}),
+                )])
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let output = fixture
+            .exec_args("dispatch-bg", &["--mode", "yolo", "--json"])
+            .await;
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+        let seen = events(&output);
+        let completed_turns: Vec<_> = seen
+            .iter()
+            .filter_map(|event| match &event.event {
+                EventKind::TurnCompleted { turn } => Some(turn.status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            completed_turns,
+            vec![TurnStatus::Completed, TurnStatus::Completed]
+        );
+        let user_items = seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.event,
+                    EventKind::ItemCompleted {
+                        item: Item::Known(KnownItem::UserMessage { .. }),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(user_items, 1);
+        assert!(seen.iter().any(|event| matches!(
+            &event.event,
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                ..
+            } if text == "TURN_2_SYNTHESIS"
+        )));
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    fn last_tool_text(body: &Value) -> String {
+        body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .take_while(|msg| msg["role"] == "tool")
+            .filter_map(|msg| msg["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigint_while_idle_waiting_for_background_subagent_reaps_child_and_exits_130() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    if has_tool_result(body) {
+                        return GatewayReply::Text("UNEXPECTED_CHILD_FINISH".into());
+                    }
+                    return GatewayReply::Tools(vec![(
+                        "call-child-sleep".into(),
+                        "bash".into(),
+                        json!({"command": "touch child_started && sleep 10 && touch child_escaped"}),
+                    )]);
+                }
+                if has_tool_result(body) {
+                    return GatewayReply::Text("TURN_1_IDLE_NOW".into());
+                }
+                GatewayReply::Tools(vec![(
+                    "call-bg-idle".into(),
+                    "subagent".into(),
+                    json!({"task": "slow-bg-bash", "background": true}),
+                )])
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let mut child = support::command()
+            .env("TIECHUI_HOME", &fixture.home)
+            .env("HOME", fixture.root.path())
+            .env("TC_VERIFY_KEY", VERIFY_SECRET)
+            .args(["exec", "start-idle-wait", "--cwd"])
+            .arg(&fixture.cwd)
+            .args(["--mode", "yolo", "--json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let event: Event = serde_json::from_str(&line).unwrap();
+                let turn_done = matches!(
+                    &event.event,
+                    EventKind::TurnCompleted { turn } if turn.status == TurnStatus::Completed
+                );
+                seen.push(event);
+                if turn_done {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !fixture.cwd.join("child_started").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        sigint(child.id().unwrap());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                seen.push(serde_json::from_str(&line).unwrap());
+            }
+        })
+        .await
+        .unwrap();
+
+        let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.code(), Some(130));
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event.event, EventKind::TurnCompleted { .. }))
+                .count(),
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(!fixture.cwd.join("child_escaped").exists());
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    #[tokio::test]
+    async fn subagent_persistence_live_steer_cross_process_resume_stop_and_doctor() {
+        let fixture = DualFixture::new(
+            |body| {
+                if is_child_request(body) {
+                    return match last_user_text(body).as_str() {
+                        "worker-step-1" => GatewayReply::Tools(vec![(
+                            "call-worker-gate".into(),
+                            "bash".into(),
+                            json!({
+                                "command": "touch worker_in_tool && until [ -f release_worker ]; do sleep 0.02; done && printf GATE_OPENED"
+                            }),
+                        )]),
+                        "worker-step-2-steer" => {
+                            let raw = serde_json::to_string(body).unwrap();
+                            assert!(raw.contains("GATE_OPENED"), "{raw}");
+                            GatewayReply::Text("WORKER_STEERED_RESULT".into())
+                        }
+                        "worker-step-3-resumed" => GatewayReply::Text("WORKER_RESUMED_RESULT".into()),
+                        "slow-stoppable-task" => {
+                            GatewayReply::DelayedText("NEVER_DELIVERED".into(), Duration::from_secs(3))
+                        }
+                        other => panic!("unexpected child prompt: {other}"),
+                    };
+                }
+                let user = last_user_text(body);
+                if user.contains("<task-notification>") {
+                    assert!(user.contains("WORKER_STEERED_RESULT"), "{user}");
+                    return GatewayReply::Text("PHASE_1_CONT_DONE".into());
+                }
+                if user == "phase-1-live-steer" {
+                    if !has_tool_result(body) {
+                        return GatewayReply::Tools(vec![(
+                            "call-spawn-worker".into(),
+                            "subagent".into(),
+                            json!({"task": "worker-step-1", "name": "worker", "background": true}),
+                        )]);
+                    }
+                    let tool_out = last_tool_text(body);
+                    if tool_out.contains("Subagent launched in the background") {
+                        return GatewayReply::Tools(vec![(
+                            "call-wait-worker".into(),
+                            "bash".into(),
+                            json!({"command": "until [ -f worker_in_tool ]; do sleep 0.02; done && printf WORKER_READY"}),
+                        )]);
+                    }
+                    if tool_out.contains("WORKER_READY") {
+                        return GatewayReply::Tools(vec![
+                            (
+                                "call-steer-worker".into(),
+                                "subagent_send".into(),
+                                json!({"to": "worker", "message": "worker-step-2-steer"}),
+                            ),
+                            (
+                                "call-release-worker".into(),
+                                "write".into(),
+                                json!({"path": "release_worker", "content": "go"}),
+                            ),
+                        ]);
+                    }
+                    assert!(
+                        tool_out.contains("Queued message for subagent ag1 (worker)"),
+                        "{tool_out}"
+                    );
+                    return GatewayReply::Text("PHASE_1_TURN_1_DONE".into());
+                }
+                assert_eq!(user, "phase-2-resume-list-stop");
+                if !has_tool_result(body) {
+                    return GatewayReply::Tools(vec![
+                        (
+                            "call-resume-worker".into(),
+                            "subagent_send".into(),
+                            json!({
+                                "to": "worker",
+                                "message": "worker-step-3-resumed",
+                                "background": false
+                            }),
+                        ),
+                        (
+                            "call-spawn-stopper".into(),
+                            "subagent".into(),
+                            json!({
+                                "task": "slow-stoppable-task",
+                                "name": "stopper",
+                                "background": true
+                            }),
+                        ),
+                    ]);
+                }
+                let tool_out = last_tool_text(body);
+                if tool_out.contains("WORKER_RESUMED_RESULT") {
+                    return GatewayReply::Tools(vec![(
+                        "call-list".into(),
+                        "subagent_list".into(),
+                        json!({}),
+                    )]);
+                }
+                if tool_out.contains("ag1 (worker)") && tool_out.contains("ag2 (stopper)") {
+                    return GatewayReply::Tools(vec![(
+                        "call-stop".into(),
+                        "subagent_stop".into(),
+                        json!({"id": "stopper"}),
+                    )]);
+                }
+                assert!(tool_out.contains("Subagent ag2 Cancelled."), "{tool_out}");
+                GatewayReply::Text("PHASE_2_ALL_DONE".into())
+            },
+            |body| panic!("unexpected beta request: {body}"),
+        )
+        .await;
+
+        let phase1 = fixture
+            .exec_args("phase-1-live-steer", &["--mode", "yolo", "--json"])
+            .await;
+        assert_eq!(phase1.status.code(), Some(0), "{phase1:?}");
+        let phase1_events = events(&phase1);
+        let parent_id = phase1_events[0].thread_id.0.clone();
+        assert_eq!(
+            phase1_events
+                .iter()
+                .filter(|e| matches!(e.event, EventKind::TurnCompleted { .. }))
+                .count(),
+            2
+        );
+
+        let child_sessions_dir = fixture
+            .home
+            .join("state/subagents/sessions")
+            .join(&parent_id);
+        let ag1_file = child_sessions_dir.join("ag1.jsonl");
+        assert!(ag1_file.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::symlink_metadata(&ag1_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o600
+            );
+            for dir in [
+                &child_sessions_dir,
+                child_sessions_dir.parent().unwrap(),
+                fixture.home.join("state/subagents").as_path(),
+                fixture.home.join("state").as_path(),
+            ] {
+                assert_eq!(
+                    std::fs::symlink_metadata(dir).unwrap().permissions().mode() & 0o7777,
+                    0o700,
+                    "expected 0700 on {}",
+                    dir.display()
+                );
+            }
+        }
+
+        let phase2 = fixture
+            .exec_args(
+                "phase-2-resume-list-stop",
+                &["--resume", &parent_id, "--mode", "yolo", "--json"],
+            )
+            .await;
+        assert_eq!(phase2.status.code(), Some(0), "{phase2:?}");
+        let phase2_events = events(&phase2);
+        assert_eq!(
+            phase2_events
+                .iter()
+                .filter(|e| matches!(e.event, EventKind::TurnCompleted { .. }))
+                .count(),
+            1,
+            "subagent_stop must suppress <task-notification> continuation wakeup"
+        );
+        assert!(phase2_events.iter().any(|e| matches!(
+            &e.event,
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                ..
+            } if text == "PHASE_2_ALL_DONE"
+        )));
+
+        let resumed_child_req = fixture
+            .alpha
+            .child_requests()
+            .into_iter()
+            .find(|req| last_user_text(req) == "worker-step-3-resumed")
+            .expect("missing resumed worker request");
+        assert_eq!(
+            all_user_texts(&resumed_child_req),
+            vec![
+                "worker-step-1".to_owned(),
+                "worker-step-2-steer".to_owned(),
+                "worker-step-3-resumed".to_owned()
+            ]
+        );
+
+        let top_sessions =
+            tiechui_session::list(&fixture.home, &fixture.cwd, &CancellationToken::new()).unwrap();
+        assert_eq!(top_sessions.sessions.len(), 1);
+        assert_eq!(top_sessions.sessions[0].header.id, parent_id);
+
+        let doctor = support::command()
+            .env("TIECHUI_HOME", &fixture.home)
+            .env("HOME", fixture.root.path())
+            .env("TC_VERIFY_KEY", VERIFY_SECRET)
+            .arg("doctor")
+            .arg("--profile")
+            .arg(&fixture.home)
+            .output()
+            .await
+            .unwrap();
+        let doctor_stdout = String::from_utf8(doctor.stdout).unwrap();
+        assert_eq!(
+            doctor.status.code(),
+            Some(0),
+            "doctor failed: {doctor_stdout}\n{}",
+            String::from_utf8_lossy(&doctor.stderr)
+        );
+        assert!(doctor_stdout.contains("Doctor: OK"), "{doctor_stdout}");
+        assert!(!doctor_stdout.contains("FAIL"), "{doctor_stdout}");
+        fixture.assert_no_secret_or_config_leak();
+    }
+
+    fn anthropic_text_sse(text: &str) -> String {
+        format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":8,\"cache_creation_input_tokens\":4}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":null,\"output_tokens\":3}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    fn anthropic_tool_calls_sse(
+        thinking: Option<(&str, &str)>,
+        lead_text: Option<&str>,
+        calls: &[(&str, &str, Value)],
+    ) -> String {
+        let mut out = String::from(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":15,\"output_tokens\":0,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":5}}}\n\n",
+        );
+        let mut idx = 0;
+        if let Some((thought, sig)) = thinking {
+            out.push_str(&format!(
+                "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"thinking_delta\",\"thinking\":{}}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"signature_delta\",\"signature\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+                serde_json::to_string(thought).unwrap(),
+                serde_json::to_string(sig).unwrap()
+            ));
+            idx += 1;
+        }
+        if let Some(text) = lead_text {
+            out.push_str(&format!(
+                "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+                serde_json::to_string(text).unwrap()
+            ));
+            idx += 1;
+        }
+        for (id, name, input) in calls {
+            let raw = serde_json::to_string(input).unwrap();
+            out.push_str(&format!(
+                "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{idx},\"content_block\":{{\"type\":\"tool_use\",\"id\":{},\"name\":{},\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{idx},\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{idx}}}\n\n",
+                serde_json::to_string(id).unwrap(),
+                serde_json::to_string(name).unwrap(),
+                serde_json::to_string(&raw).unwrap()
+            ));
+            idx += 1;
+        }
+        out.push_str(
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":12}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        out
+    }
+
+    struct E2eForkRouter;
+
+    impl wiremock::Respond for E2eForkRouter {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let parsed: Value = serde_json::from_slice(&request.body).unwrap();
+            let last_msg = parsed["messages"]
+                .as_array()
+                .and_then(|msgs| msgs.last())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let sse = if last_msg.contains("Forked subagents cannot spawn or manage subagents") {
+                anthropic_text_sse("FORK_B_BLOCKED_RECURSION")
+            } else if last_msg.contains("call_fork_a_write") {
+                anthropic_text_sse("FORK_A_COMPLETED")
+            } else if last_msg.contains("Directive: Task A: write fork output") {
+                anthropic_tool_calls_sse(
+                    None,
+                    None,
+                    &[(
+                        "call_fork_a_write",
+                        "write",
+                        json!({"path": "fork-e2e.txt", "content": "fork a wrote this"}),
+                    )],
+                )
+            } else if last_msg.contains("Directive: Task B: try recursive subagent") {
+                anthropic_tool_calls_sse(
+                    None,
+                    None,
+                    &[("call_nested_fork", "subagent", json!({"task": "nested"}))],
+                )
+            } else if last_msg.contains("<task-notification>") {
+                anthropic_text_sse("PARENT_FORK_SUMMARY")
+            } else if last_msg.contains("Subagent launched in the background") {
+                anthropic_text_sse("PARENT_FORKS_LAUNCHED")
+            } else {
+                anthropic_tool_calls_sse(
+                    Some(("Parent deep reasoning.", "sig-e2e-fork")),
+                    Some("Launching two parallel forks."),
+                    &[
+                        (
+                            "call_e2e_fork_1",
+                            "subagent",
+                            json!({
+                                "task": "Task A: write fork output",
+                                "name": "fa",
+                                "fork": true
+                            }),
+                        ),
+                        (
+                            "call_e2e_fork_2",
+                            "subagent",
+                            json!({
+                                "task": "Task B: try recursive subagent",
+                                "name": "fb",
+                                "fork": true
+                            }),
+                        ),
+                    ],
+                )
+            };
+            wiremock::ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_subagents_share_long_cache_prefix_and_reject_recursive_dispatch() {
+        use wiremock::{Mock, MockServer, matchers::method};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(E2eForkRouter)
+            .mount(&server)
+            .await;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("work");
+        create_home_dir(&home);
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "model = \"anth/sonnet\"\nthinking = \"high\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("providers.toml"),
+            format!(
+                "[anth]\nwire = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key_env = \"TC_VERIFY_KEY\"\nmodels = [{{ id = \"sonnet\", context_window = 200000, max_output = 8192, reasoning = true, thinking = \"adaptive\", cache_retention = \"long\" }}]\n",
+                server.uri()
+            ),
+        )
+        .unwrap();
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            support::command()
+                .env("TIECHUI_HOME", &home)
+                .env("HOME", root.path())
+                .env("TC_VERIFY_KEY", VERIFY_SECRET)
+                .args(["exec", "Run two parallel forks", "--cwd"])
+                .arg(&cwd)
+                .args(["--mode", "yolo", "--json"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("fork-e2e.txt")).unwrap(),
+            "fork a wrote this"
+        );
+
+        let seen = events(&output);
+        assert!(seen.iter().any(|e| matches!(
+            &e.event,
+            EventKind::ItemCompleted {
+                item: Item::Known(KnownItem::AssistantMessage { text, .. }),
+                ..
+            } if text == "PARENT_FORK_SUMMARY"
+        )));
+
+        let received = server.received_requests().await.unwrap();
+        let bodies: Vec<Value> = received
+            .iter()
+            .map(|req| serde_json::from_slice(&req.body).unwrap())
+            .collect();
+        let parent_initial = &bodies[0];
+        let last_of = |b: &Value| {
+            b["messages"]
+                .as_array()
+                .and_then(|msgs| msgs.last())
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        };
+        let fork_a = bodies
+            .iter()
+            .find(|b| last_of(b).contains("Directive: Task A: write fork output"))
+            .expect("missing Fork A initial request");
+        let fork_b = bodies
+            .iter()
+            .find(|b| last_of(b).contains("Directive: Task B: try recursive subagent"))
+            .expect("missing Fork B initial request");
+        let fork_b_denied = bodies
+            .iter()
+            .find(|b| last_of(b).contains("call_nested_fork"))
+            .expect("missing Fork B post-denial request");
+
+        for fb in [fork_a, fork_b] {
+            assert_eq!(fb["model"], parent_initial["model"]);
+            assert_eq!(fb["thinking"], parent_initial["thinking"]);
+            assert_eq!(
+                serde_json::to_vec(&fb["system"]).unwrap(),
+                serde_json::to_vec(&parent_initial["system"]).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec(&fb["tools"]).unwrap(),
+                serde_json::to_vec(&parent_initial["tools"]).unwrap()
+            );
+            assert_eq!(
+                fb["messages"][0]["content"][0]["cache_control"],
+                json!({"type": "ephemeral", "ttl": "1h"})
+            );
+            assert_eq!(
+                serde_json::to_vec(&fb["messages"][0]).unwrap(),
+                serde_json::to_vec(&parent_initial["messages"][0]).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&fork_a["messages"][1]).unwrap(),
+            serde_json::to_vec(&fork_b["messages"][1]).unwrap()
+        );
+        let a_msg2 = fork_a["messages"][2]["content"].as_array().unwrap();
+        let b_msg2 = fork_b["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&a_msg2[..2]).unwrap(),
+            serde_json::to_vec(&b_msg2[..2]).unwrap()
+        );
+        for slot in &a_msg2[..2] {
+            assert!(
+                slot.to_string()
+                    .contains("Fork started — processing in background"),
+                "{slot}"
+            );
+        }
+        assert!(
+            a_msg2[2]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<fork_boilerplate>")
+        );
+        assert!(
+            b_msg2[2]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<fork_boilerplate>")
+        );
+
+        let denied_block = &fork_b_denied["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["content"][0];
+        assert_eq!(denied_block["is_error"], true, "{denied_block}");
+        assert!(
+            denied_block
+                .to_string()
+                .contains("Forked subagents cannot spawn or manage subagents"),
+            "{denied_block}"
+        );
     }
 }

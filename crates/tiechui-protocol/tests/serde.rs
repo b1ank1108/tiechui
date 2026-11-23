@@ -516,3 +516,148 @@ fn daemon_status_round_trips() {
         })
     );
 }
+
+#[test]
+fn subagent_task_dispatch_and_view_defaults_and_pending_work() {
+    let legacy_view: SubagentsView = serde_json::from_value(json!({
+        "records": [{
+            "id": "call-1",
+            "session_id": "main",
+            "mode": "single",
+            "tasks": [{
+                "agent": "default",
+                "task": "check logs",
+                "state": "Running",
+                "output": "",
+                "thinking": "",
+                "diagnostic": null,
+                "output_path": null,
+                "thinking_path": null,
+                "usage": TokenUsage::default(),
+                "turns": 0,
+                "model": "alpha/fast"
+            }]
+        }],
+        "open": false
+    }))
+    .expect("legacy subagents view deserializes");
+
+    assert_eq!(legacy_view.pending_notifications, 0);
+    assert_eq!(legacy_view.background(), 0);
+    assert!(!legacy_view.has_pending_work());
+    let legacy_task = &legacy_view.records[0].tasks[0];
+    assert_eq!(legacy_task.id, "");
+    assert_eq!(legacy_task.name, None);
+    assert!(!legacy_task.background);
+    assert!(!legacy_task.fork);
+    assert_eq!(legacy_task.started_at, 0);
+    assert!(!legacy_view.records[0].background);
+    assert_eq!(legacy_view.records[0].started_at, 0);
+    assert!(
+        serde_json::to_value(legacy_task)
+            .expect("task serializes")
+            .get("name")
+            .is_none()
+    );
+
+    let active_view = SubagentsView {
+        records: vec![AgentDispatch {
+            id: "dispatch-1".into(),
+            session_id: "main".into(),
+            mode: "parallel".into(),
+            background: true,
+            started_at: 1_700_000_000_000,
+            tasks: vec![
+                AgentTask {
+                    id: "ag1".into(),
+                    name: Some("auditor".into()),
+                    background: true,
+                    fork: true,
+                    started_at: 1_700_000_000_001,
+                    agent: "fork".into(),
+                    task: "audit module".into(),
+                    state: AgentState::Running,
+                    output: String::new(),
+                    thinking: String::new(),
+                    diagnostic: None,
+                    output_path: None,
+                    thinking_path: None,
+                    usage: TokenUsage::default(),
+                    turns: 1,
+                    model: "alpha/fast".into(),
+                },
+                AgentTask {
+                    id: "ag2".into(),
+                    name: None,
+                    background: true,
+                    fork: false,
+                    started_at: 1_700_000_000_002,
+                    agent: "default".into(),
+                    task: "queued work".into(),
+                    state: AgentState::Waiting,
+                    output: String::new(),
+                    thinking: String::new(),
+                    diagnostic: None,
+                    output_path: None,
+                    thinking_path: None,
+                    usage: TokenUsage::default(),
+                    turns: 0,
+                    model: String::new(),
+                },
+                AgentTask {
+                    id: "ag3".into(),
+                    name: None,
+                    background: true,
+                    fork: false,
+                    started_at: 1_700_000_000_003,
+                    agent: "default".into(),
+                    task: "settled background".into(),
+                    state: AgentState::Completed,
+                    output: "ok".into(),
+                    thinking: String::new(),
+                    diagnostic: None,
+                    output_path: None,
+                    thinking_path: None,
+                    usage: TokenUsage::default(),
+                    turns: 1,
+                    model: "alpha/fast".into(),
+                },
+                AgentTask {
+                    id: "ag4".into(),
+                    name: None,
+                    background: false,
+                    fork: false,
+                    started_at: 1_700_000_000_004,
+                    agent: "default".into(),
+                    task: "foreground running".into(),
+                    state: AgentState::Running,
+                    output: String::new(),
+                    thinking: String::new(),
+                    diagnostic: None,
+                    output_path: None,
+                    thinking_path: None,
+                    usage: TokenUsage::default(),
+                    turns: 0,
+                    model: "alpha/fast".into(),
+                },
+            ],
+        }],
+        open: true,
+        pending_notifications: 0,
+    };
+
+    let serialized = round_trip(&active_view);
+    assert_eq!(serialized["records"][0]["tasks"][0]["name"], "auditor");
+    assert!(serialized["records"][0]["tasks"][1].get("name").is_none());
+    assert_eq!(active_view.background(), 2);
+    assert!(active_view.has_pending_work());
+
+    let mut settled_with_notice = active_view;
+    settled_with_notice.records[0].tasks[0].state = AgentState::Completed;
+    settled_with_notice.records[0].tasks[1].state = AgentState::Cancelled;
+    assert_eq!(settled_with_notice.background(), 0);
+    assert!(!settled_with_notice.has_pending_work());
+    settled_with_notice.pending_notifications = 1;
+    assert!(settled_with_notice.has_pending_work());
+    round_trip(&settled_with_notice);
+}

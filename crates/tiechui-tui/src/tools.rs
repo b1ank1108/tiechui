@@ -649,6 +649,34 @@ fn maintained(tools: &[Tool], width: usize, theme: &Theme, view: View) -> Vec<Li
     lines
 }
 
+fn live_background_hint(tool: &Tool, kind: Action, now: Instant) -> bool {
+    let foreground = kind == Action::Ran
+        || (tool.name == "subagent_send" && tool.arguments["background"] == false);
+    foreground
+        && tool
+            .started
+            .is_some_and(|s| now.saturating_duration_since(s) >= Duration::from_secs(2))
+}
+
+fn live_suffix(tool: &Tool, kind: Action, live: Option<(Duration, Instant)>) -> String {
+    let Some((_, now)) = live else {
+        return String::new();
+    };
+    let mut suffix = String::new();
+    let starting_shell = kind == Action::Shell && tool.name == "bash";
+    if kind != Action::Ran && !starting_shell {
+        suffix.push_str(if tool.started.is_some() {
+            " · running"
+        } else {
+            " · pending"
+        });
+    }
+    if live_background_hint(tool, kind, now) {
+        suffix.push_str(" · ctrl+b background");
+    }
+    suffix
+}
+
 fn single(
     tool: &Tool,
     width: usize,
@@ -671,16 +699,7 @@ fn single(
         _ if failed => "Failed",
         _ => kind.label(tool, live.is_some()),
     };
-    // A starting command's title already says it is running.
-    let starting = kind == Action::Shell && tool.name == "bash";
-    let mut suffix = String::new();
-    if live.is_some() && kind != Action::Ran && !starting {
-        suffix.push_str(if tool.started.is_some() {
-            " · running"
-        } else {
-            " · pending"
-        });
-    }
+    let mut suffix = live_suffix(tool, kind, live);
     if kind == Action::Shell
         && !failed
         && let Some(state) = shell_state(tool)
@@ -981,6 +1000,9 @@ fn custom(tool: &Tool, width: usize, theme: &Theme, view: View) -> Option<Vec<Li
             Some(render(&[inner], width, theme, view))
         }
         "subagent" => Some(crate::subagents::render(tool, width, theme, view)),
+        "subagent_send" if crate::subagents::has_dispatch(tool) => {
+            Some(crate::subagents::render(tool, width, theme, view))
+        }
         "run_code" => Some(crate::program::render(tool, width, theme, view)),
         "create_goal" | "get_goal" | "update_goal" => {
             let text = tool

@@ -282,6 +282,113 @@ pub(crate) fn list_in(
     Ok(result)
 }
 
+fn validate_explicit_path(path: &Path) -> Result<(&Path, &std::ffi::OsStr), SessionError> {
+    let valid_name = path.extension().is_some_and(|ext| ext == "jsonl")
+        && path.file_stem().is_some_and(|stem| !stem.is_empty());
+    if !valid_name {
+        return Err(SessionError::new(
+            path,
+            "session path must be a non-empty .jsonl file name",
+        ));
+    }
+    let directory = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| SessionError::new(path, "missing session directory"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| SessionError::new(path, "missing session file name"))?;
+    Ok((directory, file_name))
+}
+
+fn inspect_not_symlink(path: &Path, label: &str) -> Result<Option<fs::Metadata>, SessionError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(SessionError::new(
+            path,
+            format!("{label} must not be a symlink"),
+        )),
+        Ok(meta) => Ok(Some(meta)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(SessionError::new(path, err)),
+    }
+}
+
+fn open_new_session_file(path: &Path) -> Result<File, SessionError> {
+    let mut options = session_options(true);
+    options.create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| SessionError::new(path, error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| SessionError::new(path, error))?;
+    }
+    Ok(file)
+}
+
+fn write_initial_header(
+    directory: &Path,
+    path: &Path,
+    file: &mut File,
+    header: &Header,
+) -> Result<u64, SessionError> {
+    lock_writer(file)
+        .map_err(|error| SessionError::new(path, format!("cannot acquire writer lock: {error}")))?;
+    let mut line = serde_json::to_vec(header).map_err(|error| SessionError::new(path, error))?;
+    line.push(b'\n');
+    file.write_all(&line)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| SessionError::new(path, error))?;
+    #[cfg(unix)]
+    File::open(directory)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| SessionError::new(directory, error))?;
+    Ok(line.len() as u64)
+}
+
+fn init_created_store(
+    directory: &Path,
+    path: PathBuf,
+    header: Header,
+) -> Result<SessionStore, SessionError> {
+    let mut file = open_new_session_file(&path)?;
+    let len = match write_initial_header(directory, &path, &mut file, &header) {
+        Ok(len) => len,
+        Err(error) => {
+            drop(file);
+            fs::remove_file(&path).map_err(|cleanup| {
+                SessionError::new(
+                    &path,
+                    format!("{error}; failed to remove incomplete session: {cleanup}"),
+                )
+            })?;
+            return Err(error);
+        }
+    };
+    Ok(SessionStore {
+        path,
+        file,
+        writable: true,
+        header,
+        entries: Vec::new(),
+        lines: Vec::new(),
+        by_id: HashMap::new(),
+        leaf: None,
+        diagnostics: Vec::new(),
+        file_len: len,
+        valid_len: len,
+        needs_newline: false,
+        write_failed: false,
+    })
+}
+
 impl SessionStore {
     pub(crate) fn create_in(
         directory: &Path,
@@ -299,16 +406,6 @@ impl SessionStore {
             .map_err(|error| SessionError::new(directory, error))?;
         let id = new_id();
         let path = directory.join(format!("{id}.jsonl"));
-        let mut options = session_options(true);
-        options.create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|error| SessionError::new(&path, error))?;
         let header = Header {
             format_version: FORMAT_VERSION,
             id,
@@ -317,50 +414,54 @@ impl SessionStore {
             parent_session,
             runtime,
         };
-        let result = (|| {
-            lock_writer(&file).map_err(|error| {
-                SessionError::new(&path, format!("cannot acquire writer lock: {error}"))
-            })?;
-            let mut line =
-                serde_json::to_vec(&header).map_err(|error| SessionError::new(&path, error))?;
-            line.push(b'\n');
-            file.write_all(&line)
-                .and_then(|()| file.sync_all())
-                .map_err(|error| SessionError::new(&path, error))?;
-            #[cfg(unix)]
-            File::open(&directory)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| SessionError::new(&directory, error))?;
-            Ok(line.len() as u64)
-        })();
-        let len = match result {
-            Ok(len) => len,
-            Err(error) => {
-                drop(file);
-                fs::remove_file(&path).map_err(|cleanup| {
-                    SessionError::new(
-                        &path,
-                        format!("{error}; failed to remove incomplete session: {cleanup}"),
-                    )
-                })?;
-                return Err(error);
-            }
+        init_created_store(&directory, path, header)
+    }
+
+    pub(crate) fn create_at_path(
+        path: &Path,
+        cwd: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Self, SessionError> {
+        check_cancel(path, cancel)?;
+        let (directory, file_name) = validate_explicit_path(path)?;
+        inspect_not_symlink(directory, "session directory")?;
+        if inspect_not_symlink(path, "session file")?.is_some() {
+            return Err(SessionError::new(path, "session file already exists"));
+        }
+        let cwd = resolve_cwd(cwd)?;
+        tiechui_config::private::create_dir_all(directory)
+            .map_err(|error| SessionError::new(directory, error))?;
+        let canonical_dir = directory
+            .canonicalize()
+            .map_err(|error| SessionError::new(directory, error))?;
+        let full_path = canonical_dir.join(file_name);
+        let header = Header {
+            format_version: FORMAT_VERSION,
+            id: new_id(),
+            cwd,
+            created_at: now_ms(),
+            parent_session: None,
+            runtime: None,
         };
-        Ok(Self {
-            path,
-            file,
-            writable: true,
-            header,
-            entries: Vec::new(),
-            lines: Vec::new(),
-            by_id: HashMap::new(),
-            leaf: None,
-            diagnostics: Vec::new(),
-            file_len: len,
-            valid_len: len,
-            needs_newline: false,
-            write_failed: false,
-        })
+        init_created_store(&canonical_dir, full_path, header)
+    }
+
+    pub(crate) fn open_or_create_path(
+        path: &Path,
+        cwd: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Self, SessionError> {
+        check_cancel(path, cancel)?;
+        let (directory, _) = validate_explicit_path(path)?;
+        inspect_not_symlink(directory, "session directory")?;
+        match inspect_not_symlink(path, "session file")? {
+            None => Self::create_at_path(path, cwd, cancel),
+            Some(meta) if meta.is_file() => Self::load(path, true, cancel),
+            Some(_) => Err(SessionError::new(
+                path,
+                "session path must be a regular file",
+            )),
+        }
     }
 
     pub(crate) fn load(

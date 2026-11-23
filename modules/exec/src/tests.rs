@@ -480,3 +480,111 @@ async fn foreground_and_background_exec_modules_inject_network_env() {
         );
     }
 }
+
+struct RecordingHost(std::sync::Mutex<Vec<(String, Value)>>);
+
+#[async_trait]
+impl CommandHost for RecordingHost {
+    async fn ask(
+        &self,
+        _: protocol::ApprovalRequest,
+        _: CancellationToken,
+    ) -> Result<protocol::ApprovalDecision, ToolError> {
+        Err(ToolError("unexpected prompt".into()))
+    }
+
+    async fn update(&self, _: protocol::ApprovalRequest) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    async fn apply(&self, effect: SessionEffect) -> Result<(), ToolError> {
+        if let SessionEffect::Emit { kind, data } = effect {
+            self.0.lock().unwrap().push((kind, data));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn background_all_promotes_active_foreground_tasks_and_handles_command_input() {
+    let h = Harness::new();
+    h.run(&h.bash(), json!({"command":"true"})).await.unwrap();
+    h.run(&h.bash(), json!({"command":"sleep 30","background":true}))
+        .await
+        .unwrap();
+
+    let turn_cancel = CancellationToken::new();
+    let bash1 = h.bash();
+    let cancel1 = turn_cancel.clone();
+    let waiter1 = tokio::spawn(async move {
+        bash1
+            .run(
+                call(json!({"command":"echo fg1-start; sleep 0.3; echo fg1-end"})),
+                context(cancel1, ToolOrigin::Model),
+            )
+            .await
+    });
+    let bash2 = h.bash();
+    let cancel2 = turn_cancel.clone();
+    let waiter2 = tokio::spawn(async move {
+        bash2
+            .run(
+                call(json!({"command":"echo fg2-start; sleep 0.3; echo fg2-end"})),
+                context(cancel2, ToolOrigin::Model),
+            )
+            .await
+    });
+    h.running("sh3").await;
+    h.running("sh4").await;
+    assert_eq!(h.view().background(), 1);
+
+    let host = Arc::new(RecordingHost(std::sync::Mutex::new(Vec::new())));
+    let command = ShellsCommand(h.shells.clone());
+    command
+        .input(
+            json!({"background_all": true}),
+            CommandSession {
+                branch: branch(),
+                host: host.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let out1 = tokio::time::timeout(Duration::from_secs(2), waiter1)
+        .await
+        .expect("foreground waiter 1 should release immediately")
+        .unwrap()
+        .unwrap();
+    let out2 = tokio::time::timeout(Duration::from_secs(2), waiter2)
+        .await
+        .expect("foreground waiter 2 should release immediately")
+        .unwrap()
+        .unwrap();
+    assert!(text(&out1).contains("moved this command to the background as sh3"));
+    assert!(text(&out2).contains("moved this command to the background as sh4"));
+    assert_eq!(h.view().background(), 3);
+    assert_eq!(h.shells.background_all().unwrap(), 0);
+
+    {
+        let emitted = host.0.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].0, SHELLS_EVENT);
+    }
+
+    turn_cancel.cancel();
+    h.settled("sh3").await;
+    h.settled("sh4").await;
+    for (id, expected) in [
+        ("sh3", "fg1-start\nfg1-end\n"),
+        ("sh4", "fg2-start\nfg2-end\n"),
+    ] {
+        let read = h
+            .run(&h.manage(Kind::Output), json!({"task_id": id}))
+            .await
+            .unwrap();
+        assert_eq!(read.structured_content.unwrap()["output"], expected);
+    }
+    h.shells.quiesce().await;
+}

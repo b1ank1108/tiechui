@@ -110,6 +110,24 @@ impl SessionStore {
         Self::load(path, true, cancel)
     }
 
+    /// Create a new private `.jsonl` session store at an explicit file path, refusing symlinks.
+    pub fn create_at(
+        path: &Path,
+        cwd: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Self, SessionError> {
+        Self::create_at_path(path, cwd, cancel)
+    }
+
+    /// Open an existing regular `.jsonl` session file or create one privately at `path`, refusing symlinks.
+    pub fn open_or_create(
+        path: &Path,
+        cwd: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Self, SessionError> {
+        Self::open_or_create_path(path, cwd, cancel)
+    }
+
     /// Load a snapshot without locking or modifying the source, including a torn tail.
     pub fn open_read_only(path: &Path, cancel: &CancellationToken) -> Result<Self, SessionError> {
         Self::load(path, false, cancel)
