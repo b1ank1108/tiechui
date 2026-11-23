@@ -533,6 +533,10 @@ mod tests {
             registry.capabilities("claude"),
             Some(RuntimeCapabilities {
                 steering: tiechui_protocol::SteeringMode::Inject,
+                model: true,
+                thinking: true,
+                commands: true,
+                permissions: true,
                 ..RuntimeCapabilities::minimal()
             })
         );

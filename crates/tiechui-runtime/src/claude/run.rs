@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use tokio::time::Instant;
 
 use super::debug;
 use super::items::Pending;
+use super::wire::ControlResponse;
 use crate::process::Process;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,9 +39,13 @@ pub struct Shared {
     pub claude_turn: AtomicBool,
     pub interrupt_sent: AtomicBool,
     pub usable: AtomicBool,
+    /// Sub-agents still running or waiting, a background one included.
+    pub live_agents: AtomicUsize,
     pub supervisor: mpsc::UnboundedSender<SupervisorCommand>,
     answered_agents: mpsc::UnboundedSender<String>,
     pending_by_approval_id: Mutex<BTreeMap<String, Pending>>,
+    /// The driver's own control requests, by request id, until Claude answers them.
+    awaiting_replies: Mutex<HashMap<String, oneshot::Sender<ControlResponse>>>,
 }
 
 impl Shared {
@@ -61,9 +66,11 @@ impl Shared {
             claude_turn: AtomicBool::new(false),
             interrupt_sent: AtomicBool::new(false),
             usable: AtomicBool::new(true),
+            live_agents: AtomicUsize::new(0),
             supervisor,
             answered_agents,
             pending_by_approval_id: Mutex::default(),
+            awaiting_replies: Mutex::default(),
         });
         (shared, commands, answered)
     }
@@ -94,6 +101,43 @@ impl Shared {
         self.pending_by_approval_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn replies(&self) -> MutexGuard<'_, HashMap<String, oneshot::Sender<ControlResponse>>> {
+        self.awaiting_replies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `None` once Claude has exited: nothing would answer.
+    pub fn expect_reply(&self, id: &str) -> Option<oneshot::Receiver<ControlResponse>> {
+        let (reply, answer) = oneshot::channel();
+        self.replies().insert(id.to_owned(), reply);
+        if self.is_usable() {
+            return Some(answer);
+        }
+        self.forget_reply(id);
+        None
+    }
+
+    pub fn forget_reply(&self, id: &str) {
+        self.replies().remove(id);
+    }
+
+    pub fn deliver_reply(&self, response: ControlResponse) {
+        let reply = response
+            .request_id
+            .as_deref()
+            .and_then(|id| self.replies().remove(id));
+        if let Some(reply) = reply {
+            let _ = reply.send(response);
+        }
+    }
+
+    /// Called after the run is marked unusable, so no request waits for an answer that cannot
+    /// come.
+    pub fn drop_replies(&self) {
+        self.replies().clear();
     }
 
     pub fn take_approval(&self, id: &str) -> Option<Pending> {

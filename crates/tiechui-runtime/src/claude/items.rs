@@ -376,15 +376,39 @@ pub fn permission_mode(mode: Option<&str>) -> &'static str {
     }
 }
 
-/// Claude's `--effort` has no `minimal`: `low` is its lowest.
-pub fn thinking_flag(level: ThinkingLevel) -> (&'static str, &'static str) {
+/// Claude's effort for a level (`--effort` and the `effortLevel` setting); it has no `minimal`,
+/// `low` is its lowest. `off` is no effort but a zero thinking-token cap.
+pub fn effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
-        ThinkingLevel::Off => ("--thinking", "disabled"),
-        ThinkingLevel::Minimal | ThinkingLevel::Low => ("--effort", "low"),
-        ThinkingLevel::Medium => ("--effort", "medium"),
-        ThinkingLevel::High => ("--effort", "high"),
-        ThinkingLevel::Xhigh => ("--effort", "xhigh"),
-        ThinkingLevel::Max => ("--effort", "max"),
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High => Some("high"),
+        ThinkingLevel::Xhigh => Some("xhigh"),
+        ThinkingLevel::Max => Some("max"),
+    }
+}
+
+pub fn effort_level(effort: &str) -> Option<ThinkingLevel> {
+    match effort {
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
+        "max" => Some(ThinkingLevel::Max),
+        _ => None,
+    }
+}
+
+pub fn level_name(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Max => "max",
     }
 }
 

@@ -39,6 +39,10 @@ pub struct Incoming {
     pub terminal_reason: Option<String>,
     #[serde(rename = "modelUsage")]
     pub model_usage: std::collections::BTreeMap<String, ModelUsage>,
+    /// `system` `commands_changed`: the whole new list.
+    pub commands: Option<Vec<Command>>,
+    /// `system` `init`: the skills Claude loaded, plugin skills included.
+    pub skills: Option<Vec<String>>,
 }
 
 /// What answering a `control_request` takes, for one whose other fields do not parse.
@@ -70,7 +74,38 @@ pub struct Request {
 pub struct ControlResponse {
     pub subtype: String,
     pub request_id: Option<String>,
+    pub response: Value,
     pub error: Option<String>,
+    /// Why a `set_model` was refused: `not_found`, `auth_failed`, `restricted_by_org`, ...
+    pub error_code: Option<String>,
+}
+
+/// What `initialize` answers with, as far as the driver reads it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Initialized {
+    pub commands: Vec<Command>,
+    pub models: Vec<Model>,
+}
+
+/// Nothing tells a skill from a custom command; `builtin` is only set on Claude's own commands.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Command {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: String,
+    pub builtin: bool,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Model {
+    pub value: String,
+    pub resolved_model: String,
+    pub supports_effort: bool,
+    pub supported_effort_levels: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -168,12 +203,16 @@ pub struct ModelUsage {
     pub context_window: u64,
 }
 
+pub fn control_request(id: &str, request: Value) -> Value {
+    json!({"type": "control_request", "request_id": id, "request": request})
+}
+
 pub fn initialize_request(id: &str) -> Value {
-    json!({"type": "control_request", "request_id": id, "request": {"subtype": "initialize"}})
+    control_request(id, json!({"subtype": "initialize"}))
 }
 
 pub fn interrupt_request(id: &str) -> Value {
-    json!({"type": "control_request", "request_id": id, "request": {"subtype": "interrupt"}})
+    control_request(id, json!({"subtype": "interrupt"}))
 }
 
 pub fn user_message(content: &[InputContent]) -> Value {

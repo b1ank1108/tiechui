@@ -1,6 +1,7 @@
 //! The driver chooses the session id (`--session-id`): Claude's `system/init` only comes after
 //! the first user message. `--resume` keeps the id.
 
+mod catalogue;
 mod items;
 mod run;
 mod translate;
@@ -11,24 +12,31 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::{Value, json};
 use tiechui_protocol::{
-    ApprovalDecision, InputContent, ModelInfo, RuntimeCapabilities, SteeringMode, ThinkingLevel,
+    ApprovalDecision, InputContent, ModelInfo, PERMISSIONS_COMMAND, RuntimeCapabilities,
+    SteeringMode, ThinkingLevel,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backend, BackendEvent, StartParams, Started, Steered};
+use crate::backend::{Backend, BackendEvent, CommandAction, StartParams, Started, Steered};
 use crate::process::{self, Process, StderrTail, overridable, seconds};
 use crate::registry::{Driver, Launch, Probe, probe_at_least, resolve_in_path};
+use catalogue::SharedCatalogue;
 use run::{Handshake, Shared, SupervisorCommand, Writer};
 use translate::{CountedMessageIds, Translator};
 
 /// The oldest Claude Code the driver supports: 2.1.322, the only version its frames were
 /// recorded from. The driver relies on `--session-id` and `--resume` in stream-json mode,
-/// `--permission-prompt-tool stdio`, `--thinking-display`, the `initialize` and `interrupt`
-/// control requests and the per-message `stream_event` usage; a lower bound needs recordings of
-/// an older version.
+/// `--permission-prompt-tool stdio`, `--thinking-display`, `--effort`, the `initialize`,
+/// `interrupt`, `set_model`, `apply_flag_settings` and `set_max_thinking_tokens` control
+/// requests, `system/commands_changed` and the per-message `stream_event` usage; a lower bound
+/// needs recordings of an older version.
 pub const MIN_VERSION: &str = "2.1.322";
+
+/// The effort Claude runs when it is given none (`get_settings` on 2.1.322).
+const CLAUDE_DEFAULT_EFFORT: ThinkingLevel = ThinkingLevel::High;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const ERROR_RESULT_EXIT_GRACE: Duration = Duration::from_secs(9);
@@ -71,12 +79,22 @@ impl Driver for ClaudeDriver {
         RuntimeCapabilities {
             // A message written while a turn runs joins that turn (recordings of 2.1.322).
             steering: SteeringMode::Inject,
+            model: true,
+            thinking: true,
+            commands: true,
+            permissions: true,
             ..RuntimeCapabilities::minimal()
         }
     }
 
     fn gated_ops(&self) -> &'static [&'static str] {
-        &[]
+        &[
+            "set_model",
+            "set_thinking",
+            "run_command",
+            "command_input",
+            "permissions",
+        ]
     }
 
     async fn probe(&self, launch: &Launch) -> Probe {
@@ -91,6 +109,8 @@ impl Driver for ClaudeDriver {
             session_id: String::new(),
             events: None,
             counted: CountedMessageIds::default(),
+            catalogue: SharedCatalogue::default(),
+            thinking: Thinking::default(),
             run: None,
             requests: 0,
         }))
@@ -149,6 +169,42 @@ struct OpenedRun {
     resumed: bool,
 }
 
+/// Why Claude did not do what a control request asked.
+struct Refusal {
+    message: String,
+    code: Option<String>,
+}
+
+impl From<String> for Refusal {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+        }
+    }
+}
+
+/// `--thinking disabled` cannot be undone while Claude runs, a thinking-token cap can: `off` is a
+/// zero cap, sent after `initialize`, and lifting the cap brings back the effort Claude runs.
+struct Thinking {
+    /// The level the session asked for; a model without it runs the nearest one.
+    requested: ThinkingLevel,
+    /// The level Claude runs.
+    running: ThinkingLevel,
+    /// Whether the driver set `running`, or it is Claude's default.
+    chosen: bool,
+}
+
+impl Default for Thinking {
+    fn default() -> Self {
+        Self {
+            requested: CLAUDE_DEFAULT_EFFORT,
+            running: CLAUDE_DEFAULT_EFFORT,
+            chosen: false,
+        }
+    }
+}
+
 struct ClaudeBackend {
     launch: Launch,
     timeouts: Timeouts,
@@ -156,6 +212,8 @@ struct ClaudeBackend {
     session_id: String,
     events: Option<mpsc::Sender<BackendEvent>>,
     counted: CountedMessageIds,
+    catalogue: SharedCatalogue,
+    thinking: Thinking,
     run: Option<Run>,
     requests: u64,
 }
@@ -184,14 +242,34 @@ impl ClaudeBackend {
         if let Some(model) = &params.model {
             args.extend(["--model".to_owned(), model.clone()]);
         }
-        if let Some(level) = params.thinking {
-            let (flag, value) = items::thinking_flag(level);
-            args.extend([flag.to_owned(), value.to_owned()]);
+        if self.thinking.chosen
+            && let Some(effort) = items::effort(self.thinking.running)
+        {
+            args.extend(["--effort".to_owned(), effort.to_owned()]);
         }
         args
     }
 
-    async fn spawn_run(&self, id: &str, resume: bool) -> Result<Run, SpawnFailure> {
+    async fn spawn_run(&mut self, id: &str, resume: bool) -> Result<Run, SpawnFailure> {
+        let run = self.spawn_process(id, resume).await?;
+        let run = self.handshake(run, resume).await?;
+        if !self.thinking.chosen || self.thinking.running != ThinkingLevel::Off {
+            return Ok(run);
+        }
+        let id = self.next_request_id();
+        match self.ask(&run, id, thinking_cap(Some(0))).await {
+            Ok(_) => Ok(run),
+            Err(refusal) => {
+                run.close().await;
+                Err(SpawnFailure::Other(format!(
+                    "claude did not turn thinking off: {}",
+                    refusal.message
+                )))
+            }
+        }
+    }
+
+    async fn spawn_process(&self, id: &str, resume: bool) -> Result<Run, SpawnFailure> {
         let (Some(params), Some(events)) = (&self.params, &self.events) else {
             return Err(SpawnFailure::Other("claude is not started".into()));
         };
@@ -227,6 +305,7 @@ impl ClaudeBackend {
             writer.clone(),
             events.clone(),
             self.counted.clone(),
+            self.catalogue.clone(),
             self.timeouts.reap,
             tail.clone(),
         );
@@ -237,12 +316,11 @@ impl ClaudeBackend {
             tokio::spawn(translator.run(inbound, answered)),
             tokio::spawn(run::supervise(process, commands, shared.clone())),
         ];
-        let run = Run {
+        Ok(Run {
             writer,
             shared,
             tasks,
-        };
-        self.handshake(run, resume).await
+        })
     }
 
     async fn handshake(&self, run: Run, resume: bool) -> Result<Run, SpawnFailure> {
@@ -289,7 +367,8 @@ impl ClaudeBackend {
             }
         }
         self.session_id = items::new_session_id();
-        let run = self.spawn_run(&self.session_id, false).await?;
+        let id = self.session_id.clone();
+        let run = self.spawn_run(&id, false).await?;
         Ok(OpenedRun {
             run,
             resumed: false,
@@ -310,19 +389,136 @@ impl ClaudeBackend {
         Ok(())
     }
 
-    fn started(&self, params: &StartParams, resumed: bool) -> Started {
-        Started {
-            external_id: self.session_id.clone(),
-            resumed,
-            model: ModelInfo {
+    /// Without `--model` Claude runs the model its catalogue calls `default`. A model the
+    /// catalogue does not list has no known levels.
+    fn model(&self, name: Option<&str>) -> ModelInfo {
+        let name = name.unwrap_or("default");
+        self.catalogue
+            .lock()
+            .model(name)
+            .unwrap_or_else(|| ModelInfo {
                 provider: "claude".into(),
-                id: params.model.clone().unwrap_or_else(|| "claude".into()),
+                id: name.into(),
                 context_window: 0,
                 reasoning: false,
-                thinking_levels: vec![ThinkingLevel::Off],
-            },
-            thinking: ThinkingLevel::Off,
+                thinking_levels: Vec::new(),
+            })
+    }
+
+    fn current_model(&self) -> ModelInfo {
+        self.model(
+            self.params
+                .as_ref()
+                .and_then(|params| params.model.as_deref()),
+        )
+    }
+
+    /// Claude runs the requested level, or the nearest one the model has.
+    async fn follow_model(&mut self, levels: &[ThinkingLevel]) -> Result<(), Refusal> {
+        let level = self.thinking.requested.clamp(levels);
+        if level == self.thinking.running {
+            return Ok(());
         }
+        self.run_thinking(level).await
+    }
+
+    /// Lifting a zero cap restores the effort Claude was started with, so the effort is sent
+    /// after it.
+    async fn run_thinking(&mut self, level: ThinkingLevel) -> Result<(), Refusal> {
+        match items::effort(level) {
+            None => {
+                self.control(thinking_cap(Some(0))).await?;
+            }
+            Some(effort) => {
+                if self.thinking.running == ThinkingLevel::Off {
+                    self.control(thinking_cap(None)).await?;
+                }
+                self.control(json!({"subtype": "apply_flag_settings",
+                    "settings": {"effortLevel": effort}}))
+                    .await?;
+            }
+        }
+        self.thinking.running = level;
+        self.thinking.chosen = true;
+        Ok(())
+    }
+
+    async fn control(&mut self, request: Value) -> Result<Value, Refusal> {
+        let id = self.next_request_id();
+        let run = self.running()?;
+        self.ask(run, id, request).await
+    }
+
+    async fn ask(&self, run: &Run, id: String, request: Value) -> Result<Value, Refusal> {
+        let subtype = request["subtype"].as_str().unwrap_or_default().to_owned();
+        let Some(answer) = run.shared.expect_reply(&id) else {
+            return Err(String::from("claude is not running").into());
+        };
+        if let Err(error) = run.writer.send(&wire::control_request(&id, request)) {
+            run.shared.forget_reply(&id);
+            return Err(error.into());
+        }
+        match tokio::time::timeout(self.timeouts.handshake, answer).await {
+            Ok(Ok(response)) if response.subtype == "success" => Ok(response.response),
+            Ok(Ok(response)) => Err(Refusal {
+                message: response
+                    .error
+                    .unwrap_or_else(|| format!("claude refused {subtype}")),
+                code: response.error_code,
+            }),
+            Ok(Err(_)) => Err(String::from("claude exited").into()),
+            Err(_) => {
+                run.shared.forget_reply(&id);
+                Err(format!(
+                    "claude timed out: no answer to {subtype} within {}",
+                    seconds(self.timeouts.handshake)
+                )
+                .into())
+            }
+        }
+    }
+
+    /// Claude only stops for a mode change at its start: the process is restarted on the same
+    /// conversation, which has to be quiet.
+    async fn switch_permissions(&mut self, mode: &str) -> Result<CommandAction, String> {
+        let mode = match mode {
+            "auto" | "yolo" => mode,
+            _ => "rules",
+        };
+        let current = self
+            .params
+            .as_ref()
+            .and_then(|params| params.mode.as_deref());
+        if items::permission_mode(current) == items::permission_mode(Some(mode)) {
+            return Ok(CommandAction::PermissionMode(mode.to_owned()));
+        }
+        let restart = match self.running() {
+            Ok(run) => {
+                let shared = &run.shared;
+                if !shared.approvals().is_empty() {
+                    return Err("有待处理的审批，无法切换权限".into());
+                }
+                if shared.turn_active() || shared.claude_turn() {
+                    return Err("回合运行中无法切换权限".into());
+                }
+                if shared.live_agents.load(Ordering::SeqCst) > 0 {
+                    return Err("后台子代理仍在运行，无法切换权限".into());
+                }
+                true
+            }
+            Err(_) => false,
+        };
+        let previous = self
+            .params
+            .as_mut()
+            .and_then(|params| params.mode.replace(mode.to_owned()));
+        if restart && let Err(error) = self.respawn_resuming().await {
+            if let Some(params) = &mut self.params {
+                params.mode = previous;
+            }
+            return Err(format!("claude 未能以新的权限档位重启：{error}"));
+        }
+        Ok(CommandAction::PermissionMode(mode.to_owned()))
     }
 
     fn running(&self) -> Result<&Run, String> {
@@ -346,16 +542,45 @@ impl Backend for ClaudeBackend {
     ) -> Result<(Started, mpsc::Receiver<BackendEvent>), String> {
         let (events, received) = mpsc::channel(1024);
         self.events = Some(events);
-        self.params = Some(params.clone());
-        let opened = self.open(params.resume.as_deref()).await?;
+        self.catalogue
+            .lock()
+            .set_skill_roots(catalogue::skill_roots(&params.cwd));
+        self.thinking = Thinking {
+            chosen: params.thinking.is_some(),
+            ..Thinking::default()
+        };
+        if let Some(level) = params.thinking {
+            self.thinking.requested = level;
+            self.thinking.running = level;
+        }
+        let resume = params.resume.clone();
+        self.params = Some(params);
+        let opened = self.open(resume.as_deref()).await?;
         self.run = Some(opened.run);
-        Ok((self.started(&params, opened.resumed), received))
+        let model = self.current_model();
+        // A level the session did not ask for is Claude's own default and is left alone.
+        if self.thinking.chosen {
+            self.follow_model(&model.thinking_levels)
+                .await
+                .map_err(|refusal| refusal.message)?;
+        } else {
+            self.thinking.running = self.thinking.requested.clamp(&model.thinking_levels);
+        }
+        let started = Started {
+            external_id: self.session_id.clone(),
+            resumed: opened.resumed,
+            model,
+            thinking: self.thinking.running,
+        };
+        Ok((started, received))
     }
 
     async fn start_turn(&mut self, input: &[InputContent]) -> Result<(), String> {
         if self.running().is_err() {
             self.respawn_resuming().await?;
         }
+        let input = self.catalogue.lock().dispatch(input);
+        let input = input.as_slice();
         let run = self.running()?;
         let shared = &run.shared;
         shared.interrupt_sent.store(false, Ordering::SeqCst);
@@ -378,7 +603,8 @@ impl Backend for ClaudeBackend {
         if !run.shared.turn_active() {
             return Ok(Steered::Rejected("no turn is running".into()));
         }
-        Ok(match run.writer.send(&wire::user_message(input)) {
+        let input = self.catalogue.lock().dispatch(input);
+        Ok(match run.writer.send(&wire::user_message(&input)) {
             Ok(()) => Steered::Accepted,
             Err(error) => Steered::Rejected(error),
         })
@@ -415,10 +641,99 @@ impl Backend for ClaudeBackend {
         ))
     }
 
+    async fn run_command(&mut self, name: &str, arguments: &str) -> Result<CommandAction, String> {
+        if name == PERMISSIONS_COMMAND {
+            return self.switch_permissions(arguments.trim()).await;
+        }
+        if !self.catalogue.lock().offers(name) {
+            return Err(format!("claude 没有命令或技能 /{name}"));
+        }
+        let arguments = arguments.trim();
+        Ok(CommandAction::Prompt(if arguments.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {arguments}")
+        }))
+    }
+
+    async fn command_input(&mut self, name: &str, _: Value) -> Result<(), String> {
+        Err(format!("claude 的命令 /{name} 不接受额外输入"))
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<ModelInfo, String> {
+        if self.running().is_err() {
+            self.respawn_resuming().await?;
+        }
+        if let Err(refusal) = self
+            .control(json!({"subtype": "set_model", "model": model}))
+            .await
+        {
+            return Err(model_refused(model, refusal));
+        }
+        if let Some(params) = &mut self.params {
+            params.model = Some(model.to_owned());
+        }
+        let info = self.model(Some(model));
+        // Like the session, a model without known levels keeps the level shown.
+        if !info.thinking_levels.is_empty()
+            && let Err(refusal) = self.follow_model(&info.thinking_levels).await
+            && let Some(events) = &self.events
+        {
+            let message = format!("claude 已切换模型，但未能调整思考档位：{}", refusal.message);
+            let _ = events.send(BackendEvent::Error(message)).await;
+        }
+        Ok(info)
+    }
+
+    /// Taken while a turn runs too; Claude applies it from its next request.
+    async fn set_thinking(&mut self, level: ThinkingLevel) -> Result<ThinkingLevel, String> {
+        let model = self.current_model();
+        if !model.thinking_levels.is_empty() && !model.thinking_levels.contains(&level) {
+            let levels: Vec<&str> = model
+                .thinking_levels
+                .iter()
+                .map(|level| items::level_name(*level))
+                .collect();
+            return Err(format!(
+                "claude 的模型 {} 没有思考档位 {}，可选：{}",
+                model.id,
+                items::level_name(level),
+                levels.join(", ")
+            ));
+        }
+        if self.running().is_ok() {
+            self.run_thinking(level)
+                .await
+                .map_err(|refusal| refusal.message)?;
+        } else {
+            // The next process starts with it.
+            self.thinking.running = level;
+            self.thinking.chosen = true;
+        }
+        self.thinking.requested = level;
+        Ok(level)
+    }
+
     async fn shutdown(&mut self) {
         self.events = None;
         if let Some(run) = self.run.take() {
             run.close().await;
         }
+    }
+}
+
+/// `None` lifts the cap: Claude goes back to the thinking it was started with.
+fn thinking_cap(tokens: Option<u64>) -> Value {
+    json!({"subtype": "set_max_thinking_tokens", "max_thinking_tokens": tokens})
+}
+
+fn model_refused(model: &str, refusal: Refusal) -> String {
+    match refusal.code.as_deref() {
+        Some("not_found" | "catalog_unknown") => format!("claude 找不到模型 {model}"),
+        Some("auth_failed") => "claude 未登录或登录已过期，请在终端运行 claude 完成登录".into(),
+        Some("restricted_by_org" | "unavailable_for_account" | "not_offered") => {
+            format!("模型 {model} 受限：{}", refusal.message)
+        }
+        _ => refusal.message,
     }
 }

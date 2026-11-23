@@ -9,11 +9,15 @@ use serde_json::Value;
 use tiechui_protocol::{ItemId, KnownItem, TurnStatus};
 use tokio::sync::mpsc;
 
+use super::catalogue::SharedCatalogue;
 use super::debug;
 use super::items;
 use super::items::Pending;
 use super::run::{Handshake, Shared, SupervisorCommand, Writer};
-use super::wire::{Block, Incoming, Request, RequestIdOnly, StreamEvent, control_error};
+use super::wire::{
+    Block, ControlResponse, Incoming, Initialized, Request, RequestIdOnly, StreamEvent,
+    control_error,
+};
 use crate::backend::{BackendEvent, BackendItem};
 use crate::process::{Outbox, StderrTail};
 use agents::{Agent, ChildCall};
@@ -44,6 +48,7 @@ pub struct Translator {
     writer: Writer,
     out: Outbox,
     counted: CountedMessageIds,
+    catalogue: SharedCatalogue,
     reap_grace: Duration,
     streaming: StreamingMessage,
     blocks: HashMap<u64, StreamingBlock>,
@@ -63,6 +68,7 @@ impl Translator {
         writer: Writer,
         out: mpsc::Sender<BackendEvent>,
         counted: CountedMessageIds,
+        catalogue: SharedCatalogue,
         reap_grace: Duration,
         stderr: StderrTail,
     ) -> Self {
@@ -71,6 +77,7 @@ impl Translator {
             writer,
             out: Outbox::new(out),
             counted,
+            catalogue,
             reap_grace,
             streaming: StreamingMessage::default(),
             blocks: HashMap::new(),
@@ -111,6 +118,7 @@ impl Translator {
 
     async fn exited(&mut self) {
         self.shared.usable.store(false, Ordering::SeqCst);
+        self.shared.drop_replies();
         let detail = self.stderr.detail();
         if self
             .shared
@@ -150,7 +158,7 @@ impl Translator {
         match incoming.kind.as_str() {
             "control_request" => self.control_request(incoming).await,
             "control_cancel_request" => self.cancel_request(incoming).await,
-            "control_response" => self.control_response(incoming),
+            "control_response" => self.control_response(incoming).await,
             "result" => self.result(incoming).await,
             "system" => self.system(incoming).await,
             _ => self.content(incoming).await,
@@ -173,30 +181,68 @@ impl Translator {
     async fn system(&mut self, incoming: Incoming) -> bool {
         match incoming.subtype.as_deref() {
             // Every turn begins with `init`; one while no turn of the session runs is Claude's own.
-            Some("init") if !self.shared.turn_active() => {
-                self.shared.interrupt_sent.store(false, Ordering::SeqCst);
-                self.shared.claude_turn.store(true, Ordering::SeqCst);
-                self.outside_turn_output_seen = true;
-                true
+            Some("init") => {
+                if !self.shared.turn_active() {
+                    self.shared.interrupt_sent.store(false, Ordering::SeqCst);
+                    self.shared.claude_turn.store(true, Ordering::SeqCst);
+                    self.outside_turn_output_seen = true;
+                }
+                let Some(skills) = incoming.skills else {
+                    return true;
+                };
+                let menu = self.catalogue.lock().loaded(skills);
+                match menu {
+                    Some(menu) => {
+                        self.out
+                            .emit_after_flush(BackendEvent::Commands(menu))
+                            .await
+                    }
+                    None => true,
+                }
+            }
+            Some("commands_changed") => {
+                let Some(commands) = incoming.commands else {
+                    return true;
+                };
+                let menu = self.catalogue.lock().set_commands(commands);
+                self.out
+                    .emit_after_flush(BackendEvent::Commands(menu))
+                    .await
             }
             Some("task_started" | "task_notification") => self.task(incoming).await,
             _ => true,
         }
     }
 
-    fn control_response(&mut self, incoming: Incoming) -> bool {
+    async fn control_response(&mut self, incoming: Incoming) -> bool {
         let Some(response) = incoming.response else {
             return true;
         };
-        if response.request_id.as_deref() == Some(self.shared.initialize_request_id.as_str()) {
-            self.shared
-                .try_finish_handshake(if response.subtype == "success" {
-                    Handshake::Ready
-                } else {
-                    Handshake::Failed(response.error.unwrap_or_else(|| "initialize failed".into()))
-                });
+        if response.request_id.as_deref() != Some(self.shared.initialize_request_id.as_str()) {
+            self.shared.deliver_reply(response);
+            return true;
         }
-        true
+        self.initialized(response).await
+    }
+
+    /// The catalogue is in place before the driver learns that Claude is up.
+    async fn initialized(&mut self, response: ControlResponse) -> bool {
+        if response.subtype != "success" {
+            let error = response.error.unwrap_or_else(|| "initialize failed".into());
+            self.shared.try_finish_handshake(Handshake::Failed(error));
+            return true;
+        }
+        let listed =
+            serde_json::from_value::<Initialized>(response.response).unwrap_or_else(|error| {
+                debug(&format!("cannot read what initialize listed: {error}"));
+                Initialized::default()
+            });
+        let (models, menu) = self.catalogue.lock().initialized(listed);
+        if !self.shared.try_finish_handshake(Handshake::Ready) {
+            return true;
+        }
+        self.out.send_now(BackendEvent::Models(models)).await
+            && self.out.send_now(BackendEvent::Commands(menu)).await
     }
 
     /// Claude waits on every control request until it is answered, so a request nothing maps is
@@ -701,6 +747,7 @@ mod tests {
             writer,
             out,
             CountedMessageIds::default(),
+            SharedCatalogue::default(),
             Duration::from_secs(9),
             StderrTail::default(),
         );

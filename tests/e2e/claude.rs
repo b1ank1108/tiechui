@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiechui_protocol::app::{SessionEvent, Snapshot};
 use tiechui_protocol::{
-    ApprovalRequest, DerivedReason, DerivedTurnMarker, EventKind, Item, KnownItem, SubagentItem,
-    SubagentState, SubagentStatus, TokenUsage, TurnId, TurnStatus,
+    ApprovalRequest, CommandInfo, CommandKind, DerivedReason, DerivedTurnMarker, EventKind, Item,
+    KnownItem, ModelInfo, PERMISSION_MODE_EVENT, SubagentItem, SubagentState, SubagentStatus,
+    ThinkingLevel, TokenUsage, TurnId, TurnStatus,
 };
 
 const SESSION: &str = "fake-session";
@@ -462,6 +463,9 @@ async fn the_probe_runs_only_version_and_reports_the_version_and_path() {
     assert_eq!(claude["version"], "2.1.322");
     assert!(claude["path"].as_str().unwrap().ends_with("claude"));
     assert_eq!(claude["capabilities"]["steering"], "inject");
+    for gated in ["commands", "thinking", "model", "permissions"] {
+        assert_eq!(claude["capabilities"][gated], true, "{gated}");
+    }
     for gated in [
         "branch",
         "fork",
@@ -469,9 +473,6 @@ async fn the_probe_runs_only_version_and_reports_the_version_and_path() {
         "retry",
         "compact",
         "side_chat",
-        "commands",
-        "thinking",
-        "model",
         "shell",
     ] {
         assert_eq!(claude["capabilities"][gated], false, "{gated}");
@@ -2270,13 +2271,12 @@ async fn permission_modes_and_thinking_levels_map_to_flags() {
         assert_eq!(arg_after(&launches[0], "--effort"), None);
         assert_eq!(arg_after(&launches[0], "--model"), None);
     }
-    for (level, flags) in [
-        ("off", ("--thinking", "disabled")),
-        ("minimal", ("--effort", "low")),
-        ("low", ("--effort", "low")),
-        ("medium", ("--effort", "medium")),
-        ("xhigh", ("--effort", "xhigh")),
-        ("max", ("--effort", "max")),
+    for (level, effort) in [
+        ("minimal", "low"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
     ] {
         let fixture = Fixture::new();
         fixture.script(handshake());
@@ -2288,8 +2288,37 @@ async fn permission_modes_and_thinking_levels_map_to_flags() {
             )
             .await;
         let launches = fixture.launches();
-        assert_eq!(arg_after(&launches[0], flags.0), Some(flags.1), "{level}");
+        assert_eq!(arg_after(&launches[0], "--effort"), Some(effort), "{level}");
     }
+}
+
+/// `--thinking disabled` cannot be undone during the session, a zero thinking-token cap can:
+/// `off` is the cap, set right after `initialize`.
+#[tokio::test]
+async fn thinking_off_is_a_thinking_token_cap_sent_after_initialize_not_a_flag() {
+    let fixture = Fixture::new();
+    let mut steps = handshake();
+    steps.extend(answered(json!({"subtype": "set_max_thinking_tokens",
+        "max_thinking_tokens": 0})));
+    steps.push(user_message("go"));
+    steps.extend(simple_turn("msg_1", "ok", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = snapshot(
+        client
+            .ok(
+                "session/open",
+                json!({"cwd": fixture.cwd, "runtime": "claude", "thinking": "off"}),
+            )
+            .await,
+    );
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    client.until(is_completed).await;
+    let argv = &fixture.launches()[0];
+    for flag in ["--thinking", "--effort"] {
+        assert!(!argv.iter().any(|arg| arg == flag), "{flag} in {argv:?}");
+    }
+    assert_script_followed(&fixture);
 }
 
 #[tokio::test]
@@ -2891,4 +2920,761 @@ async fn a_claude_turn_gets_snapshots_and_can_be_undone() {
         std::fs::read_to_string(fixture.cwd.join("src/hello.ts")).unwrap(),
         "original\n"
     );
+}
+
+fn control(request: Value) -> Value {
+    expect(json!({"type": "control_request", "request": request}))
+}
+
+fn control_ok(response: Value) -> Value {
+    emit(json!({"type": "control_response", "response": {
+        "subtype": "success", "request_id": "$id", "response": response}}))
+}
+
+fn control_failed(error: &str, code: &str) -> Value {
+    emit(json!({"type": "control_response", "response": {
+        "subtype": "error", "request_id": "$id", "error": error, "error_code": code}}))
+}
+
+fn answered(request: Value) -> Vec<Value> {
+    vec![control(request), control_ok(Value::Null)]
+}
+
+fn effort(level: &str) -> Vec<Value> {
+    answered(json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": level}}))
+}
+
+fn thinking_cap(tokens: Value) -> Vec<Value> {
+    answered(json!({"subtype": "set_max_thinking_tokens", "max_thinking_tokens": tokens}))
+}
+
+fn set_model(model: &str, resolved: &str) -> Vec<Value> {
+    vec![
+        control(json!({"subtype": "set_model", "model": model})),
+        control_ok(json!({"model": resolved})),
+    ]
+}
+
+fn listed_model(value: &str, resolved: &str, levels: &[&str]) -> Value {
+    json!({"value": value, "resolvedModel": resolved, "displayName": value,
+        "description": format!("{value} for tests"), "supportsEffort": !levels.is_empty(),
+        "supportedEffortLevels": levels, "supportsAdaptiveThinking": true,
+        "supportsThinkingOff": false})
+}
+
+fn listed_command(name: &str, description: &str, hint: &str) -> Value {
+    json!({"name": name, "description": description, "argumentHint": hint})
+}
+
+fn builtin_command(name: &str) -> Value {
+    json!({"name": name, "description": "built in", "argumentHint": "", "builtin": true,
+        "aliases": [format!("{name}-alias")]})
+}
+
+/// `default` takes every effort; `lite` takes `low` and `medium` and one Claude level tiechui has
+/// no name for.
+fn catalogue() -> Value {
+    json!({
+        "models": [
+            listed_model("default", "claude-fake-5", &["low", "medium", "high", "xhigh", "max"]),
+            listed_model("lite", "claude-lite-5", &["low", "medium", "turbo"]),
+        ],
+        "commands": [
+            listed_command("fix", "fix things (project)", "<bug>"),
+            listed_command("review", "look it over (user)", ""),
+            listed_command("deploy", "ship it (project)", "[env]"),
+            builtin_command("compact"),
+            listed_command("plug:tool", "a plugin skill (plugin)", ""),
+        ],
+    })
+}
+
+fn listing_handshake() -> Vec<Value> {
+    vec![
+        expect(json!({"type": "control_request", "request": {"subtype": "initialize"}})),
+        emit(json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": "$id", "response": catalogue()}})),
+    ]
+}
+
+/// `fix` is a project skill, `review` a user skill (`HOME` is the fixture's root); `deploy` is a
+/// custom command and has no skill directory.
+fn write_skill_dirs(fixture: &Fixture) {
+    for dir in [
+        fixture.cwd.join(".claude/skills/fix"),
+        fixture.path(".claude/skills/review"),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\ndescription: test\n---\nDo it.\n",
+        )
+        .unwrap();
+    }
+    let commands = fixture.cwd.join(".claude/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(commands.join("deploy.md"), "Ship it.\n").unwrap();
+}
+
+fn claude_model(id: &str, levels: &[ThinkingLevel]) -> ModelInfo {
+    ModelInfo {
+        provider: "claude".into(),
+        id: id.into(),
+        context_window: 0,
+        reasoning: true,
+        thinking_levels: levels.to_vec(),
+    }
+}
+
+fn menu_entry(name: &str, description: &str, hint: Option<&str>, kind: CommandKind) -> CommandInfo {
+    CommandInfo {
+        name: name.into(),
+        description: description.into(),
+        argument_hint: hint.map(str::to_owned),
+        kind,
+    }
+}
+
+async fn submit_op(client: &mut Client, thread: &str, op: Value) {
+    client
+        .ok("session/submit", json!({"thread_id": thread, "op": op}))
+        .await;
+}
+
+fn set_model_op(model: &str) -> Value {
+    json!({"kind": "set_model", "provider": "claude", "model": model})
+}
+
+fn set_thinking_op(level: &str) -> Value {
+    json!({"kind": "set_thinking", "level": level})
+}
+
+fn run_command_op(name: &str, arguments: &str) -> Value {
+    json!({"kind": "run_command", "name": name, "arguments": arguments})
+}
+
+async fn until_error(client: &mut Client, needle: &str) -> String {
+    let events = client
+        .until(|kind| matches!(kind, EventKind::Error { message } if message.contains(needle)))
+        .await;
+    match &events.last().unwrap().event.event {
+        EventKind::Error { message } => message.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn until_model(client: &mut Client, id: &str) -> ThinkingLevel {
+    let events = client
+        .until(|kind| matches!(kind, EventKind::SessionUpdated { model, .. } if model.id == id))
+        .await;
+    match &events.last().unwrap().event.event {
+        EventKind::SessionUpdated { thinking, .. } => *thinking,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn until_thinking(client: &mut Client, level: ThinkingLevel) {
+    client
+        .until(
+            |kind| matches!(kind, EventKind::SessionUpdated { thinking, .. } if *thinking == level),
+        )
+        .await;
+}
+
+async fn until_turn_started(client: &mut Client) {
+    client
+        .until(|kind| matches!(kind, EventKind::TurnStarted { .. }))
+        .await;
+}
+
+fn entries(path: &str, kind: &str) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["kind"] == kind)
+        .collect()
+}
+
+fn session_state(events: &[tiechui_protocol::Event]) -> (ModelInfo, ThinkingLevel) {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.event {
+            EventKind::SessionUpdated {
+                model, thinking, ..
+            } => Some((model.clone(), *thinking)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn command_lists(events: &[SessionEvent]) -> Vec<Vec<CommandInfo>> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event.event {
+            EventKind::CommandsUpdated { commands } => Some(commands.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The catalogue and the commands, from the snapshot when they arrived before it and from the
+/// events after it otherwise.
+async fn listed(client: &mut Client, opened: &Snapshot) -> (Vec<ModelInfo>, Vec<CommandInfo>) {
+    fn note(
+        kind: &EventKind,
+        models: &mut Option<Vec<ModelInfo>>,
+        commands: &mut Option<Vec<CommandInfo>>,
+    ) {
+        match kind {
+            EventKind::ModelsUpdated { models: listed } if listed.len() > 1 => {
+                *models = Some(listed.clone());
+            }
+            EventKind::CommandsUpdated { commands: listed } if !listed.is_empty() => {
+                *commands = Some(listed.clone());
+            }
+            _ => {}
+        }
+    }
+    let (mut models, mut commands) = (None, None);
+    for event in &opened.events {
+        note(&event.event, &mut models, &mut commands);
+    }
+    while models.is_none() || commands.is_none() {
+        let events = client
+            .until(|kind| {
+                matches!(
+                    kind,
+                    EventKind::ModelsUpdated { .. } | EventKind::CommandsUpdated { .. }
+                )
+            })
+            .await;
+        note(
+            &events.last().unwrap().event.event,
+            &mut models,
+            &mut commands,
+        );
+    }
+    (models.unwrap(), commands.unwrap())
+}
+
+async fn open_with(client: &mut Client, fixture: &Fixture, extra: Value) -> Snapshot {
+    let mut params = json!({"cwd": fixture.cwd, "runtime": "claude"});
+    params
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    snapshot(client.ok("session/open", params).await)
+}
+
+#[tokio::test]
+async fn the_catalogue_and_the_menu_are_listed_with_skills_told_apart_and_kept_current() {
+    use CommandKind::{Command, Skill};
+    use ThinkingLevel::{High, Low, Max, Medium, Off, Xhigh};
+    let fixture = Fixture::new();
+    write_skill_dirs(&fixture);
+    let mut steps = listing_handshake();
+    steps.push(user_message("go"));
+    steps.push(system(
+        "init",
+        json!({"model": "claude-fake", "skills": ["fix", "review", "plug:tool"]}),
+    ));
+    steps.extend(reply("msg_1", "ok"));
+    steps.push(system(
+        "commands_changed",
+        json!({"commands": [
+            listed_command("fix", "fix things (project)", "<bug>"),
+            listed_command("plug:tool", "a plugin skill (plugin)", ""),
+            listed_command("lint", "lint it (project)", ""),
+            builtin_command("compact"),
+        ]}),
+    ));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let (models, commands) = listed(&mut client, &opened).await;
+    let default = claude_model("default", &[Off, Low, Medium, High, Xhigh, Max]);
+    assert_eq!(
+        models,
+        [default.clone(), claude_model("lite", &[Off, Low, Medium])]
+    );
+    let fix = menu_entry("fix", "fix things (project)", Some("<bug>"), Skill);
+    assert_eq!(
+        commands,
+        [
+            fix.clone(),
+            menu_entry("review", "look it over (user)", None, Skill),
+            menu_entry("deploy", "ship it (project)", Some("[env]"), Command),
+            menu_entry("plug:tool", "a plugin skill (plugin)", None, Command),
+        ],
+        "no built-ins; a skill directory makes a skill"
+    );
+    assert_eq!(
+        session_state(&opened.events),
+        (default, High),
+        "Claude's default model at the effort it runs without one"
+    );
+
+    submit(&mut client, &opened.thread_id.0, "go", "follow_up").await;
+    let events = client
+        .until(|kind| {
+            matches!(kind, EventKind::CommandsUpdated { commands }
+                if commands.iter().any(|command| command.name == "lint"))
+        })
+        .await;
+    let plugin = menu_entry("plug:tool", "a plugin skill (plugin)", None, Skill);
+    let lists = command_lists(&events);
+    assert_eq!(
+        lists[lists.len() - 2..],
+        [
+            vec![
+                fix.clone(),
+                menu_entry("review", "look it over (user)", None, Skill),
+                menu_entry("deploy", "ship it (project)", Some("[env]"), Command),
+                plugin.clone(),
+            ],
+            vec![
+                fix,
+                plugin,
+                menu_entry("lint", "lint it (project)", None, Command)
+            ],
+        ],
+        "`init` names the skills Claude loaded; `commands_changed` replaces the menu"
+    );
+    assert_script_followed(&fixture);
+}
+
+#[tokio::test]
+async fn a_model_switch_is_a_set_model_request_recorded_in_the_session_and_refusals_say_why() {
+    let fixture = Fixture::new();
+    let mut steps = listing_handshake();
+    steps.extend([
+        control(json!({"subtype": "set_model", "model": "nope"})),
+        control_failed("Model nope was not found", "not_found"),
+        control(json!({"subtype": "set_model", "model": "locked"})),
+        control_failed(
+            "Your organization does not allow locked",
+            "restricted_by_org",
+        ),
+        control(json!({"subtype": "set_model", "model": "gone"})),
+        control_failed("Invalid API key · Please run /login", "auth_failed"),
+        control(json!({"subtype": "set_model", "model": "odd"})),
+        control_failed("API error: 503 · model not changed", "check_failed"),
+    ]);
+    steps.extend(set_model("lite", "claude-lite-5"));
+    // The session shows high clamped to lite's levels, so Claude is told to run medium.
+    steps.extend(effort("medium"));
+    steps.push(user_message("go"));
+    steps.extend(simple_turn("msg_1", "ok", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+
+    submit_op(&mut client, &thread, set_model_op("nope")).await;
+    assert_eq!(
+        until_error(&mut client, "nope").await,
+        "claude 找不到模型 nope"
+    );
+    submit_op(&mut client, &thread, set_model_op("locked")).await;
+    let refused = until_error(&mut client, "locked").await;
+    assert!(refused.contains("受限"), "{refused}");
+    submit_op(&mut client, &thread, set_model_op("gone")).await;
+    let refused = until_error(&mut client, "登录").await;
+    assert!(refused.contains("未登录"), "{refused}");
+    submit_op(&mut client, &thread, set_model_op("odd")).await;
+    until_error(&mut client, "API error: 503 · model not changed").await;
+    submit_op(&mut client, &thread, set_model_op("lite")).await;
+    assert_eq!(
+        until_model(&mut client, "lite").await,
+        ThinkingLevel::Medium
+    );
+    submit(&mut client, &thread, "go", "follow_up").await;
+    client.until(is_completed).await;
+
+    assert_script_followed(&fixture);
+    let models: Vec<_> = entries(&opened.path, "model_change")
+        .iter()
+        .map(|entry| entry["model"].clone())
+        .collect();
+    assert_eq!(models, [json!({"provider": "claude", "model": "lite"})]);
+    assert!(entries(&opened.path, "thinking_change").is_empty());
+}
+
+#[tokio::test]
+async fn effort_and_thinking_switches_are_control_requests_that_apply_from_the_next_turn() {
+    let fixture = Fixture::new();
+    let mut steps = listing_handshake();
+    steps.extend([
+        user_message("one"),
+        system("init", json!({})),
+        message_start("msg_1"),
+    ]);
+    // Taken while the turn runs.
+    steps.extend(effort("high"));
+    steps.extend(streamed_block("msg_1", 0, "text", &["one"]));
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "end_turn"));
+    steps.push(result_ok("one"));
+    steps.extend(thinking_cap(json!(0)));
+    steps.push(user_message("two"));
+    steps.extend(simple_turn("msg_2", "two", usage_json(1, 1, 0, 0)));
+    // Leaving `off` lifts the cap before the effort.
+    steps.extend(thinking_cap(Value::Null));
+    steps.extend(effort("medium"));
+    steps.push(user_message("three"));
+    steps.extend(simple_turn("msg_3", "three", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open_with(&mut client, &fixture, json!({"thinking": "low"})).await;
+    assert_eq!(session_state(&opened.events).1, ThinkingLevel::Low);
+    assert_eq!(arg_after(&fixture.launches()[0], "--effort"), Some("low"));
+    let thread = opened.thread_id.0.clone();
+
+    submit(&mut client, &thread, "one", "follow_up").await;
+    until_turn_started(&mut client).await;
+    submit_op(&mut client, &thread, set_thinking_op("high")).await;
+    until_thinking(&mut client, ThinkingLevel::High).await;
+    submit_op(&mut client, &thread, set_thinking_op("minimal")).await;
+    let refused = until_error(&mut client, "minimal").await;
+    assert!(
+        refused.contains("low, medium, high, xhigh, max"),
+        "{refused}"
+    );
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, set_thinking_op("off")).await;
+    until_thinking(&mut client, ThinkingLevel::Off).await;
+    submit(&mut client, &thread, "two", "follow_up").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, set_thinking_op("medium")).await;
+    until_thinking(&mut client, ThinkingLevel::Medium).await;
+    submit(&mut client, &thread, "three", "follow_up").await;
+    client.until(is_completed).await;
+
+    assert_script_followed(&fixture);
+    let levels: Vec<_> = entries(&opened.path, "thinking_change")
+        .iter()
+        .map(|entry| entry["level"].clone())
+        .collect();
+    assert_eq!(levels, [json!("high"), Value::Null, json!("medium")]);
+}
+
+#[tokio::test]
+async fn a_model_without_the_requested_effort_runs_the_nearest_one_and_the_request_comes_back() {
+    let fixture = Fixture::new();
+    let mut steps = listing_handshake();
+    steps.extend(effort("high"));
+    steps.extend(set_model("lite", "claude-lite-5"));
+    steps.extend(effort("medium"));
+    steps.extend(set_model("default", "claude-fake-5"));
+    steps.extend(effort("high"));
+    steps.push(user_message("go"));
+    steps.extend(simple_turn("msg_1", "ok", usage_json(1, 1, 0, 0)));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open_with(&mut client, &fixture, json!({"thinking": "low"})).await;
+    let thread = opened.thread_id.0.clone();
+
+    submit_op(&mut client, &thread, set_thinking_op("high")).await;
+    until_thinking(&mut client, ThinkingLevel::High).await;
+    submit_op(&mut client, &thread, set_model_op("lite")).await;
+    assert_eq!(
+        until_model(&mut client, "lite").await,
+        ThinkingLevel::Medium
+    );
+    submit_op(&mut client, &thread, set_model_op("default")).await;
+    assert_eq!(
+        until_model(&mut client, "default").await,
+        ThinkingLevel::High
+    );
+    submit(&mut client, &thread, "go", "follow_up").await;
+    client.until(is_completed).await;
+    assert_script_followed(&fixture);
+}
+
+fn switched_to(mode: &'static str) -> impl Fn(&EventKind) -> bool {
+    move |kind| {
+        matches!(kind, EventKind::Extension { name, data }
+            if name == PERMISSION_MODE_EVENT && *data == mode)
+    }
+}
+
+#[tokio::test]
+async fn an_idle_permission_switch_restarts_claude_on_the_same_session_with_its_model_and_effort() {
+    let fixture = Fixture::new();
+    let mut steps = listing_handshake();
+    steps.extend(set_model("lite", "claude-lite-5"));
+    steps.push(user_message("one"));
+    steps.extend(simple_turn("msg_1", "one", usage_json(2, 7, 100, 50)));
+    fixture.script_for_launch(0, steps);
+    let mut steps = listing_handshake();
+    steps.push(message_start("msg_1"));
+    steps.extend(message_end("msg_1", usage_json(2, 7, 100, 50), "end_turn"));
+    steps.push(user_message("two"));
+    steps.extend(simple_turn("msg_2", "two", usage_json(1, 3, 200, 0)));
+    fixture.script_for_launch(1, steps);
+    let mut client = fixture.client();
+    let opened = open_with(&mut client, &fixture, json!({"thinking": "medium"})).await;
+    let thread = opened.thread_id.0.clone();
+
+    submit_op(&mut client, &thread, set_model_op("lite")).await;
+    until_model(&mut client, "lite").await;
+    submit(&mut client, &thread, "one", "follow_up").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, run_command_op("permissions", "auto")).await;
+    client.until(switched_to("auto")).await;
+    submit(&mut client, &thread, "two", "follow_up").await;
+    let events = client.until(is_completed).await;
+
+    assert_script_followed(&fixture);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let id = arg_after(&launches[0], "--session-id").unwrap();
+    let argv = &launches[1];
+    assert_eq!(arg_after(argv, "--permission-mode"), Some("auto"));
+    assert_eq!(arg_after(argv, "--resume"), Some(id));
+    assert!(!argv.iter().any(|arg| arg == "--session-id"), "{argv:?}");
+    assert_eq!(arg_after(argv, "--model"), Some("lite"));
+    assert_eq!(arg_after(argv, "--effort"), Some("medium"));
+    assert_eq!(saved_claude_session_id(&opened.path), id);
+    let used = usages(&events);
+    assert_eq!(used.len(), 1, "msg_1 was already counted: {used:?}");
+    let replies: Vec<_> = known(&events)
+        .into_iter()
+        .filter_map(|item| match item {
+            KnownItem::AssistantMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, ["two"]);
+}
+
+#[tokio::test]
+async fn a_permission_switch_is_refused_while_a_turn_runs_an_approval_waits_or_an_agent_runs() {
+    let fixture = Fixture::new();
+    let input = json!({"command": "touch a.txt", "description": "Create a.txt"});
+    let mut steps = listing_handshake();
+    steps.extend([
+        user_message("one"),
+        system("init", json!({})),
+        message_start("msg_a"),
+        user_message("go on"),
+    ]);
+    steps.extend(streamed_block("msg_a", 0, "text", &["done"]));
+    steps.extend(message_end("msg_a", usage_json(1, 1, 0, 0), "end_turn"));
+    steps.push(result_ok("done"));
+    steps.extend([user_message("two"), system("init", json!({}))]);
+    steps.extend(tool_message("msg_b", "toolu_touch", "Bash", &input));
+    steps.extend([
+        can_use_tool("perm-1", "Bash", &input, "toolu_touch"),
+        expect_permission_answer(
+            "perm-1",
+            json!({"behavior": "allow", "updatedInput": input}),
+        ),
+    ]);
+    steps.extend(message_end("msg_b", usage_json(1, 1, 0, 0), "tool_use"));
+    steps.push(tool_result("toolu_touch", json!("ok"), false));
+    steps.extend(reply("msg_c", "touched"));
+    steps.push(user_message("three"));
+    steps.extend(background_spawn("agent-1", "toolu_agent"));
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    let switch = run_command_op("permissions", "yolo");
+
+    submit(&mut client, &thread, "one", "follow_up").await;
+    until_turn_started(&mut client).await;
+    submit_op(&mut client, &thread, switch.clone()).await;
+    until_error(&mut client, "回合运行中无法切换权限").await;
+    submit(&mut client, &thread, "go on", "steer").await;
+    client.until(is_completed).await;
+
+    submit(&mut client, &thread, "two", "follow_up").await;
+    let (_, approval, _) = next_approval(&mut client).await;
+    submit_op(&mut client, &thread, switch.clone()).await;
+    until_error(&mut client, "有待处理的审批").await;
+    answer(
+        &mut client,
+        &thread,
+        &approval,
+        json!({"kind": "allow_once"}),
+    )
+    .await;
+    client.until(is_completed).await;
+
+    submit(&mut client, &thread, "three", "follow_up").await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, switch).await;
+    let events = client
+        .until(|kind| matches!(kind, EventKind::Error { message } if message.contains("后台子代理仍在运行")))
+        .await;
+    assert!(
+        !events.iter().any(|e| switched_to("yolo")(&e.event.event)),
+        "no switch was made"
+    );
+    assert_eq!(fixture.launches().len(), 1);
+    assert_script_followed(&fixture);
+}
+
+async fn submit_content(client: &mut Client, thread: &str, content: Value, delivery: &str) {
+    client
+        .ok(
+            "session/submit",
+            json!({"thread_id": thread, "op": {"kind": "user_input", "delivery": delivery,
+                "content": content}}),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn the_last_skill_mentioned_opens_the_message_and_commands_run_as_prompts() {
+    let image = json!({"type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}});
+    let fixture = Fixture::new();
+    write_skill_dirs(&fixture);
+    let mut steps = listing_handshake();
+    steps.extend([
+        user_message("/fix please $review this, then it"),
+        system("init", json!({})),
+        message_start("msg_1"),
+        user_message("/review and"),
+    ]);
+    steps.extend(streamed_block("msg_1", 0, "text", &["ok"]));
+    steps.extend(message_end("msg_1", usage_json(1, 1, 0, 0), "end_turn"));
+    steps.push(result_ok("ok"));
+    let mut turn = 1;
+    for sent in [
+        "/review the diff",
+        "/fix the bug, then $review it",
+        "/deploy now, with $review",
+        "keep $deploy, src/fix, /fixer and price$review",
+    ] {
+        turn += 1;
+        steps.push(user_message(sent));
+        steps.extend(simple_turn(
+            &format!("msg_{turn}"),
+            "ok",
+            usage_json(1, 1, 0, 0),
+        ));
+    }
+    steps.push(expect(json!({"type": "user", "message": {"role": "user",
+        "content": [image, {"type": "text", "text": "/review look at"}]}})));
+    steps.extend(simple_turn("msg_7", "ok", usage_json(1, 1, 0, 0)));
+    for (sent, msg) in [("/fix the tests", "msg_8"), ("/deploy", "msg_9")] {
+        steps.push(user_message(sent));
+        steps.extend(simple_turn(msg, "ok", usage_json(1, 1, 0, 0)));
+    }
+    fixture.script(steps);
+    let mut client = fixture.client();
+    let opened = open(&mut client, &fixture, None).await;
+    let thread = opened.thread_id.0.clone();
+    listed(&mut client, &opened).await;
+
+    submit(
+        &mut client,
+        &thread,
+        "please $review this, then /fix it",
+        "follow_up",
+    )
+    .await;
+    until_turn_started(&mut client).await;
+    submit(&mut client, &thread, "and $review", "steer").await;
+    client.until(is_completed).await;
+    for typed in [
+        "$review the diff",
+        "/fix the bug, then $review it",
+        "/deploy now, with $review",
+        "keep $deploy, src/fix, /fixer and price$review",
+    ] {
+        submit(&mut client, &thread, typed, "follow_up").await;
+        client.until(is_completed).await;
+    }
+    submit_content(
+        &mut client,
+        &thread,
+        json!([{"kind": "text", "text": "look at $review"},
+            {"kind": "image", "mime_type": "image/png", "data": "aGk="}]),
+        "follow_up",
+    )
+    .await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, run_command_op("nope", "")).await;
+    until_error(&mut client, "nope").await;
+    submit_op(
+        &mut client,
+        &thread,
+        json!({"kind": "command_input", "name": "fix", "data": {}}),
+    )
+    .await;
+    until_error(&mut client, "fix").await;
+    submit_op(&mut client, &thread, run_command_op("fix", "  the tests ")).await;
+    client.until(is_completed).await;
+    submit_op(&mut client, &thread, run_command_op("deploy", "")).await;
+    client.until(is_completed).await;
+    assert_script_followed(&fixture);
+}
+
+#[tokio::test]
+async fn reopening_and_a_restart_after_an_error_keep_the_switched_model_and_thinking() {
+    let fixture = Fixture::new();
+    let mut steps = listing_handshake();
+    steps.extend(set_model("lite", "claude-lite-5"));
+    steps.extend(thinking_cap(json!(0)));
+    steps.push(user_message("one"));
+    steps.extend(simple_turn("msg_1", "one", usage_json(1, 1, 0, 0)));
+    fixture.script_for_launch(0, steps);
+    let mut steps = listing_handshake();
+    steps.extend(thinking_cap(json!(0)));
+    steps.extend([
+        user_message("two"),
+        system("init", json!({})),
+        message_start("msg_2"),
+        result_error("error_during_execution", &["API Error: 529 overloaded"]),
+    ]);
+    fixture.script_for_launch(1, steps);
+    let mut steps = listing_handshake();
+    steps.extend(thinking_cap(json!(0)));
+    steps.push(user_message("three"));
+    steps.extend(simple_turn("msg_3", "three", usage_json(1, 1, 0, 0)));
+    fixture.script_for_launch(2, steps);
+
+    let path = {
+        let mut client = fixture.client();
+        let opened = open_with(&mut client, &fixture, json!({"thinking": "low"})).await;
+        let thread = opened.thread_id.0.clone();
+        submit_op(&mut client, &thread, set_model_op("lite")).await;
+        until_model(&mut client, "lite").await;
+        submit_op(&mut client, &thread, set_thinking_op("off")).await;
+        until_thinking(&mut client, ThinkingLevel::Off).await;
+        submit(&mut client, &thread, "one", "follow_up").await;
+        client.until(is_completed).await;
+        client
+            .ok("session/close", json!({"thread_id": thread}))
+            .await;
+        opened.path
+    };
+    let mut client = fixture.client();
+    let reopened = snapshot(client.ok("session/open", json!({"path": path})).await);
+    let (model, thinking) = session_state(&reopened.events);
+    assert_eq!((model.id.as_str(), thinking), ("lite", ThinkingLevel::Off));
+    let thread = reopened.thread_id.0.clone();
+    submit(&mut client, &thread, "two", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Failed);
+    submit(&mut client, &thread, "three", "follow_up").await;
+    let events = client.until(is_completed).await;
+    assert_eq!(completed_status(&events), TurnStatus::Completed);
+
+    assert_script_followed(&fixture);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 3, "{launches:?}");
+    let id = arg_after(&launches[0], "--session-id").unwrap();
+    for argv in &launches[1..] {
+        assert_eq!(arg_after(argv, "--resume"), Some(id), "{argv:?}");
+        assert_eq!(arg_after(argv, "--model"), Some("lite"), "{argv:?}");
+        for flag in ["--thinking", "--effort"] {
+            assert!(!argv.iter().any(|arg| arg == flag), "{flag} in {argv:?}");
+        }
+    }
 }

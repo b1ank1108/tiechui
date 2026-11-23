@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use tiechui_protocol::{ItemId, KnownItem, SubagentState};
 
 use super::super::items::{self, Pending};
@@ -88,6 +90,7 @@ impl Translator {
                 message: None,
             },
         );
+        self.count_live_agents();
         self.note_outside_turn_output();
         self.out
             .emit_after_flush(BackendEvent::Subagent(SubagentUpdate {
@@ -142,13 +145,20 @@ impl Translator {
         let current = self.agents.get_mut(agent)?;
         current.state = state;
         current.message = message;
-        Some(SubagentUpdate {
+        let update = SubagentUpdate {
             agent_id: agent.to_owned(),
             parent_call_id: current.parent_call_id.clone(),
             name: current.name.clone(),
             state,
             message: current.message.clone(),
-        })
+        };
+        self.count_live_agents();
+        Some(update)
+    }
+
+    fn count_live_agents(&self) {
+        let live = self.agents.values().filter(|agent| agent.live()).count();
+        self.shared.live_agents.store(live, Ordering::SeqCst);
     }
 
     pub(super) async fn interrupt_agents(&mut self) -> bool {
