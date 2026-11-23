@@ -639,6 +639,25 @@ impl Service {
         Ok(())
     }
 
+    fn output_dir(&self) -> PathBuf {
+        self.home.join("state/subagents/output")
+    }
+
+    fn fresh_agent_id(
+        &self,
+        state: &mut crate::state::State,
+        session: &str,
+    ) -> Result<String, ToolError> {
+        loop {
+            let id = state.allocate_id();
+            let taken = child_session_path(&self.home, session, &id)?
+                .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
+            if !taken {
+                return Ok(id);
+            }
+        }
+    }
+
     fn start_dispatch(
         self: &Arc<Self>,
         id: &str,
@@ -654,7 +673,7 @@ impl Service {
         state.ensure_available_names(&tasks)?;
         for task in &mut tasks {
             if task.id.is_empty() {
-                task.id = state.allocate_id();
+                task.id = self.fresh_agent_id(&mut state, &ctx.scope.thread_id.0)?;
             } else if state.tasks.contains_key(&task.id) {
                 return Err(ToolError(format!(
                     "Subagent '{}' is already active; retry subagent_send to queue steering",
@@ -779,7 +798,7 @@ impl Service {
             return Err(ToolError("Dispatch cancelled".into()));
         }
         let mut changes = self.changes.subscribe();
-        let output_dir = self.home.join("state/subagents/output");
+        let output_dir = self.output_dir();
         let started = self.start_dispatch(call_id, mode, tasks, runner, ctx)?;
         self.flush_entries(ctx)?;
         if started.all_background {
@@ -951,7 +970,7 @@ impl Service {
             armed: true,
         };
         let mut interrupted = false;
-        let output_dir = self.home.join("state/subagents/output");
+        let output_dir = self.output_dir();
         loop {
             match self.inspect_progress(id, session_gen)? {
                 WaitStep::SessionChanged(rx) => {
@@ -1248,8 +1267,7 @@ impl Service {
                 return Err(err);
             }
         };
-        let directory = self.home.join("state/subagents/output");
-        let collector = Arc::new(Mutex::new(Collector::new(&directory)));
+        let collector = Arc::new(Mutex::new(Collector::new(&self.output_dir())));
         let child_cancel = run.cancel.child_token();
         let steer = run.steer_rx.take();
         let fut = self.execute_child(&run, runner, collector.clone(), steer, child_cancel);
@@ -1258,7 +1276,7 @@ impl Service {
             Err(_) => Err(ToolError("Child execution panicked; task isolated".into())),
         };
         drop(permit);
-        let mut buffer = collector.lock().map_err(|e| ToolError(e.to_string()))?;
+        let mut buffer = collector.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = outcome {
             if run.cancel.is_cancelled() && buffer.status.is_none() && buffer.error.is_none() {
                 buffer.status = Some(TurnStatus::Interrupted);

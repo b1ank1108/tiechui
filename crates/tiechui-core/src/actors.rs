@@ -637,6 +637,12 @@ async fn handle_broadcast_event(
             observe_child_event(&event.event, progress);
             if matches!(event.event, EventKind::TurnCompleted { .. }) {
                 drain_ready_steers(steer, submissions, progress, shutdown).await;
+                if progress.is_settled()
+                    && let Some(rx) = steer.as_mut()
+                {
+                    rx.close();
+                    drain_ready_steers(steer, submissions, progress, shutdown).await;
+                }
                 if progress.is_settled() {
                     shutdown.cancel();
                 }

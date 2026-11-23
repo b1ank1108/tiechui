@@ -1181,8 +1181,11 @@ async fn agent_ids_names_restore_cursor_and_background_precedence() {
             },
         )
         .unwrap();
+    let abandoned = h.service.home.join("state/subagents/sessions/parent");
+    std::fs::create_dir_all(&abandoned).unwrap();
+    std::fs::write(abandoned.join("ag10.jsonl"), "").unwrap();
     let after_restore = h.run_id("c5", json!({"task": "after"})).await.unwrap();
-    assert_eq!(after_restore.tasks[0].id, "ag10");
+    assert_eq!(after_restore.tasks[0].id, "ag11");
 }
 
 fn setup_bound_module(

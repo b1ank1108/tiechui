@@ -1570,39 +1570,22 @@ impl Tool for GateTool {
     }
 }
 
-#[tokio::test]
-async fn live_steer_injects_at_child_tool_boundary_and_drains_queued_steers_before_exit() {
-    let (mid_entered_tx, mid_entered_rx) = oneshot::channel();
-    let (mid_release_tx, mid_release_rx) = oneshot::channel();
-    let (tail_release_tx, tail_release_rx) = oneshot::channel();
-
-    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+async fn probe_parent(
+    scripts: Vec<Script>,
+    root: &std::path::Path,
+) -> (
+    SessionHandle,
+    Arc<dyn tiechui_plugin_api::ChildRunner>,
+    mpsc::UnboundedReceiver<ModelRequest>,
+    CancellationToken,
+) {
+    let (req_tx, req_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(FakeProvider {
-        scripts: Mutex::new(VecDeque::from([
-            invoke("gate", json!({})),
-            Script {
-                error: None,
-                steps: VecDeque::from([
-                    Step::Wait(tail_release_rx),
-                    Step::Event(StreamEvent::TextDelta {
-                        index: 0,
-                        delta: "AFTER_FIRST_STEER".into(),
-                    }),
-                    Step::Event(finish(StopReason::EndTurn)),
-                ]),
-            },
-            answer("AFTER_QUEUED_STEER"),
-        ])),
+        scripts: Mutex::new(VecDeque::from(scripts)),
         requests: req_tx,
     });
-
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let store = SessionStore::create(
-        &root.path().join("sessions"),
-        root.path(),
-        &CancellationToken::new(),
-    )
-    .unwrap();
+    let store =
+        SessionStore::create(&root.join("sessions"), root, &CancellationToken::new()).unwrap();
     let probe = Arc::new(ChildProbe::default());
     let mut parent_reg = Registry::default();
     parent_reg.register_actor_client(probe.clone());
@@ -1626,8 +1609,37 @@ async fn live_steer_injects_at_child_tool_boundary_and_drains_queued_steers_befo
         parent.events.recv().await.unwrap().event,
         EventKind::ThreadStarted { .. }
     ) {}
-
     let runner = probe.runner.lock().unwrap().clone().unwrap();
+    (parent, runner, req_rx, shutdown)
+}
+
+#[tokio::test]
+async fn live_steer_injects_at_child_tool_boundary_and_drains_queued_steers_before_exit() {
+    let (mid_entered_tx, mid_entered_rx) = oneshot::channel();
+    let (mid_release_tx, mid_release_rx) = oneshot::channel();
+    let (tail_release_tx, tail_release_rx) = oneshot::channel();
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let (parent, runner, mut req_rx, shutdown) = probe_parent(
+        vec![
+            invoke("gate", json!({})),
+            Script {
+                error: None,
+                steps: VecDeque::from([
+                    Step::Wait(tail_release_rx),
+                    Step::Event(StreamEvent::TextDelta {
+                        index: 0,
+                        delta: "AFTER_FIRST_STEER".into(),
+                    }),
+                    Step::Event(finish(StopReason::EndTurn)),
+                ]),
+            },
+            answer("AFTER_QUEUED_STEER"),
+        ],
+        root.path(),
+    )
+    .await;
+
     let mut child_reg = Registry::default();
     child_reg
         .register_tool(Arc::new(GateTool {
@@ -1708,6 +1720,46 @@ async fn live_steer_injects_at_child_tool_boundary_and_drains_queued_steers_befo
         *seen_texts.lock().unwrap(),
         vec!["AFTER_FIRST_STEER", "AFTER_QUEUED_STEER"]
     );
+
+    shutdown.cancel();
+    parent.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn steer_after_child_settles_is_rejected_instead_of_dropped() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let (parent, runner, mut req_rx, shutdown) =
+        probe_parent(vec![answer("ONLY_TURN")], root.path()).await;
+    let (steer_tx, steer_rx) = mpsc::unbounded_channel::<String>();
+    let late_send = Arc::new(Mutex::new(None));
+    let late_clone = late_send.clone();
+    runner
+        .run(
+            tiechui_plugin_api::ChildRequest {
+                cwd: root.path().to_path_buf(),
+                task: "single turn".into(),
+                system: String::new(),
+                model: None,
+                thinking: None,
+                tools: None,
+                mode: tiechui_plugin_api::ChildMode::Standard,
+                store_path: None,
+                steer: Some(steer_rx),
+            },
+            Registry::default(),
+            CancellationToken::new(),
+            Arc::new(move |event| {
+                if matches!(event.event, EventKind::TurnCompleted { .. }) {
+                    *late_clone.lock().unwrap() = Some(steer_tx.send("late".into()).is_ok());
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(users(&recv(&mut req_rx).await), ["single turn"]);
+    assert_eq!(*late_send.lock().unwrap(), Some(false));
+    assert!(req_rx.try_recv().is_err());
 
     shutdown.cancel();
     parent.task.await.unwrap().unwrap();

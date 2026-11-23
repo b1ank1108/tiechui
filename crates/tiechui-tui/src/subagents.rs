@@ -1,3 +1,4 @@
+//! Child task viewer with background and stop actions, and the dispatch's transcript cell.
 use std::time::Duration;
 
 use crate::{

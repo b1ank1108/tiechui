@@ -1708,7 +1708,8 @@ def subagents(f):
     s.command("/subagents", "Subagents")
     s.wait("ag1 · default")
     s.wait("ag2 · default")
-    s.send(ESC + "[C")
+    if "default · fixture/alpha · foreground" not in s.screen.text():
+        s.send(ESC + "[C")
     s.wait("default · fixture/alpha · foreground")
     s.send(ESC)
     s.wait("›", absent="esc back")

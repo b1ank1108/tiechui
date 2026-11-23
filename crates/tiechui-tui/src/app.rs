@@ -3328,6 +3328,9 @@ impl App {
         spans
     }
 
+    /// Background shells and agents, the goal and scheduled tasks on one row under the
+    /// status line, absent while none runs; the shell and agent counts always lead and
+    /// survive narrow screens.
     fn activity(&self) -> Option<Line<'static>> {
         let mut items: Vec<Vec<Span<'static>>> = Vec::new();
         for (indicator, cmd) in [
