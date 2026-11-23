@@ -4,6 +4,8 @@
 //! A driver implements `Backend`; `open_session` returns the `SessionHandle` the app-server
 //! already consumes for native sessions.
 
+pub mod acp;
+pub mod agy;
 mod backend;
 mod claude;
 mod codex;
@@ -12,18 +14,21 @@ pub mod fake;
 mod history;
 mod process;
 mod registry;
+mod rpc;
 mod session;
 
+pub use agy::AgyDriver;
 pub use backend::{
-    Backend, BackendEvent, BackendItem, ChildOf, StartParams, Started, Steered, SubagentUpdate,
+    Backend, BackendEvent, BackendItem, ChildOf, CommandAction, StartParams, Started, Steered,
+    SubagentUpdate,
 };
 pub use claude::ClaudeDriver;
 pub use codex::CodexDriver;
-pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY, item_id};
+pub use history::{DERIVED_ENTRY, ITEM_ENTRY, THREAD_ENTRY, external_id, item_id, turns};
 pub use process::{DeltaCoalescer, Frame, FrameReader, MAX_FRAME, Process};
 pub use registry::{
-    Driver, Launch, PROBE_TIMEOUT, Probe, Registry, capabilities_of, parse_version, probe_binary,
-    resolve_in_path,
+    Driver, Launch, PROBE_TIMEOUT, Probe, Registry, at_least, capabilities_of, parse_version,
+    probe_binary, resolve_in_path,
 };
 pub use session::{INTERRUPT_WINDOW, Open, Opened, SessionConfig, open_session};
 

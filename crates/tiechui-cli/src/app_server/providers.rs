@@ -365,6 +365,17 @@ fn save_scalar_preference(path: &Path, key: &str, value: Value) -> Result<(), St
     Err(format!("{key} cannot be set here"))
 }
 
+fn is_external_runtime_model(model: &str) -> bool {
+    let Some((provider, id)) = model.split_once('/') else {
+        return false;
+    };
+    !provider.is_empty()
+        && !id.is_empty()
+        && tiechui_runtime::Registry::builtin(tiechui_runtime::Launch::default())
+            .driver(provider)
+            .is_some()
+}
+
 fn save_string_preference(
     home: &Path,
     path: &Path,
@@ -377,8 +388,14 @@ fn save_string_preference(
     let text = value
         .as_str()
         .ok_or_else(|| format!("{key} has the wrong type"))?;
-    if MODEL_KEYS.contains(&key) {
-        declared_model(home, key, text)?;
+    if MODEL_KEYS.contains(&key)
+        && let Err(error) = declared_model(home, key, text)
+    {
+        return if key == "model" && is_external_runtime_model(text) {
+            Ok(true)
+        } else {
+            Err(error)
+        };
     }
     tiechui_config::save_preference(path, key, text.into()).map_err(|e| e.to_string())?;
     Ok(true)

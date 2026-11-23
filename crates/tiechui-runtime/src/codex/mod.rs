@@ -4,7 +4,6 @@
 //! connection; their frames never touch the root thread's turn (see `translate`).
 
 mod items;
-mod rpc;
 mod translate;
 mod wire;
 
@@ -24,8 +23,8 @@ use crate::process::{self, Process, StderrTail, overridable, seconds};
 use crate::registry::{
     Driver, Launch, Probe, parse_version, probe_at_least, resolve_in_path, too_old,
 };
+use crate::rpc::{CallError, Rpc};
 use items::Policy;
-use rpc::{CallError, Rpc};
 use translate::{Shared, Translator, TurnState};
 
 /// The oldest Codex the driver supports: the oldest one whose frames were recorded for it
@@ -173,7 +172,7 @@ impl CodexBackend {
         let (_, initialized) = rpc
             .send("initialize", wire::initialize_params())
             .await
-            .map_err(|error| error.describe("initialize"))?;
+            .map_err(|error| error.describe("codex", "initialize"))?;
         tokio::time::timeout(timeouts.handshake, shared.first_frame.notified())
             .await
             .map_err(|_| {
@@ -221,13 +220,13 @@ impl CodexBackend {
                 Err(CallError::Rpc(error)) => {
                     debug(&format!("thread/resume failed: {}", error.message));
                 }
-                Err(error) => return Err(error.describe("thread/resume")),
+                Err(error) => return Err(error.describe("codex", "thread/resume")),
             }
         }
         let value = rpc
             .call("thread/start", self.thread_params(None), timeouts.thread)
             .await
-            .map_err(|error| error.describe("thread/start"))?;
+            .map_err(|error| error.describe("codex", "thread/start"))?;
         Ok((value, false))
     }
 
@@ -257,14 +256,8 @@ impl Backend for CodexBackend {
             self.launch.path.as_ref(),
         )
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
-        let (Some(stdin), Some(stdout), Some(stderr)) = (
-            process.stdin.take(),
-            process.stdout.take(),
-            process.stderr.take(),
-        ) else {
-            return Err("codex started without its stdio".into());
-        };
-        let rpc = Arc::new(Rpc::new(stdin));
+        let (stdin, stdout, stderr) = process.take_stdio("codex")?;
+        let rpc = Arc::new(Rpc::new(stdin, "codex", false));
         let shared = Arc::new(Shared::default());
         let tail = StderrTail::default();
         let (events, received) = mpsc::channel(1024);
@@ -317,7 +310,7 @@ impl Backend for CodexBackend {
             )
             .await;
         let started = result
-            .map_err(|error| error.describe("turn/start"))
+            .map_err(|error| error.describe("codex", "turn/start"))
             .and_then(|value| {
                 serde_json::from_value::<wire::TurnResponse>(value)
                     .map_err(|error| format!("codex turn/start response: {error}"))
@@ -354,7 +347,7 @@ impl Backend for CodexBackend {
             .await;
         Ok(match result {
             Ok(_) => Steered::Accepted,
-            Err(error) => Steered::Rejected(error.describe("turn/steer")),
+            Err(error) => Steered::Rejected(error.describe("codex", "turn/steer")),
         })
     }
 
@@ -382,7 +375,7 @@ impl Backend for CodexBackend {
             )
             .await
             .map(|_| ())
-            .map_err(|error| error.describe("turn/interrupt"))
+            .map_err(|error| error.describe("codex", "turn/interrupt"))
     }
 
     async fn answer_approval(

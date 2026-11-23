@@ -9,17 +9,20 @@ use std::time::Duration;
 use tiechui_core::SessionHandle;
 use tiechui_model::ModelId;
 use tiechui_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalRequest, DerivedReason, Event, EventKind, InputContent,
-    InputDelivery, Item, ItemId, KnownItem, ModelInfo, Op, PERMISSION_MODE_EVENT, QueuedInput,
-    RuntimeCapabilities, SessionEpoch, SteeringMode, SubagentItem, SubagentStatus, Submission,
-    SubmissionId, ThinkingLevel, Thread, ThreadId, TokenUsage, Turn, TurnId, TurnStatus,
+    ApprovalDecision, ApprovalId, ApprovalRequest, CommandInfo, DerivedReason, Event, EventKind,
+    InputContent, InputDelivery, Item, ItemId, KnownItem, ModelInfo, Op, PERMISSION_MODE_EVENT,
+    QueuedInput, RuntimeCapabilities, SessionEpoch, SteeringMode, SubagentItem, SubagentStatus,
+    Submission, SubmissionId, ThinkingLevel, Thread, ThreadId, TokenUsage, Turn, TurnId,
+    TurnStatus,
 };
 use tiechui_session::{EntryKind, ModelRef, SessionStore};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{Backend, BackendEvent, BackendItem, StartParams, Started, Steered};
+use crate::backend::{
+    Backend, BackendEvent, BackendItem, CommandAction, StartParams, Started, Steered,
+};
 use crate::history;
 
 /// How long an interrupt may take to end the turn before the session ends it itself.
@@ -104,10 +107,18 @@ pub async fn open_session(
     let path = store.path().to_owned();
     let cwd = store.header().cwd.clone();
     let resume = history::external_id(&store);
+    let is_new = matches!(config.open, Open::New { .. });
+    let requested_model = config
+        .model
+        .as_deref()
+        .map(|m| strip_runtime_prefix(runtime, m))
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+        .or_else(|| history::stored_model(&store, runtime));
     let (started, backend_events) = match backend
         .start(StartParams {
             cwd: cwd.clone(),
-            model: config.model.clone(),
+            model: requested_model.clone(),
             thinking: config.thinking,
             mode: config.mode.clone(),
             resume: resume.clone(),
@@ -128,16 +139,22 @@ pub async fn open_session(
         model: ModelId(started.model.id.clone()),
     };
     let (context, total) = history::usage(&store);
+    let initial_models = vec![started.model.clone()];
+    let persist_initial_model = requested_model.is_some_and(|m| is_new || m != started.model.id);
     let session = Session {
         runtime: runtime.to_owned(),
         capabilities,
         backend,
+        backend_events,
         store: Some(store),
         thread: ThreadId(id.clone()),
         epoch: config.epoch,
         mode: config.mode.clone(),
         started,
+        models: initial_models,
+        commands: Vec::new(),
         model_ref,
+        persist_initial_model,
         events,
         turn: None,
         last_turn: None,
@@ -154,7 +171,7 @@ pub async fn open_session(
         cwd: cwd.clone(),
         cancel: shutdown.clone(),
     };
-    let task = tokio::spawn(session.run(ops, backend_events, shutdown));
+    let task = tokio::spawn(session.run(ops, shutdown));
     Ok(Opened {
         handle: SessionHandle {
             submissions,
@@ -172,16 +189,44 @@ struct OpenTurn {
     derived: bool,
 }
 
+enum DriveStep {
+    Stop,
+    Op(Option<Submission>),
+    Backend(Option<BackendEvent>),
+    Expired,
+}
+
+async fn sleep_until_opt(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn strip_runtime_prefix<'a>(runtime: &str, model: &'a str) -> &'a str {
+    if runtime.is_empty() {
+        return model;
+    }
+    match model.split_once('/') {
+        Some((prefix, rest)) if prefix == runtime && !rest.is_empty() => rest,
+        _ => model,
+    }
+}
+
 struct Session {
     runtime: String,
     capabilities: RuntimeCapabilities,
     backend: Box<dyn Backend>,
+    backend_events: mpsc::Receiver<BackendEvent>,
     store: Option<SessionStore>,
     thread: ThreadId,
     epoch: SessionEpoch,
     mode: Option<String>,
     started: Started,
+    models: Vec<ModelInfo>,
+    commands: Vec<CommandInfo>,
     model_ref: ModelRef,
+    persist_initial_model: bool,
     events: broadcast::Sender<Event>,
     turn: Option<OpenTurn>,
     last_turn: Option<TurnId>,
@@ -203,10 +248,9 @@ impl Session {
     async fn run(
         mut self,
         mut ops: mpsc::Receiver<Submission>,
-        mut backend_events: mpsc::Receiver<BackendEvent>,
         shutdown: CancellationToken,
     ) -> Result<(), String> {
-        let result = self.drive(&mut ops, &mut backend_events, &shutdown).await;
+        let result = self.drive(&mut ops, &shutdown).await;
         self.close().await;
         result
     }
@@ -214,33 +258,45 @@ impl Session {
     async fn drive(
         &mut self,
         ops: &mut mpsc::Receiver<Submission>,
-        backend_events: &mut mpsc::Receiver<BackendEvent>,
         shutdown: &CancellationToken,
     ) -> Result<(), String> {
         self.publish_thread().await?;
         loop {
             let deadline = self.interrupt_at;
-            tokio::select! {
+            let step = tokio::select! {
                 biased;
-                () = shutdown.cancelled() => return Ok(()),
-                submission = ops.recv() => match submission {
-                    Some(submission) => self.handle_op(submission).await?,
-                    None => return Ok(()),
-                },
-                event = backend_events.recv() => match event {
-                    Some(event) => self.handle_backend(event).await?,
-                    None => {
-                        let message = format!("{} exited", self.runtime);
-                        self.emit(EventKind::Error { message: message.clone() });
-                        return Err(message);
-                    }
-                },
-                () = async {
-                    match deadline {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => self.interrupt_expired().await?,
+                () = shutdown.cancelled() => DriveStep::Stop,
+                submission = ops.recv() => DriveStep::Op(submission),
+                event = self.backend_events.recv() => DriveStep::Backend(event),
+                () = sleep_until_opt(deadline) => DriveStep::Expired,
+            };
+            if !self.apply_step(step).await? {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn apply_step(&mut self, step: DriveStep) -> Result<bool, String> {
+        match step {
+            DriveStep::Stop | DriveStep::Op(None) => Ok(false),
+            DriveStep::Op(Some(submission)) => {
+                self.handle_op(submission).await?;
+                Ok(true)
+            }
+            DriveStep::Backend(Some(event)) => {
+                self.handle_backend(event).await?;
+                Ok(true)
+            }
+            DriveStep::Backend(None) => {
+                let message = format!("{} exited", self.runtime);
+                self.emit(EventKind::Error {
+                    message: message.clone(),
+                });
+                Err(message)
+            }
+            DriveStep::Expired => {
+                self.interrupt_expired().await?;
+                Ok(true)
             }
         }
     }
@@ -289,6 +345,12 @@ impl Session {
             let kind = history::thread_entry(&self.started.external_id);
             self.append(kind).await?;
         }
+        if std::mem::take(&mut self.persist_initial_model) {
+            self.append(EntryKind::ModelChange {
+                model: self.model_ref.clone(),
+            })
+            .await?;
+        }
         let turns = history::turns(self.store()?);
         self.emit(EventKind::ThreadStarted {
             thread: Thread {
@@ -311,9 +373,11 @@ impl Session {
             total: self.total,
         });
         self.emit(EventKind::ModelsUpdated {
-            models: vec![self.model_info()],
+            models: self.models.clone(),
         });
-        self.emit(EventKind::CommandsUpdated { commands: vec![] });
+        self.emit(EventKind::CommandsUpdated {
+            commands: self.commands.clone(),
+        });
         self.emit(EventKind::RetryAvailable { available: false });
         self.publish_queue();
         if self.resume.is_some() && !self.started.resumed {
@@ -372,7 +436,6 @@ impl Session {
         submission: SubmissionId,
         content: Vec<InputContent>,
     ) -> Result<(), String> {
-        self.close_derived(TurnStatus::Completed).await;
         self.submission = Some(submission);
         let entry = self.append(history::user_entry(&content)).await?;
         let turn = Turn {
@@ -395,6 +458,17 @@ impl Session {
         if let Err(error) = self.backend.start_turn(&content).await {
             self.emit(EventKind::Error { message: error });
             self.complete(TurnStatus::Failed).await;
+        }
+        Ok(())
+    }
+
+    async fn flush_and_close_derived(&mut self) -> Result<(), String> {
+        if self.turn.as_ref().is_some_and(|open| open.derived) {
+            self.backend.finish_derived().await;
+            while let Ok(event) = self.backend_events.try_recv() {
+                self.handle_backend(event).await?;
+            }
+            self.close_derived(TurnStatus::Completed).await;
         }
         Ok(())
     }
@@ -502,6 +576,22 @@ impl Session {
                 Ok(())
             }
             Op::InputState { .. } | Op::ClearDraft | Op::Reload => Ok(()),
+            _ => self.handle_gated_op(submission).await,
+        }
+    }
+
+    async fn handle_gated_op(&mut self, submission: Submission) -> Result<(), String> {
+        match submission.op.clone() {
+            Op::RunCommand { name, arguments } => {
+                self.run_command(submission, name, arguments).await
+            }
+            Op::CommandInput { name, data } => {
+                if let Err(message) = self.backend.command_input(&name, data).await {
+                    self.emit(EventKind::Error { message });
+                }
+                Ok(())
+            }
+            Op::SetModel { provider, model } => self.set_model(&provider, &model).await,
             op => {
                 self.emit(EventKind::Error {
                     message: format!("runtime {} cannot run {op:?}", self.runtime),
@@ -511,6 +601,83 @@ impl Session {
         }
     }
 
+    async fn run_command(
+        &mut self,
+        submission: Submission,
+        name: String,
+        arguments: String,
+    ) -> Result<(), String> {
+        match self.backend.run_command(&name, &arguments).await {
+            Ok(CommandAction::Prompt(prompt)) => {
+                let content = vec![InputContent::Text { text: prompt }];
+                self.user_input(submission, content, InputDelivery::FollowUp)
+                    .await
+            }
+            Ok(CommandAction::PermissionMode(mode)) => {
+                self.set_permission_mode(mode);
+                Ok(())
+            }
+            Err(message) => {
+                self.emit(EventKind::Error { message });
+                Ok(())
+            }
+        }
+    }
+
+    async fn set_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
+        let scope = if provider.is_empty() {
+            self.runtime.as_str()
+        } else {
+            provider
+        };
+        let id = strip_runtime_prefix(scope, model);
+        match self.backend.set_model(id).await {
+            Ok(info) => self.apply_model_change(info).await,
+            Err(message) => {
+                self.emit(EventKind::Error { message });
+                Ok(())
+            }
+        }
+    }
+
+    async fn apply_model_change(&mut self, info: ModelInfo) -> Result<(), String> {
+        self.started.model = info.clone();
+        self.model_ref = ModelRef {
+            provider: self.runtime.clone(),
+            model: ModelId(info.id.clone()),
+        };
+        self.append(EntryKind::ModelChange {
+            model: self.model_ref.clone(),
+        })
+        .await?;
+        self.emit_session_updated();
+        match self.models.iter_mut().find(|item| item.id == info.id) {
+            Some(existing) => *existing = info,
+            None => self.models.push(info),
+        }
+        self.emit(EventKind::ModelsUpdated {
+            models: self.models.clone(),
+        });
+        Ok(())
+    }
+
+    fn emit_session_updated(&self) {
+        self.emit(EventKind::SessionUpdated {
+            model: self.model_info(),
+            thinking: self.started.thinking,
+            context: self.context,
+            total: self.total,
+        });
+    }
+
+    fn set_permission_mode(&mut self, mode: String) {
+        self.mode = Some(mode.clone());
+        self.emit(EventKind::Extension {
+            name: PERMISSION_MODE_EVENT.into(),
+            data: mode.into(),
+        });
+    }
+
     async fn user_input(
         &mut self,
         submission: Submission,
@@ -518,6 +685,7 @@ impl Session {
         delivery: InputDelivery,
     ) -> Result<(), String> {
         if !self.open_root() {
+            self.flush_and_close_derived().await?;
             return self.start_root_turn(submission.id, content).await;
         }
         let steer =
@@ -654,13 +822,46 @@ impl Session {
                 self.emit(EventKind::Error { message });
                 Ok(())
             }
+            other => self.handle_meta(other).await,
+        }
+    }
+
+    async fn handle_meta(&mut self, event: BackendEvent) -> Result<(), String> {
+        match event {
+            BackendEvent::Commands(commands) => {
+                self.commands = commands.clone();
+                self.emit(EventKind::CommandsUpdated { commands });
+                Ok(())
+            }
+            BackendEvent::Models(models) => {
+                self.update_models(models);
+                Ok(())
+            }
             BackendEvent::ItemStarted(_)
             | BackendEvent::ItemDelta { .. }
             | BackendEvent::ItemCompleted(_)
             | BackendEvent::Usage(_)
             | BackendEvent::ContextWindow(_)
-            | BackendEvent::Subagent(_) => Ok(()),
+            | BackendEvent::Approval { .. }
+            | BackendEvent::ApprovalWithdrawn { .. }
+            | BackendEvent::Subagent(_)
+            | BackendEvent::TurnCompleted { .. }
+            | BackendEvent::Idle
+            | BackendEvent::Error(_) => Ok(()),
         }
+    }
+
+    fn update_models(&mut self, models: Vec<ModelInfo>) {
+        if let Some(found) = models.iter().find(|m| m.id == self.started.model.id) {
+            let mut next = found.clone();
+            if next.context_window == 0 {
+                next.context_window = self.started.model.context_window;
+            }
+            self.started.model = next;
+            self.emit_session_updated();
+        }
+        self.models = models.clone();
+        self.emit(EventKind::ModelsUpdated { models });
     }
 
     fn item_delta(&mut self, item_id: ItemId, delta: String) {
@@ -696,14 +897,16 @@ impl Session {
             return;
         }
         self.started.model.context_window = window;
-        self.emit(EventKind::SessionUpdated {
-            model: self.model_info(),
-            thinking: self.started.thinking,
-            context: self.context,
-            total: self.total,
-        });
+        if let Some(entry) = self
+            .models
+            .iter_mut()
+            .find(|m| m.id == self.started.model.id)
+        {
+            entry.context_window = window;
+        }
+        self.emit_session_updated();
         self.emit(EventKind::ModelsUpdated {
-            models: vec![self.model_info()],
+            models: self.models.clone(),
         });
     }
 
