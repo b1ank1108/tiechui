@@ -2,7 +2,7 @@
 
 export type AgentDeleteParams = { cwd: string | null, path: string, };
 
-export type AgentDispatch = { id: string, session_id: string, mode: string, tasks: Array<AgentTask>, };
+export type AgentDispatch = { id: string, session_id: string, mode: string, background: boolean, started_at: number, tasks: Array<AgentTask>, };
 
 export type AgentEntry = { name: string, description: string, 
 /**
@@ -17,7 +17,11 @@ model: string | null,
  * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
  * requested thinking level when absent.
  */
-thinking: string | null, prompt: string, path: string, 
+thinking: string | null, 
+/**
+ * Runs in the background by default when `Some(true)`.
+ */
+background?: boolean | null, prompt: string, path: string, 
 /**
  * `user` or `project`.
  */
@@ -45,7 +49,7 @@ scope: string, name: string, description: string, tools: Array<string> | null, m
 /**
  * `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`.
  */
-thinking: string | null, prompt: string, 
+thinking: string | null, background?: boolean | null, prompt: string, 
 /**
  * The file being edited: rewritten in place keeping its other frontmatter, or removed
  * when the name or scope changes.
@@ -54,7 +58,7 @@ previous: string | null, };
 
 export type AgentState = "Waiting" | "Running" | "Completed" | "Failed" | "Cancelled" | "Skipped";
 
-export type AgentTask = { agent: string, task: string, state: AgentState, output: string, thinking: string, diagnostic: string | null, output_path: string | null, thinking_path: string | null, usage: TokenUsage, turns: number, model: string, };
+export type AgentTask = { id: string, name?: string | null, background: boolean, fork: boolean, started_at: number, agent: string, task: string, state: AgentState, output: string, thinking: string, diagnostic: string | null, output_path: string | null, thinking_path: string | null, usage: TokenUsage, turns: number, model: string, };
 
 export type AgentsListParams = { 
 /**
@@ -865,7 +869,7 @@ export type SubagentState = "running" | "waiting" | "completed" | "failed" | "in
 
 export type SubagentStatus = { id: ItemId, parent_call_id: ItemId, agent_id: string, name?: string, state: SubagentState, message?: string, };
 
-export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, };
+export type SubagentsView = { records: Array<AgentDispatch>, open: boolean, pending_notifications: number, };
 
 export type Submission = { id: SubmissionId, thread_id: ThreadId, epoch: SessionEpoch, op: Op, };
 

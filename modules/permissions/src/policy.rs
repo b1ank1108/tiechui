@@ -24,7 +24,7 @@ impl Rule {
 }
 
 /// Tools that only read or stay within the session; the rest ask unless rules allow them.
-const SAFE_TOOLS: [&str; 24] = [
+const SAFE_TOOLS: [&str; 26] = [
     "read",
     "grep",
     "find",
@@ -49,6 +49,8 @@ const SAFE_TOOLS: [&str; 24] = [
     "shell_list",
     "shell_output",
     "shell_stop",
+    "subagent_list",
+    "subagent_stop",
 ];
 const MCP_METADATA: [&str; 5] = [
     "mcp_status",

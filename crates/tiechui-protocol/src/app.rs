@@ -657,6 +657,9 @@ pub struct AgentEntry {
     /// `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`; the parent's
     /// requested thinking level when absent.
     pub thinking: Option<String>,
+    /// Runs in the background by default when `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     pub prompt: String,
     pub path: String,
     /// `user` or `project`.
@@ -676,6 +679,8 @@ pub struct AgentSaveParams {
     pub model: Option<String>,
     /// `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `inherit`.
     pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     pub prompt: String,
     /// The file being edited: rewritten in place keeping its other frontmatter, or removed
     /// when the name or scope changes.

@@ -88,17 +88,22 @@ impl Output {
         self.file = None;
         self.bytes = 0;
     }
+    fn open_archive(&mut self) -> Result<(), ToolError> {
+        tiechui_plugin_api::private::create_dir_all(&self.directory)?;
+        let temp = tempfile::NamedTempFile::new_in(&self.directory)?;
+        let (mut file, path) = temp.keep().map_err(|e| ToolError(e.to_string()))?;
+        file.write_all(self.text.as_bytes())?;
+        self.file = Some(file);
+        self.path = Some(path);
+        Ok(())
+    }
+
     pub fn push(&mut self, text: &str) -> Result<(), ToolError> {
         if self.bytes.saturating_add(text.len()) > ARCHIVE_BYTES {
             return Err(ToolError("Child output archive exceeded 64 MiB".into()));
         }
         if self.file.is_none() && self.bytes + text.len() > PREVIEW_BYTES {
-            tiechui_plugin_api::private::create_dir_all(&self.directory)?;
-            let file = tempfile::NamedTempFile::new_in(&self.directory)?;
-            let (mut file, path) = file.keep().map_err(|e| ToolError(e.to_string()))?;
-            file.write_all(self.text.as_bytes())?;
-            self.file = Some(file);
-            self.path = Some(path);
+            self.open_archive()?;
         }
         if let Some(file) = &mut self.file {
             file.write_all(text.as_bytes())?;
