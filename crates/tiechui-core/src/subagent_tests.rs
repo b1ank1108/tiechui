@@ -1821,16 +1821,112 @@ fn anthropic_tool_calls_sse(
     out
 }
 
+fn last_wire_message(body: &serde_json::Value) -> String {
+    body["messages"]
+        .as_array()
+        .and_then(|msgs| msgs.last())
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}
+
+fn anthropic_long_cache_provider(uri: String) -> Arc<dyn ModelProvider> {
+    let model = serde_json::from_value(json!({
+        "id": "sonnet",
+        "context_window": 200_000,
+        "max_output": 8192,
+        "reasoning": true,
+        "thinking": "adaptive",
+        "cache_retention": "long"
+    }))
+    .unwrap();
+    Arc::from(
+        tiechui_providers::testing::provider(
+            "anth",
+            &tiechui_config::ProviderConfig {
+                wire: tiechui_config::Wire::AnthropicMessages,
+                base_url: Some(uri),
+                api_key: None,
+                api_key_env: None,
+                compat: Default::default(),
+                models: vec![model],
+            },
+        )
+        .unwrap(),
+    )
+}
+
+async fn spawn_anthropic_parent(
+    parent_store: SessionStore,
+    provider: Arc<dyn ModelProvider>,
+    registry: Registry,
+    shutdown: CancellationToken,
+) -> SessionHandle {
+    let mut parent = SessionActor::spawn(
+        parent_store,
+        SessionConfig {
+            compaction: tiechui_plugin_api::CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            model: ModelRef {
+                provider: "anth".into(),
+                model: ModelId("anth/sonnet".into()),
+            },
+            thinking: Some(ReasoningLevel::High),
+            providers: BTreeMap::from([("anth".into(), provider)]),
+            registry,
+            retry: Arc::new(BoundedRetry {
+                max_retries: 0,
+                ..Default::default()
+            }),
+            interactions: None,
+            epoch: SessionEpoch(0),
+            short_cache: false,
+        },
+        shutdown,
+    );
+    while !matches!(
+        parent.events.recv().await.unwrap().event,
+        EventKind::ThreadStarted { .. }
+    ) {}
+    parent
+}
+
+async fn wire_request_bodies(server: &wiremock::MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|req| serde_json::from_slice(&req.body).unwrap())
+        .collect()
+}
+
+fn assert_fork_wire_parity(fork_body: &serde_json::Value, parent_initial: &serde_json::Value) {
+    assert_eq!(
+        serde_json::to_vec(&fork_body["system"]).unwrap(),
+        serde_json::to_vec(&parent_initial["system"]).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&fork_body["tools"]).unwrap(),
+        serde_json::to_vec(&parent_initial["tools"]).unwrap()
+    );
+    assert_eq!(
+        fork_body["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+    assert_eq!(
+        serde_json::to_vec(&fork_body["messages"][0]).unwrap(),
+        serde_json::to_vec(&parent_initial["messages"][0]).unwrap()
+    );
+}
+
 struct ForkWireRouter;
 
 impl wiremock::Respond for ForkWireRouter {
     fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
         let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        let last_msg = parsed["messages"]
-            .as_array()
-            .and_then(|msgs| msgs.last())
-            .map(ToString::to_string)
-            .unwrap_or_default();
+        let last_msg = last_wire_message(&parsed);
         let sse = if last_msg.contains("call_rec_resume")
             && last_msg.contains("Forked subagents cannot spawn or manage subagents")
         {
@@ -1924,32 +2020,7 @@ async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoi
         .mount(&server)
         .await;
 
-    let make_provider = || {
-        Arc::from(
-            tiechui_providers::testing::provider(
-                "anth",
-                &tiechui_config::ProviderConfig {
-                    wire: tiechui_config::Wire::AnthropicMessages,
-                    base_url: Some(server.uri()),
-                    api_key: None,
-                    api_key_env: None,
-                    compat: Default::default(),
-                    models: vec![
-                        serde_json::from_value(json!({
-                            "id": "sonnet",
-                            "context_window": 200_000,
-                            "max_output": 8192,
-                            "reasoning": true,
-                            "thinking": "adaptive",
-                            "cache_retention": "long"
-                        }))
-                        .unwrap(),
-                    ],
-                },
-            )
-            .unwrap(),
-        ) as Arc<dyn ModelProvider>
-    };
+    let make_provider = || anthropic_long_cache_provider(server.uri());
 
     let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let f1_store = root
@@ -2013,31 +2084,8 @@ async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoi
     .unwrap();
     let parent_thread = ThreadId(parent_store.header().id.clone());
     let shutdown = CancellationToken::new();
-    let mut parent = SessionActor::spawn(
-        parent_store,
-        SessionConfig {
-            compaction: Default::default(),
-            model: ModelRef {
-                provider: "anth".into(),
-                model: ModelId("anth/sonnet".into()),
-            },
-            thinking: Some(ReasoningLevel::High),
-            providers: BTreeMap::from([("anth".into(), make_provider())]),
-            registry,
-            retry: Arc::new(BoundedRetry {
-                max_retries: 0,
-                ..Default::default()
-            }),
-            interactions: None,
-            epoch: SessionEpoch(0),
-            short_cache: false,
-        },
-        shutdown.clone(),
-    );
-    while !matches!(
-        parent.events.recv().await.unwrap().event,
-        EventKind::ThreadStarted { .. }
-    ) {}
+    let mut parent =
+        spawn_anthropic_parent(parent_store, make_provider(), registry, shutdown.clone()).await;
 
     parent
         .submissions
@@ -2069,31 +2117,21 @@ async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoi
     shutdown.cancel();
     parent.task.await.unwrap().unwrap();
 
-    let received = server.received_requests().await.unwrap();
-    let bodies: Vec<serde_json::Value> = received
-        .iter()
-        .map(|req| serde_json::from_slice(&req.body).unwrap())
-        .collect();
+    let bodies = wire_request_bodies(&server).await;
     let parent_initial = &bodies[0];
-
-    let last_of = |b: &serde_json::Value| {
-        b["messages"]
-            .as_array()
-            .and_then(|msgs| msgs.last())
-            .map(ToString::to_string)
-            .unwrap_or_default()
-    };
     let fork_a_initial = bodies
         .iter()
-        .find(|b| last_of(b).contains("Task A: inspect parser"))
+        .find(|b| last_wire_message(b).contains("Task A: inspect parser"))
         .expect("missing Fork A initial request");
     let fork_b_initial = bodies
         .iter()
-        .find(|b| last_of(b).contains("Task B: attempt recursion"))
+        .find(|b| last_wire_message(b).contains("Task B: attempt recursion"))
         .expect("missing Fork B initial request");
     let fork_b_after_rejection = bodies
         .iter()
-        .find(|b| last_of(b).contains("Forked subagents cannot spawn or manage subagents"))
+        .find(|b| {
+            last_wire_message(b).contains("Forked subagents cannot spawn or manage subagents")
+        })
         .expect("missing Fork B post-rejection request");
 
     assert_eq!(
@@ -2106,22 +2144,10 @@ async fn fork_child_shares_byte_identical_wire_prefix_and_1h_long_cache_breakpoi
     );
 
     for fork_body in [fork_a_initial, fork_b_initial] {
-        assert_eq!(
-            serde_json::to_vec(&fork_body["system"]).unwrap(),
-            serde_json::to_vec(&parent_initial["system"]).unwrap()
-        );
-        assert_eq!(
-            serde_json::to_vec(&fork_body["tools"]).unwrap(),
-            serde_json::to_vec(&parent_initial["tools"]).unwrap()
-        );
+        assert_fork_wire_parity(fork_body, parent_initial);
         assert_eq!(fork_body["model"], parent_initial["model"]);
         assert_eq!(fork_body["thinking"], parent_initial["thinking"]);
         assert_eq!(fork_body["output_config"], parent_initial["output_config"]);
-        assert_eq!(
-            serde_json::to_vec(&fork_body["messages"][0]).unwrap(),
-            serde_json::to_vec(&parent_initial["messages"][0]).unwrap(),
-            "1h long cache breakpoint on parent user message must stay byte-identical"
-        );
     }
 
     assert_eq!(
@@ -2323,15 +2349,16 @@ impl ModelProvider for SplitProvider {
     }
 }
 
-async fn split_harness(
-    parent_scripts: Vec<Script>,
-    child_scripts: Vec<Script>,
+async fn respawn_split_actor(
+    h: &mut Harness,
     home: &std::path::Path,
-) -> (Harness, mpsc::UnboundedReceiver<ModelRequest>) {
-    let mut h = harness(vec![], home).await;
-    h.shutdown.cancel();
-    (&mut h.handle.task).await.unwrap().unwrap();
+    children: Arc<dyn ChildRegistry>,
+    include_goal: bool,
+    with_interactions: bool,
+    scripts: (Vec<Script>, Vec<Script>),
+) -> mpsc::UnboundedReceiver<ModelRequest> {
     let store = SessionStore::open(&h.path, &CancellationToken::new()).unwrap();
+    let (parent_scripts, child_scripts) = scripts;
     let (parent_tx, parent_rx) = mpsc::unbounded_channel();
     let (child_tx, child_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(SplitProvider {
@@ -2349,15 +2376,25 @@ async fn split_harness(
         home: home.into(),
         trusted: true,
         confirmation: None,
-        children: Arc::new(Children(home.join("rewind"))),
+        children,
     }
     .register(&mut registry, &ModuleConfig::default())
     .unwrap();
-    let (interactions, inbox) = Interactions::new();
+    if include_goal {
+        tiechui_module_goal::GoalModule
+            .register(&mut registry, &ModuleConfig::default())
+            .unwrap();
+    }
+    let inbox = if with_interactions {
+        let (interactions, inbox) = Interactions::new();
+        h.interactions = interactions;
+        Some(inbox)
+    } else {
+        None
+    };
     h.shutdown = CancellationToken::new();
     h.epoch.0 += 1;
     h.requests = parent_rx;
-    h.interactions = interactions;
     h.seen.clear();
     h.handle = SessionActor::spawn(
         store,
@@ -2374,7 +2411,7 @@ async fn split_harness(
                 max_retries: 0,
                 ..Default::default()
             }),
-            interactions: Some(inbox),
+            interactions: inbox,
             epoch: h.epoch,
             short_cache: false,
         },
@@ -2382,6 +2419,26 @@ async fn split_harness(
     );
     h.until(|event| matches!(event, EventKind::ThreadStarted { .. }))
         .await;
+    child_rx
+}
+
+async fn split_harness(
+    parent_scripts: Vec<Script>,
+    child_scripts: Vec<Script>,
+    home: &std::path::Path,
+) -> (Harness, mpsc::UnboundedReceiver<ModelRequest>) {
+    let mut h = harness(vec![], home).await;
+    h.shutdown.cancel();
+    (&mut h.handle.task).await.unwrap().unwrap();
+    let child_rx = respawn_split_actor(
+        &mut h,
+        home,
+        Arc::new(Children(home.join("rewind"))),
+        false,
+        true,
+        (parent_scripts, child_scripts),
+    )
+    .await;
     (h, child_rx)
 }
 
@@ -2634,6 +2691,18 @@ impl ChildRegistry for SteerGateChildren {
     }
 }
 
+async fn submit_and_wait_gate(h: &mut Harness, gate: &SteerGateTool, prompt: &str) {
+    h.input(prompt, InputDelivery::FollowUp).await;
+    tokio::time::timeout(Duration::from_secs(5), h.end(TurnStatus::Completed))
+        .await
+        .unwrap();
+    let _ = h.request().await;
+    let _ = h.request().await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("child must enter hold_gate");
+}
+
 #[tokio::test]
 async fn subagent_send_steers_running_child_resumes_across_restart_and_avoids_double_counting_usage()
  {
@@ -2653,103 +2722,51 @@ async fn subagent_send_steers_running_child_resumes_across_restart_and_avoids_do
     base.shutdown.cancel();
     (&mut base.handle.task).await.unwrap().unwrap();
 
-    let store = SessionStore::open(&base.path, &CancellationToken::new()).unwrap();
-    let parent_id = store.header().id.clone();
-    let (parent_tx, parent_rx) = mpsc::unbounded_channel();
-    let (child_tx, mut child_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(SplitProvider {
-        parent: FakeProvider {
-            scripts: Mutex::new(
-                vec![
-                    invoke(
-                        "subagent",
-                        json!({"task": "initial child work", "name": "worker", "cwd": "sub", "background": true}),
-                    ),
-                    answer("BG_STARTED"),
-                    invoke(
-                        "subagent_send",
-                        json!({"to": "worker", "message": "steered mid-tool"}),
-                    ),
-                    answer("STEER_QUEUED"),
-                    answer("CONTINUATION_ACK_1"),
-                    invoke("create_goal", json!({"objective": "track resumed child tokens"})),
-                    invoke(
-                        "subagent_send",
-                        json!({"to": "ag1", "message": "foreground resume turn", "background": false}),
-                    ),
-                    invoke("update_goal", json!({"status": "complete"})),
-                    answer("FG_RESUME_ACK"),
-                ]
-                .into(),
-            ),
-            requests: parent_tx,
-        },
-        child: FakeProvider {
-            scripts: Mutex::new(
-                vec![
-                    invoke("hold_gate", json!({})),
-                    answer("CHILD_STEERED_DONE"),
-                    answer("CHILD_FG_RESUMED_DONE"),
-                ]
-                .into(),
-            ),
-            requests: child_tx,
-        },
-    });
-    let mut registry = Registry::default();
-    tiechui_module_subagents::SubagentsModule {
-        home: root.path().into(),
-        trusted: true,
-        confirmation: None,
-        children: Arc::new(SteerGateChildren {
+    let parent_id = SessionStore::open_read_only(&base.path, &CancellationToken::new())
+        .unwrap()
+        .header()
+        .id
+        .clone();
+    let mut child_rx = respawn_split_actor(
+        &mut base,
+        root.path(),
+        Arc::new(SteerGateChildren {
             rewind: root.path().join("rewind"),
             gate: gate.clone(),
         }),
-    }
-    .register(&mut registry, &ModuleConfig::default())
-    .unwrap();
-    tiechui_module_goal::GoalModule
-        .register(&mut registry, &ModuleConfig::default())
-        .unwrap();
+        true,
+        false,
+        (
+            vec![
+                invoke(
+                    "subagent",
+                    json!({"task": "initial child work", "name": "worker", "cwd": "sub", "background": true}),
+                ),
+                answer("BG_STARTED"),
+                invoke(
+                    "subagent_send",
+                    json!({"to": "worker", "message": "steered mid-tool"}),
+                ),
+                answer("STEER_QUEUED"),
+                answer("CONTINUATION_ACK_1"),
+                invoke("create_goal", json!({"objective": "track resumed child tokens"})),
+                invoke(
+                    "subagent_send",
+                    json!({"to": "ag1", "message": "foreground resume turn", "background": false}),
+                ),
+                invoke("update_goal", json!({"status": "complete"})),
+                answer("FG_RESUME_ACK"),
+            ],
+            vec![
+                invoke("hold_gate", json!({})),
+                answer("CHILD_STEERED_DONE"),
+                answer("CHILD_FG_RESUMED_DONE"),
+            ],
+        ),
+    )
+    .await;
 
-    base.shutdown = CancellationToken::new();
-    base.epoch.0 += 1;
-    base.requests = parent_rx;
-    base.seen.clear();
-    base.handle = SessionActor::spawn(
-        store,
-        SessionConfig {
-            compaction: tiechui_plugin_api::CompactionConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            model: origin("a"),
-            thinking: None,
-            providers: BTreeMap::from([("fake".into(), provider as Arc<dyn ModelProvider>)]),
-            registry,
-            retry: Arc::new(BoundedRetry {
-                max_retries: 0,
-                ..Default::default()
-            }),
-            interactions: None,
-            epoch: base.epoch,
-            short_cache: false,
-        },
-        base.shutdown.clone(),
-    );
-    base.until(|e| matches!(e, EventKind::ThreadStarted { .. }))
-        .await;
-
-    base.input("launch worker", InputDelivery::FollowUp).await;
-    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
-        .await
-        .unwrap();
-    let _ = base.request().await;
-    let _ = base.request().await;
-
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
-        .await
-        .expect("child must enter hold_gate");
+    submit_and_wait_gate(&mut base, &gate, "launch worker").await;
     let _child_req_1 = tokio::time::timeout(Duration::from_secs(5), child_rx.recv())
         .await
         .unwrap()
@@ -2885,92 +2902,35 @@ async fn subagent_send_steers_running_child_resumes_across_restart_and_avoids_do
     base.shutdown.cancel();
     (&mut base.handle.task).await.unwrap().unwrap();
 
-    let reopened_store = SessionStore::open(&base.path, &CancellationToken::new()).unwrap();
-    let (p2_tx, p2_rx) = mpsc::unbounded_channel();
-    let (c2_tx, mut c2_rx) = mpsc::unbounded_channel();
-    let reopened_provider = Arc::new(SplitProvider {
-        parent: FakeProvider {
-            scripts: Mutex::new(
-                vec![
-                    invoke(
-                        "subagent_send",
-                        json!({"to": "worker", "message": "after process restart", "background": true}),
-                    ),
-                    answer("RESTART_BG_ACK"),
-                    invoke("subagent_list", json!({})),
-                    answer("LISTED_AFTER_RESTART"),
-                    answer("RESTART_CONT_SUMMARY"),
-                ]
-                .into(),
-            ),
-            requests: p2_tx,
-        },
-        child: FakeProvider {
-            scripts: Mutex::new(
-                vec![
-                    invoke("hold_gate", json!({})),
-                    answer("AFTER_RESTART_CHILD_DONE"),
-                ]
-                .into(),
-            ),
-            requests: c2_tx,
-        },
-    });
-    let mut reg2 = Registry::default();
-    tiechui_module_subagents::SubagentsModule {
-        home: root.path().into(),
-        trusted: true,
-        confirmation: None,
-        children: Arc::new(SteerGateChildren {
+    let mut c2_rx = respawn_split_actor(
+        &mut base,
+        root.path(),
+        Arc::new(SteerGateChildren {
             rewind: root.path().join("rewind"),
             gate: gate.clone(),
         }),
-    }
-    .register(&mut reg2, &ModuleConfig::default())
-    .unwrap();
+        false,
+        false,
+        (
+            vec![
+                invoke(
+                    "subagent_send",
+                    json!({"to": "worker", "message": "after process restart", "background": true}),
+                ),
+                answer("RESTART_BG_ACK"),
+                invoke("subagent_list", json!({})),
+                answer("LISTED_AFTER_RESTART"),
+                answer("RESTART_CONT_SUMMARY"),
+            ],
+            vec![
+                invoke("hold_gate", json!({})),
+                answer("AFTER_RESTART_CHILD_DONE"),
+            ],
+        ),
+    )
+    .await;
 
-    base.shutdown = CancellationToken::new();
-    base.epoch.0 += 1;
-    base.requests = p2_rx;
-    base.seen.clear();
-    base.handle = SessionActor::spawn(
-        reopened_store,
-        SessionConfig {
-            compaction: tiechui_plugin_api::CompactionConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            model: origin("a"),
-            thinking: None,
-            providers: BTreeMap::from([(
-                "fake".into(),
-                reopened_provider as Arc<dyn ModelProvider>,
-            )]),
-            registry: reg2,
-            retry: Arc::new(BoundedRetry {
-                max_retries: 0,
-                ..Default::default()
-            }),
-            interactions: None,
-            epoch: base.epoch,
-            short_cache: false,
-        },
-        base.shutdown.clone(),
-    );
-    base.until(|e| matches!(e, EventKind::ThreadStarted { .. }))
-        .await;
-
-    base.input("resume worker after restart", InputDelivery::FollowUp)
-        .await;
-    tokio::time::timeout(Duration::from_secs(5), base.end(TurnStatus::Completed))
-        .await
-        .unwrap();
-    let _ = base.request().await;
-    let _ = base.request().await;
-
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
-        .await
-        .expect("resumed child after restart must enter hold_gate");
+    submit_and_wait_gate(&mut base, &gate, "resume worker after restart").await;
     gate.release.notify_one();
 
     let c2_req_1 = tokio::time::timeout(Duration::from_secs(5), c2_rx.recv())
@@ -3043,11 +3003,7 @@ struct ModuleForkWireRouter;
 impl wiremock::Respond for ModuleForkWireRouter {
     fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
         let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        let last_msg = parsed["messages"]
-            .as_array()
-            .and_then(|msgs| msgs.last())
-            .map(ToString::to_string)
-            .unwrap_or_default();
+        let last_msg = last_wire_message(&parsed);
         let sse = if last_msg.contains("Follow up on Fork A") {
             anthropic_text_sse("MODULE_FORK_A_RESUMED")
         } else if last_msg.contains("MODULE_FORK_A_RESUMED") {
@@ -3138,30 +3094,7 @@ async fn subagent_module_fork_mode_shares_1h_cache_prefix_wraps_boilerplate_once
         .mount(&server)
         .await;
 
-    let provider = Arc::from(
-        tiechui_providers::testing::provider(
-            "anth",
-            &tiechui_config::ProviderConfig {
-                wire: tiechui_config::Wire::AnthropicMessages,
-                base_url: Some(server.uri()),
-                api_key: None,
-                api_key_env: None,
-                compat: Default::default(),
-                models: vec![
-                    serde_json::from_value(json!({
-                        "id": "sonnet",
-                        "context_window": 200_000,
-                        "max_output": 8192,
-                        "reasoning": true,
-                        "thinking": "adaptive",
-                        "cache_retention": "long"
-                    }))
-                    .unwrap(),
-                ],
-            },
-        )
-        .unwrap(),
-    ) as Arc<dyn ModelProvider>;
+    let provider = anthropic_long_cache_provider(server.uri());
 
     let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let home = root.path().join("profile");
@@ -3190,34 +3123,8 @@ async fn subagent_module_fork_mode_shares_1h_cache_prefix_wraps_boilerplate_once
     let parent_id = parent_store.header().id.clone();
     let parent_thread = ThreadId(parent_id.clone());
     let shutdown = CancellationToken::new();
-    let mut parent = SessionActor::spawn(
-        parent_store,
-        SessionConfig {
-            compaction: tiechui_plugin_api::CompactionConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            model: ModelRef {
-                provider: "anth".into(),
-                model: ModelId("anth/sonnet".into()),
-            },
-            thinking: Some(ReasoningLevel::High),
-            providers: BTreeMap::from([("anth".into(), provider)]),
-            registry,
-            retry: Arc::new(BoundedRetry {
-                max_retries: 0,
-                ..Default::default()
-            }),
-            interactions: None,
-            epoch: SessionEpoch(0),
-            short_cache: false,
-        },
-        shutdown.clone(),
-    );
-    while !matches!(
-        parent.events.recv().await.unwrap().event,
-        EventKind::ThreadStarted { .. }
-    ) {}
+    let mut parent =
+        spawn_anthropic_parent(parent_store, provider, registry, shutdown.clone()).await;
 
     parent
         .submissions
@@ -3316,51 +3223,26 @@ async fn subagent_module_fork_mode_shares_1h_cache_prefix_wraps_boilerplate_once
         );
     }
 
-    let received = server.received_requests().await.unwrap();
-    let bodies: Vec<serde_json::Value> = received
-        .iter()
-        .map(|req| serde_json::from_slice(&req.body).unwrap())
-        .collect();
+    let bodies = wire_request_bodies(&server).await;
     let parent_initial = &bodies[0];
-    let last_of = |b: &serde_json::Value| {
-        b["messages"]
-            .as_array()
-            .and_then(|msgs| msgs.last())
-            .map(ToString::to_string)
-            .unwrap_or_default()
-    };
     let fork_a = bodies
         .iter()
-        .find(|b| last_of(b).contains("Directive: Task A: write module fork file"))
+        .find(|b| last_wire_message(b).contains("Directive: Task A: write module fork file"))
         .expect("missing Fork A initial wire request");
     let fork_b = bodies
         .iter()
-        .find(|b| last_of(b).contains("Directive: Task B: attempt recursive subagent"))
+        .find(|b| last_wire_message(b).contains("Directive: Task B: attempt recursive subagent"))
         .expect("missing Fork B initial wire request");
     let resumed_fork_a = bodies
         .iter()
         .find(|b| {
-            last_of(b).contains("Follow up on Fork A") && !last_of(b).contains("call_send_fork_a")
+            let msg = last_wire_message(b);
+            msg.contains("Follow up on Fork A") && !msg.contains("call_send_fork_a")
         })
         .expect("missing Fork A resumed wire request");
 
     for fb in [fork_a, fork_b] {
-        assert_eq!(
-            serde_json::to_vec(&fb["system"]).unwrap(),
-            serde_json::to_vec(&parent_initial["system"]).unwrap()
-        );
-        assert_eq!(
-            serde_json::to_vec(&fb["tools"]).unwrap(),
-            serde_json::to_vec(&parent_initial["tools"]).unwrap()
-        );
-        assert_eq!(
-            fb["messages"][0]["content"][0]["cache_control"],
-            json!({"type": "ephemeral", "ttl": "1h"})
-        );
-        assert_eq!(
-            serde_json::to_vec(&fb["messages"][0]).unwrap(),
-            serde_json::to_vec(&parent_initial["messages"][0]).unwrap()
-        );
+        assert_fork_wire_parity(fb, parent_initial);
     }
     let a_msg2 = fork_a["messages"][2]["content"].as_array().unwrap();
     let b_msg2 = fork_b["messages"][2]["content"].as_array().unwrap();

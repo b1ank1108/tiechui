@@ -246,6 +246,13 @@ pub fn directories(home: &Path, cwd: &Path) -> Vec<(PathBuf, bool)> {
     directories
 }
 
+fn top_level_frontmatter_key(line: &str) -> Option<&str> {
+    if line.starts_with([' ', '\t', '-', '#']) {
+        return None;
+    }
+    line.split_once(':').map(|(key, _)| key.trim())
+}
+
 fn retained_frontmatter(existing: &str) -> String {
     let normalized = existing
         .trim_start_matches('\u{feff}')
@@ -257,13 +264,11 @@ fn retained_frontmatter(existing: &str) -> String {
     let mut out = String::new();
     let mut kept = true;
     for line in header.lines() {
-        // Indented lines and block sequence items continue the key above; comments stay.
-        if !line.starts_with([' ', '\t', '-', '#'])
-            && let Some((key, _)) = line.split_once(':')
-        {
-            kept = !MANAGED_KEYS.contains(&key.trim());
+        let is_comment = line.starts_with('#');
+        if let Some(key) = top_level_frontmatter_key(line) {
+            kept = !MANAGED_KEYS.contains(&key);
         }
-        if kept || line.starts_with('#') {
+        if kept || is_comment {
             out.push_str(line);
             out.push('\n');
         }

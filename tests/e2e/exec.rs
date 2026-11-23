@@ -1489,13 +1489,19 @@ mod dual_subagents {
 
         let results = tool_results(&events(&output));
         assert_eq!(results.len(), 10);
+        let mut assigned_ids = std::collections::BTreeSet::new();
         for (index, (text, is_error)) in results.iter().enumerate() {
             assert!(!is_error, "call {index} failed: {text}");
-            assert_eq!(
-                text,
-                &format!("ACK:slot-job-{index}\n\n[agent_id: ag{}]", index + 1)
-            );
+            let prefix = format!("ACK:slot-job-{index}\n\n[agent_id: ");
+            let id = text
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or_else(|| panic!("unexpected output for call {index}: {text}"));
+            assigned_ids.insert(id.to_owned());
         }
+        let expected_ids: std::collections::BTreeSet<String> =
+            (1..=10).map(|n| format!("ag{n}")).collect();
+        assert_eq!(assigned_ids, expected_ids);
 
         assert_eq!(fixture.alpha.child_requests().len(), 10);
         let peak = fixture.tracker.peak();

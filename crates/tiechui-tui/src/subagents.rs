@@ -1,4 +1,3 @@
-//! Child task viewer and the dispatch's transcript cell.
 use std::time::Duration;
 
 use crate::{
@@ -33,7 +32,6 @@ pub struct Panel {
     pager: Pager,
 }
 
-/// `1 agent`, or nothing without active background subagents.
 pub fn indicator(view: &SubagentsView) -> Option<String> {
     match view.background() {
         0 => None,
